@@ -183,3 +183,30 @@ add_test(NAME CooInput COMMAND test_coo_input)
 add_executable(test_sparse_fwd_solve test_sparse_fwd_solve.cpp)
 target_link_libraries(test_sparse_fwd_solve PRIVATE smf GTest::gtest_main)
 add_test(NAME SparseFwdSolve COMMAND test_sparse_fwd_solve)
+
+# --- M10.S1 CHOLMOD comparison tests (gated) ---
+
+if(SMF_BUILD_CHOLMOD_COMPARE AND SMF_HAS_CHOLMOD)
+    add_executable(test_cholmod_compare test_cholmod_compare.cpp)
+    target_link_libraries(test_cholmod_compare PRIVATE smf GTest::gtest_main CHOLMOD::CHOLMOD)
+    target_include_directories(test_cholmod_compare PRIVATE ${CHOLMOD_INCLUDE_DIRS})
+    add_test(NAME CholmodCompare COMMAND test_cholmod_compare)
+endif()
+
+# --- OCP KKT regression test (always built) ---
+
+add_executable(test_ocp_kkt_regression test_ocp_kkt_regression.cpp)
+target_link_libraries(test_ocp_kkt_regression PRIVATE smf GTest::gtest_main)
+add_test(NAME OcpKktRegression COMMAND test_ocp_kkt_regression)
+
+# --- M10.S3 Matrix Market reader tests (always built) ---
+
+add_executable(test_suite_sparse_matrix_market test_suite_sparse_matrix_market.cpp)
+target_link_libraries(test_suite_sparse_matrix_market PRIVATE smf GTest::gtest_main)
+add_test(NAME MatrixMarketTest COMMAND test_suite_sparse_matrix_market)
+
+# --- BugFix.AssemblyTree: 2D Poisson fill-propagation regression test ---
+
+add_executable(test_poisson_2d test_poisson_2d.cpp)
+target_link_libraries(test_poisson_2d PRIVATE smf GTest::gtest_main)
+add_test(NAME Poisson2D COMMAND test_poisson_2d)

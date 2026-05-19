@@ -1,8 +1,8 @@
-# .live-agents — Live Agent Coordination  (wave: sequential Phase 9)
+# .live-agents — Live Agent Coordination  (wave: bug fix, sequential)
 # READ before any build/compile/test/install. UPDATE immediately on state change.
 # Exclusive ops (BUILDING / TESTING / INSTALLING): only one agent may hold these at a time.
 
-# Phase 9 complete — M9.S1 ✅ M9.S2 ✅ M9.S3 ✅ — 36/36 tests green
-[Alpha] status=DONE           mission=M9.S3  op=done      updated=2026-05-21T02:20:00Z
-[Beta]  status=IDLE        mission=none   op=idle        updated=2026-05-19T15:20:00Z
-[Gamma] status=IDLE        mission=none   op=idle        updated=2026-05-19T15:00:00Z
+# Phase 10 complete. Bug fix: assembly_tree fill-propagation
+[Alpha] status=DONE             mission=BugFix.AssemblyTree  op=done  updated=2026-05-19T21:00:00Z
+[Beta]  status=IDLE            mission=none                 op=idle        updated=2026-05-19T15:20:00Z
+[Gamma] status=IDLE            mission=none                 op=idle        updated=2026-05-19T15:00:00Z
