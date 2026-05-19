@@ -6,6 +6,7 @@ macro(smf_benchmark name)
     target_link_libraries(${name} PRIVATE smf)
     if(TARGET Eigen3::Eigen)
         target_link_libraries(${name} PRIVATE Eigen3::Eigen)
+        target_compile_definitions(${name} PRIVATE SMF_HAS_EIGEN=1)
     endif()
 endmacro()
 
