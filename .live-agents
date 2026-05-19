@@ -1,9 +1,8 @@
-# .live-agents — Live Agent Coordination  (Phase 5 sequential)
+# .live-agents — Live Agent Coordination  (wave: pg:7)
 # READ before any build/compile/test/install. UPDATE immediately on state change.
 # Exclusive ops (BUILDING / TESTING / INSTALLING): only one agent may hold these at a time.
 
-# Phase 5 sequential
-# Phase 4 DONE — 26/26 tests green 2026-05-20
-[Alpha] status=DONE          mission=M5.S3  op=idle         updated=2026-05-21T09:15:00Z
-[Beta]  status=DONE       mission=M4.B1  op=idle        updated=2026-05-19T15:45:00Z
-[Gamma] status=DONE       mission=M4.G1  op=idle        updated=2026-05-19T16:05:00Z
+# Phase 6 DONE — 32/32 tests green
+[Alpha] status=DONE        mission=M7.A1  op=done  updated=2026-05-19T15:09:00Z
+[Beta]  status=STARTING   mission=M7.B1  op=self-check  updated=2026-05-19T15:00:00Z
+[Gamma] status=IDLE        mission=none   op=idle        updated=2026-05-19T15:00:00Z

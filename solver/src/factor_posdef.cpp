@@ -2,7 +2,9 @@
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
+#include "smf/threading.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <numeric>
@@ -140,10 +142,194 @@ compute_postorder(const std::vector<Supernode> &supernodes) {
 
 } // anonymous namespace
 
+// ---------------------------------------------------------------------------
+// Parallel SPD factorization helper (only compiled when SMF_PARALLEL defined)
+// ---------------------------------------------------------------------------
+#ifdef SMF_PARALLEL
+static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
+                                           const Control &ctrl,
+                                           FactorKeep &fkeep,
+                                           const CscLower &Ap) {
+  const Int ns = static_cast<Int>(keep.supernodes.size());
+
+  // ---- Step 1: Pre-allocate factor storage (all sizes known from analysis) --
+  // Each supernode s contributes front_size(s) × width(s) factor values.
+  fkeep.factor_col_ptr.resize(static_cast<std::size_t>(ns) + 1, 0);
+  {
+    int offset = 0;
+    for (Int s = 0; s < ns; ++s) {
+      fkeep.factor_col_ptr[static_cast<std::size_t>(s)] = offset;
+      const Int f = keep.fronts[static_cast<std::size_t>(s)].front_size();
+      const Int p = keep.supernodes[static_cast<std::size_t>(s)].width();
+      offset += static_cast<int>(f) * static_cast<int>(p);
+    }
+    fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
+    fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
+  }
+
+  // ---- Step 2: Per-node contribution blocks (q×q, column-major lower tri) --
+  // Each element is exclusively written by its own task and read by the
+  // parent task (which begins only after all children tasks finish).
+  std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));
+
+  // ---- Step 3: Shared atomic error flag -----------------------------------
+  // 0 = success so far; 1 = NotPositiveDefinite detected
+  std::atomic<int> err_flag{0};
+
+  // ---- Step 4: Per-node callback ------------------------------------------
+  auto process_node = [&](Int s) {
+    // Skip this node if another subtree already failed.
+    if (err_flag.load(std::memory_order_relaxed) != 0)
+      return;
+
+    const std::size_t si = static_cast<std::size_t>(s);
+    const FrontalInfo &fi = keep.fronts[si];
+    const Supernode &sn = keep.supernodes[si];
+    const Int p = sn.width();
+    const Int f = fi.front_size();
+    const Int q = f - p;
+
+    if (p <= 0)
+      return;
+
+    // Per-task arena — not shared with other concurrent tasks.
+    const std::size_t arena_sz =
+        (static_cast<std::size_t>(f) * static_cast<std::size_t>(f) * 2 +
+         static_cast<std::size_t>(q) * static_cast<std::size_t>(q)) *
+            sizeof(double) +
+        8192u;
+    AlignedArena arena(arena_sz);
+
+    const std::vector<Int> col_indices(
+        fi.row_indices.begin(),
+        fi.row_indices.begin() + static_cast<std::ptrdiff_t>(p));
+
+    FrontalMatrix F(f, p, fi.row_indices, col_indices, arena);
+    F.zero();
+
+    double *a22 = nullptr;
+    if (q > 0) {
+      const std::size_t nbytes =
+          static_cast<std::size_t>(q) * static_cast<std::size_t>(q) *
+          sizeof(double);
+      a22 = static_cast<double *>(arena.allocate(nbytes));
+      std::memset(a22, 0, nbytes);
+    }
+
+    // Scatter original A entries (read-only from Ap).
+    F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+
+    // Assemble child contributions (children are fully done by taskwait).
+    for (const Int c : sn.children) {
+      const std::size_t ci = static_cast<std::size_t>(c);
+      if (contrib[ci].empty())
+        continue;
+
+      const Int p_c = keep.supernodes[ci].width();
+      const Int f_c = keep.fronts[ci].front_size();
+      const Int q_c = f_c - p_c;
+      if (q_c <= 0)
+        continue;
+
+      const double *cc = contrib[ci].data();
+      const FrontalInfo &fi_c = keep.fronts[ci];
+
+      std::vector<Int> parent_rows(static_cast<std::size_t>(q_c));
+      for (Int ii = 0; ii < q_c; ++ii) {
+        const Int ext_row =
+            fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
+        const auto it = std::lower_bound(fi.row_indices.begin(),
+                                         fi.row_indices.end(), ext_row);
+        parent_rows[static_cast<std::size_t>(ii)] =
+            static_cast<Int>(it - fi.row_indices.begin());
+      }
+
+      // Assemble A11/A21 parts into F.
+      F.assemble_contrib(cc, q_c, parent_rows);
+
+      // Assemble A22 parts where both row and col map to parent extended rows.
+      if (q > 0) {
+        for (Int jj = 0; jj < q_c; ++jj) {
+          const Int pr_j = parent_rows[static_cast<std::size_t>(jj)];
+          if (pr_j < p)
+            continue;
+          const Int lcol = pr_j - p;
+          for (Int ii = jj; ii < q_c; ++ii) {
+            const Int pr_i = parent_rows[static_cast<std::size_t>(ii)];
+            if (pr_i < p)
+              continue;
+            const Int lrow = pr_i - p;
+            a22[static_cast<std::size_t>(lcol) *
+                    static_cast<std::size_t>(q) +
+                static_cast<std::size_t>(lrow)] +=
+                cc[static_cast<std::size_t>(jj) *
+                       static_cast<std::size_t>(q_c) +
+                   static_cast<std::size_t>(ii)];
+          }
+        }
+      }
+
+      // Release child's contribution block — child is done, parent is done
+      // reading; no other task will touch contrib[c].
+      contrib[ci].clear();
+      contrib[ci].shrink_to_fit();
+    }
+
+    // Cholesky factorization of the p×p pivot block.
+    const int ret =
+        smf_dpotrf_lower(F.data(), static_cast<int>(p), static_cast<int>(f));
+    if (ret != 0) {
+      int expected = 0;
+      err_flag.compare_exchange_strong(expected, 1,
+                                       std::memory_order_relaxed);
+      return;
+    }
+
+    // Compute L21 block via triangular solve: A21 × L11^{-T} = L21.
+    if (q > 0 && p > 0) {
+      smf_dtrsm_right_lower_transpose(
+          F.data() + static_cast<std::ptrdiff_t>(p), static_cast<int>(q),
+          static_cast<int>(p), F.data(), static_cast<int>(f),
+          static_cast<int>(f));
+    }
+
+    // Schur complement: a22 -= L21 × L21^T.
+    if (q > 0 && p > 0) {
+      smf_dsyrk_lower(a22, static_cast<int>(q),
+                      F.data() + static_cast<std::ptrdiff_t>(p),
+                      static_cast<int>(p), static_cast<int>(f),
+                      static_cast<int>(q));
+    }
+
+    // Write factor columns to pre-allocated fkeep.factor_values.
+    // Range [factor_col_ptr[s], factor_col_ptr[s+1]) is exclusive to this task.
+    const std::size_t base =
+        static_cast<std::size_t>(fkeep.factor_col_ptr[si]);
+    const std::size_t sz =
+        static_cast<std::size_t>(f) * static_cast<std::size_t>(p);
+    std::memcpy(fkeep.factor_values.data() + base, F.data(),
+                sz * sizeof(double));
+
+    // Store contribution block for the parent.
+    if (q > 0) {
+      const std::size_t q2 =
+          static_cast<std::size_t>(q) * static_cast<std::size_t>(q);
+      contrib[si].assign(a22, a22 + q2);
+    }
+  };
+
+  // ---- Step 5: Parallel postorder traversal --------------------------------
+  run_parallel_postorder(keep.supernodes, process_node, ctrl.num_threads);
+
+  if (err_flag.load() != 0)
+    return FactorStatus::NotPositiveDefinite;
+
+  return FactorStatus::Success;
+}
+#endif // SMF_PARALLEL
+
 FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
                            Info &info, FactorKeep &fkeep) {
-  (void)ctrl; // not used in this simplified SPD driver
-
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
 
@@ -167,6 +353,25 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   // Permute the cleaned matrix into the analysis ordering.
   // scatter_original expects column/row indices in the permuted space.
   const CscLower Ap = permute_lower_csc(keep.cleaned, keep.perm, keep.iperm);
+
+#ifdef SMF_PARALLEL
+  if (ctrl.num_threads > 1) {
+    const FactorStatus ps = factor_posdef_parallel(keep, ctrl, fkeep, Ap);
+    if (ps != FactorStatus::Success) {
+      info.factor_status = ps;
+      const auto t1 = std::chrono::steady_clock::now();
+      info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+      return ps;
+    }
+    info.actual_factor_entries =
+        static_cast<LongInt>(fkeep.factor_values.size());
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+    return FactorStatus::Success;
+  }
+#endif // SMF_PARALLEL
+
+  // ---- Serial path (unchanged) --------------------------------------------
 
   // Compute postorder traversal of the supernode tree
   const std::vector<Int> postorder = compute_postorder(keep.supernodes);

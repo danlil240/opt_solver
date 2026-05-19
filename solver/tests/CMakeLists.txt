@@ -139,3 +139,27 @@ target_link_libraries(test_dod_regression PRIVATE smf GTest::gtest_main)
 add_test(NAME DodRegression COMMAND test_dod_regression)
 set_tests_properties(DodRegression PROPERTIES LABELS "dod_regression")
 
+# --- M7.A1 test target ---
+
+add_executable(test_scaling_equilib test_scaling_equilib.cpp)
+target_link_libraries(test_scaling_equilib PRIVATE smf GTest::gtest_main)
+add_test(NAME ScalingEquilib COMMAND test_scaling_equilib)
+
+
+# --- M6.A1 test target ---
+
+add_executable(test_parallel_factor test_parallel_factor.cpp)
+target_link_libraries(test_parallel_factor PRIVATE smf GTest::gtest_main)
+add_test(NAME ParallelFactor COMMAND test_parallel_factor)
+
+# --- M6.B1 test target ---
+
+add_executable(test_blas_thread_guard test_blas_thread_guard.cpp)
+target_link_libraries(test_blas_thread_guard PRIVATE smf GTest::gtest_main)
+add_test(NAME BlasThreadGuard COMMAND test_blas_thread_guard)
+
+# --- M6.G1 test target ---
+
+add_executable(test_parallel_determinism test_parallel_determinism.cpp)
+target_link_libraries(test_parallel_determinism PRIVATE smf GTest::gtest_main)
+add_test(NAME ParallelDeterminism COMMAND test_parallel_determinism)
