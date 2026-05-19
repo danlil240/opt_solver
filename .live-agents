@@ -1,8 +1,9 @@
-# .live-agents — Live Agent Coordination  (wave: sequential Phase 9)
+# .live-agents — Live Agent Coordination  (wave: sequential Phase 10)
 # READ before any build/compile/test/install. UPDATE immediately on state change.
 # Exclusive ops (BUILDING / TESTING / INSTALLING): only one agent may hold these at a time.
 
-# Phase 9 complete — M9.S1 ✅ M9.S2 ✅ M9.S3 ✅ — 36/36 tests green
-[Alpha] status=DONE           mission=M9.S3  op=done      updated=2026-05-21T02:20:00Z
-[Beta]  status=IDLE        mission=none   op=idle        updated=2026-05-19T15:20:00Z
-[Gamma] status=IDLE        mission=none   op=idle        updated=2026-05-19T15:00:00Z
+# Phase 9 complete — M9.S1 ✅ M9.S2 ✅ M9.S3 ✅ — 35/35 tests green
+# Phase 10 — M10.S1 ✅ (37/37 tests), M10.S2 SKIPPED (MUMPS unavailable), dispatching M10.S3
+[Alpha] status=DONE              mission=M10.S5  op=done        updated=2026-05-20T00:10:00Z
+[Beta]  status=IDLE            mission=none    op=idle        updated=2026-05-19T15:20:00Z
+[Gamma] status=IDLE            mission=none    op=idle        updated=2026-05-19T15:00:00Z

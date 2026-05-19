@@ -20,6 +20,7 @@ option(SMF_BUILD_BENCHMARKS    "Build benchmarks"                       ON)
 option(SMF_SANITIZE            "Enable -fsanitize=address,undefined"    OFF)
 option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
 option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
+option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD found)" OFF)
 
 # ---- Compiler flags -----------------------------------------------------
 add_compile_options(-Wall -Wextra -Wpedantic -O2 -g)
@@ -72,6 +73,25 @@ if(SMF_USE_METIS)
     endif()
 endif()
 
+# ---- Optional: CHOLMOD (for comparison tests) ----------------------------
+set(SMF_HAS_CHOLMOD OFF)
+find_package(CHOLMOD QUIET)
+if(CHOLMOD_FOUND)
+    set(SMF_HAS_CHOLMOD ON)
+    message(STATUS "smf: CHOLMOD found -- SMF_HAS_CHOLMOD=ON")
+    if(NOT SMF_BUILD_CHOLMOD_COMPARE)
+        set(SMF_BUILD_CHOLMOD_COMPARE ON CACHE BOOL
+            "Build CHOLMOD comparison tests (auto-enabled: CHOLMOD found)" FORCE)
+        message(STATUS "smf: SMF_BUILD_CHOLMOD_COMPARE auto-enabled (CHOLMOD found)")
+    endif()
+else()
+    message(STATUS "smf: CHOLMOD NOT found -- cholmod compare test will be skipped")
+    if(SMF_BUILD_CHOLMOD_COMPARE)
+        message(WARNING "smf: SMF_BUILD_CHOLMOD_COMPARE=ON but CHOLMOD not found; disabling.")
+        set(SMF_BUILD_CHOLMOD_COMPARE OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+
 # ---- Optional: Eigen3 (test-only reference oracle) ----
 if(SMF_BUILD_TESTS)
     find_package(Eigen3 QUIET CONFIG)
@@ -120,6 +140,7 @@ add_library(smf STATIC
     src/parallel/determinism.cpp
     src/coo_to_csc.cpp
     src/solve_sparse_fwd.cpp
+    src/matrix_market.cpp
 )
 
 target_include_directories(smf PUBLIC
@@ -206,6 +227,33 @@ if(SMF_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
 
+# ---- Install targets ----------------------------------------------------
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+install(TARGETS smf EXPORT smfTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(EXPORT smfTargets
+    FILE smfTargets.cmake
+    NAMESPACE smf::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+
+configure_package_config_file(
+    cmake/smfConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/smfConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/smfConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY AnyNewerVersion)
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/smfConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/smfConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+
 # ---- Summary ------------------------------------------------------------
 message(STATUS "")
 message(STATUS "smf ${PROJECT_VERSION} configuration summary")
@@ -214,9 +262,11 @@ message(STATUS "  OpenMP        : ${SMF_ENABLE_OPENMP}")
 message(STATUS "  MKL           : ${SMF_USE_MKL}")
 message(STATUS "  AMD found     : ${SMF_HAS_AMD}")
 message(STATUS "  METIS found   : ${SMF_HAS_METIS}")
+message(STATUS "  CHOLMOD found : ${SMF_HAS_CHOLMOD}")
 message(STATUS "  Deterministic : ${SMF_DETERMINISTIC}")
 message(STATUS "  Build tests   : ${SMF_BUILD_TESTS}")
 message(STATUS "  Build benchmarks: ${SMF_BUILD_BENCHMARKS}")
 message(STATUS "  C API wrapper : ${SMF_BUILD_C_API}")
+message(STATUS "  CHOLMOD tests : ${SMF_BUILD_CHOLMOD_COMPARE}")
 message(STATUS "  Sanitizers    : ${SMF_SANITIZE}")
 message(STATUS "")
