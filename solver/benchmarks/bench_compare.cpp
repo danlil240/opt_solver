@@ -18,7 +18,7 @@
 #include <string>
 #include <vector>
 
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
 #include <Eigen/Sparse>
 #include <Eigen/SparseCholesky>
 #endif
@@ -287,7 +287,7 @@ static double smf_run(const smf::CscLower &A, std::vector<double> &x_out,
 // ---------------------------------------------------------------------------
 // Eigen SimplicialLDLT solve
 // ---------------------------------------------------------------------------
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
 static Eigen::SparseMatrix<double> to_eigen_sym(const smf::CscLower &A) {
     int n = static_cast<int>(A.n);
     Eigen::SparseMatrix<double> M(n, n);
@@ -321,7 +321,7 @@ static double eigen_run(const Eigen::SparseMatrix<double> &M,
     Eigen::VectorXd res = M * x_out - b;
     return res.norm() / std::sqrt(static_cast<double>(n));
 }
-#endif // EIGEN_WORLD_VERSION
+#endif // SMF_HAS_EIGEN
 
 // ---------------------------------------------------------------------------
 // Benchmark driver
@@ -352,7 +352,7 @@ int main() {
     std::puts("CHOLMOD: not available (not compiled in)\n");
 #endif
 
-#ifndef EIGEN_WORLD_VERSION
+#ifndef SMF_HAS_EIGEN
     std::puts("Eigen: not available (not compiled in)");
     std::puts("Running smf-only benchmark.\n");
 #endif
@@ -361,7 +361,7 @@ int main() {
 
     // Header
     std::printf("%-22s  %6s  %7s  %9s", "Matrix", "N", "nnz", "smf(ms)");
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
     std::printf("  %9s  %8s  %10s  %10s",
                 "Eigen(ms)", "Speedup", "smf_res", "Eigen_res");
 #else
@@ -372,7 +372,7 @@ int main() {
     // Separator line
     std::printf("%-22s  %6s  %7s  %9s", "----------------------", "------",
                 "-------", "---------");
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
     std::printf("  %9s  %8s  %10s  %10s", "---------", "--------",
                 "----------", "----------");
 #else
@@ -380,7 +380,7 @@ int main() {
 #endif
     std::puts("");
 
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
     int smf_faster_count = 0;
     double total_speedup = 0.0;
     int valid_speedup    = 0;
@@ -404,7 +404,7 @@ int main() {
             }
         }
 
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
         // --- Eigen: warm-up runs, keep minimum ---
         Eigen::SparseMatrix<double> M = to_eigen_sym(A);
         double eigen_best = 1e18;
@@ -437,7 +437,7 @@ int main() {
 
     std::puts("");
 
-#ifdef EIGEN_WORLD_VERSION
+#ifdef SMF_HAS_EIGEN
     std::printf("Summary: smf is faster than Eigen in %d/%d cases\n",
                 smf_faster_count, static_cast<int>(cases.size()));
     if (valid_speedup > 0) {

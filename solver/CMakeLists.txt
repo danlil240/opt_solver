@@ -19,6 +19,7 @@ option(SMF_BUILD_TESTS         "Build unit tests"                       ON)
 option(SMF_BUILD_BENCHMARKS    "Build benchmarks"                       ON)
 option(SMF_SANITIZE            "Enable -fsanitize=address,undefined"    OFF)
 option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
+option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
 
 # ---- Compiler flags -----------------------------------------------------
 add_compile_options(-Wall -Wextra -Wpedantic -O2 -g)
@@ -117,6 +118,8 @@ add_library(smf STATIC
     src/parallel/task_tree.cpp
     src/parallel/blas_thread_guard.cpp
     src/parallel/determinism.cpp
+    src/coo_to_csc.cpp
+    src/solve_sparse_fwd.cpp
 )
 
 target_include_directories(smf PUBLIC
@@ -153,7 +156,6 @@ target_compile_definitions(smf PUBLIC
 )
 
 # ---- Optional: detect OpenBLAS thread API --------------------------------
-# If OpenBLAS is the BLAS provider (and not MKL), probe for the threading API.
 set(SMF_HAS_OPENBLAS OFF)
 if(NOT SMF_USE_MKL)
     find_package(OpenBLAS QUIET CONFIG)
@@ -189,6 +191,16 @@ if(SMF_BUILD_IPOPT_ADAPTER)
     target_compile_definitions(smf PUBLIC SMF_BUILD_IPOPT_ADAPTER=1)
 endif()
 
+# ---- C ABI wrapper (optional) -------------------------------------------
+if(SMF_BUILD_C_API)
+    target_sources(smf PRIVATE src/smf_c.cpp)
+    target_compile_definitions(smf PUBLIC SMF_BUILD_C_API=1)
+    if(SMF_BUILD_TESTS)
+        add_executable(test_c_api tests/test_c_api.cpp)
+        target_link_libraries(test_c_api PRIVATE smf GTest::gtest_main)
+        add_test(NAME CApiTest COMMAND test_c_api)
+    endif()
+endif()
 # ---- Benchmarks subdirectory --------------------------------------------
 if(SMF_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
@@ -205,5 +217,6 @@ message(STATUS "  METIS found   : ${SMF_HAS_METIS}")
 message(STATUS "  Deterministic : ${SMF_DETERMINISTIC}")
 message(STATUS "  Build tests   : ${SMF_BUILD_TESTS}")
 message(STATUS "  Build benchmarks: ${SMF_BUILD_BENCHMARKS}")
+message(STATUS "  C API wrapper : ${SMF_BUILD_C_API}")
 message(STATUS "  Sanitizers    : ${SMF_SANITIZE}")
 message(STATUS "")
