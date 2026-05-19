@@ -1,0 +1,22 @@
+#pragma once
+#include "smf/types.hpp"
+#include "smf/csc_matrix.hpp"
+#include "smf/etree.hpp"
+#include "smf/supernode.hpp"
+#include "smf/assembly_tree.hpp"
+#include <vector>
+
+namespace smf {
+
+/// All symbolic analysis outputs needed by the factorization phase.
+struct AnalysisKeep {
+    CscLower                 cleaned;     ///< cleaned input (from check_matrix)
+    std::vector<Int>         perm;        ///< perm[new] = old (fill-reducing)
+    std::vector<Int>         iperm;       ///< iperm[old] = new
+    EliminationTree          etree;       ///< elimination tree of the permuted matrix
+    std::vector<Supernode>   supernodes;  ///< amalgamated supernodes
+    std::vector<FrontalInfo> fronts;      ///< per-supernode frontal info
+    Int                      n = 0;       ///< matrix order (= cleaned.n)
+};
+
+} // namespace smf

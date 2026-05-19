@@ -1,0 +1,44 @@
+# Build directories
+solver/build/
+build/
+cmake-build-*/
+
+# Clangd / LSP cache
+.cache/
+
+# CMake generated files
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build.ninja
+compile_commands.json
+CTestTestfile.cmake
+DartConfiguration.tcl
+*.ninja
+
+# Compiled binaries and object files
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# Test binaries (built artifacts, not source)
+solver/build/tests/
+
+# CTest / CDash output
+Testing/
+
+# IDE and editor files
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

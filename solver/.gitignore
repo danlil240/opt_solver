@@ -1,0 +1,17 @@
+# Out-of-source build directory
+build/
+
+# Compiled object files
+*.o
+
+# Static and shared libraries
+*.a
+*.so
+*.so.*
+
+# CMake generated artifacts
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
