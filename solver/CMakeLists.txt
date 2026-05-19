@@ -18,6 +18,7 @@ option(SMF_DETERMINISTIC       "Enable deterministic (reproducible) mode" OFF)
 option(SMF_BUILD_TESTS         "Build unit tests"                       ON)
 option(SMF_BUILD_BENCHMARKS    "Build benchmarks"                       ON)
 option(SMF_SANITIZE            "Enable -fsanitize=address,undefined"    OFF)
+option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
 
 # ---- Compiler flags -----------------------------------------------------
 add_compile_options(-Wall -Wextra -Wpedantic -O2 -g)
@@ -111,6 +112,7 @@ add_library(smf STATIC
     src/solve_diag.cpp
     src/solve.cpp
     src/scaling.cpp
+    src/scaling_matching.cpp
     src/solver.cpp
     src/parallel/task_tree.cpp
     src/parallel/blas_thread_guard.cpp
@@ -181,10 +183,15 @@ if(SMF_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
 
+# ---- IPOPT adapter (optional) -------------------------------------------
+if(SMF_BUILD_IPOPT_ADAPTER)
+    target_sources(smf PRIVATE src/ipopt_adapter.cpp)
+    target_compile_definitions(smf PUBLIC SMF_BUILD_IPOPT_ADAPTER=1)
+endif()
+
 # ---- Benchmarks subdirectory --------------------------------------------
 if(SMF_BUILD_BENCHMARKS)
-    # Placeholder: no benchmark sources yet.
-    # add_subdirectory(benchmarks)
+    add_subdirectory(benchmarks)
 endif()
 
 # ---- Summary ------------------------------------------------------------

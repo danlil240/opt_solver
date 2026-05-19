@@ -163,3 +163,11 @@ add_test(NAME BlasThreadGuard COMMAND test_blas_thread_guard)
 add_executable(test_parallel_determinism test_parallel_determinism.cpp)
 target_link_libraries(test_parallel_determinism PRIVATE smf GTest::gtest_main)
 add_test(NAME ParallelDeterminism COMMAND test_parallel_determinism)
+
+# --- M8.S1 IPOPT adapter test (gated) ---
+
+if(SMF_BUILD_IPOPT_ADAPTER)
+    add_executable(test_ipopt_adapter test_ipopt_adapter.cpp)
+    target_link_libraries(test_ipopt_adapter PRIVATE smf GTest::GTest GTest::Main)
+    add_test(NAME IpoptAdapter COMMAND test_ipopt_adapter)
+endif()
