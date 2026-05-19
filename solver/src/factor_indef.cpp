@@ -7,16 +7,108 @@
 #include <atomic>
 #include <cassert>
 #include <cmath>
+#include <numeric>
 #include <vector>
 
 namespace smf {
+
+// ---------------------------------------------------------------------------
+// Permute a lower-CSC matrix into the analysis ordering.
+// Identical logic to factor_posdef.cpp — scatter_original expects column/row
+// indices in the permuted space, so we must pass A_perm, not the raw input.
+// ---------------------------------------------------------------------------
+static CscLower permute_lower_csc_indef(const CscLower &A,
+                                        const std::vector<Int> &iperm) {
+  const Int n = A.n;
+
+  std::vector<Int> count(static_cast<std::size_t>(n), 0);
+  for (Int old_j = 0; old_j < n; ++old_j) {
+    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+    for (Int k = A.col_ptr[static_cast<std::size_t>(old_j)];
+         k < A.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
+      const Int old_i = A.row_idx[static_cast<std::size_t>(k)];
+      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+      if (new_i >= new_j)
+        ++count[static_cast<std::size_t>(new_j)];
+      else
+        ++count[static_cast<std::size_t>(new_i)];
+    }
+  }
+
+  CscLower B;
+  B.n = n;
+  B.col_ptr.resize(static_cast<std::size_t>(n) + 1, 0);
+  for (Int j = 0; j < n; ++j)
+    B.col_ptr[static_cast<std::size_t>(j) + 1] =
+        B.col_ptr[static_cast<std::size_t>(j)] +
+        count[static_cast<std::size_t>(j)];
+  const Int nnz = B.col_ptr[static_cast<std::size_t>(n)];
+  B.row_idx.resize(static_cast<std::size_t>(nnz));
+  B.values.resize(static_cast<std::size_t>(nnz), 0.0);
+
+  std::vector<Int> pos(B.col_ptr.begin(),
+                       B.col_ptr.begin() + static_cast<std::ptrdiff_t>(n));
+
+  for (Int old_j = 0; old_j < n; ++old_j) {
+    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+    for (Int k = A.col_ptr[static_cast<std::size_t>(old_j)];
+         k < A.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
+      const Int old_i = A.row_idx[static_cast<std::size_t>(k)];
+      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+      Int col, row;
+      if (new_i >= new_j) {
+        col = new_j;
+        row = new_i;
+      } else {
+        col = new_i;
+        row = new_j;
+      }
+      const Int slot = pos[static_cast<std::size_t>(col)]++;
+      B.row_idx[static_cast<std::size_t>(slot)] = row;
+      B.values[static_cast<std::size_t>(slot)] =
+          A.values[static_cast<std::size_t>(k)];
+    }
+  }
+
+  // Sort each column's row indices (and corresponding values)
+  for (Int j = 0; j < n; ++j) {
+    const Int start = B.col_ptr[static_cast<std::size_t>(j)];
+    const Int end   = B.col_ptr[static_cast<std::size_t>(j) + 1];
+    const Int len   = end - start;
+    if (len <= 1)
+      continue;
+
+    std::vector<Int> idx(static_cast<std::size_t>(len));
+    std::iota(idx.begin(), idx.end(), Int{0});
+    std::sort(idx.begin(), idx.end(), [&](Int a, Int b) {
+      return B.row_idx[static_cast<std::size_t>(start + a)] <
+             B.row_idx[static_cast<std::size_t>(start + b)];
+    });
+
+    std::vector<Int> sr(static_cast<std::size_t>(len));
+    std::vector<double> sv(static_cast<std::size_t>(len));
+    for (Int k = 0; k < len; ++k) {
+      sr[static_cast<std::size_t>(k)] =
+          B.row_idx[static_cast<std::size_t>(start + idx[static_cast<std::size_t>(k)])];
+      sv[static_cast<std::size_t>(k)] =
+          B.values[static_cast<std::size_t>(start + idx[static_cast<std::size_t>(k)])];
+    }
+    for (Int k = 0; k < len; ++k) {
+      B.row_idx[static_cast<std::size_t>(start + k)] = sr[static_cast<std::size_t>(k)];
+      B.values[static_cast<std::size_t>(start + k)]  = sv[static_cast<std::size_t>(k)];
+    }
+  }
+
+  return B;
+}
 
 // ---------------------------------------------------------------------------
 // Parallel indefinite factorization helper
 // ---------------------------------------------------------------------------
 #ifdef SMF_PARALLEL
 static FactorStatus
-factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
+factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
+                      const Control &ctrl,
                       FactorKeep &fkeep, InertiaCounts &out_inertia,
                       int &out_delayed) {
   const Int ns = static_cast<Int>(keep.supernodes.size());
@@ -52,9 +144,13 @@ factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
                                  static_cast<std::ptrdiff_t>(p));
     FrontalMatrix front(f, p, fi.row_indices, col_idx, arena);
 
-    // Scatter from cleaned matrix (already in analysis ordering).
-    front.scatter_original(keep.cleaned.col_ptr, keep.cleaned.row_idx,
-                           keep.cleaned.values);
+    // Scatter from permuted matrix (analysis ordering).
+    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+
+    // a22[col*ext+row] for row>=col: accumulates child A22 contributions.
+    std::vector<double> a22_par;
+    if (ext > 0)
+      a22_par.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // Assemble children contributions (all done by taskwait).
     for (const Int c : sn.children) {
@@ -79,6 +175,34 @@ factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
       }
 
       front.assemble_contrib(contrib[ci].data(), cext, prows);
+
+      // Accumulate A22-type child contributions into a22_par.
+      if (ext > 0) {
+        const double *cc = contrib[ci].data();
+        for (Int jj = 0; jj < cext; ++jj) {
+          const Int pr_j = prows[static_cast<std::size_t>(jj)];
+          if (pr_j < p) continue;
+          const Int lcol = pr_j - p;
+          for (Int ii = jj; ii < cext; ++ii) {
+            const Int pr_i = prows[static_cast<std::size_t>(ii)];
+            if (pr_i < p) continue;
+            const Int lrow = pr_i - p;
+            const double val =
+                cc[static_cast<std::size_t>(jj) *
+                       static_cast<std::size_t>(cext) +
+                   static_cast<std::size_t>(ii)];
+            if (lrow >= lcol)
+              a22_par[static_cast<std::size_t>(lcol) *
+                          static_cast<std::size_t>(ext) +
+                      static_cast<std::size_t>(lrow)] += val;
+            else
+              a22_par[static_cast<std::size_t>(lrow) *
+                          static_cast<std::size_t>(ext) +
+                      static_cast<std::size_t>(lcol)] += val;
+          }
+        }
+      }
+
       contrib[ci].clear();
       contrib[ci].shrink_to_fit();
     }
@@ -155,7 +279,8 @@ factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
     // Compute contribution block for parent.
     if (ext > 0 && sn.parent >= 0) {
       const std::size_t ext_sz = static_cast<std::size_t>(ext);
-      contrib[si].assign(ext_sz * ext_sz, 0.0);
+      // Initialize with accumulated a22 contributions.
+      contrib[si] = a22_par;
       double *cb = contrib[si].data();
 
       for (int pk = 0; pk < num_fs; ++pk) {
@@ -167,13 +292,13 @@ factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
           const double d = front.at(static_cast<Int>(pk), static_cast<Int>(pk));
           if (std::abs(d) < ctrl.small_pivot)
             continue;
-          const double inv_d = 1.0 / d;
+          // After apply_pivot_1x1, extension rows already store L factor entries.
           for (Int j = 0; j < ext; ++j) {
             const double lj =
-                front.at(p + j, static_cast<Int>(pk)) * inv_d;
+                front.at(p + j, static_cast<Int>(pk));
             for (Int i = j; i < ext; ++i) {
               const double li =
-                  front.at(p + i, static_cast<Int>(pk)) * inv_d;
+                  front.at(p + i, static_cast<Int>(pk));
               cb[static_cast<std::size_t>(j) * ext_sz +
                  static_cast<std::size_t>(i)] -= li * d * lj;
             }
@@ -189,17 +314,13 @@ factor_indef_parallel(const AnalysisKeep &keep, const Control &ctrl,
           if (std::abs(det) < ctrl.small_pivot)
             continue;
 
+          // After apply_pivot_2x2, extension rows already store L factor entries.
           for (Int j = 0; j < ext; ++j) {
-            const double r0j = front.at(p + j, static_cast<Int>(pk));
-            const double r1j = front.at(p + j, static_cast<Int>(pk + 1));
-            const double lj0 = (d11 * r0j - d10 * r1j) / det;
-            const double lj1 = (-d10 * r0j + d00 * r1j) / det;
-
+            const double lj0 = front.at(p + j, static_cast<Int>(pk));
+            const double lj1 = front.at(p + j, static_cast<Int>(pk + 1));
             for (Int i = j; i < ext; ++i) {
-              const double r0i = front.at(p + i, static_cast<Int>(pk));
-              const double r1i = front.at(p + i, static_cast<Int>(pk + 1));
-              const double li0 = (d11 * r0i - d10 * r1i) / det;
-              const double li1 = (-d10 * r0i + d00 * r1i) / det;
+              const double li0 = front.at(p + i, static_cast<Int>(pk));
+              const double li1 = front.at(p + i, static_cast<Int>(pk + 1));
 
               cb[static_cast<std::size_t>(j) * ext_sz +
                  static_cast<std::size_t>(i)] -=
@@ -273,10 +394,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
+    // Permute the cleaned matrix into the analysis ordering once before launching tasks.
+    const CscLower Ap = permute_lower_csc_indef(keep.cleaned, keep.iperm);
     InertiaCounts par_inertia{};
     int par_delayed = 0;
     const FactorStatus ps =
-        factor_indef_parallel(keep, ctrl, fkeep, par_inertia, par_delayed);
+        factor_indef_parallel(keep, Ap, ctrl, fkeep, par_inertia, par_delayed);
     info.delayed_pivots = par_delayed;
     info.num_positive = par_inertia.positive;
     info.num_negative = par_inertia.negative;
@@ -289,7 +412,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
   }
 #endif // SMF_PARALLEL
 
-  // ---- Serial path (unchanged) -----------------------------------------
+  // ---- Serial path -----------------------------------------
+
+  // Permute the cleaned matrix into the analysis ordering.
+  // scatter_original expects column/row indices in the permuted space.
+  const CscLower Ap = permute_lower_csc_indef(keep.cleaned, keep.iperm);
 
   // Per-supernode contribution blocks (ext×ext, column-major, heap-alloc).
   std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));
@@ -318,9 +445,14 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
     AlignedArena::Marker mark = arena.save();
     FrontalMatrix front(f, p, fi.row_indices, col_idx, arena);
 
-    // ---- Scatter original A values ----------------------------------
-    front.scatter_original(keep.cleaned.col_ptr, keep.cleaned.row_idx,
-                           keep.cleaned.values);
+    // ---- Scatter permuted A values ----------------------------------
+    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+
+    // a22[col*ext+row] for row>=col: accumulates child A22 contributions
+    // that land in extension×extension positions of this front.
+    std::vector<double> a22;
+    if (ext > 0)
+      a22.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // ---- Assemble child contribution blocks -------------------------
     for (Int c : sn.children) {
@@ -345,6 +477,38 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
       }
 
       front.assemble_contrib(contrib[ci].data(), cext, prows);
+
+      // Accumulate A22-type entries (both row and col map to extension rows)
+      // into a22, so the contribution block carries the full Schur complement.
+      if (ext > 0) {
+        const double *cc = contrib[ci].data();
+        for (Int jj = 0; jj < cext; ++jj) {
+          const Int pr_j = prows[static_cast<std::size_t>(jj)];
+          if (pr_j < p)
+            continue;
+          const Int lcol = pr_j - p;
+          for (Int ii = jj; ii < cext; ++ii) {
+            const Int pr_i = prows[static_cast<std::size_t>(ii)];
+            if (pr_i < p)
+              continue;
+            const Int lrow = pr_i - p;
+            const double val =
+                cc[static_cast<std::size_t>(jj) *
+                       static_cast<std::size_t>(cext) +
+                   static_cast<std::size_t>(ii)];
+            // Store in lower-triangle position (lrow >= lcol or swap)
+            if (lrow >= lcol)
+              a22[static_cast<std::size_t>(lcol) *
+                      static_cast<std::size_t>(ext) +
+                  static_cast<std::size_t>(lrow)] += val;
+            else
+              a22[static_cast<std::size_t>(lrow) *
+                      static_cast<std::size_t>(ext) +
+                  static_cast<std::size_t>(lcol)] += val;
+          }
+        }
+      }
+
       contrib[ci].clear();
       contrib[ci].shrink_to_fit();
     }
@@ -419,13 +583,14 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
     if (si < fkeep.pivot_types.size())
       fkeep.pivot_types[si] = pivot_tag;
 
-    // ---- Compute simplified contribution block for parent ------------
-    // CB[j*ext+i] = -∑_k  L_ext[i,k] · D_k · L_ext[j,k]   (i >= j)
-    // The extension rows are untouched by the BBK loop (num_fs == p),
-    // so front.at(p+i, k) is the raw assembled value for ext row i, col k.
+    // ---- Compute contribution block for parent ----------------------
+    // CB[j*ext+i] = a22[j*ext+i] - ∑_k L_ext[i,k]·D_k·L_ext[j,k]  (i>=j)
+    // a22 carries assembled child A22-type contributions; the Schur
+    // complement from the pivot columns is subtracted below.
     if (ext > 0 && sn.parent >= 0) {
       const std::size_t ext_sz = static_cast<std::size_t>(ext);
-      contrib[si].assign(ext_sz * ext_sz, 0.0);
+      // Initialize contribution block from accumulated a22
+      contrib[si] = a22;
       double *cb = contrib[si].data();
 
       for (int pk = 0; pk < num_fs; ++pk) {
@@ -435,21 +600,24 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
         if (tag == int8_t{1}) {
           // 1×1 pivot at column pk
+          // After apply_pivot_1x1, extension rows already store L factor entries
+          // (divided by d), so read them directly — no extra inv_d needed.
           const double d = front.at(static_cast<Int>(pk), static_cast<Int>(pk));
           if (std::abs(d) < ctrl.small_pivot)
             continue;
-          const double inv_d = 1.0 / d;
 
           for (Int j = 0; j < ext; ++j) {
-            const double lj = front.at(p + j, static_cast<Int>(pk)) * inv_d;
+            const double lj = front.at(p + j, static_cast<Int>(pk));
             for (Int i = j; i < ext; ++i) {
-              const double li = front.at(p + i, static_cast<Int>(pk)) * inv_d;
+              const double li = front.at(p + i, static_cast<Int>(pk));
               cb[static_cast<std::size_t>(j) * ext_sz +
                  static_cast<std::size_t>(i)] -= li * d * lj;
             }
           }
 
         } else { // tag == 2 : 2×2 pivot at (pk, pk+1)
+          // After apply_pivot_2x2, extension rows already store L factor entries
+          // for both columns pk and pk+1 — read them directly.
           const double d00 =
               front.at(static_cast<Int>(pk), static_cast<Int>(pk));
           const double d10 =
@@ -461,16 +629,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
             continue;
 
           for (Int j = 0; j < ext; ++j) {
-            const double r0j = front.at(p + j, static_cast<Int>(pk));
-            const double r1j = front.at(p + j, static_cast<Int>(pk + 1));
-            const double lj0 = (d11 * r0j - d10 * r1j) / det;
-            const double lj1 = (-d10 * r0j + d00 * r1j) / det;
+            const double lj0 = front.at(p + j, static_cast<Int>(pk));
+            const double lj1 = front.at(p + j, static_cast<Int>(pk + 1));
 
             for (Int i = j; i < ext; ++i) {
-              const double r0i = front.at(p + i, static_cast<Int>(pk));
-              const double r1i = front.at(p + i, static_cast<Int>(pk + 1));
-              const double li0 = (d11 * r0i - d10 * r1i) / det;
-              const double li1 = (-d10 * r0i + d00 * r1i) / det;
+              const double li0 = front.at(p + i, static_cast<Int>(pk));
+              const double li1 = front.at(p + i, static_cast<Int>(pk + 1));
 
               cb[static_cast<std::size_t>(j) * ext_sz +
                  static_cast<std::size_t>(i)] -=

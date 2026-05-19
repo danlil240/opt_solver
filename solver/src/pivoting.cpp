@@ -28,6 +28,10 @@ void sym_swap_front(FrontalMatrix &F, int p, int q, int num_fs) {
   // Column-segment (q, num_fs): same row m, columns p and q
   for (int m = q + 1; m < num_fs; ++m)
     std::swap(F.at(m, p), F.at(m, q));
+
+  // Extension rows: swap column p and column q for rows >= num_fs
+  for (int m = num_fs; m < F.front_size(); ++m)
+    std::swap(F.at(m, p), F.at(m, q));
 }
 
 // ---------------------------------------------------------------------------
@@ -84,15 +88,17 @@ PivotResult choose_pivot(FrontalMatrix &F, int k, int num_fs, double u,
 
 void apply_pivot_1x1(FrontalMatrix &F, int k, int num_fs) {
   double d = F.at(k, k);
+  const int f = F.front_size();
 
-  // Form L column k: divide sub-diagonal by pivot
-  for (int i = k + 1; i < num_fs; ++i)
+  // Form L column k: divide sub-diagonal by pivot (including extension rows)
+  for (int i = k + 1; i < f; ++i)
     F.at(i, k) /= d;
 
   // Schur complement: F(i,j) -= l_ik * d * l_jk  (lower triangle, j > k)
+  // Column range stays within pivot block; row range extends to all rows.
   for (int j = k + 1; j < num_fs; ++j) {
     double ljk = F.at(j, k);
-    for (int i = j; i < num_fs; ++i)
+    for (int i = j; i < f; ++i)
       F.at(i, j) -= F.at(i, k) * d * ljk;
   }
 }
@@ -111,8 +117,10 @@ void apply_pivot_2x2(FrontalMatrix &F, int k, int num_fs, double small) {
   if (std::abs(det) < small)
     return;
 
-  // Form L columns k and k+1 for rows i in (k+1, num_fs)
-  for (int i = k + 2; i < num_fs; ++i) {
+  const int f = F.front_size();
+
+  // Form L columns k and k+1 for rows i in (k+1, f), including extension rows
+  for (int i = k + 2; i < f; ++i) {
     double a0 = F.at(i, k);
     double a1 = F.at(i, k + 1);
     F.at(i, k) = (d11 * a0 - d10 * a1) / det;
@@ -121,10 +129,11 @@ void apply_pivot_2x2(FrontalMatrix &F, int k, int num_fs, double small) {
 
   // Schur complement: F(i,j) -= l_i0*d00*l_j0 + l_i0*d10*l_j1
   //                            + l_i1*d10*l_j0 + l_i1*d11*l_j1
+  // Column range stays within pivot block; row range extends to all rows.
   for (int j = k + 2; j < num_fs; ++j) {
     double lj0 = F.at(j, k);
     double lj1 = F.at(j, k + 1);
-    for (int i = j; i < num_fs; ++i) {
+    for (int i = j; i < f; ++i) {
       double li0 = F.at(i, k);
       double li1 = F.at(i, k + 1);
       F.at(i, j) -=

@@ -2093,3 +2093,104 @@ Total Test time (real) = 0.19 sec
    in `factor_indef.cpp` or the indef assembly. Tracked in §6 Current Focus.
 3. The fill-propagation fix is correct and complete for the SPD (Cholesky) path.
 4. `bench_poisson` in `solver/benchmarks/` should now produce correct results after rebuild.
+
+---
+
+### Session 023 — 2026-05-20 11:30 UTC
+Session-ID: 023
+Agent: Alpha
+Agent-ID: Alpha
+Wave: BugFix.IndefFactor (sequential, single agent)
+Mode: bugfix
+Focus: BugFix.IndefFactor — LDLᵀ factorization accuracy for matrices > 2×2
+Outcome: DONE
+Confidence: high
+Conflict check: no other agents active; Beta and Gamma IDLE
+.live-agents state at session start: `[Alpha] status=STARTING mission=BugFix.IndefFactor op=self-check updated=2026-05-20T09:30:00Z`
+
+**Intent**
+- Fix five interconnected bugs in the indefinite (LDLᵀ) factorization path that caused large
+  residuals (>>1) for coupled matrices larger than 2×2.
+- Add regression tests covering 4×4 and 8×8 tridiagonal plus 3×3 and 4×4 Poisson indef matrices.
+- All 43 tests (39 prior + 4 new) must pass with residuals < 1e-8.
+
+**What was done**
+
+Five root-cause bugs found and fixed:
+
+**Bug 1 — `sym_swap_front` missing extension row swap** (`pivoting.cpp`)
+`sym_swap_front(F, p, q, num_fs)` only swapped rows/cols in `[0, num_fs)` (the pivot block).
+The extension rows `[num_fs, front_size())` were silently left unswapped, corrupting the frontal
+matrix whenever pivoting needed to reorder columns.
+Fix: added a loop `for (m = num_fs; m < F.front_size(); ++m) std::swap(F.at(m, p), F.at(m, q))`.
+
+**Bug 2 — `apply_pivot_1x1` / `apply_pivot_2x2` not updating extension rows** (`pivoting.cpp`)
+Both functions used `num_fs` as the loop bound for the Schur complement update, so extension
+rows were never divided by the pivot or updated. After pivoting, extension rows still held raw
+assembled values instead of the proper L factor entries (raw value / pivot).
+Fix: changed both functions to loop to `F.front_size()` (full front, including extension rows).
+
+**Bug 3 — Contribution block formula re-applied D⁻¹** (`factor_indef.cpp`)
+The contribution block formula assumed extension rows still held raw values (pre-Bug-2 state),
+applying `raw_val * inv_d` to recover L, then `* d * inv_d` for the Schur update.
+After Bug 2 fix, extension rows hold L factor entries directly, so the formula simplified to
+`cb -= li * d * lj` for 1×1 pivots and the analogous 2×2 form.
+
+**Bug 4 (KEY) — Scatter from unpermuted matrix** (`factor_indef.cpp`)
+`factor_posdef.cpp` calls `permute_lower_csc` to obtain `Ap` (AMD-reordered matrix), then
+scatters from `Ap`. The indef path was scattering directly from `keep.cleaned` (the pre-AMD
+input matrix), so the wrong entries were loaded into frontal matrices for any non-trivial AMD
+permutation. For the 50×50 block-diagonal indef tests, AMD produced a near-identity permutation
+that masked the bug. For tridiagonal/Poisson matrices under AMD the permutation is non-trivial
+and the scatter was completely wrong.
+Fix: added `permute_lower_csc_indef` (exact mirror of the SPD helper) and computed `Ap` before
+the main supernode loop in both serial and parallel paths.
+
+**Bug 5 — Missing A22 accumulation in contribution block** (`factor_indef.cpp`)
+In the supernodal factorization, when a child supernode's contribution block is assembled into
+its parent, entries where *both* the row AND column map to extension rows of the parent (A22-type
+entries) are not absorbed into the parent's frontal matrix (which is only `f × p`). Instead, they
+must be accumulated into a separate `a22` buffer and used to initialize the parent's own
+contribution block (before subtracting the Schur complement L·D·Lᵀ).
+The SPD path (`factor_posdef.cpp`) handles this correctly with a dedicated `a22` buffer.
+The indef path was missing this entirely, causing residuals ~0.1 for fill-in matrices like Poisson.
+Fix: added `a22` vector (size `ext × ext`, lower-triangular col-major) to both serial and parallel
+supernode loops, accumulating child A22-type contributions, and initializing `contrib[si] = a22`
+before subtracting the Schur complement. For tridiagonal matrices, `a22` is all zeros (no fill),
+which is why Bugs 1–4 being fixed was sufficient for those tests.
+
+**Regression tests added**
+- `solver/tests/test_indef_larger.cpp` — 4 tests:
+  - `IndefLarger.Tridiag_4x4`: 4×4 indefinite tridiagonal, residual < 1e-8 ✓
+  - `IndefLarger.Tridiag_8x8`: 8×8 indefinite tridiagonal, residual < 1e-8 ✓
+  - `IndefLarger.Poisson2D_3x3_Indef`: 9×9 indefinite 2D Poisson, residual < 1e-8 ✓
+  - `IndefLarger.Poisson2D_4x4_Indef`: 16×16 indefinite 2D Poisson, residual < 1e-8 ✓
+- `solver/tests/CMakeLists.txt` — registered `test_indef_larger` and `IndefLarger` test target
+
+**Files touched**
+- `solver/src/pivoting.cpp` — Bugs 1, 2: extension row swap + full-front pivot loops
+- `solver/src/factor_indef.cpp` — Bugs 3, 4, 5: formula fix, permuted scatter, a22 buffer
+- `solver/tests/test_indef_larger.cpp` — CREATED: 4-test indef regression suite
+- `solver/tests/CMakeLists.txt` — EDITED: added `test_indef_larger` target
+- `.live-agents` — EDITED: Alpha status updated throughout
+- `MA97_SOLVER_BREATHING_PLAN.md` — EDITED: Session 023 appended
+
+**Validation**
+```
+cmake --build solver/build -j4  →  100% build green, 0 errors, 0 warnings
+ctest --test-dir solver/build --output-on-failure
+→  100% tests passed, 0 tests failed out of 40
+   All 39 prior tests: PASSED
+   40/40 IndefLarger: PASSED (4 subtests: Tridiag_4x4, Tridiag_8x8, Poisson2D_3x3_Indef, Poisson2D_4x4_Indef)
+Total Test time (real) = 0.16 sec
+```
+
+**Mission status updates**
+- [x] BugFix.IndefFactor — DONE; all acceptance criteria satisfied
+
+**HANDOFF**
+1. All 40/40 ctest tests green. All five indef factorization bugs fixed.
+2. The indef path for matrices > 2×2 is now correct under AMD permutation with fill-in.
+3. No known remaining accuracy bugs in the factorization paths (SPD or indef).
+4. The parallel indef path received the same fixes as the serial path; parallel determinism tests pass.
+
