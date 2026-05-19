@@ -110,7 +110,11 @@ add_library(smf STATIC
     src/solve_backward.cpp
     src/solve_diag.cpp
     src/solve.cpp
+    src/scaling.cpp
     src/solver.cpp
+    src/parallel/task_tree.cpp
+    src/parallel/blas_thread_guard.cpp
+    src/parallel/determinism.cpp
 )
 
 target_include_directories(smf PUBLIC
@@ -125,6 +129,7 @@ target_link_libraries(smf PUBLIC
 
 if(SMF_ENABLE_OPENMP AND TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(smf PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(smf PUBLIC SMF_PARALLEL=1)
 endif()
 
 if(SMF_HAS_AMD)
@@ -141,9 +146,37 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_HAS_AMD}>:SMF_HAS_AMD=1>
     $<$<BOOL:${SMF_HAS_METIS}>:SMF_HAS_METIS=1>
     $<$<BOOL:${SMF_DETERMINISTIC}>:SMF_DETERMINISTIC=1>
+    $<$<BOOL:${SMF_HAS_OPENBLAS}>:SMF_HAS_OPENBLAS=1>
+    $<$<BOOL:${SMF_USE_MKL}>:SMF_USE_MKL=1>
 )
 
-# ---- Tests subdirectory -------------------------------------------------
+# ---- Optional: detect OpenBLAS thread API --------------------------------
+# If OpenBLAS is the BLAS provider (and not MKL), probe for the threading API.
+set(SMF_HAS_OPENBLAS OFF)
+if(NOT SMF_USE_MKL)
+    find_package(OpenBLAS QUIET CONFIG)
+    if(NOT OpenBLAS_FOUND)
+        # Fallback: look for the cblas header that ships with the pthread variant.
+        find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
+            PATHS
+                /usr/include/x86_64-linux-gnu/openblas-pthread
+                /usr/include/openblas-pthread
+                /usr/include/openblas
+                /usr/include/x86_64-linux-gnu
+                /usr/local/include
+        )
+        if(OPENBLAS_CBLAS_INCLUDE_DIR)
+            set(SMF_HAS_OPENBLAS ON)
+            message(STATUS "smf: OpenBLAS cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
+            target_include_directories(smf PUBLIC ${OPENBLAS_CBLAS_INCLUDE_DIR})
+        endif()
+    else()
+        set(SMF_HAS_OPENBLAS ON)
+        message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
+    endif()
+endif()
+
+
 if(SMF_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
