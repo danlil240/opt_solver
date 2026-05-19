@@ -171,3 +171,15 @@ if(SMF_BUILD_IPOPT_ADAPTER)
     target_link_libraries(test_ipopt_adapter PRIVATE smf GTest::GTest GTest::Main)
     add_test(NAME IpoptAdapter COMMAND test_ipopt_adapter)
 endif()
+
+# --- M9.S1 COO input test ---
+
+add_executable(test_coo_input test_coo_input.cpp)
+target_link_libraries(test_coo_input PRIVATE smf GTest::gtest_main)
+add_test(NAME CooInput COMMAND test_coo_input)
+
+# --- M9.S3 Sparse forward solve test ---
+
+add_executable(test_sparse_fwd_solve test_sparse_fwd_solve.cpp)
+target_link_libraries(test_sparse_fwd_solve PRIVATE smf GTest::gtest_main)
+add_test(NAME SparseFwdSolve COMMAND test_sparse_fwd_solve)
