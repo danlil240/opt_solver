@@ -417,6 +417,49 @@ Build `smf` — a C++20 sparse symmetric multifrontal direct solver inspired by 
 
 These are in **§10 Deferred Improvements**, not on the active mission board.
 
+### Phase 10 — External Validation & Performance Truth
+
+- [ ] M10.S1 Compare against CHOLMOD on SPD matrices
+- [ ] M10.S2 Compare against MUMPS / PARDISO / MA27 if available on indefinite KKT matrices
+- [ ] M10.S3 Add SuiteSparse Matrix Collection loader tests
+- [ ] M10.S4 Add trajectory-optimization KKT benchmark
+- [ ] M10.S5 Produce benchmark report with failure cases
+
+Add one serious integration test
+
+Create:
+
+solver/tests/test_ocp_kkt_regression.cpp
+
+Acceptance:
+
+Builds synthetic block-KKT matrix
+Runs analyse once
+Runs factor/solve 100 times
+Checks residual < 1e-9
+Checks inertia stable
+Checks analyse is not repeated
+Checks factor time is reported
+
+This should become your main regression test.
+
+
+Clean API and installability
+
+Right now the repo has a library, tests, benchmarks, and optional IPOPT adapter, but before using it seriously you need:
+
+install(TARGETS smf EXPORT smfTargets ...)
+install(DIRECTORY include/ DESTINATION include)
+
+And:
+
+solver/cmake/smfConfig.cmake.in
+
+So another project can use:
+
+find_package(smf REQUIRED)
+target_link_libraries(my_solver PRIVATE smf::smf)
+
 ---
 
 ## 6) Current Focus
