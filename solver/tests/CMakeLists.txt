@@ -204,3 +204,9 @@ add_test(NAME OcpKktRegression COMMAND test_ocp_kkt_regression)
 add_executable(test_suite_sparse_matrix_market test_suite_sparse_matrix_market.cpp)
 target_link_libraries(test_suite_sparse_matrix_market PRIVATE smf GTest::gtest_main)
 add_test(NAME MatrixMarketTest COMMAND test_suite_sparse_matrix_market)
+
+# --- BugFix.AssemblyTree: 2D Poisson fill-propagation regression test ---
+
+add_executable(test_poisson_2d test_poisson_2d.cpp)
+target_link_libraries(test_poisson_2d PRIVATE smf GTest::gtest_main)
+add_test(NAME Poisson2D COMMAND test_poisson_2d)

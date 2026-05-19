@@ -490,8 +490,9 @@ target_link_libraries(my_solver PRIVATE smf::smf)
 
 ## 6) Current Focus
 
-- **Active phase:** Phase 10 complete — all missions done. M10.S1 ✅ M10.S2 SKIPPED (MUMPS unavailable) M10.S3 ✅ M10.S4 ✅ M10.S5 ✅.
-- **Build state:** 38/38 tests green (prior 37 + MatrixMarketTest). Benchmark report in `docs/benchmark_report.md`.
+- **Active phase:** BugFix.AssemblyTree ✅ DONE — fill-propagation bug fixed. All 39/39 tests green.
+- **Build state:** 39/39 tests green (prior 38 + Poisson2D regression test). Benchmark report updated in `docs/benchmark_report.md`.
+- **Known remaining issue:** `RealSymmetricIndefinite` factorization has a pre-existing accuracy issue for matrices larger than 2×2 (large residuals). This is a separate bug from the fill-propagation fix and is tracked for a future mission.
 ---
 
 ## 7) Pre-Flight Checklist (Run Every Session)
@@ -2008,3 +2009,87 @@ Traj-opt KKT (N=50, n=456): analyse=0.378 ms, factor(avg)=0.164 ms, solve(avg)=0
 2. Pre-existing Poisson2D bug (AMD reordering, far-apart columns) documented in `docs/benchmark_report.md` §5. Out of scope.
 3. Matrix Market reader is reusable for loading SuiteSparse Collection matrices locally (pass .mtx file to `bench_suite_sparse_matrix_market`).
 4. `docs/benchmark_report.md` has full performance characterization and known limitations.
+
+---
+
+### Session 022 — 2026-05-19 21:00 UTC
+Session-ID: 022
+Agent: Alpha
+Agent-ID: Alpha
+Wave: BugFix.AssemblyTree (sequential, single agent)
+Mode: implement
+Focus: BugFix.AssemblyTree — assembly_tree fill-propagation fix
+Outcome: DONE
+Confidence: high
+Conflict check: no other agents active; Beta and Gamma IDLE
+.live-agents state at session start: `[Alpha] status=STARTING mission=BugFix.AssemblyTree op=self-check updated=2026-05-19T20:35:00Z`
+
+**Intent**
+- Fix the `build_assembly_tree` fill-propagation bug: parent supernodes were not
+  inheriting extension rows from child supernodes, causing incorrect frontal matrix
+  dimensions and wrong factorizations for 2D Poisson and similar matrices under AMD.
+- Add regression test `test_poisson_2d.cpp` covering grids 2×2 through 10×10 SPD.
+- Document the fix in `docs/benchmark_report.md`.
+
+**What was done**
+
+1. **Root cause verified**: `build_assembly_tree` in `solver/src/assembly_tree.cpp`
+   only collected direct sparsity pattern rows for each supernode. It never propagated
+   extension rows (rows beyond the child's pivot columns) from children to parents.
+   For tridiagonal matrices under AMD, children's extension rows happen to be in the
+   parent's direct pattern — so it worked. For 2D Poisson under AMD, they are not —
+   so the fronts were too small and assembly was incorrect.
+
+2. **Fix implemented** in `solver/src/assembly_tree.cpp`:
+   After collecting direct-pattern rows for supernode S (steps 1-2), the new code
+   (step 3) iterates over all children C of S and for each extension row r in
+   `fronts[C].row_indices` where r >= C.col_end, marks r in S's `seen[]` bitmap.
+   Since supernodes are in postorder (child indices < parent indices), processing
+   in order 0..nsn-1 guarantees children are fully built before the parent reads them.
+   This is the standard multifrontal fill-propagation algorithm.
+
+3. **Regression test created** at `solver/tests/test_poisson_2d.cpp`:
+   - `Poisson2D.Grid2x2_SPD`: 4×4 Poisson under AMD, residual < 1e-10 ✓
+   - `Poisson2D.Grid3x3_SPD`: 9×9 Poisson under AMD, residual < 1e-10 ✓
+   - `Poisson2D.Grid4x4_SPD`: 16×16 Poisson under AMD, residual < 1e-10 ✓
+   - `Poisson2D.Grid5x5_SPD`: 25×25 Poisson under AMD, residual < 1e-10 ✓
+   - `Poisson2D.Grid10x10_SPD`: 100×100 Poisson under AMD, residual < 1e-10 ✓
+   Note: an indef variant was attempted but exposed a *separate* pre-existing accuracy
+   bug in the indef (LDLᵀ) path for matrices larger than 2×2. That bug is out of scope
+   for this mission and is documented as a future mission in §6 Current Focus.
+
+4. **CMakeLists.txt updated**: registered `Poisson2D` test target.
+
+5. **`docs/benchmark_report.md` updated**: §5.1 updated from "known bug, out of scope"
+   to "FIXED in Session 022"; limitations table updated; test count updated to 39/39.
+
+**Files touched**
+- `solver/src/assembly_tree.cpp` — EDITED: added fill-propagation step (step 3)
+- `solver/tests/test_poisson_2d.cpp` — CREATED: 5-test Poisson2D regression suite
+- `solver/tests/CMakeLists.txt` — EDITED: added `test_poisson_2d` target + `Poisson2D` test
+- `docs/benchmark_report.md` — EDITED: §5.1, bench_poisson result note, limitations table, test count
+- `MA97_SOLVER_BREATHING_PLAN.md` — EDITED: §6 Current Focus updated, Session 022 appended
+- `.live-agents` — EDITED: Alpha status updated throughout
+
+**Validation**
+```
+cmake -S solver -B solver/build -DCMAKE_BUILD_TYPE=Release -DSMF_BUILD_TESTS=ON
+cmake --build solver/build -j4  →  100% build green, 0 errors, 0 warnings
+ctest --test-dir solver/build --output-on-failure
+→  100% tests passed, 0 tests failed out of 39
+   All 38 prior tests: PASSED
+   39/39 Poisson2D: PASSED (5 subtests: Grid2x2_SPD, Grid3x3_SPD, Grid4x4_SPD, Grid5x5_SPD, Grid10x10_SPD)
+Total Test time (real) = 0.19 sec
+```
+
+**Mission status updates**
+- [x] BugFix.AssemblyTree — DONE; all acceptance criteria satisfied
+
+**HANDOFF**
+1. All 39/39 ctest tests green. Fill-propagation bug fixed.
+2. **Known remaining issue (new):** `RealSymmetricIndefinite` LDLᵀ factorization produces
+   large residuals (>>1) for matrices larger than ~4×4. The bug is distinct from fill-propagation:
+   the indef 2×2 matrix test still passes but 3×3+ Poisson fails. Root cause unknown — likely
+   in `factor_indef.cpp` or the indef assembly. Tracked in §6 Current Focus.
+3. The fill-propagation fix is correct and complete for the SPD (Cholesky) path.
+4. `bench_poisson` in `solver/benchmarks/` should now produce correct results after rebuild.
