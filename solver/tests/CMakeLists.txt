@@ -119,3 +119,23 @@ add_test(NAME SolveEndToEnd COMMAND test_solve_end_to_end)
 add_executable(test_factor_solve test_factor_solve.cpp)
 target_link_libraries(test_factor_solve PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorSolve COMMAND test_factor_solve)
+
+# --- M5.S1 test target ---
+
+add_executable(test_repeated_factor test_repeated_factor.cpp)
+target_link_libraries(test_repeated_factor PRIVATE smf GTest::gtest_main)
+add_test(NAME RepeatedFactor COMMAND test_repeated_factor)
+
+# --- M5.S2 test target ---
+
+add_executable(test_singular test_singular.cpp)
+target_link_libraries(test_singular PRIVATE smf GTest::gtest_main)
+add_test(NAME Singular COMMAND test_singular)
+
+# --- M5.S3 test target ---
+
+add_executable(test_dod_regression test_dod_regression.cpp)
+target_link_libraries(test_dod_regression PRIVATE smf GTest::gtest_main)
+add_test(NAME DodRegression COMMAND test_dod_regression)
+set_tests_properties(DodRegression PROPERTIES LABELS "dod_regression")
+

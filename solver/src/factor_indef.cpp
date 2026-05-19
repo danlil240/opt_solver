@@ -152,6 +152,13 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
     info.delayed_pivots += delayed_here;
 
+    // DECISION LOG (M5.S2): Rejected pivots are zero eigenvalues.
+    // In this implementation there is no real "delay-to-parent" mechanism —
+    // a Reject at any supernode means the column can never be factored and
+    // its eigenvalue contribution is zero.  Count each rejected column in
+    // inertia.zero so that info.num_zero and info.numerical_rank are correct.
+    inertia.zero += delayed_here;
+
     // ---- Store the f×p factored front in fkeep.factor_values --------
     {
       const std::size_t lsize =
@@ -238,7 +245,14 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
   info.num_negative = inertia.negative;
   info.num_zero = inertia.zero;
 
-  if (info.delayed_pivots > 0 && !ctrl.continue_on_singular)
+  // DECISION LOG (M5.S2): numerical_rank = n minus zero-eigenvalue count.
+  // All rejected pivots have been folded into inertia.zero above.
+  info.numerical_rank = static_cast<int>(keep.n) - inertia.zero;
+
+  // Return Singular whenever any pivot was rejected (zero) — regardless of
+  // continue_on_singular.  The flag controls only whether the caller proceeds
+  // to solve with the degraded factorization; it does not change the status.
+  if (inertia.zero > 0)
     return FactorStatus::Singular;
   return FactorStatus::Success;
 }
