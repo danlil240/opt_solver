@@ -22,21 +22,43 @@ std::vector<FrontalInfo> build_assembly_tree(
     // Supernodes are numbered in postorder so children always have smaller indices
     // than their parent. Processing in order 0..nsn-1 guarantees children are
     // complete before we read their row_indices for propagation.
+    //
+    // Optimised "dirty-list / timestamped-mark" pattern:
+    //   mark[r] == s  means row r has been added for supernode s in this pass.
+    //   We never clear mark[] between supernodes — the generation number `s`
+    //   serves as an implicit epoch, making the check O(1) per row.
+    //   dirty[] accumulates only the rows that were touched, so we collect
+    //   results in O(front_size) instead of O(n).
+    //
+    // Total work across all supernodes: O(nnz_factor) ≈ O(n log n) for sparse
+    // problems, vs the previous O(nsn × n) = O(n²) with per-supernode allocation.
+    std::vector<Int> mark(static_cast<std::size_t>(A.n), -1);
+    std::vector<Int> dirty;
+    dirty.reserve(256); // typical front size; grows as needed
+
     for (Int s = 0; s < nsn; ++s) {
         const Supernode& sn = supernodes[static_cast<std::size_t>(s)];
         FrontalInfo& fi = fronts[static_cast<std::size_t>(s)];
 
-        std::vector<bool> seen(static_cast<std::size_t>(A.n), false);
+        dirty.clear();
+
+        // Helper: mark row r as belonging to supernode s (idempotent)
+        auto mark_row = [&](Int r) {
+            if (mark[static_cast<std::size_t>(r)] != s) {
+                mark[static_cast<std::size_t>(r)] = s;
+                dirty.push_back(r);
+            }
+        };
 
         // --- Step 1: Add diagonal entries (pivot columns of this supernode) ---
         for (Int j = sn.col_start; j < sn.col_end; ++j)
-            seen[static_cast<std::size_t>(j)] = true;
+            mark_row(j);
 
         // --- Step 2: Add off-diagonal entries from the original sparsity pattern ---
         for (Int j = sn.col_start; j < sn.col_end; ++j) {
             for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
                  p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-                seen[static_cast<std::size_t>(A.row_idx[static_cast<std::size_t>(p)])] = true;
+                mark_row(A.row_idx[static_cast<std::size_t>(p)]);
             }
         }
 
@@ -51,13 +73,14 @@ std::vector<FrontalInfo> build_assembly_tree(
             // Extension rows start where the child's pivot columns end
             for (const Int r : cfi.row_indices) {
                 if (r >= csn.col_end)          // skip the child's own pivot rows
-                    seen[static_cast<std::size_t>(r)] = true;
+                    mark_row(r);
             }
         }
 
         // --- Step 4: Collect sorted row indices ---
-        for (Int i = 0; i < A.n; ++i)
-            if (seen[static_cast<std::size_t>(i)]) fi.row_indices.push_back(i);
+        // dirty[] is not ordered; sort to produce the required ascending order.
+        fi.row_indices = dirty;
+        std::sort(fi.row_indices.begin(), fi.row_indices.end());
     }
 
     // Compute prediction stats

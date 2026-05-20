@@ -30,6 +30,8 @@ static void make_1x1(AnalysisKeep &ak, FactorKeep &fk) {
   ak.fronts.push_back(std::move(fi));
 
   // Factor: L11 = [2.0]  (sqrt(4))
+  ak.solve_postorder = {0};
+
   fk.factor_values = {2.0};
   fk.factor_col_ptr = {0, 1};
   fk.perm = {0};
@@ -83,6 +85,9 @@ static void make_2x2(AnalysisKeep &ak, FactorKeep &fk) {
   fk.iperm = {0, 1};
   fk.analysis = &ak;
   fk.is_posdef = true;
+
+  // sn0 is child of sn1 → postorder: [0, 1]
+  ak.solve_postorder = {0, 1};
 }
 
 // ---------------------------------------------------------------------------
