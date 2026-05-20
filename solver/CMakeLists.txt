@@ -24,7 +24,7 @@ option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD 
 option(SMF_BUILD_MA97_PLUGIN   "Build libsmf_ma97.so HSL MA97 plugin (IPOPT dynamic loader)" ON)
 
 # ---- Compiler flags -----------------------------------------------------
-add_compile_options(-Wall -Wextra -Wpedantic -O2 -g)
+add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native -g)
 
 if(SMF_SANITIZE)
     add_compile_options(-fsanitize=address,undefined)
