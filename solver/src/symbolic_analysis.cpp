@@ -163,6 +163,71 @@ namespace smf
         // Step 8: build assembly tree and fill info predictions
         auto fronts = build_assembly_tree(A_perm, snodes, info);
 
+        // Step 8.5a: compute supernode postorder (children before parents) via iterative DFS.
+        const Int nsn = static_cast<Int>(snodes.size());
+        std::vector<Int> sn_postorder;
+        sn_postorder.reserve(static_cast<std::size_t>(nsn));
+        {
+            std::vector<std::pair<Int,Int>> stk; // (node, next_child_idx)
+            stk.reserve(static_cast<std::size_t>(nsn));
+            for (Int i = 0; i < nsn; ++i)
+                if (snodes[static_cast<std::size_t>(i)].parent == -1)
+                    stk.push_back({i, 0});
+            while (!stk.empty()) {
+                auto& [node, ci] = stk.back();
+                const Int nch = static_cast<Int>(snodes[static_cast<std::size_t>(node)].children.size());
+                if (ci < nch) {
+                    const Int child = snodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci)];
+                    ++ci;
+                    stk.push_back({child, 0});
+                } else {
+                    sn_postorder.push_back(node);
+                    stk.pop_back();
+                }
+            }
+        }
+
+        // Step 8.5b: build inverse postorder for sort key.
+        std::vector<Int> po_idx(static_cast<std::size_t>(nsn));
+        for (Int i = 0; i < nsn; ++i)
+            po_idx[static_cast<std::size_t>(sn_postorder[static_cast<std::size_t>(i)])] = i;
+
+        // Step 8.5c: pre-sort each supernode's children by descending postorder index.
+        // Factor's LIFO fstack freeing requires this order; doing it once in analysis
+        // eliminates the per-supernode sorted_ch vector + std::sort in the factor hot loop.
+        for (Int s = 0; s < nsn; ++s) {
+            auto& ch = snodes[static_cast<std::size_t>(s)].children;
+            if (ch.size() > 1)
+                std::sort(ch.begin(), ch.end(), [&](Int a, Int b) {
+                    return po_idx[static_cast<std::size_t>(a)] >
+                           po_idx[static_cast<std::size_t>(b)];
+                });
+        }
+
+        // Step 8.5d: pre-compute child_parent_rows scatter maps for every front.
+        // child_parent_rows[k][i] = row index in parent front for child k's i-th extended row.
+        // This moves all per-child lower_bound searches from the factor hot loop into analysis.
+        for (Int s = 0; s < nsn; ++s) {
+            const Supernode& sn = snodes[static_cast<std::size_t>(s)];
+            FrontalInfo& fi = fronts[static_cast<std::size_t>(s)];
+            const std::size_t nch = sn.children.size();
+            fi.child_parent_rows.resize(nch);
+            for (std::size_t k = 0; k < nch; ++k) {
+                const Int c = sn.children[k];
+                const FrontalInfo& cfi = fronts[static_cast<std::size_t>(c)];
+                const Int cp = snodes[static_cast<std::size_t>(c)].width();
+                const Int q_c = cfi.front_size() - cp;
+                fi.child_parent_rows[k].resize(static_cast<std::size_t>(q_c));
+                for (Int i = 0; i < q_c; ++i) {
+                    const Int ext_row = cfi.row_indices[static_cast<std::size_t>(cp + i)];
+                    const auto it = std::lower_bound(fi.row_indices.begin(),
+                                                     fi.row_indices.end(), ext_row);
+                    fi.child_parent_rows[k][static_cast<std::size_t>(i)] =
+                        static_cast<Int>(it - fi.row_indices.begin());
+                }
+            }
+        }
+
         // Step 9: record timing
         const auto t1 = std::chrono::steady_clock::now();
         info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -214,6 +279,7 @@ namespace smf
         keep->etree = std::move(etree);
         keep->supernodes = std::move(snodes);
         keep->fronts = std::move(fronts);
+        keep->postorder = std::move(sn_postorder);
 
         return keep;
     }

@@ -6,15 +6,12 @@
 namespace smf {
 
 FrontalMatrix::FrontalMatrix(Int front_size, Int pivot_cols,
-                             const std::vector<Int>& row_indices,
-                             const std::vector<Int>& col_indices,
+                             const Int* row_map, const Int* col_map,
                              AlignedArena& arena)
     : f_(front_size), p_(pivot_cols),
-      row_map_(row_indices), col_map_(col_indices)
+      row_map_(row_map), col_map_(col_map)
 {
     assert(p_ >= 0 && p_ <= f_);
-    assert(static_cast<Int>(row_indices.size()) == f_);
-    assert(static_cast<Int>(col_indices.size()) == p_);
 
     const std::size_t nbytes =
         static_cast<std::size_t>(f_) * static_cast<std::size_t>(p_) * sizeof(double);
@@ -38,14 +35,16 @@ void FrontalMatrix::scatter_original(const std::vector<Int>& col_ptr,
                                      const std::vector<Int>& row_idx,
                                      const std::vector<double>& values)
 {
+    const Int* const row_end = row_map_ + f_;
     for (Int j = 0; j < p_; ++j) {
         const Int orig_col = col_map_[j];
-        for (Int k = col_ptr[orig_col]; k < col_ptr[orig_col + 1]; ++k) {
+        for (Int k = col_ptr[static_cast<std::size_t>(orig_col)];
+             k < col_ptr[static_cast<std::size_t>(orig_col) + 1]; ++k) {
             const Int orig_row = row_idx[static_cast<std::size_t>(k)];
             // Binary search for orig_row in sorted row_map_
-            const auto it = std::lower_bound(row_map_.cbegin(), row_map_.cend(), orig_row);
-            if (it != row_map_.cend() && *it == orig_row) {
-                const Int front_row = static_cast<Int>(it - row_map_.cbegin());
+            const Int* it = std::lower_bound(row_map_, row_end, orig_row);
+            if (it != row_end && *it == orig_row) {
+                const Int front_row = static_cast<Int>(it - row_map_);
                 at(front_row, j) += values[static_cast<std::size_t>(k)];
             }
         }
@@ -55,9 +54,6 @@ void FrontalMatrix::scatter_original(const std::vector<Int>& col_ptr,
 void FrontalMatrix::assemble_contrib(const double* contrib, Int q,
                                      const std::vector<Int>& parent_rows)
 {
-    // Pivot invariant: col_map_[k] == row_map_[k] for k < p_, so the parent
-    // column index for contribution column j is parent_rows[j] when parent_rows[j] < p_.
-    // No map lookups inside the inner loop — parent_rows is precomputed.
     for (Int j = 0; j < q; ++j) {
         const Int pr_j = parent_rows[static_cast<std::size_t>(j)];
         if (pr_j >= p_) continue;   // extended column — no storage in this front

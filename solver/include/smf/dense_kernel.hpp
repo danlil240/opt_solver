@@ -36,6 +36,12 @@ void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha = 1.0, double beta = 0.0);
 
+/// Matrix-vector: y := alpha * Aᵀ * x + beta * y. A is m×n, lda.
+/// x has length m, y has length n.
+void smf_dgemv_transpose(double *y, int m, int n, const double *A, int lda,
+                         const double *x, double alpha = 1.0,
+                         double beta = 0.0);
+
 /// Triangular solve: solves L x = b (lower, no-transpose, non-unit).
 /// x overwrites b. n = size.
 void smf_dtrsv_lower(double *b, int n, const double *L, int lda);

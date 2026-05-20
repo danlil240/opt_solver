@@ -2,6 +2,7 @@
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/threading.hpp"
 #include <algorithm>
 #include <atomic>
@@ -28,42 +29,6 @@ static std::vector<double> scatter_values(
         orig_to_perm_idx[static_cast<std::size_t>(k)])] +=
         A_orig.values[static_cast<std::size_t>(k)];
   return perm_values;
-}
-
-/// Compute a postorder traversal of the supernode tree (children before
-/// parents).
-static std::vector<Int>
-compute_postorder(const std::vector<Supernode> &supernodes) {
-  const Int ns = static_cast<Int>(supernodes.size());
-  std::vector<Int> order;
-  order.reserve(static_cast<std::size_t>(ns));
-
-  // Iterative DFS: each stack element is (node_index, next_child_to_visit)
-  std::vector<std::pair<Int, Int>> stk;
-  stk.reserve(static_cast<std::size_t>(ns));
-
-  // Seed with all roots (supernodes whose parent == -1)
-  for (Int i = 0; i < ns; ++i) {
-    if (supernodes[static_cast<std::size_t>(i)].parent == -1)
-      stk.push_back({i, 0});
-  }
-
-  while (!stk.empty()) {
-    auto &[node, ci] = stk.back();
-    const Int nch = static_cast<Int>(
-        supernodes[static_cast<std::size_t>(node)].children.size());
-    if (ci < nch) {
-      const Int child = supernodes[static_cast<std::size_t>(node)]
-                            .children[static_cast<std::size_t>(ci)];
-      ++ci;
-      stk.push_back({child, 0});
-    } else {
-      order.push_back(node);
-      stk.pop_back();
-    }
-  }
-
-  return order;
 }
 
 } // anonymous namespace
@@ -126,12 +91,7 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
         8192u;
     AlignedArena arena(arena_sz);
 
-    const std::vector<Int> col_indices(
-        fi.row_indices.begin(),
-        fi.row_indices.begin() + static_cast<std::ptrdiff_t>(p));
-
-    FrontalMatrix F(f, p, fi.row_indices, col_indices, arena);
-    F.zero();
+    FrontalMatrix F(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
 
     double *a22 = nullptr;
     if (q > 0) {
@@ -146,7 +106,9 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
     F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
 
     // Assemble child contributions (children are fully done by taskwait).
-    for (const Int c : sn.children) {
+    // Children in sn.children are pre-sorted; child_parent_rows[k] pre-computed.
+    for (std::size_t k = 0; k < sn.children.size(); ++k) {
+      const Int c = sn.children[k];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
@@ -158,17 +120,7 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
         continue;
 
       const double *cc = contrib[ci].data();
-      const FrontalInfo &fi_c = keep.fronts[ci];
-
-      std::vector<Int> parent_rows(static_cast<std::size_t>(q_c));
-      for (Int ii = 0; ii < q_c; ++ii) {
-        const Int ext_row =
-            fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-        const auto it = std::lower_bound(fi.row_indices.begin(),
-                                         fi.row_indices.end(), ext_row);
-        parent_rows[static_cast<std::size_t>(ii)] =
-            static_cast<Int>(it - fi.row_indices.begin());
-      }
+      const std::vector<Int>& parent_rows = fi.child_parent_rows[k];
 
       // Assemble A11/A21 parts into F.
       F.assemble_contrib(cc, q_c, parent_rows);
@@ -198,7 +150,6 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
       // Release child's contribution block — child is done, parent is done
       // reading; no other task will touch contrib[c].
       contrib[ci].clear();
-      contrib[ci].shrink_to_fit();
     }
 
     // Cholesky factorization of the p×p pivot block.
@@ -292,6 +243,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
+    BlasSerialGuard blas_guard;
     const FactorStatus ps = factor_posdef_parallel(keep, ctrl, fkeep, Ap);
     if (ps != FactorStatus::Success) {
       info.factor_status = ps;
@@ -307,26 +259,34 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   }
 #endif // SMF_PARALLEL
 
-  // ---- Serial path (unchanged) --------------------------------------------
+  // ---- Serial path --------------------------------------------------------
 
-  // Compute postorder traversal of the supernode tree
-  const std::vector<Int> postorder = compute_postorder(keep.supernodes);
-
-  // Inverse postorder: po_idx[s] = position of supernode s in postorder
-  std::vector<Int> po_idx(static_cast<std::size_t>(ns));
-  for (Int i = 0; i < ns; ++i)
-    po_idx[static_cast<std::size_t>(postorder[static_cast<std::size_t>(i)])] =
-        i;
+  // Use precomputed postorder from analysis (children before parents).
+  // Children are also pre-sorted descending postorder in each Supernode::children
+  // (done during symbolic_analysis) — no per-call sort needed.
+  const std::vector<Int>& postorder = keep.postorder;
 
   // Arena for frontal matrix + A22 accumulator (reused each supernode via
-  // save/reset)
+  // save/reset).  Size from the largest front shape instead of O(n^2)
+  // over-allocation.
+  LongInt max_front = 1;
+  LongInt max_ext = 0;
+  for (Int s = 0; s < ns; ++s) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const LongInt f = static_cast<LongInt>(keep.fronts[si].front_size());
+    const LongInt p = static_cast<LongInt>(keep.supernodes[si].width());
+    max_front = std::max(max_front, f);
+    max_ext = std::max(max_ext, std::max<LongInt>(0, f - p));
+  }
+  const LongInt workspace_elems =
+      max_front * max_front * 2 + max_ext * max_ext;
+  const LongInt hint_elems =
+      info.predicted_factor_entries > 0 ? info.predicted_factor_entries
+                                        : LongInt{1};
   const std::size_t arena_cap =
-      static_cast<std::size_t>(std::max(static_cast<LongInt>(n) * n,
-                                        info.predicted_factor_entries > 0
-                                            ? info.predicted_factor_entries
-                                            : LongInt{1})) *
-          sizeof(double) * 2 +
-      4096u;
+      static_cast<std::size_t>(std::max(workspace_elems, hint_elems)) *
+          sizeof(double) +
+      8192u;
   AlignedArena arena(arena_cap);
 
   // Two-buffer stack for contribution (Schur complement) blocks
@@ -360,14 +320,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     // Save arena so we can recycle it after this supernode
     const AlignedArena::Marker arena_mark = arena.save();
 
-    // Build col_indices = first p entries of row_indices (pivot columns)
-    const std::vector<Int> col_indices(fi.row_indices.begin(),
-                                       fi.row_indices.begin() +
-                                           static_cast<std::ptrdiff_t>(p));
-
-    // Allocate and zero the f×p frontal matrix
-    FrontalMatrix F(f, p, fi.row_indices, col_indices, arena);
-    F.zero();
+    // Allocate and zero the f×p frontal matrix (no col_indices copy — pointer into fi.row_indices)
+    FrontalMatrix F(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
 
     // Allocate and zero the q×q A22 accumulator in the arena
     double *a22 = nullptr;
@@ -388,32 +342,16 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
 
     // --- Assemble child contributions -----------------------------------
-    // Sort children by postorder index descending to match LIFO free order
-    std::vector<Int> sorted_ch(sn.children.begin(), sn.children.end());
-    std::sort(sorted_ch.begin(), sorted_ch.end(), [&](Int a, Int b) {
-      return po_idx[static_cast<std::size_t>(a)] >
-             po_idx[static_cast<std::size_t>(b)];
-    });
-
-    for (const Int c : sorted_ch) {
+    // Children are pre-sorted descending postorder in sn.children (from analysis),
+    // matching the LIFO fstack order.  child_parent_rows[k] is pre-computed.
+    for (std::size_t k = 0; k < sn.children.size(); ++k) {
+      const Int c = sn.children[k];
       const Int q_c = contrib_q[static_cast<std::size_t>(c)];
       if (q_c <= 0)
         continue;
 
       const double *cc = contrib_ptrs[static_cast<std::size_t>(c)];
-      const FrontalInfo &fi_c = keep.fronts[static_cast<std::size_t>(c)];
-      const Int p_c = keep.supernodes[static_cast<std::size_t>(c)].width();
-
-      // Build parent_rows: child extended row i → parent front row index
-      std::vector<Int> parent_rows(static_cast<std::size_t>(q_c));
-      for (Int ii = 0; ii < q_c; ++ii) {
-        const Int ext_row =
-            fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-        const auto it = std::lower_bound(fi.row_indices.begin(),
-                                         fi.row_indices.end(), ext_row);
-        parent_rows[static_cast<std::size_t>(ii)] =
-            static_cast<Int>(it - fi.row_indices.begin());
-      }
+      const std::vector<Int>& parent_rows = fi.child_parent_rows[k];
 
       // Assemble A11/A21 parts into F
       F.assemble_contrib(cc, q_c, parent_rows);

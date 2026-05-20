@@ -3,6 +3,6 @@
 # Exclusive ops (BUILDING / TESTING / INSTALLING): only one agent may hold these at a time.
 
 # Phase 11 active. Bug fix: indefinite factorization accuracy
-[Alpha] status=DONE  mission=Perf.AssemblyTree  op=done  updated=2026-05-20T14:05:00Z
+[Alpha] status=DONE  mission=Perf.FactorHotpath  op=done  updated=2026-05-21T11:30:00Z
 [Beta]  status=DONE  mission=BenchmarkUpgrade  op=done  updated=2026-05-20T13:10:00Z
 [Gamma] status=IDLE            mission=none                 op=idle        updated=2026-05-19T15:00:00Z

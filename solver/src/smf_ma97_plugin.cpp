@@ -241,10 +241,6 @@ static void apply_ma97_control(SmfAkeep* ak, const ma97_control_d* ctrl)
     if (ctrl->nemin > 0)
         ak->ctrl.nemin = ctrl->nemin;
     
-    // Debug: always print pivot_u for diagnosis
-    fprintf(stderr, "[smf_ma97] DEBUG: matrix_type=%d ctrl->u=%.2e current_pivot_u=%.2e\n",
-            static_cast<int>(ak->ctrl.matrix_type), ctrl->u, ak->ctrl.pivot_u);
-    
     // CRITICAL: IPOPT's default ctrl->u is 1e-8 (appropriate for dense Cholesky),
     // but Bunch-Kaufman indefinite pivoting requires u >= 0.01 (ideally ~0.64).
     // Clamp to a safe minimum for indefinite matrices to avoid accepting tiny pivots

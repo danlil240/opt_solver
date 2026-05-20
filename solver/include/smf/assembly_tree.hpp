@@ -10,6 +10,13 @@ namespace smf {
 /// Per-supernode data needed for assembly and factorization.
 struct FrontalInfo {
     std::vector<Int> row_indices; ///< all row indices in the frontal matrix, sorted
+
+    /// Pre-computed parent-row scatter maps, one per child (same order as Supernode::children
+    /// after symbolic_analysis.cpp pre-sorts children by descending postorder).
+    /// child_parent_rows[k][i] = row index in *this* front for child k's i-th extended row.
+    /// Populated by symbolic_analysis after build_assembly_tree; empty until then.
+    std::vector<std::vector<Int>> child_parent_rows;
+
     Int front_size() const { return static_cast<Int>(row_indices.size()); }
 };
 

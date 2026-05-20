@@ -17,8 +17,9 @@ struct AnalysisKeep {
     std::vector<Int>         perm;              ///< perm[new] = old (fill-reducing)
     std::vector<Int>         iperm;             ///< iperm[old] = new
     EliminationTree          etree;             ///< elimination tree of the permuted matrix
-    std::vector<Supernode>   supernodes;        ///< amalgamated supernodes
-    std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info
+    std::vector<Supernode>   supernodes;        ///< amalgamated supernodes (children pre-sorted descending postorder)
+    std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info (child_parent_rows populated)
+    std::vector<Int>         postorder;         ///< supernode postorder: postorder[i] = s means supernode s is i-th in children-before-parents order
     Int                      n = 0;             ///< matrix order (= cleaned.n)
 };
 

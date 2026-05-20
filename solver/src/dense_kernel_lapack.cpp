@@ -45,6 +45,12 @@ void smf_dgemv(double *y, int m, int n, const double *A, int lda,
               1);
 }
 
+void smf_dgemv_transpose(double *y, int m, int n, const double *A, int lda,
+                         const double *x, double alpha, double beta) {
+  cblas_dgemv(CblasColMajor, CblasTrans, m, n, alpha, A, lda, x, 1, beta, y,
+              1);
+}
+
 void smf_dtrsv_lower(double *b, int n, const double *L, int lda) {
   cblas_dtrsv(CblasColMajor, CblasLower, CblasNoTrans, CblasNonUnit, n, L, lda,
               b, 1);
