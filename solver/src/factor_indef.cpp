@@ -12,6 +12,92 @@
 
 namespace smf {
 
+namespace {
+
+void build_diag_entries(const AnalysisKeep &keep, FactorKeep &fkeep) {
+  fkeep.diag_entries.clear();
+  fkeep.diag_entries.reserve(static_cast<std::size_t>(keep.n));
+
+  const int ns = static_cast<int>(keep.supernodes.size());
+  for (int s = 0; s < ns; ++s) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    if (si >= fkeep.pivot_types.size())
+      continue;
+    const auto &ptypes = fkeep.pivot_types[si];
+    if (ptypes.empty())
+      continue;
+
+    const Supernode &sn = keep.supernodes[si];
+    const FrontalInfo &fi = keep.fronts[si];
+    const int p = static_cast<int>(sn.width());
+    const int f = static_cast<int>(fi.front_size());
+    const int start = fkeep.factor_col_ptr[si];
+
+    for (int k = 0; k < p; ++k) {
+      const std::size_t ki = static_cast<std::size_t>(k);
+      if (ki >= ptypes.size())
+        break;
+      const int8_t tag = ptypes[ki];
+      if (tag == 1) {
+        DiagSolveEntry entry;
+        entry.tag = 1;
+        entry.row0 = fi.row_indices[ki];
+        entry.d00 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
+        fkeep.diag_entries.push_back(entry);
+      } else if (tag == 2) {
+        DiagSolveEntry entry;
+        entry.tag = 2;
+        entry.row0 = fi.row_indices[ki];
+        entry.row1 = fi.row_indices[ki + 1];
+        entry.d00 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
+        entry.d10 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + (k + 1))];
+        entry.d11 = fkeep.factor_values[static_cast<std::size_t>(start + (k + 1) * f + (k + 1))];
+        fkeep.diag_entries.push_back(entry);
+      }
+    }
+  }
+}
+
+void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
+  fkeep.solve_steps.clear();
+  fkeep.solve_row_indices.clear();
+  fkeep.solve_steps.reserve(keep.solve_postorder.size());
+
+  std::size_t row_count = 0;
+  int max_p = 0;
+  int max_q = 0;
+  for (Int s : keep.solve_postorder)
+  {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const int p = static_cast<int>(keep.supernodes[si].width());
+    const int f = static_cast<int>(keep.fronts[si].front_size());
+    row_count += keep.fronts[si].row_indices.size();
+    max_p = std::max(max_p, p);
+    max_q = std::max(max_q, f - p);
+  }
+  fkeep.solve_row_indices.reserve(row_count);
+
+  for (Int s : keep.solve_postorder) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const FrontalInfo &fi = keep.fronts[si];
+    const Supernode &sn = keep.supernodes[si];
+    SolveStep step;
+    step.row_offset = static_cast<Int>(fkeep.solve_row_indices.size());
+    step.factor_offset = fkeep.factor_col_ptr[si];
+    step.p = static_cast<int>(sn.width());
+    step.f = static_cast<int>(fi.front_size());
+    fkeep.solve_steps.push_back(step);
+    fkeep.solve_row_indices.insert(fkeep.solve_row_indices.end(),
+                                   fi.row_indices.begin(), fi.row_indices.end());
+  }
+
+  fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
+  fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
+  fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Permute VALUES only using pre-computed pattern (col_ptr, row_idx) from analysis.
 // This is a fast path that avoids re-allocating and re-sorting the pattern.
@@ -65,8 +151,8 @@ static std::vector<double> permute_values_only_indef(
 // Identical logic to factor_posdef.cpp — scatter_original expects column/row
 // indices in the permuted space, so we must pass A_perm, not the raw input.
 // ---------------------------------------------------------------------------
-static CscLower permute_lower_csc_indef(const CscLower &A,
-                                        const std::vector<Int> &iperm) {
+[[maybe_unused]] static CscLower
+permute_lower_csc_indef(const CscLower &A, const std::vector<Int> &iperm) {
   const Int n = A.n;
 
   std::vector<Int> count(static_cast<std::size_t>(n), 0);
@@ -461,6 +547,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
     info.num_zero = par_inertia.zero;
     info.numerical_rank =
         static_cast<int>(keep.n) - par_inertia.zero;
+      build_diag_entries(keep, fkeep);
+      build_solve_steps(keep, fkeep);
     if (par_inertia.zero > 0)
       return FactorStatus::Singular;
     return ps;
@@ -717,6 +805,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
   // DECISION LOG (M5.S2): numerical_rank = n minus zero-eigenvalue count.
   // All rejected pivots have been folded into inertia.zero above.
   info.numerical_rank = static_cast<int>(keep.n) - inertia.zero;
+  build_diag_entries(keep, fkeep);
+  build_solve_steps(keep, fkeep);
 
   // Return Singular whenever any pivot was rejected (zero) — regardless of
   // continue_on_singular.  The flag controls only whether the caller proceeds

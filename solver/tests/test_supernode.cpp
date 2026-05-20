@@ -115,6 +115,28 @@ TEST(Supernode, AmalgamationReduces) {
     EXPECT_EQ(total, n);
 }
 
+TEST(Supernode, AmalgamationKeepsParentSiblings) {
+    std::vector<Supernode> supernodes(4);
+    for (Int i = 0; i < 4; ++i) {
+        supernodes[static_cast<std::size_t>(i)].col_start = i;
+        supernodes[static_cast<std::size_t>(i)].col_end = i + 1;
+        supernodes[static_cast<std::size_t>(i)].parent = -1;
+    }
+
+    supernodes[1].parent = 2;
+    supernodes[0].parent = 2;
+    supernodes[2].children = {0, 1};
+
+    auto amalg = amalgamate_supernodes(std::move(supernodes), 2);
+
+    ASSERT_EQ(static_cast<Int>(amalg.size()), 3);
+    EXPECT_EQ(amalg[1].col_start, 1);
+    EXPECT_EQ(amalg[1].col_end, 3);
+    ASSERT_EQ(amalg[1].children.size(), 1u);
+    EXPECT_EQ(amalg[1].children[0], 0);
+    EXPECT_EQ(amalg[0].parent, 1);
+}
+
 // n=0 edge case
 TEST(Supernode, EmptyMatrix) {
     std::vector<Int> cp = {0};

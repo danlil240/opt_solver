@@ -114,6 +114,41 @@ namespace smf
         return B;
     }
 
+    static std::vector<Int> compute_supernode_postorder(const std::vector<Supernode> &supernodes)
+    {
+        const Int ns = static_cast<Int>(supernodes.size());
+        std::vector<Int> order;
+        order.reserve(static_cast<std::size_t>(ns));
+
+        std::vector<std::pair<Int, Int>> stack;
+        stack.reserve(static_cast<std::size_t>(ns));
+
+        for (Int i = 0; i < ns; ++i)
+        {
+            if (supernodes[static_cast<std::size_t>(i)].parent == -1)
+                stack.push_back({i, 0});
+        }
+
+        while (!stack.empty())
+        {
+            auto &[node, child_pos] = stack.back();
+            const auto &children = supernodes[static_cast<std::size_t>(node)].children;
+            if (child_pos < static_cast<Int>(children.size()))
+            {
+                const Int child = children[static_cast<std::size_t>(child_pos)];
+                ++child_pos;
+                stack.push_back({child, 0});
+            }
+            else
+            {
+                order.push_back(node);
+                stack.pop_back();
+            }
+        }
+
+        return order;
+    }
+
     std::unique_ptr<AnalysisKeep> Solver::analyse(const CscLower &A, const Control &control, Info &info)
     {
         const auto t0 = std::chrono::steady_clock::now();
@@ -186,6 +221,7 @@ namespace smf
         keep->etree = std::move(etree);
         keep->supernodes = std::move(snodes);
         keep->fronts = std::move(fronts);
+        keep->solve_postorder = compute_supernode_postorder(keep->supernodes);
 
         return keep;
     }

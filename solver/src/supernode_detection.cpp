@@ -105,16 +105,25 @@ namespace smf
 
                 if (supernodes[static_cast<std::size_t>(s)].width() < nemin &&
                     supernodes[static_cast<std::size_t>(p)].width() < nemin &&
-                    supernodes[static_cast<std::size_t>(p)].children.size() == 1 &&
                     supernodes[static_cast<std::size_t>(s)].col_end ==
                         supernodes[static_cast<std::size_t>(p)].col_start)
                 {
-                    // Merge s into p: p absorbs s's column range and s's children
+                    // Merge s into p: p absorbs s's column range, replaces child s
+                    // with s's children, and keeps any other existing children.
                     supernodes[static_cast<std::size_t>(p)].col_start =
                         supernodes[static_cast<std::size_t>(s)].col_start;
 
-                    supernodes[static_cast<std::size_t>(p)].children =
-                        std::move(supernodes[static_cast<std::size_t>(s)].children);
+                    std::vector<Int> merged_children;
+                    merged_children.reserve(supernodes[static_cast<std::size_t>(p)].children.size() +
+                                            supernodes[static_cast<std::size_t>(s)].children.size());
+
+                    for (Int c : supernodes[static_cast<std::size_t>(p)].children)
+                        if (c != s)
+                            merged_children.push_back(c);
+                    for (Int c : supernodes[static_cast<std::size_t>(s)].children)
+                        merged_children.push_back(c);
+
+                    supernodes[static_cast<std::size_t>(p)].children = std::move(merged_children);
 
                     for (Int c : supernodes[static_cast<std::size_t>(p)].children)
                         supernodes[static_cast<std::size_t>(c)].parent = p;

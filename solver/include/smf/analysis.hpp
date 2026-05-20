@@ -18,6 +18,7 @@ struct AnalysisKeep {
     EliminationTree          etree;             ///< elimination tree of the permuted matrix
     std::vector<Supernode>   supernodes;        ///< amalgamated supernodes
     std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info
+    std::vector<Int>         solve_postorder;   ///< supernode postorder reused by triangular solves
     Int                      n = 0;             ///< matrix order (= cleaned.n)
 };
 
