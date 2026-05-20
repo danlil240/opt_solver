@@ -14,7 +14,8 @@ struct FrontalInfo {
     /// Pre-computed parent-row scatter maps, one per child (same order as Supernode::children
     /// after symbolic_analysis.cpp pre-sorts children by descending postorder).
     /// child_parent_rows[k][i] = row index in *this* front for child k's i-th extended row.
-    /// Populated by symbolic_analysis after build_assembly_tree; empty until then.
+    /// Populated by symbolic_analysis for smaller analyses; may be empty for
+    /// large-n cases where factorization computes this map on demand.
     std::vector<std::vector<Int>> child_parent_rows;
 
     Int front_size() const { return static_cast<Int>(row_indices.size()); }

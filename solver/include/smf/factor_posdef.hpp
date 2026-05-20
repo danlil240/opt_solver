@@ -21,6 +21,10 @@ struct FactorKeep {
   //  1 = 1×1 accepted, 2 = first of 2×2, -1 = second of 2×2, 0 = delayed
   std::vector<std::vector<int8_t>> pivot_types; ///< [s][k] = pivot type per supernode column
   bool is_posdef = false;          ///< true if factorization used SPD path (D = I)
+  bool use_banded_spd = false;     ///< true when SPD factor stored in banded LAPACK form
+  int band_n = 0;                  ///< order for banded SPD factor
+  int band_kd = 0;                 ///< lower half-bandwidth for banded SPD factor
+  std::vector<double> band_factor; ///< banded Cholesky factor (ldab=band_kd+1, col-major)
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };

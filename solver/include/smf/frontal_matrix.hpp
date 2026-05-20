@@ -25,14 +25,13 @@ public:
                   const Int* row_map, const Int* col_map,
                   AlignedArena& arena);
 
-    /// Convenience constructor from vectors (delegates to pointer constructor).
-    /// The vectors must outlive this object (pointers are stored, no copy).
+    /// Convenience constructor from vectors.
+    /// This constructor takes ownership of row/col maps to guarantee lifetime
+    /// safety for callers that pass temporaries.
     FrontalMatrix(Int front_size, Int pivot_cols,
                   const std::vector<Int>& row_indices,
                   const std::vector<Int>& col_indices,
-                  AlignedArena& arena)
-        : FrontalMatrix(front_size, pivot_cols,
-                        row_indices.data(), col_indices.data(), arena) {}
+                  AlignedArena& arena);
 
     // ---- Scatter / assemble -------------------------------------------------
 
@@ -66,6 +65,8 @@ private:
     double*      data_;     ///< f*p doubles, column-major, arena-backed (NOT owned)
     const Int*   row_map_;  ///< length-f sorted original row indices (NOT owned)
     const Int*   col_map_;  ///< length-p original col indices (NOT owned)
+    std::vector<Int> owned_row_map_; ///< owned row-map storage for vector constructor
+    std::vector<Int> owned_col_map_; ///< owned col-map storage for vector constructor
 };
 
 } // namespace smf

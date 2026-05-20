@@ -23,6 +23,19 @@ FrontalMatrix::FrontalMatrix(Int front_size, Int pivot_cols,
     }
 }
 
+FrontalMatrix::FrontalMatrix(Int front_size, Int pivot_cols,
+                             const std::vector<Int>& row_indices,
+                             const std::vector<Int>& col_indices,
+                             AlignedArena& arena)
+    : FrontalMatrix(front_size, pivot_cols,
+                    row_indices.data(), col_indices.data(), arena)
+{
+    owned_row_map_ = row_indices;
+    owned_col_map_ = col_indices;
+    row_map_ = owned_row_map_.data();
+    col_map_ = owned_col_map_.data();
+}
+
 void FrontalMatrix::zero() noexcept
 {
     const std::size_t nbytes =

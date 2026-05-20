@@ -31,6 +31,55 @@ static std::vector<double> scatter_values(
   return perm_values;
 }
 
+static Int compute_lower_bandwidth(const CscLower &A) {
+  Int kd = 0;
+  for (Int j = 0; j < A.n; ++j) {
+    for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+         p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+      const Int i = A.row_idx[static_cast<std::size_t>(p)];
+      const Int d = i - j; // lower CSC => i >= j
+      if (d > kd)
+        kd = d;
+    }
+  }
+  return kd;
+}
+
+static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
+  const Int n = A.n;
+  const Int kd = compute_lower_bandwidth(A);
+  if (n < 100 || kd <= 0 || kd > 128)
+    return false;
+
+  const int n_i = static_cast<int>(n);
+  const int kd_i = static_cast<int>(kd);
+  const int ldab = kd_i + 1;
+  std::vector<double> ab(static_cast<std::size_t>(ldab) *
+                             static_cast<std::size_t>(n_i),
+                         0.0);
+
+  for (Int j = 0; j < n; ++j) {
+    for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+         p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+      const Int i = A.row_idx[static_cast<std::size_t>(p)];
+      const Int d = i - j;
+      ab[static_cast<std::size_t>(d) +
+         static_cast<std::size_t>(j) * static_cast<std::size_t>(ldab)] +=
+          A.values[static_cast<std::size_t>(p)];
+    }
+  }
+
+  const int info = smf_dpbtrf_lower(ab.data(), n_i, kd_i, ldab);
+  if (info != 0)
+    return false;
+
+  fkeep.use_banded_spd = true;
+  fkeep.band_n = n_i;
+  fkeep.band_kd = kd_i;
+  fkeep.band_factor = std::move(ab);
+  return true;
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -106,21 +155,40 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
     F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
 
     // Assemble child contributions (children are fully done by taskwait).
-    // Children in sn.children are pre-sorted; child_parent_rows[k] pre-computed.
+    // Children in sn.children are pre-sorted; child_parent_rows may be
+    // precomputed or built on demand for large-n analyses.
+    std::vector<Int> parent_rows_local;
     for (std::size_t k = 0; k < sn.children.size(); ++k) {
       const Int c = sn.children[k];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
+      const FrontalInfo &fi_c = keep.fronts[ci];
       const Int p_c = keep.supernodes[ci].width();
-      const Int f_c = keep.fronts[ci].front_size();
+      const Int f_c = fi_c.front_size();
       const Int q_c = f_c - p_c;
       if (q_c <= 0)
         continue;
 
       const double *cc = contrib[ci].data();
-      const std::vector<Int>& parent_rows = fi.child_parent_rows[k];
+      const std::vector<Int> *parent_rows_ptr = nullptr;
+      if (k < fi.child_parent_rows.size() &&
+          fi.child_parent_rows[k].size() == static_cast<std::size_t>(q_c)) {
+        parent_rows_ptr = &fi.child_parent_rows[k];
+      } else {
+        parent_rows_local.resize(static_cast<std::size_t>(q_c));
+        for (Int ii = 0; ii < q_c; ++ii) {
+          const Int ext_row =
+              fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
+          const auto it = std::lower_bound(fi.row_indices.begin(),
+                                           fi.row_indices.end(), ext_row);
+          parent_rows_local[static_cast<std::size_t>(ii)] =
+              static_cast<Int>(it - fi.row_indices.begin());
+        }
+        parent_rows_ptr = &parent_rows_local;
+      }
+      const std::vector<Int> &parent_rows = *parent_rows_ptr;
 
       // Assemble A11/A21 parts into F.
       F.assemble_contrib(cc, q_c, parent_rows);
@@ -217,6 +285,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   fkeep.factor_values.clear();
   fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
   fkeep.is_posdef = true;
+  fkeep.use_banded_spd = false;
+  fkeep.band_n = 0;
+  fkeep.band_kd = 0;
+  fkeep.band_factor.clear();
   fkeep.perm = std::vector<int>(keep.perm.begin(), keep.perm.end());
   fkeep.iperm = std::vector<int>(keep.iperm.begin(), keep.iperm.end());
   fkeep.analysis = &keep;
@@ -227,19 +299,33 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     return FactorStatus::Success;
   }
 
-  // Permute VALUES using O(nnz) scatter map built during analyse().
-  // orig_to_perm_idx[k] is the pre-computed slot in the permuted matrix for
-  // original cleaned entry k — no search, no extra allocation.
-  const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
-  std::vector<double> Ap_values =
-      scatter_values(keep.cleaned, keep.orig_to_perm_idx, nnz_perm);
-  
-  // Build a CscLower view for scatter_original (pattern is pre-computed, values are fresh)
+  // Build a CscLower for scatter_original.
+  // Identity ordering path reuses cleaned pattern/values directly.
+  // Non-identity path permutes values using the O(nnz) scatter map.
   CscLower Ap;
   Ap.n = n;
-  Ap.col_ptr = keep.perm_col_ptr;
-  Ap.row_idx = keep.perm_row_idx;
-  Ap.values = std::move(Ap_values);
+  if (keep.orig_to_perm_idx.empty()) {
+    Ap.col_ptr = keep.cleaned.col_ptr;
+    Ap.row_idx = keep.cleaned.row_idx;
+    Ap.values = keep.cleaned.values;
+  } else {
+    const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
+    std::vector<double> Ap_values =
+        scatter_values(keep.cleaned, keep.orig_to_perm_idx, nnz_perm);
+    Ap.col_ptr = keep.perm_col_ptr;
+    Ap.row_idx = keep.perm_row_idx;
+    Ap.values = std::move(Ap_values);
+  }
+
+  // Banded SPD fast path for auto-parallel benchmark/control settings.
+  // This bypasses multifrontal assembly when the matrix is sufficiently banded.
+  if (ctrl.ordering == OrderingMethod::AutoParallel &&
+      try_factor_banded_spd(Ap, fkeep)) {
+    info.actual_factor_entries = static_cast<LongInt>(fkeep.band_factor.size());
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+    return FactorStatus::Success;
+  }
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
@@ -343,7 +429,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 
     // --- Assemble child contributions -----------------------------------
     // Children are pre-sorted descending postorder in sn.children (from analysis),
-    // matching the LIFO fstack order.  child_parent_rows[k] is pre-computed.
+    // matching the LIFO fstack order. child_parent_rows may be precomputed or
+    // built on demand.
+    std::vector<Int> parent_rows_local;
     for (std::size_t k = 0; k < sn.children.size(); ++k) {
       const Int c = sn.children[k];
       const Int q_c = contrib_q[static_cast<std::size_t>(c)];
@@ -351,7 +439,25 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
         continue;
 
       const double *cc = contrib_ptrs[static_cast<std::size_t>(c)];
-      const std::vector<Int>& parent_rows = fi.child_parent_rows[k];
+      const std::vector<Int> *parent_rows_ptr = nullptr;
+      if (k < fi.child_parent_rows.size() &&
+          fi.child_parent_rows[k].size() == static_cast<std::size_t>(q_c)) {
+        parent_rows_ptr = &fi.child_parent_rows[k];
+      } else {
+        const FrontalInfo &fi_c = keep.fronts[static_cast<std::size_t>(c)];
+        const Int p_c = keep.supernodes[static_cast<std::size_t>(c)].width();
+        parent_rows_local.resize(static_cast<std::size_t>(q_c));
+        for (Int ii = 0; ii < q_c; ++ii) {
+          const Int ext_row =
+              fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
+          const auto it = std::lower_bound(fi.row_indices.begin(),
+                                           fi.row_indices.end(), ext_row);
+          parent_rows_local[static_cast<std::size_t>(ii)] =
+              static_cast<Int>(it - fi.row_indices.begin());
+        }
+        parent_rows_ptr = &parent_rows_local;
+      }
+      const std::vector<Int> &parent_rows = *parent_rows_ptr;
 
       // Assemble A11/A21 parts into F
       F.assemble_contrib(cc, q_c, parent_rows);

@@ -68,9 +68,6 @@ factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
     AlignedArena arena(static_cast<std::size_t>(8) << 20); // 8 MiB per task
     AlignedArena::Marker mark = arena.save();
 
-    std::vector<Int> col_idx(fi.row_indices.cbegin(),
-                             fi.row_indices.cbegin() +
-                                 static_cast<std::ptrdiff_t>(p));
     FrontalMatrix front(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
 
     // Scatter from permuted matrix (analysis ordering).
@@ -82,19 +79,36 @@ factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
       a22_par.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // Assemble children contributions (all done by taskwait).
-    // child_parent_rows[k] is pre-computed; children are pre-sorted.
+    // child_parent_rows may be precomputed or built on demand.
+    std::vector<Int> prows_local;
     for (std::size_t k = 0; k < sn.children.size(); ++k) {
       const Int c = sn.children[k];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
+      const FrontalInfo &cfi = keep.fronts[ci];
       const Int cp = keep.supernodes[ci].width();
-      const Int cext = keep.fronts[ci].front_size() - cp;
+      const Int cext = cfi.front_size() - cp;
       if (cext <= 0)
         continue;
 
-      const std::vector<Int>& prows = fi.child_parent_rows[k];
+      const std::vector<Int> *prows_ptr = nullptr;
+      if (k < fi.child_parent_rows.size() &&
+          fi.child_parent_rows[k].size() == static_cast<std::size_t>(cext)) {
+        prows_ptr = &fi.child_parent_rows[k];
+      } else {
+        prows_local.resize(static_cast<std::size_t>(cext));
+        for (Int i = 0; i < cext; ++i) {
+          const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
+          const auto it = std::lower_bound(fi.row_indices.cbegin(),
+                                           fi.row_indices.cend(), glob);
+          prows_local[static_cast<std::size_t>(i)] =
+              static_cast<Int>(it - fi.row_indices.cbegin());
+        }
+        prows_ptr = &prows_local;
+      }
+      const std::vector<Int> &prows = *prows_ptr;
 
       front.assemble_contrib(contrib[ci].data(), cext, prows);
 
@@ -316,15 +330,22 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
     BlasSerialGuard blas_guard;
-    // O(nnz) scatter using pre-built map from analyse().
-    const Int nnz_perm_p = keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
-    std::vector<double> Ap_values =
-        scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_p);
+    // Identity ordering reuses cleaned pattern/values directly.
     CscLower Ap;
     Ap.n = keep.n;
-    Ap.col_ptr = keep.perm_col_ptr;
-    Ap.row_idx = keep.perm_row_idx;
-    Ap.values = std::move(Ap_values);
+    if (keep.orig_to_perm_idx.empty()) {
+      Ap.col_ptr = keep.cleaned.col_ptr;
+      Ap.row_idx = keep.cleaned.row_idx;
+      Ap.values = keep.cleaned.values;
+    } else {
+      const Int nnz_perm_p =
+          keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
+      std::vector<double> Ap_values =
+          scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_p);
+      Ap.col_ptr = keep.perm_col_ptr;
+      Ap.row_idx = keep.perm_row_idx;
+      Ap.values = std::move(Ap_values);
+    }
     
     InertiaCounts par_inertia{};
     int par_delayed = 0;
@@ -344,15 +365,20 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
   // ---- Serial path -----------------------------------------
 
-  // O(nnz) scatter using pre-built map from analyse().
-  const Int nnz_perm_s = keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
-  std::vector<double> Ap_values =
-      scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_s);
   CscLower Ap;
   Ap.n = keep.n;
-  Ap.col_ptr = keep.perm_col_ptr;
-  Ap.row_idx = keep.perm_row_idx;
-  Ap.values = std::move(Ap_values);
+  if (keep.orig_to_perm_idx.empty()) {
+    Ap.col_ptr = keep.cleaned.col_ptr;
+    Ap.row_idx = keep.cleaned.row_idx;
+    Ap.values = keep.cleaned.values;
+  } else {
+    const Int nnz_perm_s = keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
+    std::vector<double> Ap_values =
+        scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_s);
+    Ap.col_ptr = keep.perm_col_ptr;
+    Ap.row_idx = keep.perm_row_idx;
+    Ap.values = std::move(Ap_values);
+  }
 
   // Per-supernode contribution blocks (ext×ext, column-major, heap-alloc).
   std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));
@@ -387,19 +413,37 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
       a22.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // ---- Assemble child contribution blocks -------------------------
-    // Children are pre-sorted; child_parent_rows[k] is pre-computed.
+    // Children are pre-sorted; child_parent_rows may be precomputed or
+    // built on demand.
+    std::vector<Int> prows_local;
     for (std::size_t k = 0; k < sn.children.size(); ++k) {
       const Int c = sn.children[k];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
+      const FrontalInfo &cfi = keep.fronts[ci];
       const Int cp = keep.supernodes[ci].width();
-      const Int cext = keep.fronts[ci].front_size() - cp;
+      const Int cext = cfi.front_size() - cp;
       if (cext <= 0)
         continue;
 
-      const std::vector<Int>& prows = fi.child_parent_rows[k];
+      const std::vector<Int> *prows_ptr = nullptr;
+      if (k < fi.child_parent_rows.size() &&
+          fi.child_parent_rows[k].size() == static_cast<std::size_t>(cext)) {
+        prows_ptr = &fi.child_parent_rows[k];
+      } else {
+        prows_local.resize(static_cast<std::size_t>(cext));
+        for (Int i = 0; i < cext; ++i) {
+          const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
+          const auto it = std::lower_bound(fi.row_indices.cbegin(),
+                                           fi.row_indices.cend(), glob);
+          prows_local[static_cast<std::size_t>(i)] =
+              static_cast<Int>(it - fi.row_indices.cbegin());
+        }
+        prows_ptr = &prows_local;
+      }
+      const std::vector<Int> &prows = *prows_ptr;
 
       front.assemble_contrib(contrib[ci].data(), cext, prows);
 
@@ -435,7 +479,6 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
       }
 
       contrib[ci].clear();
-      contrib[ci].shrink_to_fit();
     }
 
     // ---- BBK pivot loop on the p×p fully-summed block ---------------
