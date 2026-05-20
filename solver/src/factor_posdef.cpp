@@ -13,145 +13,20 @@ namespace smf {
 
 namespace {
 
-/// Permute a lower-CSC matrix: perm[new]=old, iperm[old]=new.
-/// Duplicates the logic from symbolic_analysis.cpp (which is not exported).
-[[maybe_unused]] static CscLower
-permute_lower_csc(const CscLower &A,
-                  [[maybe_unused]] const std::vector<Int> &perm,
-                  const std::vector<Int> &iperm) {
-  const Int n = A.n;
-
-  // Count entries per new column
-  std::vector<Int> count(static_cast<std::size_t>(n), 0);
-  for (Int old_j = 0; old_j < n; ++old_j) {
-    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-    for (Int k = A.col_ptr[static_cast<std::size_t>(old_j)];
-         k < A.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
-      const Int old_i = A.row_idx[static_cast<std::size_t>(k)];
-      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-      if (new_i >= new_j)
-        ++count[static_cast<std::size_t>(new_j)];
-      else
-        ++count[static_cast<std::size_t>(new_i)];
-    }
-  }
-
-  CscLower B;
-  B.n = n;
-  B.col_ptr.resize(static_cast<std::size_t>(n) + 1, 0);
-  for (Int j = 0; j < n; ++j)
-    B.col_ptr[static_cast<std::size_t>(j) + 1] =
-        B.col_ptr[static_cast<std::size_t>(j)] +
-        count[static_cast<std::size_t>(j)];
-  const Int nnz = B.col_ptr[static_cast<std::size_t>(n)];
-  B.row_idx.resize(static_cast<std::size_t>(nnz));
-  B.values.resize(static_cast<std::size_t>(nnz), 0.0);
-
-  std::vector<Int> pos(B.col_ptr.begin(),
-                       B.col_ptr.begin() + static_cast<std::ptrdiff_t>(n));
-
-  for (Int old_j = 0; old_j < n; ++old_j) {
-    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-    for (Int k = A.col_ptr[static_cast<std::size_t>(old_j)];
-         k < A.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
-      const Int old_i = A.row_idx[static_cast<std::size_t>(k)];
-      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-      Int col, row;
-      if (new_i >= new_j) {
-        col = new_j;
-        row = new_i;
-      } else {
-        col = new_i;
-        row = new_j;
-      }
-      const Int slot = pos[static_cast<std::size_t>(col)]++;
-      B.row_idx[static_cast<std::size_t>(slot)] = row;
-      B.values[static_cast<std::size_t>(slot)] =
-          A.values[static_cast<std::size_t>(k)];
-    }
-  }
-
-  // Sort each column's row indices (and corresponding values)
-  for (Int j = 0; j < n; ++j) {
-    const Int start = B.col_ptr[static_cast<std::size_t>(j)];
-    const Int end = B.col_ptr[static_cast<std::size_t>(j) + 1];
-    const Int len = end - start;
-    if (len <= 1)
-      continue;
-
-    std::vector<Int> idx(static_cast<std::size_t>(len));
-    std::iota(idx.begin(), idx.end(), Int{0});
-    std::sort(idx.begin(), idx.end(), [&](Int a, Int b) {
-      return B.row_idx[static_cast<std::size_t>(start + a)] <
-             B.row_idx[static_cast<std::size_t>(start + b)];
-    });
-
-    std::vector<Int> sr(static_cast<std::size_t>(len));
-    std::vector<double> sv(static_cast<std::size_t>(len));
-    for (Int k = 0; k < len; ++k) {
-      sr[static_cast<std::size_t>(k)] = B.row_idx[static_cast<std::size_t>(
-          start + idx[static_cast<std::size_t>(k)])];
-      sv[static_cast<std::size_t>(k)] = B.values[static_cast<std::size_t>(
-          start + idx[static_cast<std::size_t>(k)])];
-    }
-    for (Int k = 0; k < len; ++k) {
-      B.row_idx[static_cast<std::size_t>(start + k)] =
-          sr[static_cast<std::size_t>(k)];
-      B.values[static_cast<std::size_t>(start + k)] =
-          sv[static_cast<std::size_t>(k)];
-    }
-  }
-
-  return B;
-}
-
-/// Permute VALUES only using pre-computed pattern (col_ptr, row_idx) from analysis.
-/// This is a fast path that avoids re-allocating and re-sorting the pattern.
-static std::vector<double> permute_values_only(
+/// Permute VALUES into pre-computed permuted positions using the scatter map
+/// built during analyse().  O(nnz) with no search — replaces the former
+/// O(nnz * avg_col_width) linear-search in permute_values_only.
+/// Allocation: one vector of size nnz_perm (same as before), no aux arrays.
+static std::vector<double> scatter_values(
     const CscLower &A_orig,
-    const std::vector<Int> &iperm,
-    const std::vector<Int> &perm_col_ptr,
-    const std::vector<Int> &perm_row_idx) {
-  
-  const Int n = A_orig.n;
-  const Int nnz_perm = perm_col_ptr[static_cast<std::size_t>(n)];
+    const std::vector<Int> &orig_to_perm_idx,
+    Int nnz_perm) {
   std::vector<double> perm_values(static_cast<std::size_t>(nnz_perm), 0.0);
-
-  // Scatter values from A_orig into permuted locations
-  std::vector<Int> pos(perm_col_ptr.begin(),
-                       perm_col_ptr.begin() + static_cast<std::ptrdiff_t>(n));
-
-  for (Int old_j = 0; old_j < n; ++old_j) {
-    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-    for (Int k = A_orig.col_ptr[static_cast<std::size_t>(old_j)];
-         k < A_orig.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
-      const Int old_i = A_orig.row_idx[static_cast<std::size_t>(k)];
-      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-      Int col, row;
-      if (new_i >= new_j) {
-        col = new_j;
-        row = new_i;
-      } else {
-        col = new_i;
-        row = new_j;
-      }
-      const double val = A_orig.values[static_cast<std::size_t>(k)];
-      
-      // Find the slot in permuted column 'col' where row == 'row'
-      // Since perm_row_idx is sorted within each column, we can binary search
-      const Int col_start = perm_col_ptr[static_cast<std::size_t>(col)];
-      const Int col_end = perm_col_ptr[static_cast<std::size_t>(col) + 1];
-      
-      // Linear search (binary search would be faster but add complexity)
-      for (Int p = col_start; p < col_end; ++p) {
-        if (perm_row_idx[static_cast<std::size_t>(p)] == row) {
-          perm_values[static_cast<std::size_t>(p)] += val;
-          break;
-        }
-      }
-    }
-  }
-
+  const Int nnz = static_cast<Int>(A_orig.values.size());
+  for (Int k = 0; k < nnz; ++k)
+    perm_values[static_cast<std::size_t>(
+        orig_to_perm_idx[static_cast<std::size_t>(k)])] +=
+        A_orig.values[static_cast<std::size_t>(k)];
   return perm_values;
 }
 
@@ -439,10 +314,12 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     return FactorStatus::Success;
   }
 
-  // Permute VALUES only using pre-computed pattern from analysis.
-  // This avoids re-allocating and re-sorting col_ptr/row_idx on every factorization.
-  std::vector<double> Ap_values = permute_values_only(
-      keep.cleaned, keep.iperm, keep.perm_col_ptr, keep.perm_row_idx);
+  // Permute VALUES using O(nnz) scatter map built during analyse().
+  // orig_to_perm_idx[k] is the pre-computed slot in the permuted matrix for
+  // original cleaned entry k — no search, no extra allocation.
+  const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
+  std::vector<double> Ap_values =
+      scatter_values(keep.cleaned, keep.orig_to_perm_idx, nnz_perm);
   
   // Build a CscLower view for scatter_original (pattern is pre-computed, values are fresh)
   CscLower Ap;

@@ -78,6 +78,9 @@ namespace smf
         }
 
         // Sort each column's row indices (and values accordingly)
+        // Workspace allocated once outside the loop; resize() does not reallocate
+        // when shrinking, so at most O(max_col_width) allocations total.
+        std::vector<std::pair<Int, double>> ws;
         for (Int j = 0; j < n; ++j)
         {
             const Int start = B.col_ptr[static_cast<std::size_t>(j)];
@@ -86,28 +89,18 @@ namespace smf
             if (len <= 1)
                 continue;
 
-            std::vector<Int> idx(static_cast<std::size_t>(len));
-            std::iota(idx.begin(), idx.end(), 0);
-            std::sort(idx.begin(), idx.end(),
-                      [&](Int a, Int b)
-                      {
-                          return B.row_idx[static_cast<std::size_t>(start + a)] <
-                                 B.row_idx[static_cast<std::size_t>(start + b)];
+            ws.resize(static_cast<std::size_t>(len));
+            for (Int k = 0; k < len; ++k)
+                ws[static_cast<std::size_t>(k)] = {B.row_idx[static_cast<std::size_t>(start + k)],
+                                                    B.values[static_cast<std::size_t>(start + k)]};
+            std::sort(ws.begin(), ws.end(),
+                      [](const std::pair<Int, double> &a, const std::pair<Int, double> &b) {
+                          return a.first < b.first;
                       });
-
-            std::vector<Int> sorted_r(static_cast<std::size_t>(len));
-            std::vector<double> sorted_v(static_cast<std::size_t>(len));
             for (Int k = 0; k < len; ++k)
             {
-                sorted_r[static_cast<std::size_t>(k)] =
-                    B.row_idx[static_cast<std::size_t>(start + idx[static_cast<std::size_t>(k)])];
-                sorted_v[static_cast<std::size_t>(k)] =
-                    B.values[static_cast<std::size_t>(start + idx[static_cast<std::size_t>(k)])];
-            }
-            for (Int k = 0; k < len; ++k)
-            {
-                B.row_idx[static_cast<std::size_t>(start + k)] = sorted_r[static_cast<std::size_t>(k)];
-                B.values[static_cast<std::size_t>(start + k)] = sorted_v[static_cast<std::size_t>(k)];
+                B.row_idx[static_cast<std::size_t>(start + k)] = ws[static_cast<std::size_t>(k)].first;
+                B.values[static_cast<std::size_t>(start + k)] = ws[static_cast<std::size_t>(k)].second;
             }
         }
 
@@ -209,6 +202,40 @@ namespace smf
         const auto t1 = std::chrono::steady_clock::now();
         info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
 
+        // Step 9.5: build orig_to_perm_idx scatter map (before moving A_perm).
+        // For each entry k in cleaned (0-based), compute the slot in A_perm where it lands.
+        // Since A_perm.row_idx is sorted within each column (post-sort from permute_lower_csc),
+        // we use std::lower_bound: O(nnz * log(max_col_width)).
+        // This map enables O(nnz) value-only permutation on every factorization call.
+        const Int nnz_orig = static_cast<Int>(cleaned.clean.values.size());
+        std::vector<Int> otp(static_cast<std::size_t>(nnz_orig));
+        for (Int old_j = 0; old_j < n; ++old_j)
+        {
+            const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+            for (Int k = cleaned.clean.col_ptr[static_cast<std::size_t>(old_j)];
+                 k < cleaned.clean.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k)
+            {
+                const Int old_i =
+                    cleaned.clean.row_idx[static_cast<std::size_t>(k)];
+                const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+                // Determine which column this entry lands in after lower-triangle
+                // enforcement: col = min(new_i, new_j), row = max(new_i, new_j).
+                const Int perm_col = (new_i >= new_j) ? new_j : new_i;
+                const Int perm_row = (new_i >= new_j) ? new_i : new_j;
+                // Binary-search within the sorted column of A_perm.
+                const Int cs =
+                    A_perm.col_ptr[static_cast<std::size_t>(perm_col)];
+                const Int ce =
+                    A_perm.col_ptr[static_cast<std::size_t>(perm_col) + 1];
+                auto it = std::lower_bound(
+                    A_perm.row_idx.begin() + cs,
+                    A_perm.row_idx.begin() + ce,
+                    perm_row);
+                otp[static_cast<std::size_t>(k)] =
+                    static_cast<Int>(it - A_perm.row_idx.begin());
+            }
+        }
+
         // Step 10: assemble AnalysisKeep
         auto keep = std::make_unique<AnalysisKeep>();
         keep->n = n;
@@ -216,6 +243,7 @@ namespace smf
         // Store permuted pattern (col_ptr, row_idx) for fast value-only permutation in factor
         keep->perm_col_ptr = std::move(A_perm.col_ptr);
         keep->perm_row_idx = std::move(A_perm.row_idx);
+        keep->orig_to_perm_idx = std::move(otp);
         keep->perm = std::move(perm);
         keep->iperm = std::move(iperm);
         keep->etree = std::move(etree);
