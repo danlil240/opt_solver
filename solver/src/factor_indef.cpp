@@ -13,7 +13,55 @@
 namespace smf {
 
 // ---------------------------------------------------------------------------
-// Permute a lower-CSC matrix into the analysis ordering.
+// Permute VALUES only using pre-computed pattern (col_ptr, row_idx) from analysis.
+// This is a fast path that avoids re-allocating and re-sorting the pattern.
+// ---------------------------------------------------------------------------
+static std::vector<double> permute_values_only_indef(
+    const CscLower &A_orig,
+    const std::vector<Int> &iperm,
+    const std::vector<Int> &perm_col_ptr,
+    const std::vector<Int> &perm_row_idx) {
+  
+  const Int n = A_orig.n;
+  const Int nnz_perm = perm_col_ptr[static_cast<std::size_t>(n)];
+  std::vector<double> perm_values(static_cast<std::size_t>(nnz_perm), 0.0);
+
+  // Scatter values from A_orig into permuted locations
+  for (Int old_j = 0; old_j < n; ++old_j) {
+    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+    for (Int k = A_orig.col_ptr[static_cast<std::size_t>(old_j)];
+         k < A_orig.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
+      const Int old_i = A_orig.row_idx[static_cast<std::size_t>(k)];
+      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+      Int col, row;
+      if (new_i >= new_j) {
+        col = new_j;
+        row = new_i;
+      } else {
+        col = new_i;
+        row = new_j;
+      }
+      const double val = A_orig.values[static_cast<std::size_t>(k)];
+      
+      // Find the slot in permuted column 'col' where row == 'row'
+      const Int col_start = perm_col_ptr[static_cast<std::size_t>(col)];
+      const Int col_end = perm_col_ptr[static_cast<std::size_t>(col) + 1];
+      
+      // Linear search for the matching row index
+      for (Int p = col_start; p < col_end; ++p) {
+        if (perm_row_idx[static_cast<std::size_t>(p)] == row) {
+          perm_values[static_cast<std::size_t>(p)] += val;
+          break;
+        }
+      }
+    }
+  }
+
+  return perm_values;
+}
+
+// ---------------------------------------------------------------------------
+// Permute a lower-CSC matrix into the analysis ordering (LEGACY, kept for reference).
 // Identical logic to factor_posdef.cpp — scatter_original expects column/row
 // indices in the permuted space, so we must pass A_perm, not the raw input.
 // ---------------------------------------------------------------------------
@@ -394,8 +442,15 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
-    // Permute the cleaned matrix into the analysis ordering once before launching tasks.
-    const CscLower Ap = permute_lower_csc_indef(keep.cleaned, keep.iperm);
+    // Use the pre-computed permuted matrix pattern from analysis, permute values only.
+    std::vector<double> Ap_values = permute_values_only_indef(
+        keep.cleaned, keep.iperm, keep.perm_col_ptr, keep.perm_row_idx);
+    CscLower Ap;
+    Ap.n = keep.n;
+    Ap.col_ptr = keep.perm_col_ptr;
+    Ap.row_idx = keep.perm_row_idx;
+    Ap.values = std::move(Ap_values);
+    
     InertiaCounts par_inertia{};
     int par_delayed = 0;
     const FactorStatus ps =
@@ -414,9 +469,14 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
 
   // ---- Serial path -----------------------------------------
 
-  // Permute the cleaned matrix into the analysis ordering.
-  // scatter_original expects column/row indices in the permuted space.
-  const CscLower Ap = permute_lower_csc_indef(keep.cleaned, keep.iperm);
+  // Use the pre-computed permuted matrix pattern from analysis, permute values only.
+  std::vector<double> Ap_values = permute_values_only_indef(
+      keep.cleaned, keep.iperm, keep.perm_col_ptr, keep.perm_row_idx);
+  CscLower Ap;
+  Ap.n = keep.n;
+  Ap.col_ptr = keep.perm_col_ptr;
+  Ap.row_idx = keep.perm_row_idx;
+  Ap.values = std::move(Ap_values);
 
   // Per-supernode contribution blocks (ext×ext, column-major, heap-alloc).
   std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));

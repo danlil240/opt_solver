@@ -15,6 +15,7 @@
 ///     matrix, all pivots accepted, inertia = (9,0,0))
 
 #include "smf/solver.hpp"
+#include "smf/supernode.hpp"
 #include <cmath>
 #include <gtest/gtest.h>
 #include <vector>
@@ -28,8 +29,8 @@ using namespace smf;
 /// Build a lower-CSC tridiagonal matrix of order n.
 ///   diagonal[i]   = diag[i]
 ///   sub-diagonal  = offdiag (constant)
-static CscLower make_tridiag(int n, const std::vector<double> &diag,
-                              double offdiag) {
+static CscLower make_tridiag(int n, const std::vector<double> &diag, double offdiag)
+{
     CscLower A;
     A.n = n;
     A.col_ptr.reserve(static_cast<std::size_t>(n + 1));
@@ -37,14 +38,16 @@ static CscLower make_tridiag(int n, const std::vector<double> &diag,
     A.values.reserve(static_cast<std::size_t>(2 * n - 1));
 
     int nnz = 0;
-    for (int j = 0; j < n; ++j) {
+    for (int j = 0; j < n; ++j)
+    {
         A.col_ptr.push_back(nnz);
         // diagonal
         A.row_idx.push_back(j);
         A.values.push_back(diag[static_cast<std::size_t>(j)]);
         ++nnz;
         // sub-diagonal
-        if (j + 1 < n) {
+        if (j + 1 < n)
+        {
             A.row_idx.push_back(j + 1);
             A.values.push_back(offdiag);
             ++nnz;
@@ -55,7 +58,8 @@ static CscLower make_tridiag(int n, const std::vector<double> &diag,
 }
 
 /// 2D Poisson (5-point stencil) lower-CSC of order N×N.
-static CscLower make_poisson2d(int N) {
+static CscLower make_poisson2d(int N)
+{
     const int n = N * N;
     CscLower A;
     A.n = n;
@@ -63,33 +67,38 @@ static CscLower make_poisson2d(int N) {
     A.row_idx.clear();
     A.values.clear();
 
-    for (int k = 0; k < n; ++k) {
+    for (int k = 0; k < n; ++k)
+    {
         int cnt = 1;
         int row = k / N, col = k % N;
-        if (col < N - 1) ++cnt;
-        if (row < N - 1) ++cnt;
+        if (col < N - 1)
+            ++cnt;
+        if (row < N - 1)
+            ++cnt;
         A.col_ptr[static_cast<std::size_t>(k + 1)] = cnt;
     }
     for (int k = 0; k < n; ++k)
-        A.col_ptr[static_cast<std::size_t>(k + 1)] +=
-            A.col_ptr[static_cast<std::size_t>(k)];
+        A.col_ptr[static_cast<std::size_t>(k + 1)] += A.col_ptr[static_cast<std::size_t>(k)];
 
     const int nnz = A.col_ptr[static_cast<std::size_t>(n)];
     A.row_idx.resize(static_cast<std::size_t>(nnz));
     A.values.resize(static_cast<std::size_t>(nnz));
 
-    for (int k = 0; k < n; ++k) {
+    for (int k = 0; k < n; ++k)
+    {
         int row = k / N, col = k % N;
         int p = A.col_ptr[static_cast<std::size_t>(k)];
         A.row_idx[static_cast<std::size_t>(p)] = k;
         A.values[static_cast<std::size_t>(p)] = 4.0;
         ++p;
-        if (col < N - 1) {
+        if (col < N - 1)
+        {
             A.row_idx[static_cast<std::size_t>(p)] = k + 1;
             A.values[static_cast<std::size_t>(p)] = -1.0;
             ++p;
         }
-        if (row < N - 1) {
+        if (row < N - 1)
+        {
             A.row_idx[static_cast<std::size_t>(p)] = k + N;
             A.values[static_cast<std::size_t>(p)] = -1.0;
             ++p;
@@ -99,13 +108,14 @@ static CscLower make_poisson2d(int N) {
 }
 
 /// Full symmetric matvec  y = A_full * x
-static std::vector<double> sym_matvec(const CscLower &A,
-                                      const std::vector<double> &x) {
+static std::vector<double> sym_matvec(const CscLower &A, const std::vector<double> &x)
+{
     const int n = A.n;
     std::vector<double> y(static_cast<std::size_t>(n), 0.0);
-    for (int j = 0; j < n; ++j) {
-        for (int p = A.col_ptr[static_cast<std::size_t>(j)];
-             p < A.col_ptr[static_cast<std::size_t>(j + 1)]; ++p) {
+    for (int j = 0; j < n; ++j)
+    {
+        for (int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j + 1)]; ++p)
+        {
             const int i = A.row_idx[static_cast<std::size_t>(p)];
             const double v = A.values[static_cast<std::size_t>(p)];
             y[static_cast<std::size_t>(i)] += v * x[static_cast<std::size_t>(j)];
@@ -118,8 +128,8 @@ static std::vector<double> sym_matvec(const CscLower &A,
 
 /// Solve A·x = b with the indefinite factorization, return relative residual.
 /// Returns 1e30 on any failure.
-static double solve_indef(const CscLower &A, const std::vector<double> &b,
-                          smf::Info *info_out = nullptr) {
+static double solve_indef(const CscLower &A, const std::vector<double> &b, smf::Info* info_out = nullptr)
+{
     const int n = A.n;
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
@@ -127,24 +137,28 @@ static double solve_indef(const CscLower &A, const std::vector<double> &b,
 
     Solver solver;
     auto ak_ptr = solver.analyse(A, ctrl, info);
-    if (!ak_ptr) return 1e30;
+    if (!ak_ptr)
+        return 1e30;
 
     FactorKeep fk;
     const FactorStatus fs = solver.factor(*ak_ptr, ctrl, info, fk);
-    if (fs != FactorStatus::Success) return 1e30;
+    if (fs != FactorStatus::Success)
+        return 1e30;
 
     std::vector<double> x = b;
     const int rc = solver.solve(fk, ctrl, info, x.data(), n);
-    if (rc != 0) return 1e30;
+    if (rc != 0)
+        return 1e30;
 
-    if (info_out) *info_out = info;
+    if (info_out)
+        *info_out = info;
 
     // residual r = A*x - b
     const std::vector<double> Ax = sym_matvec(A, x);
     double r2 = 0.0, b2 = 0.0;
-    for (int i = 0; i < n; ++i) {
-        const double r = Ax[static_cast<std::size_t>(i)] -
-                         b[static_cast<std::size_t>(i)];
+    for (int i = 0; i < n; ++i)
+    {
+        const double r = Ax[static_cast<std::size_t>(i)] - b[static_cast<std::size_t>(i)];
         r2 += r * r;
         b2 += b[static_cast<std::size_t>(i)] * b[static_cast<std::size_t>(i)];
     }
@@ -155,6 +169,35 @@ static double solve_indef(const CscLower &A, const std::vector<double> &b,
 // Tests
 // ---------------------------------------------------------------------------
 
+TEST(IndefLarger, NonAdjacentSupernodesAreNotAmalgamated)
+{
+    std::vector<Supernode> supernodes(4);
+    for (int i = 0; i < 4; ++i)
+    {
+        supernodes[static_cast<std::size_t>(i)].col_start = i;
+        supernodes[static_cast<std::size_t>(i)].col_end = i + 1;
+        supernodes[static_cast<std::size_t>(i)].parent = -1;
+    }
+
+    supernodes[0].parent = 3;
+    supernodes[3].children.push_back(0);
+
+    const std::vector<Supernode> merged = amalgamate_supernodes(supernodes, 8);
+
+    std::vector<int> covered(4, 0);
+    int width_sum = 0;
+    for (const Supernode &sn : merged)
+    {
+        width_sum += sn.width();
+        for (Int col = sn.col_start; col < sn.col_end; ++col)
+            ++covered[static_cast<std::size_t>(col)];
+    }
+
+    EXPECT_EQ(width_sum, 4);
+    for (int count : covered)
+        EXPECT_EQ(count, 1);
+}
+
 /// 4×4 indefinite tridiagonal: diag = [2,2,2,-2], sub-diag = -1.
 ///
 ///   A = [[ 2,-1, 0, 0],
@@ -163,7 +206,8 @@ static double solve_indef(const CscLower &A, const std::vector<double> &b,
 ///        [ 0, 0,-1,-2]]
 ///
 /// x_true = [1,1,1,1] → b = A*x_true = [1, 0, 0, -3].
-TEST(IndefLarger, Tridiag_4x4) {
+TEST(IndefLarger, Tridiag_4x4)
+{
     const std::vector<double> diag = {2.0, 2.0, 2.0, -2.0};
     CscLower A = make_tridiag(4, diag, -1.0);
 
@@ -182,7 +226,8 @@ TEST(IndefLarger, Tridiag_4x4) {
 }
 
 /// 8×8 indefinite tridiagonal: diag = [2,2,2,2,2,2,2,-2], sub-diag = -1.
-TEST(IndefLarger, Tridiag_8x8) {
+TEST(IndefLarger, Tridiag_8x8)
+{
     std::vector<double> diag(8, 2.0);
     diag[7] = -2.0;
     CscLower A = make_tridiag(8, diag, -1.0);
@@ -204,7 +249,8 @@ TEST(IndefLarger, Tridiag_8x8) {
 /// The matrix IS SPD, so the indefinite factorization should accept all pivots
 /// and return inertia = (9, 0, 0).  This directly tests the bug case mentioned
 /// in the mission (large residuals for 3×3 grids under RealSymmetricIndefinite).
-TEST(IndefLarger, Poisson2D_3x3_Indef) {
+TEST(IndefLarger, Poisson2D_3x3_Indef)
+{
     const int N = 3;
     CscLower A = make_poisson2d(N);
 
@@ -223,7 +269,8 @@ TEST(IndefLarger, Poisson2D_3x3_Indef) {
 
 /// 16×16 2D Poisson (4×4 grid) solved via the indefinite code path.
 /// Further exercises multi-level supernodal contribution blocks.
-TEST(IndefLarger, Poisson2D_4x4_Indef) {
+TEST(IndefLarger, Poisson2D_4x4_Indef)
+{
     const int N = 4;
     CscLower A = make_poisson2d(N);
     const int n = N * N;

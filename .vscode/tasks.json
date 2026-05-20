@@ -1,0 +1,29 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "trajectory ma97 retest summary",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd /home/daniel/spb_ws && ./build/interception_mngr/trajectory_optimizer_single_run_test > /tmp/traj_ma97_task.log 2>&1; rc=$?; echo EXIT_CODE=$rc; ls -lh /tmp/traj_ma97_task.log; grep -E 'This is Ipopt|Number of Iterations|Total seconds in IPOPT|EXIT:|Optimization completed|Physics Consistency|Max position error|Max velocity error|All errors|Restoration|Cannot call|Problem in step computation|smf_ma97' /tmp/traj_ma97_task.log | tail -n 160"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		},
+		{
+			"label": "trajectory ma97 retest summary 2",
+			"type": "shell",
+			"command": "zsh",
+			"args": [
+				"-lc",
+				"cd /home/daniel/spb_ws && ./build/interception_mngr/trajectory_optimizer_single_run_test > /tmp/traj_ma97_task.log 2>&1; rc=$?; echo EXIT_CODE=$rc; ls -lh /tmp/traj_ma97_task.log; grep -E \"This is Ipopt|Number of Iterations|Total seconds in IPOPT|EXIT:|Optimization completed|Physics Consistency|Max position error|Max velocity error|All errors|Restoration|Cannot call|Problem in step computation|smf_ma97\" /tmp/traj_ma97_task.log | tail -n 160"
+			],
+			"isBackground": false,
+			"problemMatcher": [],
+			"group": "test"
+		}
+	]
+}

@@ -3,6 +3,10 @@ solver/build/
 build/
 cmake-build-*/
 
+# Installation directories
+install/
+solver/install/
+
 # Clangd / LSP cache
 .cache/
 

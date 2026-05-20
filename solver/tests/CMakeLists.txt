@@ -98,6 +98,10 @@ add_executable(test_diagnostics test_diagnostics.cpp)
 target_link_libraries(test_diagnostics PRIVATE smf GTest::gtest_main)
 add_test(NAME Diagnostics COMMAND test_diagnostics)
 
+add_executable(test_solve_residual test_solve_residual.cpp)
+target_link_libraries(test_solve_residual PRIVATE smf GTest::gtest_main)
+add_test(NAME SolveResidual COMMAND test_solve_residual)
+
 add_executable(test_solve_forward test_solve_forward.cpp)
 target_link_libraries(test_solve_forward PRIVATE smf GTest::gtest_main)
 add_test(NAME SolveForward COMMAND test_solve_forward)

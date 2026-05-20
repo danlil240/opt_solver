@@ -21,6 +21,7 @@ option(SMF_SANITIZE            "Enable -fsanitize=address,undefined"    OFF)
 option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
 option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
 option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD found)" OFF)
+option(SMF_BUILD_MA97_PLUGIN   "Build libsmf_ma97.so HSL MA97 plugin (IPOPT dynamic loader)" ON)
 
 # ---- Compiler flags -----------------------------------------------------
 add_compile_options(-Wall -Wextra -Wpedantic -O2 -g)
@@ -92,6 +93,40 @@ else()
     endif()
 endif()
 
+# ---- Optional: MA27 via CoinHSL (for comparison benchmarks) ----------------
+set(SMF_HAS_MA27 OFF)
+find_library(COINHSL_LIBRARY coinhsl
+    HINTS /usr/local/lib
+    DOC "CoinHSL library containing MA27")
+find_path(COINHSL_INCLUDE_DIR CoinHslConfig.h
+    HINTS /usr/local/include/coin-or/hsl
+    DOC "CoinHSL include directory")
+if(COINHSL_LIBRARY)
+    set(SMF_HAS_MA27 ON)
+    message(STATUS "smf: CoinHSL/MA27 found at ${COINHSL_LIBRARY} -- SMF_HAS_MA27=ON")
+else()
+    message(STATUS "smf: CoinHSL not found -- MA27 benchmark disabled")
+endif()
+
+# ---- Optional: MUMPS (for comparison benchmarks) -------------------------
+set(SMF_HAS_MUMPS OFF)
+find_library(DMUMPS_LIBRARY NAMES dmumps_seq dmumps
+    HINTS /usr/lib /usr/lib/x86_64-linux-gnu
+    DOC "MUMPS double-precision library")
+find_path(MUMPS_INCLUDE_DIR dmumps_c.h
+    HINTS /usr/include
+    DOC "MUMPS include directory")
+if(DMUMPS_LIBRARY AND MUMPS_INCLUDE_DIR)
+    find_library(MUMPS_COMMON_LIBRARY NAMES mumps_common_seq mumps_common
+        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+    find_library(MPISEQ_LIBRARY NAMES mpiseq_seq mpiseq
+        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+    set(SMF_HAS_MUMPS ON)
+    message(STATUS "smf: MUMPS found at ${DMUMPS_LIBRARY} -- SMF_HAS_MUMPS=ON")
+else()
+    message(STATUS "smf: MUMPS not found -- MUMPS benchmark disabled")
+endif()
+
 # ---- Optional: Eigen3 (test-only reference oracle) ----
 if(SMF_BUILD_TESTS)
     find_package(Eigen3 QUIET CONFIG)
@@ -147,6 +182,9 @@ target_include_directories(smf PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
+
+# Required for linking smf into shared libraries (e.g. libsmf_ma97.so)
+set_property(TARGET smf PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 target_link_libraries(smf PUBLIC
     ${BLAS_LIBRARIES}
@@ -254,7 +292,26 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/smfConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
 
-# ---- Summary ------------------------------------------------------------
+# ---- HSL MA97 plugin (optional) -----------------------------------------
+# Builds libsmf_ma97.so: an IPOPT-loadable shared library that implements
+# the 7 HSL MA97 C interface functions backed by smf.  After install, use:
+#   s_opts["linear_solver"] = "ma97";
+#   s_opts["hsllib"]        = "/usr/local/lib/libsmf_ma97.so";
+if(SMF_BUILD_MA97_PLUGIN)
+    add_library(smf_ma97 SHARED src/smf_ma97_plugin.cpp)
+    target_link_libraries(smf_ma97 PRIVATE smf)
+    target_include_directories(smf_ma97 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    set_target_properties(smf_ma97 PROPERTIES
+        SOVERSION 1
+        VERSION   1.0.0)
+    install(TARGETS smf_ma97
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    message(STATUS "smf: MA97 plugin enabled -- will build libsmf_ma97.so")
+endif()
+
+
 message(STATUS "")
 message(STATUS "smf ${PROJECT_VERSION} configuration summary")
 message(STATUS "  C++ standard  : ${CMAKE_CXX_STANDARD}")
@@ -263,10 +320,13 @@ message(STATUS "  MKL           : ${SMF_USE_MKL}")
 message(STATUS "  AMD found     : ${SMF_HAS_AMD}")
 message(STATUS "  METIS found   : ${SMF_HAS_METIS}")
 message(STATUS "  CHOLMOD found : ${SMF_HAS_CHOLMOD}")
+message(STATUS "  MA27 (CoinHSL): ${SMF_HAS_MA27}")
+message(STATUS "  MUMPS         : ${SMF_HAS_MUMPS}")
 message(STATUS "  Deterministic : ${SMF_DETERMINISTIC}")
 message(STATUS "  Build tests   : ${SMF_BUILD_TESTS}")
 message(STATUS "  Build benchmarks: ${SMF_BUILD_BENCHMARKS}")
 message(STATUS "  C API wrapper : ${SMF_BUILD_C_API}")
+message(STATUS "  MA97 plugin   : ${SMF_BUILD_MA97_PLUGIN}")
 message(STATUS "  CHOLMOD tests : ${SMF_BUILD_CHOLMOD_COMPARE}")
 message(STATUS "  Sanitizers    : ${SMF_SANITIZE}")
 message(STATUS "")

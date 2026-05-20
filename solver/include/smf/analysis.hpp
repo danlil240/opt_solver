@@ -10,13 +10,15 @@ namespace smf {
 
 /// All symbolic analysis outputs needed by the factorization phase.
 struct AnalysisKeep {
-    CscLower                 cleaned;     ///< cleaned input (from check_matrix)
-    std::vector<Int>         perm;        ///< perm[new] = old (fill-reducing)
-    std::vector<Int>         iperm;       ///< iperm[old] = new
-    EliminationTree          etree;       ///< elimination tree of the permuted matrix
-    std::vector<Supernode>   supernodes;  ///< amalgamated supernodes
-    std::vector<FrontalInfo> fronts;      ///< per-supernode frontal info
-    Int                      n = 0;       ///< matrix order (= cleaned.n)
+    CscLower                 cleaned;           ///< cleaned input (from check_matrix)
+    std::vector<Int>         perm_col_ptr;      ///< col_ptr of permuted matrix (pattern only, for fast value permutation)
+    std::vector<Int>         perm_row_idx;      ///< row_idx of permuted matrix (pattern only, for fast value permutation)
+    std::vector<Int>         perm;              ///< perm[new] = old (fill-reducing)
+    std::vector<Int>         iperm;             ///< iperm[old] = new
+    EliminationTree          etree;             ///< elimination tree of the permuted matrix
+    std::vector<Supernode>   supernodes;        ///< amalgamated supernodes
+    std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info
+    Int                      n = 0;             ///< matrix order (= cleaned.n)
 };
 
 } // namespace smf

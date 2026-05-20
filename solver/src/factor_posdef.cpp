@@ -104,6 +104,56 @@ static CscLower permute_lower_csc(const CscLower &A,
   return B;
 }
 
+/// Permute VALUES only using pre-computed pattern (col_ptr, row_idx) from analysis.
+/// This is a fast path that avoids re-allocating and re-sorting the pattern.
+static std::vector<double> permute_values_only(
+    const CscLower &A_orig,
+    const std::vector<Int> &iperm,
+    const std::vector<Int> &perm_col_ptr,
+    const std::vector<Int> &perm_row_idx) {
+  
+  const Int n = A_orig.n;
+  const Int nnz_perm = perm_col_ptr[static_cast<std::size_t>(n)];
+  std::vector<double> perm_values(static_cast<std::size_t>(nnz_perm), 0.0);
+
+  // Scatter values from A_orig into permuted locations
+  std::vector<Int> pos(perm_col_ptr.begin(),
+                       perm_col_ptr.begin() + static_cast<std::ptrdiff_t>(n));
+
+  for (Int old_j = 0; old_j < n; ++old_j) {
+    const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+    for (Int k = A_orig.col_ptr[static_cast<std::size_t>(old_j)];
+         k < A_orig.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k) {
+      const Int old_i = A_orig.row_idx[static_cast<std::size_t>(k)];
+      const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+      Int col, row;
+      if (new_i >= new_j) {
+        col = new_j;
+        row = new_i;
+      } else {
+        col = new_i;
+        row = new_j;
+      }
+      const double val = A_orig.values[static_cast<std::size_t>(k)];
+      
+      // Find the slot in permuted column 'col' where row == 'row'
+      // Since perm_row_idx is sorted within each column, we can binary search
+      const Int col_start = perm_col_ptr[static_cast<std::size_t>(col)];
+      const Int col_end = perm_col_ptr[static_cast<std::size_t>(col) + 1];
+      
+      // Linear search (binary search would be faster but add complexity)
+      for (Int p = col_start; p < col_end; ++p) {
+        if (perm_row_idx[static_cast<std::size_t>(p)] == row) {
+          perm_values[static_cast<std::size_t>(p)] += val;
+          break;
+        }
+      }
+    }
+  }
+
+  return perm_values;
+}
+
 /// Compute a postorder traversal of the supernode tree (children before
 /// parents).
 static std::vector<Int>
@@ -350,9 +400,17 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     return FactorStatus::Success;
   }
 
-  // Permute the cleaned matrix into the analysis ordering.
-  // scatter_original expects column/row indices in the permuted space.
-  const CscLower Ap = permute_lower_csc(keep.cleaned, keep.perm, keep.iperm);
+  // Permute VALUES only using pre-computed pattern from analysis.
+  // This avoids re-allocating and re-sorting col_ptr/row_idx on every factorization.
+  std::vector<double> Ap_values = permute_values_only(
+      keep.cleaned, keep.iperm, keep.perm_col_ptr, keep.perm_row_idx);
+  
+  // Build a CscLower view for scatter_original (pattern is pre-computed, values are fresh)
+  CscLower Ap;
+  Ap.n = n;
+  Ap.col_ptr = keep.perm_col_ptr;
+  Ap.row_idx = keep.perm_row_idx;
+  Ap.values = std::move(Ap_values);
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
