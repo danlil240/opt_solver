@@ -22,6 +22,8 @@ option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
 option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
 option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD found)" OFF)
 option(SMF_BUILD_MA97_PLUGIN   "Build libsmf_ma97.so HSL MA97 plugin (IPOPT dynamic loader)" ON)
+option(SMF_REQUIRE_MA27
+    "Require CoinHSL/MA27 — configure fails with install hint when absent" OFF)
 
 # ---- Compiler flags -----------------------------------------------------
 add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native -g)
@@ -94,18 +96,58 @@ else()
 endif()
 
 # ---- Optional: MA27 via CoinHSL (for comparison benchmarks) ----------------
+# Searches for CoinHSL under the most common names and install prefixes.
+# Set COINHSL_ROOT or COINHSL_LIBRARY on the cmake command line to override.
+# Enable SMF_REQUIRE_MA27=ON to make a missing library a hard configure error.
 set(SMF_HAS_MA27 OFF)
-find_library(COINHSL_LIBRARY coinhsl
-    HINTS /usr/local/lib
-    DOC "CoinHSL library containing MA27")
-find_path(COINHSL_INCLUDE_DIR CoinHslConfig.h
-    HINTS /usr/local/include/coin-or/hsl
-    DOC "CoinHSL include directory")
+find_library(COINHSL_LIBRARY
+    NAMES coinhsl coinHSL CoinHSL hsl ma27 hsl_ma27
+    HINTS
+        "${COINHSL_ROOT}/lib"
+        "${COINHSL_ROOT}"
+        /usr/local/lib
+        /usr/local/lib/x86_64-linux-gnu
+        /usr/lib
+        /usr/lib/x86_64-linux-gnu
+        /opt/coinhsl/lib
+        /opt/local/lib
+    DOC "CoinHSL library containing MA27 (set COINHSL_LIBRARY to override)")
+find_path(COINHSL_INCLUDE_DIR
+    NAMES CoinHslConfig.h coin/CoinHslConfig.h hsl_ma27.h
+    HINTS
+        "${COINHSL_ROOT}/include"
+        "${COINHSL_ROOT}/include/coin-or/hsl"
+        "${COINHSL_ROOT}/include/coin-or"
+        /usr/local/include/coin-or/hsl
+        /usr/local/include/coin-or
+        /usr/local/include
+        /usr/include/coin-or/hsl
+        /usr/include/coin-or
+        /opt/coinhsl/include
+    DOC "CoinHSL include directory (may be empty; MA27 has no required public header)")
 if(COINHSL_LIBRARY)
     set(SMF_HAS_MA27 ON)
     message(STATUS "smf: CoinHSL/MA27 found at ${COINHSL_LIBRARY} -- SMF_HAS_MA27=ON")
+    if(COINHSL_INCLUDE_DIR)
+        message(STATUS "smf: CoinHSL include dir: ${COINHSL_INCLUDE_DIR}")
+    endif()
 else()
-    message(STATUS "smf: CoinHSL not found -- MA27 benchmark disabled")
+    if(SMF_REQUIRE_MA27)
+        message(FATAL_ERROR
+            "smf: SMF_REQUIRE_MA27=ON but CoinHSL library not found.\n"
+            "Install CoinHSL (libcoinhsl) and re-run cmake, or pass:\n"
+            "  -DCOINHSL_LIBRARY=/path/to/libcoinhsl.so\n"
+            "To obtain CoinHSL:\n"
+            "  wget https://www.hsl.rl.ac.uk/download/coinhsl/  (academic registration)\n"
+            "  ./configure --prefix=/usr/local && make install\n"
+            "or use the ThirdParty-HSL helper:\n"
+            "  git clone https://github.com/coin-or-tools/ThirdParty-HSL\n"
+            "  cd ThirdParty-HSL && ./get.HSL && ./configure && make install")
+    else()
+        message(STATUS "smf: CoinHSL not found -- MA27 benchmark disabled "
+                       "(set -DCOINHSL_LIBRARY=/path/to/libcoinhsl.so or "
+                       "-DSMF_REQUIRE_MA27=ON for a hard error with install hints)")
+    endif()
 endif()
 
 # ---- Optional: MUMPS (for comparison benchmarks) -------------------------
@@ -279,6 +321,15 @@ install(EXPORT smfTargets
     NAMESPACE smf::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
 
+# Install custom Find modules alongside smfConfig.cmake so the installed
+# config file can resolve SuiteSparseAMD::amd and METIS::metis in downstream
+# projects that lack these modules in their own module path.
+install(FILES
+    cmake/FindCHOLMOD.cmake
+    cmake/FindMETIS.cmake
+    cmake/FindSuiteSparseAMD.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+
 configure_package_config_file(
     cmake/smfConfig.cmake.in
     ${CMAKE_CURRENT_BINARY_DIR}/smfConfig.cmake
@@ -321,6 +372,7 @@ message(STATUS "  AMD found     : ${SMF_HAS_AMD}")
 message(STATUS "  METIS found   : ${SMF_HAS_METIS}")
 message(STATUS "  CHOLMOD found : ${SMF_HAS_CHOLMOD}")
 message(STATUS "  MA27 (CoinHSL): ${SMF_HAS_MA27}")
+message(STATUS "  Require MA27  : ${SMF_REQUIRE_MA27}")
 message(STATUS "  MUMPS         : ${SMF_HAS_MUMPS}")
 message(STATUS "  Deterministic : ${SMF_DETERMINISTIC}")
 message(STATUS "  Build tests   : ${SMF_BUILD_TESTS}")

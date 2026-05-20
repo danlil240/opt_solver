@@ -1,3 +1,35 @@
 @PACKAGE_INIT@
+
+# ---- Module path: find custom Find*.cmake modules installed next to this file ----
+# This allows find_package(SuiteSparseAMD), find_package(METIS), etc. to work
+# even in downstream projects that don't have these modules in their own path.
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+# ---- Transitive dependencies required by smf::smf --------------------------------
+# BLAS and LAPACK: smf links their libraries directly (resolved at build time),
+# but CMake may need them for target validation on some platforms.
+find_package(BLAS QUIET)
+find_package(LAPACK QUIET)
+
+# OpenMP: smf links PUBLIC OpenMP::OpenMP_CXX; downstream must see this target.
+find_package(OpenMP QUIET COMPONENTS CXX)
+if(NOT OpenMP_FOUND)
+    message(WARNING "smf: OpenMP not found in downstream project — "
+                    "smf::smf may fail to link. "
+                    "Install libomp-dev (apt) or equivalent.")
+endif()
+
+# SuiteSparse AMD: optional — only link-required when smf was built with AMD.
+if(NOT TARGET SuiteSparseAMD::amd)
+    find_package(SuiteSparseAMD QUIET)
+endif()
+
+# METIS: optional — only link-required when smf was built with METIS.
+if(NOT TARGET METIS::metis)
+    find_package(METIS QUIET)
+endif()
+
+# ---- Import the exported smf targets -----------------------------------------
 include("${CMAKE_CURRENT_LIST_DIR}/smfTargets.cmake")
+
 check_required_components(smf)
