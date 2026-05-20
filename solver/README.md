@@ -51,6 +51,7 @@ Available CMake options (all `ON` unless noted):
 | `SMF_BUILD_BENCHMARKS`    | ON      | Build benchmarks                                    |
 | `SMF_SANITIZE`            | OFF     | Enable `-fsanitize=address,undefined`               |
 | `SMF_REQUIRE_MA27`        | OFF     | Fail configure with install hint if CoinHSL absent  |
+| `SMF_BUILD_IPOPT_BENCHMARK` | OFF   | Build `bench_ipopt_compare` (requires IPOPT installed) |
 
 ## How to run tests
 
@@ -72,7 +73,7 @@ This installs:
 - `lib/libsmf.a` and (if enabled) `lib/libsmf_ma97.so`
 - `include/smf/` headers
 - `lib/cmake/smf/smfConfig.cmake`, `smfConfigVersion.cmake`, `smfTargets.cmake`
-- `lib/cmake/smf/Find{METIS,CHOLMOD,SuiteSparseAMD}.cmake` (for transitive deps)
+- `lib/cmake/smf/Find{METIS,CHOLMOD,SuiteSparseAMD,CoinHSL}.cmake` (for transitive deps)
 
 ### Using smf in a downstream CMake project
 
@@ -130,13 +131,22 @@ cmake --build build
 `bench_compare` times smf against CHOLMOD and, optionally, HSL MA27 (via CoinHSL).
 MA27 is a reference-quality indefinite sparse direct solver from the Harwell Subroutine Library.
 
-### Getting CoinHSL (libcoinhsl)
+### Why CoinHSL cannot be installed with apt-get
 
-CoinHSL requires a free academic/commercial licence from https://www.hsl.rl.ac.uk/.
-Once you have the source:
+CoinHSL (which packages MA27, MA57, MA97 and other HSL routines) is licensed by
+STFC Rutherford Appleton Laboratory.  It is **not freely redistributable** and therefore
+does not appear in standard Debian/Ubuntu package repositories.  Running
+`apt-get install coinor-libhsl-dev` or similar will fail — no such package exists on
+stock runners or workstations.
+
+### Getting CoinHSL (libcoinhsl) — fastest supported path
+
+1. **Register and download** the CoinHSL source (free academic or commercial licence):
+   <https://www.hsl.rl.ac.uk/>
+
+2. **Build and install** via ThirdParty-HSL (recommended for IPOPT users):
 
 ```bash
-# Option A — ThirdParty-HSL (easiest, recommended for IPOPT users)
 git clone https://github.com/coin-or-tools/ThirdParty-HSL
 cd ThirdParty-HSL
 # copy or symlink your coinhsl/ source directory here, then:
@@ -144,28 +154,35 @@ cd ThirdParty-HSL
 make -j$(nproc)
 sudo make install
 # installs /usr/local/lib/libcoinhsl.so and headers
-
-# Option B — standalone build from hsl_ma27 source
-./configure --prefix=/usr/local
-make -j$(nproc) && sudo make install
 ```
+
+3. **Configure smf** using one of:
+
+```bash
+# Auto-discover via prefix:
+cmake -S solver -B solver/build -DCOINHSL_ROOT=/usr/local
+
+# Point directly at the library:
+cmake -S solver -B solver/build \
+    -DCOINHSL_LIBRARY=/usr/local/lib/libcoinhsl.so
+
+# Require it (configure fails with detailed install instructions when absent):
+cmake -S solver -B solver/build -DSMF_REQUIRE_MA27=ON
+
+# Combine with root override:
+cmake -S solver -B solver/build \
+    -DSMF_REQUIRE_MA27=ON -DCOINHSL_ROOT=/usr/local
+```
+
+`FindCoinHSL.cmake` also honours the `COINHSL_ROOT` environment variable and probes
+`pkg-config` (ThirdParty-HSL installs `coinhsl.pc`), so the library is found
+automatically once it is in any standard prefix.
 
 ### Building bench_compare with MA27 enabled
 
-Pass `COINHSL_LIBRARY` directly, or let CMake search standard paths:
-
 ```bash
-# Auto-discover (searches /usr/local/lib, /usr/lib, and common prefixes):
-cmake -S solver -B solver/build
+cmake -S solver -B solver/build -DCOINHSL_ROOT=/usr/local
 cmake --build solver/build --target bench_compare -- -j$(nproc)
-
-# Override path explicitly:
-cmake -S solver -B solver/build \
-    -DCOINHSL_LIBRARY=/usr/local/lib/libcoinhsl.so
-cmake --build solver/build --target bench_compare -- -j$(nproc)
-
-# Require MA27 — configure fails with install hint if absent:
-cmake -S solver -B solver/build -DSMF_REQUIRE_MA27=ON
 ```
 
 ### Running the benchmark
