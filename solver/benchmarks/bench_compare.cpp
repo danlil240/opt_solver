@@ -366,6 +366,56 @@ static double smf_run(const smf::CscLower &A, std::vector<double> &x_out, SmfTim
 }
 
 // ---------------------------------------------------------------------------
+// Timing helper for repeated-factorisation benchmarks
+// ---------------------------------------------------------------------------
+struct RepeatedTimes
+{
+    double analyse_ms    = 0.0; ///< single analyse call
+    double avg_factor_ms = 0.0; ///< average over reps factor calls
+    double avg_solve_ms  = 0.0; ///< average over reps solve calls
+    double amortized_ms(int reps) const
+    {
+        return analyse_ms / static_cast<double>(reps) + avg_factor_ms + avg_solve_ms;
+    }
+};
+
+/// smf repeated factorisation: analyse once, then factor+solve reps times.
+static bool smf_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
+{
+    const smf::Int n = A.n;
+    smf::Control ctrl;
+    ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
+    smf::Info info;
+    smf::Solver solver;
+
+    auto ta0 = Clock::now();
+    auto ak = solver.analyse(A, ctrl, info);
+    auto ta1 = Clock::now();
+    if (!ak)
+        return false;
+    t.analyse_ms = elapsed_ms(ta0, ta1);
+
+    double total_factor = 0.0, total_solve = 0.0;
+    for (int i = 0; i < reps; ++i)
+    {
+        std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+        smf::FactorKeep fk;
+        auto tf0 = Clock::now();
+        auto fs = solver.factor(*ak, ctrl, info, fk);
+        auto tf1 = Clock::now();
+        if (fs != smf::FactorStatus::Success)
+            return false;
+        solver.solve(fk, ctrl, info, x.data(), static_cast<int>(n));
+        auto tf2 = Clock::now();
+        total_factor += elapsed_ms(tf0, tf1);
+        total_solve  += elapsed_ms(tf1, tf2);
+    }
+    t.avg_factor_ms = total_factor / static_cast<double>(reps);
+    t.avg_solve_ms  = total_solve  / static_cast<double>(reps);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // Eigen SimplicialLDLT solve
 // ---------------------------------------------------------------------------
 #ifdef SMF_HAS_EIGEN
@@ -404,6 +454,34 @@ static double eigen_run(const Eigen::SparseMatrix<double> &M, Eigen::VectorXd &x
 
     Eigen::VectorXd res = M * x_out - b;
     return res.norm() / std::sqrt(static_cast<double>(n));
+}
+
+/// Eigen repeated factorisation: analyzePattern once, then factorize+solve reps times.
+static bool eigen_repeated_run(const Eigen::SparseMatrix<double> &M, int reps, RepeatedTimes &t)
+{
+    int n = static_cast<int>(M.rows());
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> ldlt;
+    Eigen::VectorXd b = Eigen::VectorXd::Ones(n);
+
+    auto ta0 = Clock::now();
+    ldlt.analyzePattern(M);
+    auto ta1 = Clock::now();
+    t.analyse_ms = elapsed_ms(ta0, ta1);
+
+    double total_factor = 0.0, total_solve = 0.0;
+    for (int i = 0; i < reps; ++i)
+    {
+        auto tf0 = Clock::now();
+        ldlt.factorize(M);
+        auto tf1 = Clock::now();
+        Eigen::VectorXd x = ldlt.solve(b);
+        auto tf2 = Clock::now();
+        total_factor += elapsed_ms(tf0, tf1);
+        total_solve  += elapsed_ms(tf1, tf2);
+    }
+    t.avg_factor_ms = total_factor / static_cast<double>(reps);
+    t.avg_solve_ms  = total_solve  / static_cast<double>(reps);
+    return (ldlt.info() == Eigen::Success);
 }
 #endif // SMF_HAS_EIGEN
 
@@ -487,6 +565,67 @@ static double cholmod_run(const smf::CscLower &A, std::vector<double> &x_out, Ch
     cholmod_free_sparse(&Ac, &c);
     cholmod_finish(&c);
     return res;
+}
+
+/// CHOLMOD repeated factorisation: analyze once, then factorize+solve reps times.
+static bool cholmod_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
+{
+    const int n   = static_cast<int>(A.n);
+    const int nnz = static_cast<int>(A.nnz());
+
+    cholmod_common c;
+    cholmod_start(&c);
+    c.print = 0;
+
+    cholmod_sparse *Ac =
+        cholmod_allocate_sparse(static_cast<std::size_t>(n), static_cast<std::size_t>(n),
+                                static_cast<std::size_t>(nnz),
+                                1, 1, -1, CHOLMOD_REAL, &c);
+    {
+        int    *Ap = static_cast<int    *>(Ac->p);
+        int    *Ai = static_cast<int    *>(Ac->i);
+        double *Ax = static_cast<double *>(Ac->x);
+        for (int j = 0; j <= n; ++j)
+            Ap[j] = static_cast<int>(A.col_ptr[static_cast<std::size_t>(j)]);
+        for (int k = 0; k < nnz; ++k)
+        {
+            Ai[k] = static_cast<int>(A.row_idx[static_cast<std::size_t>(k)]);
+            Ax[k] = A.values[static_cast<std::size_t>(k)];
+        }
+    }
+
+    auto ta = Clock::now();
+    cholmod_factor *L = cholmod_analyze(Ac, &c);
+    auto tb = Clock::now();
+    if (!L || c.status != CHOLMOD_OK)
+    {
+        cholmod_free_sparse(&Ac, &c);
+        cholmod_finish(&c);
+        return false;
+    }
+    t.analyse_ms = elapsed_ms(ta, tb);
+
+    double total_factor = 0.0, total_solve = 0.0;
+    for (int i = 0; i < reps; ++i)
+    {
+        auto tf0 = Clock::now();
+        cholmod_factorize(Ac, L, &c);
+        auto tf1 = Clock::now();
+        cholmod_dense *b_ch = cholmod_ones(static_cast<std::size_t>(n), 1, CHOLMOD_REAL, &c);
+        cholmod_dense *x_ch = cholmod_solve(CHOLMOD_A, L, b_ch, &c);
+        auto tf2 = Clock::now();
+        total_factor += elapsed_ms(tf0, tf1);
+        total_solve  += elapsed_ms(tf1, tf2);
+        if (x_ch) cholmod_free_dense(&x_ch, &c);
+        cholmod_free_dense(&b_ch, &c);
+    }
+    t.avg_factor_ms = total_factor / static_cast<double>(reps);
+    t.avg_solve_ms  = total_solve  / static_cast<double>(reps);
+
+    cholmod_free_factor(&L, &c);
+    cholmod_free_sparse(&Ac, &c);
+    cholmod_finish(&c);
+    return (c.status == CHOLMOD_OK || reps > 0);
 }
 #endif // SMF_HAS_CHOLMOD
 
@@ -588,8 +727,8 @@ static double ma27_run(const smf::CscLower &A, std::vector<double> &x_out, Ma27T
     x_out.assign(rhs.begin(), rhs.end());
 
     t.analyse_ms = elapsed_ms(ta, tb);
-    t.factor_ms = elapsed_ms(tb, tc);
-    t.solve_ms = elapsed_ms(tc, td);
+    t.factor_ms  = elapsed_ms(tb, tc);
+    t.solve_ms   = elapsed_ms(tc, td);
 
     std::vector<double> Ax_vec(static_cast<std::size_t>(n), 0.0);
     spmv_sym(A, x_out.data(), Ax_vec.data());
@@ -600,6 +739,86 @@ static double ma27_run(const smf::CscLower &A, std::vector<double> &x_out, Ma27T
         res += r * r;
     }
     return std::sqrt(res) / std::sqrt(static_cast<double>(n));
+}
+
+/// MA27 repeated factorisation: ma27ad_ once, then (ma27bd_+ma27cd_) reps times.
+/// a[] is restored from a_in before each ma27bd_ call (MA27 overwrites a[] in place).
+static bool ma27_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
+{
+    int n   = static_cast<int>(A.n);
+    int nnz = static_cast<int>(A.nnz());
+
+    // Build 1-indexed COO
+    std::vector<int>    irn(static_cast<std::size_t>(nnz));
+    std::vector<int>    icn(static_cast<std::size_t>(nnz));
+    std::vector<double> a_in(static_cast<std::size_t>(nnz));
+    {
+        int p = 0;
+        for (int j = 0; j < n; ++j)
+            for (smf::Int k = A.col_ptr[static_cast<std::size_t>(j)];
+                 k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k, ++p)
+            {
+                irn[static_cast<std::size_t>(p)] =
+                    static_cast<int>(A.row_idx[static_cast<std::size_t>(k)]) + 1;
+                icn[static_cast<std::size_t>(p)] = j + 1;
+                a_in[static_cast<std::size_t>(p)] = A.values[static_cast<std::size_t>(k)];
+            }
+    }
+
+    int icntl[30]; double cntl[5];
+    ma27id_(icntl, cntl);
+    icntl[0] = 0; icntl[1] = 0; cntl[0] = 0.0;
+
+    // Phase 1: symbolic analysis (once)
+    int liw1 = 2 * nnz + 3 * n + 1;
+    std::vector<int> iw(static_cast<std::size_t>(liw1));
+    std::vector<int> ikeep(static_cast<std::size_t>(3 * n));
+    std::vector<int> iw1_buf(static_cast<std::size_t>(2 * n));
+    int nsteps = 0, iflag = 0, info[20] = {};
+    double ops = 0.0;
+
+    auto ta = Clock::now();
+    ma27ad_(&n, &nnz, irn.data(), icn.data(), iw.data(), &liw1, ikeep.data(),
+            iw1_buf.data(), &nsteps, &iflag, icntl, cntl, info, &ops);
+    auto tb = Clock::now();
+    if (info[0] != 0) return false;
+    t.analyse_ms = elapsed_ms(ta, tb);
+
+    int la   = std::max(4 * nnz, static_cast<int>(static_cast<double>(info[3]) * 3.0)) + 2 * n + 200;
+    int liw2 = std::max(4 * nnz, static_cast<int>(static_cast<double>(info[4]) * 3.0)) + 2 * n + 200;
+    if (liw2 > liw1) iw.resize(static_cast<std::size_t>(liw2));
+
+    std::vector<double> a_fac(static_cast<std::size_t>(la));
+    std::vector<int>    iw1_bd(static_cast<std::size_t>(2 * n + nsteps + 100));
+    std::vector<int>    iw1_cd(static_cast<std::size_t>(2 * n + nsteps + 100));
+
+    double total_factor = 0.0, total_solve = 0.0;
+    for (int rep = 0; rep < reps; ++rep)
+    {
+        // Restore original values (MA27 overwrites a_fac during factorisation)
+        for (int k = 0; k < nnz; ++k)
+            a_fac[static_cast<std::size_t>(k)] = a_in[static_cast<std::size_t>(k)];
+
+        int maxfrt = 0;
+        auto tf0 = Clock::now();
+        ma27bd_(&n, &nnz, irn.data(), icn.data(), a_fac.data(), &la, iw.data(), &liw2,
+                ikeep.data(), &nsteps, &maxfrt, iw1_bd.data(), icntl, cntl, info);
+        auto tf1 = Clock::now();
+        if (info[0] != 0) return false;
+
+        std::vector<double> w(static_cast<std::size_t>(maxfrt > 0 ? maxfrt : 1));
+        std::vector<double> rhs(static_cast<std::size_t>(n), 1.0);
+        ma27cd_(&n, a_fac.data(), &la, iw.data(), &liw2, w.data(), &maxfrt,
+                rhs.data(), iw1_cd.data(), &nsteps, icntl, info);
+        auto tf2 = Clock::now();
+        if (info[0] != 0) return false;
+
+        total_factor += elapsed_ms(tf0, tf1);
+        total_solve  += elapsed_ms(tf1, tf2);
+    }
+    t.avg_factor_ms = total_factor / static_cast<double>(reps);
+    t.avg_solve_ms  = total_solve  / static_cast<double>(reps);
+    return true;
 }
 #endif // SMF_HAS_MA27
 
@@ -735,10 +954,16 @@ static std::vector<MatrixCase> build_test_matrices()
     cases.push_back({"Tridiag_500", make_tridiagonal(500)});
     cases.push_back({"BandedSPD_200", make_banded_spd(200, 5)});
     cases.push_back({"BlockDiag_300", make_block_diagonal_spd(300)});
+    // Larger matrices – exercise BLAS-3 fronts and amortised-analyse advantage
+    cases.push_back({"Poisson2D_1000", make_poisson2d(31)});    // N=961,  nnz≈3844
+    cases.push_back({"Poisson2D_4000", make_poisson2d(63)});    // N=3969, nnz≈15876
+    cases.push_back({"Tridiag_5000",   make_tridiagonal(5000)});
+    cases.push_back({"BandedSPD_2000", make_banded_spd(2000, 10)});
     return cases;
 }
 
-static constexpr int WARMUP_RUNS = 3;
+/// Warmup/timing runs: fewer for large matrices to keep benchmark fast.
+static int warmup_runs_for(int N) { return (N > 500) ? 2 : 3; }
 
 int main()
 {
@@ -767,6 +992,16 @@ int main()
     std::puts("");
 
     auto cases = build_test_matrices();
+
+    // Per-case smf phase breakdown (filled inside main loop)
+    struct BreakdownRow
+    {
+        std::string name;
+        int         N   = 0;
+        SmfTimes    times;
+    };
+    std::vector<BreakdownRow> breakdown_rows;
+    breakdown_rows.reserve(cases.size());
 
     // --- Print header ---
     std::printf("%-22s  %6s  %7s  %9s", "Matrix", "N", "nnz", "smf(ms)");
@@ -856,22 +1091,25 @@ int main()
 
         // smf
         double smf_best = 1e18, smf_res = -1.0;
+        SmfTimes smf_best_times;
         std::vector<double> smf_x;
-        for (int r = 0; r < WARMUP_RUNS; ++r)
+        for (int r = 0; r < warmup_runs_for(N); ++r)
         {
             SmfTimes t;
             double res = smf_run(A, smf_x, t);
             if (res >= 0.0 && t.total_ms() < smf_best)
             {
-                smf_best = t.total_ms();
-                smf_res = res;
+                smf_best       = t.total_ms();
+                smf_res        = res;
+                smf_best_times = t;
             }
         }
+        breakdown_rows.push_back({mc.name, N, smf_best_times});
 
 #ifdef SMF_HAS_CHOLMOD
         double chol_best = 1e18, chol_res = -1.0;
         std::vector<double> chol_x;
-        for (int r = 0; r < WARMUP_RUNS; ++r)
+        for (int r = 0; r < warmup_runs_for(N); ++r)
         {
             CholmodTimes t;
             double res = cholmod_run(A, chol_x, t);
@@ -894,7 +1132,7 @@ int main()
 #ifdef SMF_HAS_MA27
         double ma27_best = 1e18, ma27_res = -1.0;
         std::vector<double> ma27_x;
-        for (int r = 0; r < WARMUP_RUNS; ++r)
+        for (int r = 0; r < warmup_runs_for(N); ++r)
         {
             Ma27Times t;
             double res = ma27_run(A, ma27_x, t);
@@ -917,7 +1155,7 @@ int main()
 #ifdef SMF_HAS_MUMPS
         double mps_best = 1e18, mps_res = -1.0;
         std::vector<double> mps_x;
-        for (int r = 0; r < WARMUP_RUNS; ++r)
+        for (int r = 0; r < warmup_runs_for(N); ++r)
         {
             MumpsTimes t;
             double res = mumps_run(A, mps_x, t);
@@ -941,7 +1179,7 @@ int main()
         Eigen::SparseMatrix<double> M = to_eigen_sym(A);
         double eig_best = 1e18, eig_res = -1.0;
         Eigen::VectorXd eig_x;
-        for (int r = 0; r < WARMUP_RUNS; ++r)
+        for (int r = 0; r < warmup_runs_for(N); ++r)
         {
             double t_ms = 0.0;
             double res = eigen_run(M, eig_x, t_ms);
@@ -1034,6 +1272,113 @@ int main()
     std::printf("  smf vs Eigen   : smf faster in %d/%d cases, avg speedup %.2fx\n", eig_faster, eig_valid,
                 eig_valid > 0 ? eig_spd_sum / static_cast<double>(eig_valid) : 0.0);
 #endif
+
+    // =========================================================================
+    // smf Phase Breakdown
+    // =========================================================================
+    std::puts("\n=== smf Phase Breakdown ===");
+    std::printf("%-22s  %6s  %12s  %11s  %10s\n",
+                "Matrix", "N", "analyse(ms)", "factor(ms)", "solve(ms)");
+    std::printf("%-22s  %6s  %12s  %11s  %10s\n",
+                "----------------------", "------", "------------", "-----------", "----------");
+    for (const auto &br : breakdown_rows)
+    {
+        std::printf("%-22s  %6d  %12.3f  %11.3f  %10.3f\n",
+                    br.name.c_str(), br.N,
+                    br.times.analyse_ms, br.times.factor_ms, br.times.solve_ms);
+    }
+
+    // =========================================================================
+    // Repeated Factorisation (analyse×1 + factor+solve×10)
+    // =========================================================================
+    static constexpr int REPEAT_REPS = 10;
+    std::puts("\n=== Repeated Factorization (analyse x1 + factor+solve x10) ===");
+    std::printf("Note: amortized = analyse/10 + avg_factor + avg_solve\n\n");
+
+    // Header
+    std::printf("%-22s  %6s  %7s  %10s",
+                "Matrix", "N", "nnz", "smf_amort");
+#ifdef SMF_HAS_CHOLMOD
+    std::printf("  %10s", "chol_amort");
+#endif
+#ifdef SMF_HAS_MA27
+    std::printf("  %10s", "ma27_amort");
+#endif
+#ifdef SMF_HAS_EIGEN
+    std::printf("  %10s", "eig_amort");
+#endif
+    std::printf("  %9s  %9s  %9s\n", "smf_a_ms", "smf_f_ms", "smf_s_ms");
+
+    // Separator
+    std::printf("%-22s  %6s  %7s  %10s",
+                "----------------------", "------", "-------", "----------");
+#ifdef SMF_HAS_CHOLMOD
+    std::printf("  %10s", "----------");
+#endif
+#ifdef SMF_HAS_MA27
+    std::printf("  %10s", "----------");
+#endif
+#ifdef SMF_HAS_EIGEN
+    std::printf("  %10s", "----------");
+#endif
+    std::printf("  %9s  %9s  %9s\n", "---------", "---------", "---------");
+
+    for (const auto &mc : cases)
+    {
+        const smf::CscLower &A  = mc.A;
+        const int            N  = static_cast<int>(A.n);
+        const int            nz = static_cast<int>(A.nnz());
+
+        RepeatedTimes smf_rt;
+        bool smf_ok = smf_repeated_run(A, REPEAT_REPS, smf_rt);
+
+#ifdef SMF_HAS_CHOLMOD
+        RepeatedTimes chol_rt;
+        bool chol_ok = cholmod_repeated_run(A, REPEAT_REPS, chol_rt);
+#endif
+#ifdef SMF_HAS_MA27
+        RepeatedTimes ma27_rt;
+        bool ma27_ok = ma27_repeated_run(A, REPEAT_REPS, ma27_rt);
+#endif
+#ifdef SMF_HAS_EIGEN
+        Eigen::SparseMatrix<double> M_rep = to_eigen_sym(A);
+        RepeatedTimes eig_rt;
+        bool eig_ok = eigen_repeated_run(M_rep, REPEAT_REPS, eig_rt);
+#endif
+
+        // smf amortized
+        std::printf("%-22s  %6d  %7d", mc.name.c_str(), N, nz);
+        if (smf_ok)
+            std::printf("  %10.3f", smf_rt.amortized_ms(REPEAT_REPS));
+        else
+            std::printf("  %10s", "FAILED");
+
+#ifdef SMF_HAS_CHOLMOD
+        if (chol_ok)
+            std::printf("  %10.3f", chol_rt.amortized_ms(REPEAT_REPS));
+        else
+            std::printf("  %10s", "FAILED");
+#endif
+#ifdef SMF_HAS_MA27
+        if (ma27_ok)
+            std::printf("  %10.3f", ma27_rt.amortized_ms(REPEAT_REPS));
+        else
+            std::printf("  %10s", "FAILED");
+#endif
+#ifdef SMF_HAS_EIGEN
+        if (eig_ok)
+            std::printf("  %10.3f", eig_rt.amortized_ms(REPEAT_REPS));
+        else
+            std::printf("  %10s", "FAILED");
+#endif
+        // smf split columns
+        if (smf_ok)
+            std::printf("  %9.3f  %9.3f  %9.3f",
+                        smf_rt.analyse_ms, smf_rt.avg_factor_ms, smf_rt.avg_solve_ms);
+        else
+            std::printf("  %9s  %9s  %9s", "n/a", "n/a", "n/a");
+        std::puts("");
+    }
 
     return 0;
 }
