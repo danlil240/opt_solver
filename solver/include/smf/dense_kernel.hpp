@@ -12,11 +12,23 @@ namespace smf {
 /// Returns LAPACK info: 0 = success, >0 = not positive definite at pivot info.
 int smf_dpotrf_lower(double *A, int n, int lda);
 
+/// Banded Cholesky factorization of SPD matrix in lower-band storage.
+/// AB is (kd+1) x n with ldab = kd+1, storing A(i,j) at AB(i-j, j) for i>=j.
+/// On success, AB is overwritten with banded Cholesky factor L.
+/// Returns LAPACK info: 0 = success, >0 = leading minor not SPD.
+int smf_dpbtrf_lower(double *AB, int n, int kd, int ldab);
+
 /// Triangular solve: solves X Lᵀ = B  (right, lower, transpose)
 /// B is n_rows × k, ldb = leading dim of B. L is k×k lower triangular, ldl =
 /// leading dim of L. Overwrites B with X.
 void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
                                      const double *L, int ldl, int ldb);
+
+/// Solve with banded Cholesky factor from smf_dpbtrf_lower.
+/// Solves A * X = B in place for nrhs right-hand sides (column-major, ldb).
+/// Returns LAPACK info (0 success).
+int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
+                     int ldab, int ldb);
 
 // --- BLAS wrappers ---
 
@@ -35,6 +47,12 @@ void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
 /// Matrix-vector: y := alpha * A * x + beta * y. A is m×n, lda.
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha = 1.0, double beta = 0.0);
+
+/// Matrix-vector: y := alpha * Aᵀ * x + beta * y. A is m×n, lda.
+/// x has length m, y has length n.
+void smf_dgemv_transpose(double *y, int m, int n, const double *A, int lda,
+                         const double *x, double alpha = 1.0,
+                         double beta = 0.0);
 
 /// Triangular solve: solves L x = b (lower, no-transpose, non-unit).
 /// x overwrites b. n = size.

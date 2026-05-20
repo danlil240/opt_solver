@@ -18,13 +18,16 @@ namespace smf {
 /// the front are the pivot rows, which are also the pivot columns.
 class FrontalMatrix {
 public:
-    /// Construct a zeroed front of size f×p backed by `arena`.
-    ///
-    /// @param front_size    f — total number of rows (pivot + extended)
-    /// @param pivot_cols    p — number of pivot columns (p ≤ f)
-    /// @param row_indices   length-f sorted original row indices
-    /// @param col_indices   length-p sorted original column indices (= row_indices[0..p-1])
-    /// @param arena         arena from which f*p*sizeof(double) bytes are allocated
+    /// Fast pointer-based constructor — zero copies; row_map/col_map must outlive this.
+    /// Typically pass fi.row_indices.data() for both: the first p entries serve as
+    /// col_map and all f entries serve as row_map.
+    FrontalMatrix(Int front_size, Int pivot_cols,
+                  const Int* row_map, const Int* col_map,
+                  AlignedArena& arena);
+
+    /// Convenience constructor from vectors.
+    /// This constructor takes ownership of row/col maps to guarantee lifetime
+    /// safety for callers that pass temporaries.
     FrontalMatrix(Int front_size, Int pivot_cols,
                   const std::vector<Int>& row_indices,
                   const std::vector<Int>& col_indices,
@@ -33,29 +36,11 @@ public:
     // ---- Scatter / assemble -------------------------------------------------
 
     /// Scatter entries from the original permuted lower-CSC into this front.
-    ///
-    /// For each pivot column j (orig col = col_map_[j]):
-    ///   for each (orig_row, val) in column orig_col of A:
-    ///     find front_row = binary-search position of orig_row in row_map_ (sorted)
-    ///     if found: at(front_row, j) += val
-    ///
-    /// @param col_ptr  size-(n+1) column pointer array of the permuted lower-CSC
-    /// @param row_idx  row indices of the lower-CSC
-    /// @param values   values of the lower-CSC
     void scatter_original(const std::vector<Int>& col_ptr,
                           const std::vector<Int>& row_idx,
                           const std::vector<double>& values);
 
     /// Add a (q×q) lower-triangular contribution block (column-major) into this front.
-    ///
-    /// Implements scatter-add with a precomputed scatter map (no map lookups in the
-    /// inner loop). Each entry (i,j) of the contribution (lower-triangle, i ≥ j) is
-    /// added to parent front position (parent_rows[i], parent_rows[j]) provided that
-    /// parent_rows[j] < p_ (pivot invariant: col index = parent_rows[j]).
-    ///
-    /// @param contrib      q×q dense column-major block; entry (i,j) at contrib[j*q+i]
-    /// @param q            size of the contribution block
-    /// @param parent_rows  precomputed map: contribution index i → row in this front
     void assemble_contrib(const double* contrib, Int q,
                           const std::vector<Int>& parent_rows);
 
@@ -71,18 +56,17 @@ public:
     double&       at(Int row, Int col)       noexcept { return data_[col * f_ + row]; }
     const double& at(Int row, Int col) const noexcept { return data_[col * f_ + row]; }
 
-    const std::vector<Int>& row_map() const noexcept { return row_map_; }
-    const std::vector<Int>& col_map() const noexcept { return col_map_; }
-
     /// Zero all f*p entries (preserves metadata).
     void zero() noexcept;
 
 private:
-    Int              f_;        ///< front size (total rows)
-    Int              p_;        ///< pivot columns
-    double*          data_;     ///< f*p doubles, column-major, arena-backed (NOT owned)
-    std::vector<Int> row_map_;  ///< row_map_[i] = original row index for front row i (sorted)
-    std::vector<Int> col_map_;  ///< col_map_[j] = original col index for front col j (sorted)
+    Int          f_;        ///< front size (total rows)
+    Int          p_;        ///< pivot columns
+    double*      data_;     ///< f*p doubles, column-major, arena-backed (NOT owned)
+    const Int*   row_map_;  ///< length-f sorted original row indices (NOT owned)
+    const Int*   col_map_;  ///< length-p original col indices (NOT owned)
+    std::vector<Int> owned_row_map_; ///< owned row-map storage for vector constructor
+    std::vector<Int> owned_col_map_; ///< owned col-map storage for vector constructor
 };
 
 } // namespace smf

@@ -15,6 +15,29 @@
 namespace smf
 {
 
+    static bool is_auto_ordering(OrderingMethod m)
+    {
+        return (m == OrderingMethod::AutoSerial ||
+                m == OrderingMethod::AutoParallel);
+    }
+
+    static Int max_lower_bandwidth(const CscLower &A)
+    {
+        Int bw = 0;
+        for (Int j = 0; j < A.n; ++j)
+        {
+            for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+                 p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            {
+                const Int i = A.row_idx[static_cast<std::size_t>(p)];
+                const Int d = i - j; // lower CSC => i >= j
+                if (d > bw)
+                    bw = d;
+            }
+        }
+        return bw;
+    }
+
     // Permute a lower-CSC matrix: given perm[new]=old, build the matrix
     // in the new ordering. For lower-CSC: entry (i,j) with i>=j in old ordering
     // becomes (iperm[i], iperm[j]) in new ordering; we keep only new_i >= new_j.
@@ -129,20 +152,54 @@ namespace smf
             return keep;
         }
 
-        // Step 2: choose ordering backend
-        auto backend = make_ordering_backend(control.ordering, n, info);
+        // Step 2: choose ordering strategy.
+        // For narrow-band matrices in Auto modes, identity ordering preserves
+        // structure and avoids expensive ordering/permutation overhead.
+        const bool auto_order = is_auto_ordering(control.ordering);
+        const Int half_bw = max_lower_bandwidth(cleaned.clean);
+        const bool use_identity_ordering = auto_order && (half_bw <= 64);
 
-        // Step 3: build symmetric adjacency graph for the cleaned pattern
-        auto [xadj, adjncy] = build_symmetric_adjacency(cleaned.clean);
-
-        // Step 4: compute fill-reducing permutation
-        std::vector<Int> perm = backend->compute_ordering(n, xadj, adjncy);
-        if (perm.empty())
+        std::vector<Int> perm(static_cast<std::size_t>(n));
+        if (use_identity_ordering)
         {
-            // Ordering failed — fall back to identity permutation
-            info.status = ErrorCode::Success;
-            perm.resize(static_cast<std::size_t>(n));
             std::iota(perm.begin(), perm.end(), 0);
+            info.ordering_used = static_cast<int>(OrderingMethod::UserSupplied);
+        }
+        else
+        {
+            auto backend = make_ordering_backend(control.ordering, n, info);
+
+            // Step 3: build symmetric adjacency graph for the cleaned pattern.
+            auto [xadj, adjncy] = build_symmetric_adjacency(cleaned.clean);
+
+            // Step 4: compute fill-reducing permutation.
+            perm = backend->compute_ordering(n, xadj, adjncy);
+            if (perm.empty())
+            {
+                // Ordering failed — fall back to identity permutation.
+                info.status = ErrorCode::Success;
+                perm.resize(static_cast<std::size_t>(n));
+                std::iota(perm.begin(), perm.end(), 0);
+                info.ordering_used = static_cast<int>(OrderingMethod::UserSupplied);
+            }
+            else
+            {
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+                info.ordering_used = static_cast<int>(
+                    control.ordering == OrderingMethod::AutoParallel
+                        ? OrderingMethod::METIS
+                        : (control.ordering == OrderingMethod::AutoSerial
+                               ? OrderingMethod::AMD
+                               : control.ordering));
+#else
+                info.ordering_used = static_cast<int>(
+                    control.ordering == OrderingMethod::AutoParallel
+                        ? OrderingMethod::AMD
+                        : (control.ordering == OrderingMethod::AutoSerial
+                               ? OrderingMethod::AMD
+                               : control.ordering));
+#endif
+            }
         }
 
         // Build inverse permutation
@@ -150,18 +207,93 @@ namespace smf
         for (Int i = 0; i < n; ++i)
             iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
 
-        // Step 5: permute the cleaned matrix
-        CscLower A_perm = permute_lower_csc(cleaned.clean, perm, iperm);
+        // Step 5: permute the cleaned matrix.
+        CscLower A_perm;
+        const CscLower *A_ord = nullptr;
+        if (use_identity_ordering)
+            A_ord = &cleaned.clean;
+        else
+        {
+            A_perm = permute_lower_csc(cleaned.clean, perm, iperm);
+            A_ord = &A_perm;
+        }
 
         // Step 6: build elimination tree
-        EliminationTree etree = build_elimination_tree(n, A_perm.col_ptr, A_perm.row_idx);
+        EliminationTree etree = build_elimination_tree(n, A_ord->col_ptr, A_ord->row_idx);
 
         // Step 7: detect and amalgamate supernodes
-        auto snodes = detect_fundamental_supernodes(n, A_perm.col_ptr, A_perm.row_idx, etree);
+        auto snodes = detect_fundamental_supernodes(n, A_ord->col_ptr, A_ord->row_idx, etree);
         snodes = amalgamate_supernodes(std::move(snodes), static_cast<Int>(control.nemin));
 
         // Step 8: build assembly tree and fill info predictions
-        auto fronts = build_assembly_tree(A_perm, snodes, info);
+        auto fronts = build_assembly_tree(*A_ord, snodes, info);
+
+        // Step 8.5a: compute supernode postorder (children before parents) via iterative DFS.
+        const Int nsn = static_cast<Int>(snodes.size());
+        std::vector<Int> sn_postorder;
+        sn_postorder.reserve(static_cast<std::size_t>(nsn));
+        {
+            std::vector<std::pair<Int,Int>> stk; // (node, next_child_idx)
+            stk.reserve(static_cast<std::size_t>(nsn));
+            for (Int i = 0; i < nsn; ++i)
+                if (snodes[static_cast<std::size_t>(i)].parent == -1)
+                    stk.push_back({i, 0});
+            while (!stk.empty()) {
+                auto& [node, ci] = stk.back();
+                const Int nch = static_cast<Int>(snodes[static_cast<std::size_t>(node)].children.size());
+                if (ci < nch) {
+                    const Int child = snodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci)];
+                    ++ci;
+                    stk.push_back({child, 0});
+                } else {
+                    sn_postorder.push_back(node);
+                    stk.pop_back();
+                }
+            }
+        }
+
+        // Step 8.5b: build inverse postorder for sort key.
+        std::vector<Int> po_idx(static_cast<std::size_t>(nsn));
+        for (Int i = 0; i < nsn; ++i)
+            po_idx[static_cast<std::size_t>(sn_postorder[static_cast<std::size_t>(i)])] = i;
+
+        // Step 8.5c: pre-sort each supernode's children by descending postorder index.
+        // Factor's LIFO fstack freeing requires this order; doing it once in analysis
+        // eliminates the per-supernode sorted_ch vector + std::sort in the factor hot loop.
+        for (Int s = 0; s < nsn; ++s) {
+            auto& ch = snodes[static_cast<std::size_t>(s)].children;
+            if (ch.size() > 1)
+                std::sort(ch.begin(), ch.end(), [&](Int a, Int b) {
+                    return po_idx[static_cast<std::size_t>(a)] >
+                           po_idx[static_cast<std::size_t>(b)];
+                });
+        }
+
+        // Step 8.5d: pre-compute child-parent row scatter maps only for smaller
+        // matrices; for larger cases this can dominate one-shot analyse time.
+        const bool precompute_child_maps = (n <= 1200);
+        if (precompute_child_maps) {
+            for (Int s = 0; s < nsn; ++s) {
+                const Supernode& sn = snodes[static_cast<std::size_t>(s)];
+                FrontalInfo& fi = fronts[static_cast<std::size_t>(s)];
+                const std::size_t nch = sn.children.size();
+                fi.child_parent_rows.resize(nch);
+                for (std::size_t k = 0; k < nch; ++k) {
+                    const Int c = sn.children[k];
+                    const FrontalInfo& cfi = fronts[static_cast<std::size_t>(c)];
+                    const Int cp = snodes[static_cast<std::size_t>(c)].width();
+                    const Int q_c = cfi.front_size() - cp;
+                    fi.child_parent_rows[k].resize(static_cast<std::size_t>(q_c));
+                    for (Int i = 0; i < q_c; ++i) {
+                        const Int ext_row = cfi.row_indices[static_cast<std::size_t>(cp + i)];
+                        const auto it = std::lower_bound(fi.row_indices.begin(),
+                                                         fi.row_indices.end(), ext_row);
+                        fi.child_parent_rows[k][static_cast<std::size_t>(i)] =
+                            static_cast<Int>(it - fi.row_indices.begin());
+                    }
+                }
+            }
+        }
 
         // Step 9: record timing
         const auto t1 = std::chrono::steady_clock::now();
@@ -172,32 +304,35 @@ namespace smf
         // Since A_perm.row_idx is sorted within each column (post-sort from permute_lower_csc),
         // we use std::lower_bound: O(nnz * log(max_col_width)).
         // This map enables O(nnz) value-only permutation on every factorization call.
-        const Int nnz_orig = static_cast<Int>(cleaned.clean.values.size());
-        std::vector<Int> otp(static_cast<std::size_t>(nnz_orig));
-        for (Int old_j = 0; old_j < n; ++old_j)
-        {
-            const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-            for (Int k = cleaned.clean.col_ptr[static_cast<std::size_t>(old_j)];
-                 k < cleaned.clean.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k)
+        std::vector<Int> otp;
+        if (!use_identity_ordering) {
+            const Int nnz_orig = static_cast<Int>(cleaned.clean.values.size());
+            otp.resize(static_cast<std::size_t>(nnz_orig));
+            for (Int old_j = 0; old_j < n; ++old_j)
             {
-                const Int old_i =
-                    cleaned.clean.row_idx[static_cast<std::size_t>(k)];
-                const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-                // Determine which column this entry lands in after lower-triangle
-                // enforcement: col = min(new_i, new_j), row = max(new_i, new_j).
-                const Int perm_col = (new_i >= new_j) ? new_j : new_i;
-                const Int perm_row = (new_i >= new_j) ? new_i : new_j;
-                // Binary-search within the sorted column of A_perm.
-                const Int cs =
-                    A_perm.col_ptr[static_cast<std::size_t>(perm_col)];
-                const Int ce =
-                    A_perm.col_ptr[static_cast<std::size_t>(perm_col) + 1];
-                auto it = std::lower_bound(
-                    A_perm.row_idx.begin() + cs,
-                    A_perm.row_idx.begin() + ce,
-                    perm_row);
-                otp[static_cast<std::size_t>(k)] =
-                    static_cast<Int>(it - A_perm.row_idx.begin());
+                const Int new_j = iperm[static_cast<std::size_t>(old_j)];
+                for (Int k = cleaned.clean.col_ptr[static_cast<std::size_t>(old_j)];
+                     k < cleaned.clean.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k)
+                {
+                    const Int old_i =
+                        cleaned.clean.row_idx[static_cast<std::size_t>(k)];
+                    const Int new_i = iperm[static_cast<std::size_t>(old_i)];
+                    // Determine which column this entry lands in after lower-triangle
+                    // enforcement: col = min(new_i, new_j), row = max(new_i, new_j).
+                    const Int perm_col = (new_i >= new_j) ? new_j : new_i;
+                    const Int perm_row = (new_i >= new_j) ? new_i : new_j;
+                    // Binary-search within the sorted column of A_perm.
+                    const Int cs =
+                        A_perm.col_ptr[static_cast<std::size_t>(perm_col)];
+                    const Int ce =
+                        A_perm.col_ptr[static_cast<std::size_t>(perm_col) + 1];
+                    auto it = std::lower_bound(
+                        A_perm.row_idx.begin() + cs,
+                        A_perm.row_idx.begin() + ce,
+                        perm_row);
+                    otp[static_cast<std::size_t>(k)] =
+                        static_cast<Int>(it - A_perm.row_idx.begin());
+                }
             }
         }
 
@@ -205,15 +340,19 @@ namespace smf
         auto keep = std::make_unique<AnalysisKeep>();
         keep->n = n;
         keep->cleaned = std::move(cleaned.clean);
-        // Store permuted pattern (col_ptr, row_idx) for fast value-only permutation in factor
-        keep->perm_col_ptr = std::move(A_perm.col_ptr);
-        keep->perm_row_idx = std::move(A_perm.row_idx);
+        // Store permuted pattern for fast value-only permutation in factor.
+        // For identity ordering we keep these empty and factor reuses cleaned pattern.
+        if (!use_identity_ordering) {
+            keep->perm_col_ptr = std::move(A_perm.col_ptr);
+            keep->perm_row_idx = std::move(A_perm.row_idx);
+        }
         keep->orig_to_perm_idx = std::move(otp);
         keep->perm = std::move(perm);
         keep->iperm = std::move(iperm);
         keep->etree = std::move(etree);
         keep->supernodes = std::move(snodes);
         keep->fronts = std::move(fronts);
+        keep->postorder = std::move(sn_postorder);
 
         return keep;
     }

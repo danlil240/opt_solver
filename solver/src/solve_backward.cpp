@@ -8,34 +8,35 @@
 namespace smf {
 
 namespace {
-/// Compute postorder traversal matching factor_posdef / solve_forward.
-static std::vector<Int>
-compute_postorder_bwd(const std::vector<Supernode> &supernodes) {
-  const Int ns = static_cast<Int>(supernodes.size());
-  std::vector<Int> order;
-  order.reserve(static_cast<std::size_t>(ns));
-  std::vector<std::pair<Int, Int>> stk;
-  stk.reserve(static_cast<std::size_t>(ns));
-  for (Int i = 0; i < ns; ++i)
-    if (supernodes[static_cast<std::size_t>(i)].parent == -1)
-      stk.push_back({i, 0});
-  while (!stk.empty()) {
-    auto &[node, ci] = stk.back();
-    const Int nch = static_cast<Int>(
-        supernodes[static_cast<std::size_t>(node)].children.size());
-    if (ci < nch) {
-      const Int child = supernodes[static_cast<std::size_t>(node)]
-                            .children[static_cast<std::size_t>(ci)];
-      ++ci;
-      stk.push_back({child, 0});
-    } else {
-      order.push_back(node);
-      stk.pop_back();
-    }
-  }
-  return order;
-}
 } // anonymous namespace
+
+/// Return a postorder reference: precomputed from analysis if available,
+/// otherwise compute on demand into `local_buf` (tests / legacy callers).
+static const std::vector<Int>&
+get_or_compute_postorder(const AnalysisKeep& ak, std::vector<Int>& local_buf)
+{
+    if (!ak.postorder.empty())
+        return ak.postorder;
+
+    const Int ns = static_cast<Int>(ak.supernodes.size());
+    local_buf.reserve(static_cast<std::size_t>(ns));
+    std::vector<std::pair<Int,Int>> stk;
+    stk.reserve(static_cast<std::size_t>(ns));
+    for (Int i = 0; i < ns; ++i)
+        if (ak.supernodes[static_cast<std::size_t>(i)].parent == -1)
+            stk.push_back({i, 0});
+    while (!stk.empty()) {
+        auto& [node, ci] = stk.back();
+        const Int nch = static_cast<Int>(ak.supernodes[static_cast<std::size_t>(node)].children.size());
+        if (ci < nch) {
+            stk.push_back({ak.supernodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci++)], 0});
+        } else {
+            local_buf.push_back(node);
+            stk.pop_back();
+        }
+    }
+    return local_buf;
+}
 
 void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
   if (n == 0 || nrhs == 0)
@@ -44,11 +45,13 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
   const AnalysisKeep &ak = *fkeep.analysis;
   const int ns = static_cast<int>(ak.supernodes.size());
 
-  // Compute postorder (children before parents), then reverse for backward
-  const std::vector<Int> postorder = compute_postorder_bwd(ak.supernodes);
+  // Use precomputed postorder from analysis, then reverse for backward solve
+  std::vector<Int> po_buf;
+  const std::vector<Int>& postorder = get_or_compute_postorder(ak, po_buf);
 
   std::vector<double> b_loc;
   std::vector<double> b_ext;
+  std::vector<double> tmp_perm(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
     double *xc = x + static_cast<std::ptrdiff_t>(rhs) * n;
@@ -80,14 +83,10 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
           b_ext[static_cast<std::size_t>(i)] =
               xc[fi.row_indices[static_cast<std::size_t>(p + i)]];
 
-        for (int j = 0; j < p; ++j) {
-          const double *col =
-              factor_data + static_cast<std::ptrdiff_t>(j) * f + p;
-          double dot = 0.0;
-          for (int i = 0; i < q; ++i)
-            dot += col[i] * b_ext[static_cast<std::size_t>(i)];
-          b_loc[static_cast<std::size_t>(j)] -= dot;
-        }
+        // b_loc <- -L21^T * b_ext + b_loc
+        // L21 is q×p, stored as rows [p, f) of the f×p supernode block.
+        smf_dgemv_transpose(b_loc.data(), q, p, factor_data + p, f,
+                            b_ext.data(), -1.0, 1.0);
       }
 
       // Solve L11^T z = b_loc (SPD: non-unit; indef: unit lower diagonal)
@@ -103,12 +102,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
     }
 
     // Apply fill-reducing permutation: x_original[perm[j]] = x_permuted[j]
-    std::vector<double> tmp(static_cast<std::size_t>(n));
     for (int j = 0; j < n; ++j)
-      tmp[static_cast<std::size_t>(fkeep.perm[static_cast<std::size_t>(j)])] =
+      tmp_perm[static_cast<std::size_t>(fkeep.perm[static_cast<std::size_t>(j)])] =
           xc[j];
     for (int j = 0; j < n; ++j)
-      xc[j] = tmp[static_cast<std::size_t>(j)];
+      xc[j] = tmp_perm[static_cast<std::size_t>(j)];
   }
 }
 

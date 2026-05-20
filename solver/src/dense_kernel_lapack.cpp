@@ -7,6 +7,9 @@
 // Fortran LAPACK declarations — avoids dependency on liblapacke-dev.
 extern "C" {
 void dpotrf_(char *uplo, int *n, double *a, int *lda, int *info);
+void dpbtrf_(char *uplo, int *n, int *kd, double *ab, int *ldab, int *info);
+void dpbtrs_(char *uplo, int *n, int *kd, int *nrhs, double *ab, int *ldab,
+             double *b, int *ldb, int *info);
 }
 #endif
 
@@ -19,11 +22,27 @@ int smf_dpotrf_lower(double *A, int n, int lda) {
   return info;
 }
 
+int smf_dpbtrf_lower(double *AB, int n, int kd, int ldab) {
+  char uplo = 'L';
+  int info = 0;
+  dpbtrf_(&uplo, &n, &kd, AB, &ldab, &info);
+  return info;
+}
+
 void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
                                      const double *L, int ldl, int ldb) {
   // B := B * L^{-T}  — right, lower, transpose, non-unit, alpha=1
   cblas_dtrsm(CblasColMajor, CblasRight, CblasLower, CblasTrans, CblasNonUnit,
               n_rows, k, 1.0, L, ldl, B, ldb);
+}
+
+int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
+                     int ldab, int ldb) {
+  char uplo = 'L';
+  int info = 0;
+  dpbtrs_(&uplo, &n, &kd, &nrhs, const_cast<double *>(AB), &ldab, B, &ldb,
+          &info);
+  return info;
 }
 
 void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
@@ -42,6 +61,12 @@ void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
   cblas_dgemv(CblasColMajor, CblasNoTrans, m, n, alpha, A, lda, x, 1, beta, y,
+              1);
+}
+
+void smf_dgemv_transpose(double *y, int m, int n, const double *A, int lda,
+                         const double *x, double alpha, double beta) {
+  cblas_dgemv(CblasColMajor, CblasTrans, m, n, alpha, A, lda, x, 1, beta, y,
               1);
 }
 

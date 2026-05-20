@@ -2616,3 +2616,67 @@ Close the bench_compare gap vs CHOLMOD/MA27/Eigen. User reported smf at 0.28x av
 2. bench_compare now has larger cases + repeated-factorization + phase breakdown tables.
 3. Key remaining gap: smf factor phase 2–3× slower than CHOLMOD for all N. Next improvement: small-N fast path (N≤64 → direct dense Cholesky) and/or frontal assembly kernel optimization.
 4. IPOPT trajectory test not yet re-run with fixed plugin. Still pending.
+
+---
+
+### Session Log — Alpha Perf.FactorHotpath (2026-05-21)
+
+**Mission**: Eliminate hot-path allocations and redundant computation in the multifrontal factor loop.
+
+**Issue**
+`smf` factor time was dominated by per-supernode heap allocations in the serial factor loop:
+for each of N supernodes (e.g. 5000 for Tridiag_5000):
+- `col_indices` vector copy: O(p) malloc/free
+- `FrontalMatrix` with 2× `std::vector<Int>` members: 2× O(f) malloc/free
+- `sorted_ch` vector + `std::sort`: O(ch) malloc/sort per node
+- `parent_rows` vector + `lower_bound` per child: O(q_c) malloc + O(q_c log f) per child
+- `compute_postorder()` DFS called 4× per pipeline (factor_posdef, solve_forward, solve_backward, solve_sparse_fwd)
+
+**Reproducer**
+`./solver/build/benchmarks/bench_compare` — Tridiag_5000 showing 2.341ms factor vs MA27's 0.696ms (0.30x ratio).
+
+**Root Cause**
+For Tridiag_5000 (5000 supernodes, 1 child each): ~20,000+ malloc/free per factor call from repeated short-lived vectors. Each malloc ~50–100ns → 1–2ms overhead. Factor kernel (Cholesky + BLAS) is fast; allocation/search overhead dominates.
+
+**Fix**
+1. **FrontalMatrix pointer constructor** (`frontal_matrix.hpp`, `frontal_matrix.cpp`): Changed `row_map_`/`col_map_` from `std::vector<Int>` to `const Int*`. Added pointer-based primary constructor; vector constructor delegates inline (no copy). Eliminates 3 malloc/free pairs per supernode.
+2. **Precomputed supernode postorder** (`analysis.hpp`): Added `std::vector<Int> postorder` field to `AnalysisKeep`. Computed once during `symbolic_analysis.cpp` via iterative DFS.
+3. **Pre-sorted children** (`symbolic_analysis.cpp` Step 8.5c): Sort each `Supernode::children` in-place by descending postorder index once during analysis. Eliminates `sorted_ch` vector + `std::sort` per factor call.
+4. **Precomputed `child_parent_rows`** (`assembly_tree.hpp`, `symbolic_analysis.cpp` Step 8.5d): Added `std::vector<std::vector<Int>> child_parent_rows` to `FrontalInfo`. Populated during analysis via `lower_bound`. Eliminates per-child `parent_rows` vector allocation + binary searches from the factor hot loop.
+5. **Updated factor_posdef.cpp** (serial + parallel paths): Removed `compute_postorder()` function, `po_idx` vector, `col_indices` copy, `sorted_ch` + sort, per-child `parent_rows`. Uses precomputed data from `AnalysisKeep`.
+6. **Updated factor_indef.cpp** (serial + parallel paths): Same — removed `col_idx` vector, per-child `prows` computation.
+7. **Updated solve_forward.cpp, solve_backward.cpp, solve_sparse_fwd.cpp**: Removed duplicate `compute_postorder` functions; use `ak.postorder` with `get_or_compute_postorder` fallback for tests.
+
+**Files Touched**
+- `solver/include/smf/frontal_matrix.hpp` — pointer constructor
+- `solver/src/frontal_matrix.cpp` — pointer constructor implementation
+- `solver/include/smf/assembly_tree.hpp` — `child_parent_rows` field on FrontalInfo
+- `solver/include/smf/analysis.hpp` — `postorder` field on AnalysisKeep
+- `solver/src/symbolic_analysis.cpp` — Steps 8.5a–d: compute postorder, pre-sort children, compute child_parent_rows
+- `solver/src/factor_posdef.cpp` — serial + parallel paths updated
+- `solver/src/factor_indef.cpp` — serial + parallel paths updated
+- `solver/src/solve_forward.cpp` — removed duplicate DFS; fallback helper
+- `solver/src/solve_backward.cpp` — removed duplicate DFS; fallback helper
+- `solver/src/solve_sparse_fwd.cpp` — removed duplicate DFS; fallback helper
+
+**Validation**
+- Build: ✅ 0 errors, 0 new warnings
+- Tests: ✅ 41/41 PASSED
+- Benchmark (bench_compare, 2026-05-21):
+  - smf vs MA27 avg: **0.37x → 0.42x** (+14%)
+  - Tridiag_5000 single factor: **2.341ms → 0.671ms** (3.49× speedup in factor phase)
+  - BandedSPD_2000 single factor: **2.352ms → 0.585ms** (4.02× speedup in factor phase)
+  - BandedSPD_2000 amortized: **smf 0.468ms vs MA27 0.489ms** (smf now faster than MA27!)
+  - Tridiag_500 single factor: 0.252ms → 0.077ms (3.27× speedup in factor phase)
+
+**Residual Risk**
+- Analysis time increased for sparse cases (Tridiag_5000: +~1.2ms for child_parent_rows precomputation). This cost is amortized away in the repeated-factorization path but hurts single-shot analysis+factor latency.
+- The `child_parent_rows` precomputation does O(nsn × nch × q_c × log f) work in analysis — acceptable for the benchmarks tested but could be revisited for very dense problems.
+- The fallback `get_or_compute_postorder()` in solve files handles test helpers that don't set `ak.postorder`; production path (via `Solver::analyse`) always has postorder pre-populated.
+
+**HANDOFF — Next Session Start Here**
+1. All 41 tests green. Build clean (-O3 -march=native).
+2. Factor phase is now 3–4× faster on sparse/tridiagonal cases. Overall smf vs MA27 at 0.42x avg.
+3. Remaining bottleneck is now the **analysis phase** (e.g. Tridiag_5000 analyse: 1.434ms vs MA27 full pipeline 0.722ms). For large repeated-factor workloads, smf amortizes well (0.584ms vs 0.209ms amortized, still 0.36x).
+4. Next high-impact improvement: reduce analysis time (the `build_assembly_tree` + `child_parent_rows` computation). Alternatively, a small-N fast path (skip multifrontal machinery for N≤64).
+5. IPOPT plugin still not re-tested.

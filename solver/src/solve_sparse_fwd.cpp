@@ -24,45 +24,6 @@
 namespace smf {
 
 // ---------------------------------------------------------------------------
-// Internal helper: compute postorder of the supernode assembly tree.
-// Identical logic to the helper in solve_forward.cpp, duplicated here so
-// solve_sparse_fwd.cpp has no dependency on internal translation units.
-// ---------------------------------------------------------------------------
-static std::vector<int>
-compute_sn_postorder(const std::vector<Supernode> &supernodes) {
-    const int ns = static_cast<int>(supernodes.size());
-    std::vector<int> order;
-    order.reserve(static_cast<std::size_t>(ns));
-
-    // Iterative DFS: stack entries are (node_index, next_child_cursor).
-    std::vector<std::pair<int, int>> stk;
-    stk.reserve(static_cast<std::size_t>(ns));
-
-    // Seed with all roots (parent == -1).
-    for (int i = 0; i < ns; ++i) {
-        if (supernodes[static_cast<std::size_t>(i)].parent == -1)
-            stk.push_back({i, 0});
-    }
-
-    while (!stk.empty()) {
-        auto &[node, ci] = stk.back();
-        const int nch = static_cast<int>(
-            supernodes[static_cast<std::size_t>(node)].children.size());
-        if (ci < nch) {
-            const int child =
-                supernodes[static_cast<std::size_t>(node)]
-                    .children[static_cast<std::size_t>(ci)];
-            ++ci;
-            stk.push_back({child, 0});
-        } else {
-            order.push_back(node);
-            stk.pop_back();
-        }
-    }
-    return order;
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -127,8 +88,31 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
 
     // ------------------------------------------------------------------
     // Step 4: Collect reach supernodes in postorder.
+    // Use precomputed postorder from analysis (same order as factor/solve).
     // ------------------------------------------------------------------
-    const std::vector<int> postorder_all = compute_sn_postorder(supernodes);
+    // Fallback: compute postorder if not populated (e.g., tests).
+    std::vector<Int> po_buf;
+    const std::vector<Int>* postorder_ptr = &akeep.postorder;
+    if (akeep.postorder.empty()) {
+        po_buf.reserve(static_cast<std::size_t>(ns));
+        std::vector<std::pair<Int,Int>> dfs_stk;
+        dfs_stk.reserve(static_cast<std::size_t>(ns));
+        for (int i = 0; i < ns; ++i)
+            if (supernodes[static_cast<std::size_t>(i)].parent == -1)
+                dfs_stk.push_back({i, 0});
+        while (!dfs_stk.empty()) {
+            auto& [node, ci] = dfs_stk.back();
+            const int nch = static_cast<int>(supernodes[static_cast<std::size_t>(node)].children.size());
+            if (ci < nch) {
+                dfs_stk.push_back({supernodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci++)], 0});
+            } else {
+                po_buf.push_back(node);
+                dfs_stk.pop_back();
+            }
+        }
+        postorder_ptr = &po_buf;
+    }
+    const std::vector<Int>& postorder_all = *postorder_ptr;
     reach.reserve(static_cast<std::size_t>(ns));
     for (int s : postorder_all) {
         if (in_reach[static_cast<std::size_t>(s)])

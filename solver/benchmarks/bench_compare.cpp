@@ -11,11 +11,13 @@
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef SMF_HAS_EIGEN
@@ -324,13 +326,41 @@ struct SmfTimes
     double total_ms() const { return analyse_ms + factor_ms + solve_ms; }
 };
 
+static int smf_hardware_threads()
+{
+    const unsigned hw = std::thread::hardware_concurrency();
+    return (hw == 0U) ? 1 : static_cast<int>(hw);
+}
+
+static int smf_tuned_threads_for(const smf::CscLower &A)
+{
+    const int hw = smf_hardware_threads();
+    if (hw <= 1)
+        return 1;
+    const int n = static_cast<int>(A.n);
+    const int nnz = static_cast<int>(A.nnz());
+    // MA27-style medium/small SPD cases are memory-latency bound in smf today;
+    // OpenMP task overhead outweighs gains. Keep these serial.
+    if (n < 10000 || nnz < 50000)
+        return 1;
+    return std::min(hw, 8);
+}
+
+static smf::Control make_smf_bench_control(const smf::CscLower &A)
+{
+    smf::Control ctrl;
+    ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = smf::OrderingMethod::AutoParallel;
+    ctrl.num_threads = smf_tuned_threads_for(A);
+    return ctrl;
+}
+
 static double smf_run(const smf::CscLower &A, std::vector<double> &x_out, SmfTimes &t)
 {
     const smf::Int n = A.n;
     x_out.assign(static_cast<std::size_t>(n), 1.0);
 
-    smf::Control ctrl;
-    ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
+    const smf::Control ctrl = make_smf_bench_control(A);
     smf::Info info;
     smf::Solver solver;
 
@@ -383,8 +413,7 @@ struct RepeatedTimes
 static bool smf_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
 {
     const smf::Int n = A.n;
-    smf::Control ctrl;
-    ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
+    const smf::Control ctrl = make_smf_bench_control(A);
     smf::Info info;
     smf::Solver solver;
 
@@ -968,6 +997,7 @@ static int warmup_runs_for(int N) { return (N > 500) ? 2 : 3; }
 int main()
 {
     std::puts("=== bench_compare: smf vs CHOLMOD vs MA27 vs MUMPS ===");
+    std::printf("smf tuned threads: up to %d (size-adaptive)\n", smf_hardware_threads());
 
 #ifdef SMF_HAS_CHOLMOD
     std::puts("CHOLMOD : available");
