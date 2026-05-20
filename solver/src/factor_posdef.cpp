@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <numeric>
 
 namespace smf {
@@ -126,11 +127,8 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
         8192u;
     AlignedArena arena(arena_sz);
 
-    const std::vector<Int> col_indices(
-        fi.row_indices.begin(),
-        fi.row_indices.begin() + static_cast<std::ptrdiff_t>(p));
-
-    FrontalMatrix F(f, p, fi.row_indices, col_indices, arena);
+    // col_indices precomputed at analyse() time.
+    FrontalMatrix F(f, p, fi.row_indices, fi.col_indices, arena);
     F.zero();
 
     double *a22 = nullptr;
@@ -142,11 +140,23 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
       std::memset(a22, 0, nbytes);
     }
 
-    // Scatter original A entries (read-only from Ap).
-    F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+    // Scatter original A entries (two-pointer merge: O(nnz_per_sn + f)).
+    for (Int j = 0; j < p; ++j) {
+      const Int orig_col = fi.col_indices[static_cast<std::size_t>(j)];
+      const Int cs = Ap.col_ptr[static_cast<std::size_t>(orig_col)];
+      const Int ce = Ap.col_ptr[static_cast<std::size_t>(orig_col) + 1];
+      std::size_t fri = static_cast<std::size_t>(j);
+      for (Int k = cs; k < ce; ++k) {
+        const Int orig_row = Ap.row_idx[static_cast<std::size_t>(k)];
+        while (fi.row_indices[fri] < orig_row) ++fri;
+        F.data()[static_cast<std::size_t>(j) * static_cast<std::size_t>(f) + fri] +=
+            Ap.values[static_cast<std::size_t>(k)];
+      }
+    }
 
     // Assemble child contributions (children are fully done by taskwait).
-    for (const Int c : sn.children) {
+    for (std::size_t ck = 0; ck < sn.children.size(); ++ck) {
+      const Int c = sn.children[ck];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
@@ -158,20 +168,27 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
         continue;
 
       const double *cc = contrib[ci].data();
-      const FrontalInfo &fi_c = keep.fronts[ci];
 
-      std::vector<Int> parent_rows(static_cast<std::size_t>(q_c));
-      for (Int ii = 0; ii < q_c; ++ii) {
-        const Int ext_row =
-            fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-        const auto it = std::lower_bound(fi.row_indices.begin(),
-                                         fi.row_indices.end(), ext_row);
-        parent_rows[static_cast<std::size_t>(ii)] =
-            static_cast<Int>(it - fi.row_indices.begin());
+      // Raw pointer into flat CPR data (no per-call allocation).
+      const Int* parent_rows = keep.cpr_data.data() +
+          static_cast<std::size_t>(
+              keep.cpr_ch_off[static_cast<std::size_t>(keep.cpr_sn_off[si]) + ck]);
+
+      // Inline assemble_contrib: A11/A21 entries (pr_j < p → pivot col).
+      // Column-major: F.data()[col*f + row] where col = pr_j, row = parent_rows[i].
+      {
+        double* Fdata = F.data();
+        for (Int j = 0; j < q_c; ++j) {
+          const Int pr_j = parent_rows[static_cast<std::size_t>(j)];
+          if (pr_j >= p) continue;
+          for (Int i = j; i < q_c; ++i) {
+            Fdata[static_cast<std::size_t>(pr_j) * static_cast<std::size_t>(f) +
+                  static_cast<std::size_t>(parent_rows[static_cast<std::size_t>(i)])] +=
+                cc[static_cast<std::size_t>(j) * static_cast<std::size_t>(q_c) +
+                   static_cast<std::size_t>(i)];
+          }
+        }
       }
-
-      // Assemble A11/A21 parts into F.
-      F.assemble_contrib(cc, q_c, parent_rows);
 
       // Assemble A22 parts where both row and col map to parent extended rows.
       if (q > 0) {
@@ -343,8 +360,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   // ---- Main postorder loop ------------------------------------------------
   for (Int pos = 0; pos < ns; ++pos) {
     const Int s = postorder[static_cast<std::size_t>(pos)];
-    const FrontalInfo &fi = keep.fronts[static_cast<std::size_t>(s)];
-    const Supernode &sn = keep.supernodes[static_cast<std::size_t>(s)];
+    const std::size_t si = static_cast<std::size_t>(s);
+    const FrontalInfo &fi = keep.fronts[si];
+    const Supernode &sn = keep.supernodes[si];
 
     const Int p = sn.width();      // pivot column count
     const Int f = fi.front_size(); // total front rows
@@ -360,13 +378,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     // Save arena so we can recycle it after this supernode
     const AlignedArena::Marker arena_mark = arena.save();
 
-    // Build col_indices = first p entries of row_indices (pivot columns)
-    const std::vector<Int> col_indices(fi.row_indices.begin(),
-                                       fi.row_indices.begin() +
-                                           static_cast<std::ptrdiff_t>(p));
-
-    // Allocate and zero the f×p frontal matrix
-    FrontalMatrix F(f, p, fi.row_indices, col_indices, arena);
+    // Allocate and zero the f×p frontal matrix (col_indices precomputed at analyse time)
+    FrontalMatrix F(f, p, fi.row_indices, fi.col_indices, arena);
     F.zero();
 
     // Allocate and zero the q×q A22 accumulator in the arena
@@ -379,13 +392,21 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
       std::memset(a22, 0, a22_bytes);
     }
 
-    // --- Scatter original entries from permuted A -----------------------
-    // A11 (rows 0..p-1, cols 0..p-1) and A21 (rows p..f-1, cols 0..p-1) → F.
-    // A22 (ext-row × ext-col) is NOT scattered here: those entries belong to
-    // later supernodes that own those columns as pivot columns.  The a22
-    // accumulator is zero-initialised above and receives only child Schur
-    // complements assembled in the loop below.
-    F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+    // --- Scatter original entries from permuted A (two-pointer merge) ------
+    // fi.row_indices and A_perm columns are both sorted; two-pointer scan is
+    // O(nnz_per_sn + f) vs O(nnz_per_sn * log(f)) for binary search.
+    for (Int j = 0; j < p; ++j) {
+      const Int orig_col = fi.col_indices[static_cast<std::size_t>(j)];
+      const Int cs = Ap.col_ptr[static_cast<std::size_t>(orig_col)];
+      const Int ce = Ap.col_ptr[static_cast<std::size_t>(orig_col) + 1];
+      std::size_t fri = static_cast<std::size_t>(j); // diagonal is at position j
+      for (Int k = cs; k < ce; ++k) {
+        const Int orig_row = Ap.row_idx[static_cast<std::size_t>(k)];
+        while (fi.row_indices[fri] < orig_row) ++fri;
+        F.data()[static_cast<std::size_t>(j) * static_cast<std::size_t>(f) + fri] +=
+            Ap.values[static_cast<std::size_t>(k)];
+      }
+    }
 
     // --- Assemble child contributions -----------------------------------
     // Sort children by postorder index descending to match LIFO free order
@@ -395,28 +416,42 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
              po_idx[static_cast<std::size_t>(b)];
     });
 
+    // Lambda: find child c's index in sn.children (O(|children|), children
+    // list is typically tiny — 2-4 elements for typical sparse problems).
+    auto child_k = [&](Int c) -> std::size_t {
+      for (std::size_t k = 0; k < sn.children.size(); ++k)
+        if (sn.children[k] == c) return k;
+      return std::numeric_limits<std::size_t>::max(); // unreachable
+    };
+
     for (const Int c : sorted_ch) {
       const Int q_c = contrib_q[static_cast<std::size_t>(c)];
       if (q_c <= 0)
         continue;
 
       const double *cc = contrib_ptrs[static_cast<std::size_t>(c)];
-      const FrontalInfo &fi_c = keep.fronts[static_cast<std::size_t>(c)];
-      const Int p_c = keep.supernodes[static_cast<std::size_t>(c)].width();
 
-      // Build parent_rows: child extended row i → parent front row index
-      std::vector<Int> parent_rows(static_cast<std::size_t>(q_c));
-      for (Int ii = 0; ii < q_c; ++ii) {
-        const Int ext_row =
-            fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-        const auto it = std::lower_bound(fi.row_indices.begin(),
-                                         fi.row_indices.end(), ext_row);
-        parent_rows[static_cast<std::size_t>(ii)] =
-            static_cast<Int>(it - fi.row_indices.begin());
+      // Raw pointer into flat CPR data (no per-call allocation).
+      const std::size_t ck = child_k(c);
+      const Int* parent_rows = keep.cpr_data.data() +
+          static_cast<std::size_t>(
+              keep.cpr_ch_off[static_cast<std::size_t>(keep.cpr_sn_off[si]) + ck]);
+
+      // Inline assemble_contrib: A11/A21 entries (pr_j < p → pivot col).
+      // Column-major: F.data()[col*f + row].
+      {
+        double* Fdata = F.data();
+        for (Int j = 0; j < q_c; ++j) {
+          const Int pr_j = parent_rows[static_cast<std::size_t>(j)];
+          if (pr_j >= p) continue;
+          for (Int i = j; i < q_c; ++i) {
+            Fdata[static_cast<std::size_t>(pr_j) * static_cast<std::size_t>(f) +
+                  static_cast<std::size_t>(parent_rows[static_cast<std::size_t>(i)])] +=
+                cc[static_cast<std::size_t>(j) * static_cast<std::size_t>(q_c) +
+                   static_cast<std::size_t>(i)];
+          }
+        }
       }
-
-      // Assemble A11/A21 parts into F
-      F.assemble_contrib(cc, q_c, parent_rows);
 
       // Assemble A22 parts (where both row and col map to parent extended)
       if (q > 0) {

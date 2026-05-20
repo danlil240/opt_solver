@@ -215,6 +215,72 @@ namespace smf
         keep->supernodes = std::move(snodes);
         keep->fronts = std::move(fronts);
 
+        // Step 10.5: Build flat CSR child→parent row maps.
+        // Replaces per-supernode vector<vector<Int>> (O(N) allocs) with 3 allocations.
+        // For sn si, child ck (0-based in sn.children), ext row ii:
+        //   parent_row_pos = cpr_data[ cpr_ch_off[ cpr_sn_off[si] + ck ] + ii ]
+        {
+            const std::size_t n_sn2 = keep->supernodes.size();
+
+            // Pass 1: build cpr_sn_off and cpr_ch_off (sizes only).
+            keep->cpr_sn_off.resize(n_sn2 + 1);
+            keep->cpr_sn_off[0] = 0;
+            for (std::size_t si2 = 0; si2 < n_sn2; ++si2)
+                keep->cpr_sn_off[si2 + 1] = keep->cpr_sn_off[si2] +
+                    static_cast<Int>(keep->supernodes[si2].children.size());
+
+            const std::size_t total_ch =
+                static_cast<std::size_t>(keep->cpr_sn_off[n_sn2]);
+            keep->cpr_ch_off.resize(total_ch + 1);
+            keep->cpr_ch_off[0] = 0;
+            {
+                std::size_t ch_idx = 0;
+                for (std::size_t si2 = 0; si2 < n_sn2; ++si2) {
+                    for (const Int c : keep->supernodes[si2].children) {
+                        const Int p_c =
+                            keep->supernodes[static_cast<std::size_t>(c)].width();
+                        const Int q_c =
+                            keep->fronts[static_cast<std::size_t>(c)].front_size() - p_c;
+                        keep->cpr_ch_off[ch_idx + 1] =
+                            keep->cpr_ch_off[ch_idx] + q_c;
+                        ++ch_idx;
+                    }
+                }
+            }
+
+            // Pass 2: allocate flat data and fill via two-pointer merge.
+            const std::size_t total_data =
+                static_cast<std::size_t>(keep->cpr_ch_off[total_ch]);
+            keep->cpr_data.resize(total_data);
+            {
+                std::size_t ch_idx = 0;
+                for (std::size_t si2 = 0; si2 < n_sn2; ++si2) {
+                    const FrontalInfo& fi2 = keep->fronts[si2];
+                    const std::size_t f_sz =
+                        static_cast<std::size_t>(fi2.front_size());
+                    for (const Int c : keep->supernodes[si2].children) {
+                        const FrontalInfo& cfi =
+                            keep->fronts[static_cast<std::size_t>(c)];
+                        const Int p_c =
+                            keep->supernodes[static_cast<std::size_t>(c)].width();
+                        const Int q_c = cfi.front_size() - p_c;
+                        Int* dst = keep->cpr_data.data() +
+                            static_cast<std::size_t>(keep->cpr_ch_off[ch_idx]);
+                        std::size_t pi = 0;
+                        for (Int ii = 0; ii < q_c; ++ii) {
+                            const Int ext_row = cfi.row_indices[
+                                static_cast<std::size_t>(p_c + ii)];
+                            while (pi < f_sz && fi2.row_indices[pi] < ext_row)
+                                ++pi;
+                            dst[static_cast<std::size_t>(ii)] =
+                                static_cast<Int>(pi);
+                        }
+                        ++ch_idx;
+                    }
+                }
+            }
+        }
+
         return keep;
     }
 

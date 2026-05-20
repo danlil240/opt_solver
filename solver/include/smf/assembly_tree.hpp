@@ -10,6 +10,8 @@ namespace smf {
 /// Per-supernode data needed for assembly and factorization.
 struct FrontalInfo {
     std::vector<Int> row_indices; ///< all row indices in the frontal matrix, sorted
+    std::vector<Int> col_indices; ///< first width() entries of row_indices (pivot column indices)
+
     Int front_size() const { return static_cast<Int>(row_indices.size()); }
 };
 

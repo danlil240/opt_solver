@@ -81,6 +81,11 @@ std::vector<FrontalInfo> build_assembly_tree(
         // dirty[] is not ordered; sort to produce the required ascending order.
         fi.row_indices = dirty;
         std::sort(fi.row_indices.begin(), fi.row_indices.end());
+
+        // --- Step 5: Store col_indices = first p entries (pivot column indices) ---
+        const Int p_sn = sn.width();
+        fi.col_indices.assign(fi.row_indices.begin(),
+                              fi.row_indices.begin() + static_cast<std::ptrdiff_t>(p_sn));
     }
 
     // Compute prediction stats

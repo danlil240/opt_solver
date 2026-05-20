@@ -20,6 +20,14 @@ struct AnalysisKeep {
     std::vector<Supernode>   supernodes;        ///< amalgamated supernodes
     std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info
     Int                      n = 0;             ///< matrix order (= cleaned.n)
+
+    /// Flat CSR child→parent row maps (3 allocations vs O(N) with per-supernode
+    /// vector<vector<Int>>).  For supernode si, child ck (0-based in sn.children),
+    /// extension row ii:
+    ///   parent_row_pos = cpr_data[ cpr_ch_off[ cpr_sn_off[si] + ck ] + ii ]
+    std::vector<Int>         cpr_sn_off;        ///< [si] = start of sn si's children in cpr_ch_off; size = n_sn+1
+    std::vector<Int>         cpr_ch_off;        ///< per (sn,child): start in cpr_data; size = total_children+1
+    std::vector<Int>         cpr_data;          ///< flat parent row positions for all children
 };
 
 } // namespace smf

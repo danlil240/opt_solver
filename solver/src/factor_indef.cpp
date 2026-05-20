@@ -63,17 +63,26 @@ factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
     if (p == 0)
       return;
 
-    // Per-task arena.
+    // Per-task arena — not shared with other concurrent tasks.
     AlignedArena arena(static_cast<std::size_t>(8) << 20); // 8 MiB per task
+    // Column indices precomputed at analyse() time.
     AlignedArena::Marker mark = arena.save();
+    FrontalMatrix front(f, p, fi.row_indices, fi.col_indices, arena);
 
-    std::vector<Int> col_idx(fi.row_indices.cbegin(),
-                             fi.row_indices.cbegin() +
-                                 static_cast<std::ptrdiff_t>(p));
-    FrontalMatrix front(f, p, fi.row_indices, col_idx, arena);
-
-    // Scatter from permuted matrix (analysis ordering).
-    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+    // Scatter from permuted matrix (two-pointer merge: O(nnz_per_sn + f)).
+    for (Int j = 0; j < p; ++j) {
+      const Int orig_col = fi.col_indices[static_cast<std::size_t>(j)];
+      const Int cs = Ap.col_ptr[static_cast<std::size_t>(orig_col)];
+      const Int ce = Ap.col_ptr[static_cast<std::size_t>(orig_col) + 1];
+      std::size_t fri = static_cast<std::size_t>(j);
+      for (Int k = cs; k < ce; ++k) {
+        const Int orig_row = Ap.row_idx[static_cast<std::size_t>(k)];
+        while (fi.row_indices[fri] < orig_row) ++fri;
+        front.data()[static_cast<std::size_t>(j) *
+                         static_cast<std::size_t>(f) + fri] +=
+            Ap.values[static_cast<std::size_t>(k)];
+      }
+    }
 
     // a22[col*ext+row] for row>=col: accumulates child A22 contributions.
     std::vector<double> a22_par;
@@ -81,28 +90,38 @@ factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
       a22_par.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // Assemble children contributions (all done by taskwait).
-    for (const Int c : sn.children) {
+    for (std::size_t ck = 0; ck < sn.children.size(); ++ck) {
+      const Int c = sn.children[ck];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
-      const Supernode &csn = keep.supernodes[ci];
-      const FrontalInfo &cfi = keep.fronts[ci];
-      const Int cp = csn.width();
-      const Int cext = cfi.front_size() - cp;
+      const Int cext = keep.fronts[ci].front_size() -
+                       keep.supernodes[ci].width();
       if (cext <= 0)
         continue;
 
-      std::vector<Int> prows(static_cast<std::size_t>(cext));
-      for (Int i = 0; i < cext; ++i) {
-        const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
-        const auto it = std::lower_bound(fi.row_indices.cbegin(),
-                                         fi.row_indices.cend(), glob);
-        prows[static_cast<std::size_t>(i)] =
-            static_cast<Int>(it - fi.row_indices.cbegin());
-      }
+      // Raw pointer into flat CPR data (no per-call allocation).
+      const Int* prows = keep.cpr_data.data() +
+          static_cast<std::size_t>(
+              keep.cpr_ch_off[static_cast<std::size_t>(keep.cpr_sn_off[si]) + ck]);
 
-      front.assemble_contrib(contrib[ci].data(), cext, prows);
+      // Inline assemble_contrib: A11/A21 entries (pr_j < p → pivot col).
+      // Column-major: front.data()[col*f + row].
+      {
+        double* Fdata = front.data();
+        for (Int j = 0; j < cext; ++j) {
+          const Int pr_j = prows[static_cast<std::size_t>(j)];
+          if (pr_j >= p) continue;
+          for (Int i = j; i < cext; ++i) {
+            Fdata[static_cast<std::size_t>(pr_j) * static_cast<std::size_t>(f) +
+                  static_cast<std::size_t>(prows[static_cast<std::size_t>(i)])] +=
+                contrib[ci].data()[static_cast<std::size_t>(j) *
+                                       static_cast<std::size_t>(cext) +
+                                   static_cast<std::size_t>(i)];
+          }
+        }
+      }
 
       // Accumulate A22-type child contributions into a22_par.
       if (ext > 0) {
@@ -379,16 +398,24 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
     if (p == 0)
       continue;
 
-    // Column indices for this supernode = first p rows of the front.
-    std::vector<Int> col_idx(fi.row_indices.cbegin(),
-                             fi.row_indices.cbegin() +
-                                 static_cast<std::ptrdiff_t>(p));
-
+    // Column indices precomputed at analyse() time.
     AlignedArena::Marker mark = arena.save();
-    FrontalMatrix front(f, p, fi.row_indices, col_idx, arena);
+    FrontalMatrix front(f, p, fi.row_indices, fi.col_indices, arena);
 
-    // ---- Scatter permuted A values ----------------------------------
-    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
+    // ---- Scatter permuted A values (two-pointer merge: O(nnz_per_sn + f)) --
+    for (Int j = 0; j < p; ++j) {
+      const Int orig_col = fi.col_indices[static_cast<std::size_t>(j)];
+      const Int cs = Ap.col_ptr[static_cast<std::size_t>(orig_col)];
+      const Int ce = Ap.col_ptr[static_cast<std::size_t>(orig_col) + 1];
+      std::size_t fri = static_cast<std::size_t>(j);
+      for (Int k = cs; k < ce; ++k) {
+        const Int orig_row = Ap.row_idx[static_cast<std::size_t>(k)];
+        while (fi.row_indices[fri] < orig_row) ++fri;
+        front.data()[static_cast<std::size_t>(j) *
+                         static_cast<std::size_t>(f) + fri] +=
+            Ap.values[static_cast<std::size_t>(k)];
+      }
+    }
 
     // a22[col*ext+row] for row>=col: accumulates child A22 contributions
     // that land in extension×extension positions of this front.
@@ -397,28 +424,38 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
       a22.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
 
     // ---- Assemble child contribution blocks -------------------------
-    for (Int c : sn.children) {
+    for (std::size_t ck = 0; ck < sn.children.size(); ++ck) {
+      const Int c = sn.children[ck];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
-      const Supernode &csn = keep.supernodes[ci];
-      const FrontalInfo &cfi = keep.fronts[ci];
-      const Int cp = csn.width();
-      const Int cext = cfi.front_size() - cp;
+      const Int cext = keep.fronts[ci].front_size() -
+                       keep.supernodes[ci].width();
       if (cext <= 0)
         continue;
 
-      std::vector<Int> prows(static_cast<std::size_t>(cext));
-      for (Int i = 0; i < cext; ++i) {
-        const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
-        const auto it = std::lower_bound(fi.row_indices.cbegin(),
-                                         fi.row_indices.cend(), glob);
-        prows[static_cast<std::size_t>(i)] =
-            static_cast<Int>(it - fi.row_indices.cbegin());
-      }
+      // Raw pointer into flat CPR data (no per-call allocation).
+      const Int* prows = keep.cpr_data.data() +
+          static_cast<std::size_t>(
+              keep.cpr_ch_off[static_cast<std::size_t>(keep.cpr_sn_off[si]) + ck]);
 
-      front.assemble_contrib(contrib[ci].data(), cext, prows);
+      // Inline assemble_contrib: A11/A21 entries (pr_j < p → pivot col).
+      // Column-major: front.data()[col*f + row].
+      {
+        double* Fdata = front.data();
+        for (Int j = 0; j < cext; ++j) {
+          const Int pr_j = prows[static_cast<std::size_t>(j)];
+          if (pr_j >= p) continue;
+          for (Int i = j; i < cext; ++i) {
+            Fdata[static_cast<std::size_t>(pr_j) * static_cast<std::size_t>(f) +
+                  static_cast<std::size_t>(prows[static_cast<std::size_t>(i)])] +=
+                contrib[ci].data()[static_cast<std::size_t>(j) *
+                                       static_cast<std::size_t>(cext) +
+                                   static_cast<std::size_t>(i)];
+          }
+        }
+      }
 
       // Accumulate A22-type entries (both row and col map to extension rows)
       // into a22, so the contribution block carries the full Schur complement.
