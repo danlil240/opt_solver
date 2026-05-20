@@ -2,7 +2,7 @@
 # READ before any build/compile/test/install. UPDATE immediately on state change.
 # Exclusive ops (BUILDING / TESTING / INSTALLING): only one agent may hold these at a time.
 
-# Phase 10 complete. Bug fix: assembly_tree fill-propagation
-[Alpha] status=DONE             mission=BugFix.AssemblyTree  op=done  updated=2026-05-19T21:00:00Z
+# Phase 11 active. Bug fix: indefinite factorization accuracy
+[Alpha] status=DONE  mission=BugFix.IndefFactor  op=done  updated=2026-05-20T11:30:00Z
 [Beta]  status=IDLE            mission=none                 op=idle        updated=2026-05-19T15:20:00Z
 [Gamma] status=IDLE            mission=none                 op=idle        updated=2026-05-19T15:00:00Z

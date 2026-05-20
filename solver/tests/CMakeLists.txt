@@ -210,3 +210,9 @@ add_test(NAME MatrixMarketTest COMMAND test_suite_sparse_matrix_market)
 add_executable(test_poisson_2d test_poisson_2d.cpp)
 target_link_libraries(test_poisson_2d PRIVATE smf GTest::gtest_main)
 add_test(NAME Poisson2D COMMAND test_poisson_2d)
+
+# --- BugFix.IndefFactor: larger indefinite factorization regression tests ---
+
+add_executable(test_indef_larger test_indef_larger.cpp)
+target_link_libraries(test_indef_larger PRIVATE smf GTest::gtest_main)
+add_test(NAME IndefLarger COMMAND test_indef_larger)
