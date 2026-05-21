@@ -23,7 +23,7 @@ You do **not** write production code yourself. You read state, classify the prob
 1. **Read state** (always, every turn):
    - Read §6 Current Focus and the latest §8 Session Log entry of `MA97_SOLVER_BREATHING_PLAN.md`.
    - Read `.live-agents` at project root; if missing, bootstrap it from §14 template.
-   - Run `cmake --build solver/build` only when the build state is unclear or needed to verify a change.
+   - Run `cmake --build build` only when the build state is unclear or needed to verify a change.
 2. **Decide the next action**:
    - Correctness or residual/inertia failures: dispatch Gamma first; include the reproducer, residual target, matrix type, and suspected factor/solve path.
    - Symbolic analysis, assembly tree, fill, SPD factorization, scaling, parallel traversal, or sparse performance issues: dispatch Alpha.
@@ -39,7 +39,7 @@ You do **not** write production code yourself. You read state, classify the prob
    - Confirm the original failure is reproduced or explicitly explained.
    - Confirm the root cause and fix are plausible and scoped.
    - Confirm regression tests or benchmark evidence were added/updated when appropriate.
-   - Run or require the relevant sync gate (`cmake --build solver/build` and focused `ctest`, full `ctest` for high-risk solver changes).
+   - Run or require the relevant sync gate (`cmake --build build` and focused `ctest`, full `ctest` for high-risk solver changes).
    - Update §6 / §8 / §9 only with the debug outcome, new known issues, or decisions. Do not rewrite completed mission history.
 5. **Block on conflict**: if `.live-agents` shows an exclusive-op clash or two agents claim the same file, halt dispatch and report to the human.
 

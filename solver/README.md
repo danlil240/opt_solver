@@ -17,15 +17,15 @@
 Configure and build from the repository root with an out-of-source build directory:
 
 ```bash
-cmake -S solver -B solver/build
-cmake --build solver/build -- -j$(nproc)
+cmake -S solver -B build
+cmake --build build -- -j$(nproc)
 ```
 
 To enable address/UB sanitizers:
 
 ```bash
-cmake -S solver -B solver/build -DSMF_SANITIZE=ON
-cmake --build solver/build -- -j$(nproc)
+cmake -S solver -B build -DSMF_SANITIZE=ON
+cmake --build build -- -j$(nproc)
 ```
 
 Available CMake options (all `ON` unless noted):
@@ -44,5 +44,5 @@ Available CMake options (all `ON` unless noted):
 ## How to run tests
 
 ```bash
-ctest --test-dir solver/build --output-on-failure
+ctest --test-dir build --output-on-failure
 ```

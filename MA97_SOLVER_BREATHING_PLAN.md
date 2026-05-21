@@ -66,7 +66,7 @@ Build `smf` — a C++20 sparse symmetric multifrontal direct solver inspired by 
   - acceptance:
     - Directory layout matches `ma97_solver_implementation_plan.md` §1 exactly (paths under `solver/include/smf/` and `solver/src/`).
     - CMake finds `BLAS`, `LAPACK`, `OpenMP` (required), `SuiteSparse::AMD`, `METIS` (required for now — fail fast if missing), `GTest` (test target).
-    - `cmake -S solver -B solver/build && cmake --build solver/build` succeeds with an empty placeholder library and a hello-world unit test.
+    - `cmake -S solver -B build && cmake --build build` succeeds with an empty placeholder library and a hello-world unit test.
     - Compiler flags: `-std=c++20 -Wall -Wextra -Wpedantic -O2 -g`; sanitizers gated by `SMF_SANITIZE=ON`.
     - CMake options exposed: `SMF_ENABLE_OPENMP`, `SMF_USE_MKL`, `SMF_USE_METIS`, `SMF_USE_SUITESPARSE_AMD`, `SMF_DETERMINISTIC`, `SMF_BUILD_TESTS`, `SMF_BUILD_BENCHMARKS`.
   - notes: README must contain a one-paragraph "How to build" + how to run tests.
@@ -120,7 +120,7 @@ Build `smf` — a C++20 sparse symmetric multifrontal direct solver inspired by 
     - Residual `‖A − P L D Lᵀ Pᵀ‖_F / ‖A‖_F < 1e-12` on all dense test cases.
   - notes: this mission is the foundation of indefinite correctness. Any bug here will propagate. Do not optimize — keep it readable. **No sparse code in this mission.**
 
-> **Sync gate after pg:1**: all three missions `[x]`, `cmake --build solver/build && ctest --test-dir solver/build` green. Update §6 Current Focus.
+> **Sync gate after pg:1**: all three missions `[x]`, `cmake --build build && ctest --test-dir build` green. Update §6 Current Focus.
 
 ### Phase 2 — Symbolic analysis
 
@@ -505,7 +505,7 @@ target_link_libraries(my_solver PRIVATE smf::smf)
 - [ ] Confirmed §6 Current Focus matches the mission I'm about to work on.
 - [ ] Read §4 Do Not Touch.
 - [ ] Confirmed I am not duplicating completed work (search for the mission ID in the Session Log).
-- [ ] Confirmed current build state: `cmake --build solver/build` succeeds (skip if M0.S1 not yet done).
+- [ ] Confirmed current build state: `cmake --build build` succeeds (skip if M0.S1 not yet done).
 - [ ] Read `.live-agents` at project root; **created it from §14 template if missing**; updated my own line to `status=STARTING op=self-check`.
 - [ ] Confirmed no other agent currently holds `BUILDING`, `TESTING`, or `INSTALLING`.
 - [ ] (Parallel waves only) Ran the full **Agent Self-Check** (§13) — confirmed correct Agent-ID, wave, and that my owned files do not collide with another agent's owned files.
@@ -557,8 +557,8 @@ Conflict check: none detected — single sequential agent; no parallel waves act
 - `.live-agents` — updated Alpha line throughout session
 
 **Validation / Evidence**
-- Build: ✅ — `cmake -S solver -B solver/build && cmake --build solver/build -- -j$(nproc)` — `[100%] Built target test_hello`
-- Tests: ✅ — `ctest --test-dir solver/build --output-on-failure` — `1/1 Test #1: Smoke.Hello ... Passed  0.00 sec — 100% tests passed`
+- Build: ✅ — `cmake -S solver -B build && cmake --build build -- -j$(nproc)` — `[100%] Built target test_hello`
+- Tests: ✅ — `ctest --test-dir build --output-on-failure` — `1/1 Test #1: Smoke.Hello ... Passed  0.00 sec — 100% tests passed`
 - Runtime/Smoke: ✅ — All dependencies found: BLAS/LAPACK/OpenMP/AMD/METIS/GTest
 - Perf/Benchmark (if relevant): n/a
 
@@ -573,7 +573,7 @@ Conflict check: none detected — single sequential agent; no parallel waves act
 
 ---
 **HANDOFF — Next Session Start Here (First 10 Minutes)**
-1. M0.S1 is DONE; `cmake --build solver/build && ctest --test-dir solver/build` green.
+1. M0.S1 is DONE; `cmake --build build && ctest --test-dir build` green.
 2. Next mission is M0.S2 (Public types, Control, Info, CscLower, error codes) — depends_on M0.S1.
 3. Read `ma97_solver_implementation_plan.md` §2 and §10 before writing any headers for M0.S2.
 ---
@@ -621,8 +621,8 @@ Conflict check: none detected — single sequential agent; no parallel waves act
 - `MA97_SOLVER_BREATHING_PLAN.md` — M0.S2=[x], §6 updated to Phase 1, Session 002 appended
 
 **Validation / Evidence**
-- Build: ✅ — `cmake --build solver/build` — zero warnings under -Wall -Wextra -Wpedantic; [100%] Built target test_types
-- Tests: ✅ — `ctest --test-dir solver/build --output-on-failure` — 2/2 tests passed (Smoke.Hello + Types, 11 subtests in Types)
+- Build: ✅ — `cmake --build build` — zero warnings under -Wall -Wextra -Wpedantic; [100%] Built target test_types
+- Tests: ✅ — `ctest --test-dir build --output-on-failure` — 2/2 tests passed (Smoke.Hello + Types, 11 subtests in Types)
 - No BLAS/LAPACK/METIS includes in any public header under include/smf/: ✅ (confirmed by inspection)
 - Enum values match spec exactly (SolveJob Full=0..DiagBack=4): ✅
 
@@ -637,7 +637,7 @@ Conflict check: none detected — single sequential agent; no parallel waves act
 
 ---
 **HANDOFF — Next Session Start Here (First 10 Minutes)**
-1. M0.S1 and M0.S2 are both DONE; Phase 0 complete; `cmake --build solver/build && ctest --test-dir solver/build` green (2/2 tests).
+1. M0.S1 and M0.S2 are both DONE; Phase 0 complete; `cmake --build build && ctest --test-dir build` green (2/2 tests).
 2. Next missions are Phase 1 pg:1 parallel wave: M1.A1 (Alpha), M1.B1 (Beta), M1.G1 (Gamma) — all depend on M0.S2.
 3. Read MA97_SOLVER_BREATHING_PLAN.md §13 (Parallel Execution Map) before launching pg:1.
 ---
@@ -683,8 +683,8 @@ Conflict check: none detected — agents operated on strictly disjoint files
 - `solver/tests/CMakeLists.txt` — registered 6 new test executables
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build -- -j$(nproc)` — zero errors, zero warnings
-- Tests: ✅ `ctest --test-dir solver/build --output-on-failure` — 8/8 PASSED (Smoke.Hello, Types, MatrixCheck, BlasWrap, Arena, CholeskyDense, LDLTDense, InertiaDense)
+- Build: ✅ `cmake --build build -- -j$(nproc)` — zero errors, zero warnings
+- Tests: ✅ `ctest --test-dir build --output-on-failure` — 8/8 PASSED (Smoke.Hello, Types, MatrixCheck, BlasWrap, Arena, CholeskyDense, LDLTDense, InertiaDense)
 - Arena bug fix: old_bufs_ vector keeps freed-but-referenced allocations alive until destructor
 
 **Mission status updates**
@@ -741,8 +741,8 @@ Implement `CooMatrix` struct + `coo_to_lower_csc()` converter, comprehensive tes
 - `MA97_SOLVER_BREATHING_PLAN.md` — Session 017 appended
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build --parallel 4` — zero errors, zero warnings
-- Tests: ✅ `ctest --test-dir solver/build --output-on-failure` — 34/34 PASSED (all 33 prior tests green + CooInput 10/10)
+- Build: ✅ `cmake --build build --parallel 4` — zero errors, zero warnings
+- Tests: ✅ `ctest --test-dir build --output-on-failure` — 34/34 PASSED (all 33 prior tests green + CooInput 10/10)
 - IntegrationWithSolver residual: < 1e-12 (5×5 tridiagonal SPD, Cholesky factorization)
 - No BLAS, no external libs, no std::map in coo_to_csc.cpp: ✅
 
@@ -808,8 +808,8 @@ Implement `solve_sparse_forward()` — a sparse forward solve that exploits RHS 
 - `MA97_SOLVER_BREATHING_PLAN.md` — M9.S3=[x], §6 updated, §10 updated, Session 019 appended
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build --parallel 4` — zero errors, zero warnings (-Wall -Wextra -Wpedantic clean)
-- Tests: ✅ `ctest --test-dir solver/build --output-on-failure` — **36/36 PASSED** (all 35 prior tests green + SparseFwdSolve 5/5)
+- Build: ✅ `cmake --build build --parallel 4` — zero errors, zero warnings (-Wall -Wextra -Wpedantic clean)
+- Tests: ✅ `ctest --test-dir build --output-on-failure` — **36/36 PASSED** (all 35 prior tests green + SparseFwdSolve 5/5)
 - Correctness tolerance: 1e-14 × ‖x‖_∞ — all 5 cases pass
 - ReachSizeSmall: block-diagonal 100×100 with b=e_0 → reach.size() ≤ 10 (n/10) ✅
 - AllNonzeroRHS: b=all-ones → reach.size() = ns (all supernodes touched) ✅
@@ -877,9 +877,9 @@ Fix `solver/src/smf_ma97_plugin.cpp` to match HSL MA97 2.8/IPOPT 3.14 C ABI layo
 - `MA97_SOLVER_BREATHING_PLAN.md` — Session 020 appended
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build --target smf_ma97 -j4` — zero errors, zero warnings
-- Install: ✅ `cmake --install solver/build --prefix solver/install --component smf_ma97` — `solver/install/lib/libsmf_ma97.so` updated (3159192 bytes, timestamp 2026-05-20 14:02)
-- Tests: ✅ Enabled `SMF_BUILD_IPOPT_ADAPTER=ON` and rebuilt; `ctest --test-dir solver/build -R IpoptAdapter --output-on-failure` → **1/1 Test #34: IpoptAdapter .........  Passed (0.01 sec)**
+- Build: ✅ `cmake --build build --target smf_ma97 -j4` — zero errors, zero warnings
+- Install: ✅ `cmake --install build --prefix solver/install --component smf_ma97` — `solver/install/lib/libsmf_ma97.so` updated (3159192 bytes, timestamp 2026-05-20 14:02)
+- Tests: ✅ Enabled `SMF_BUILD_IPOPT_ADAPTER=ON` and rebuilt; `ctest --test-dir build -R IpoptAdapter --output-on-failure` → **1/1 Test #34: IpoptAdapter .........  Passed (0.01 sec)**
 - ABI explanation:
   - Before: IPOPT wrote `u=1e-8` at the offset where it expected HSL's `u` field, but plugin read from wrong offset due to layout mismatch, falling back to plugin default `u=0.01`
   - After: IPOPT's `u=1e-8` write lands at correct offset; plugin now reads `u=1e-8` and passes it to `smf::Control::pivot_u`
@@ -969,7 +969,7 @@ After Session 020's ABI fix, trajectory test still takes 1594 iterations (~10.4s
 **Validation / Evidence**
 - Build: ✅ 4 rebuilds, all clean, zero errors/warnings
 - Install: ✅ 4 reinstalls to `solver/install/lib/libsmf_ma97.so.1.0.0`
-- Tests: ✅ `ctest --test-dir solver/build -R SolveResidual` → **2/2 passed** (residuals 3.3e-17, 1.2e-17)
+- Tests: ✅ `ctest --test-dir build -R SolveResidual` → **2/2 passed** (residuals 3.3e-17, 1.2e-17)
 - Debug output shows pivot_u clamping works:
   ```
   [smf_ma97] DEBUG: matrix_type=4 ctrl->u=1.00e-08 current_pivot_u=1.00e-02
@@ -1053,7 +1053,7 @@ After Session 020's ABI fix, trajectory test still takes 1594 iterations (~10.4s
 The plan is closed when **all** of the following hold:
 
 - [ ] All Phase 0–8 missions are `[x]` and validated (Phase 9 is explicitly deferred).
-- [ ] `ctest --test-dir solver/build` is green at 0, 2, 4, and 8 threads.
+- [ ] `ctest --test-dir build` is green at 0, 2, 4, and 8 threads.
 - [ ] M5.S3 regression battery passes — all §15 DoD criteria from `ma97_solver_implementation_plan.md` are automated.
 - [ ] No unresolved `[!]` blocked mission remains.
 - [ ] Decision Log is complete and dated.
@@ -1129,7 +1129,7 @@ See §14 below for the canonical bootstrap. The file lives at `<project root>/.l
 
 **Step 4 — Sync gate after the wave**
 - All agents must report `Outcome: DONE` in their Session Log entries.
-- A single agent (or the human) runs the full test suite: `ctest --test-dir solver/build --output-on-failure`.
+- A single agent (or the human) runs the full test suite: `ctest --test-dir build --output-on-failure`.
 - Update §6 Current Focus to the next wave or sequential mission.
 - Only then launch the next wave.
 
@@ -1234,7 +1234,7 @@ Outcome: DONE — M2.S4 sync gate passed; Phase 3 pg:3a launched
 - `solver/src/ordering_amd.cpp` — added empty-adjncy guard + #include <numeric>
 
 **Validation / Evidence**
-- Build: ✅ cmake --build solver/build — zero errors
+- Build: ✅ cmake --build build — zero errors
 - Tests: ✅ ctest 15/15 PASSED
 
 **Mission status updates**
@@ -1245,7 +1245,7 @@ Outcome: DONE — M2.S4 sync gate passed; Phase 3 pg:3a launched
 1. Phase 2 complete. 15/15 tests green. M2.S4=[x].
 2. Next: Phase 3 pg:3a parallel wave — Alpha→M3.A1, Beta→M3.B1, Gamma→M3.G1.
 3. All three missions touch disjoint files; confirm .live-agents shows 3 agents WORKING with no file collisions.
-4. After all three report DONE, run sync gate: cmake --build solver/build && ctest --test-dir solver/build --output-on-failure
+4. After all three report DONE, run sync gate: cmake --build build && ctest --test-dir build --output-on-failure
 ---
 
 ### Session 006 — 2026-05-19 (Phase 3 pg:3a + pg:3b)
@@ -1288,7 +1288,7 @@ Outcome: DONE — both pg:3a and pg:3b sync gates passed (21/21 tests)
 - FactorStack::Buffer::init() removed +1 double in allocation (was inflating capacity by 8 bytes, breaking GrowthCount test)
 
 **Validation / Evidence**
-- Build: ✅ cmake --build solver/build -- -j$(nproc) — zero errors, zero warnings
+- Build: ✅ cmake --build build -- -j$(nproc) — zero errors, zero warnings
 - pg:3a gate: ✅ ctest 18/18 PASSED
 - pg:3b gate: ✅ ctest 21/21 PASSED
 
@@ -1305,7 +1305,7 @@ Outcome: DONE — both pg:3a and pg:3b sync gates passed (21/21 tests)
 1. Phase 3 complete. 21/21 tests green. All M3.* missions [x].
 2. Next: Phase 4 pg:4 parallel wave — Alpha→M4.A1 (forward solve), Beta→M4.B1 (diagonal/back solve), Gamma→M4.G1 (multi-RHS BLAS-3 path).
 3. Prerequisite: M3.A2 and M3.B2 [x] → confirmed.
-4. After all three report DONE, run sync gate: cmake --build solver/build && ctest --test-dir solver/build --output-on-failure
+4. After all three report DONE, run sync gate: cmake --build build && ctest --test-dir build --output-on-failure
 5. Then dispatch M4.S1 (sequential): integrate factor+solve into public Solver::factor/Solver::solve API.
 ---
 
@@ -1339,8 +1339,8 @@ Confidence: high
 - `MA97_SOLVER_BREATHING_PLAN.md` — M4.S1=[x], §6 updated to M4.S2, Session 007 appended
 
 **Validation / Evidence**
-- Build: ✅ ninja -C solver/build — 32/32 targets, zero errors
-- Sync gate: ✅ ctest --test-dir solver/build --output-on-failure — 25/25 PASSED, 100%
+- Build: ✅ ninja -C build — 32/32 targets, zero errors
+- Sync gate: ✅ ctest --test-dir build --output-on-failure — 25/25 PASSED, 100%
 
 **Mission status updates**
 - [x] M4.S1 — DONE; SPD and indefinite end-to-end tests pass
@@ -1492,8 +1492,8 @@ populate `info.numerical_rank` and `info.num_zero`, and add a comprehensive test
 - `solver/tests/CMakeLists.txt` — test_singular target registered
 
 **Validation**
-- `cmake --build solver/build` — clean build, 0 errors, 0 warnings
-- `ctest --test-dir solver/build --output-on-failure` — **28/28 PASS** (was 27/27)
+- `cmake --build build` — clean build, 0 errors, 0 warnings
+- `ctest --test-dir build --output-on-failure` — **28/28 PASS** (was 27/27)
 
 **Mission status updates**
 - [x] M5.S2 — DONE
@@ -1552,9 +1552,9 @@ the `dod_regression` label; verify the complete test suite (29/29) passes in < 3
 - `MA97_SOLVER_BREATHING_PLAN.md` — M5.S3=[x], §6 updated, Session 011 appended
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build` — clean, 0 errors, 0 warnings
-- ctest all: ✅ `ctest --test-dir solver/build --output-on-failure` — **29/29 PASSED**, 0.09 s total
-- ctest label: ✅ `ctest --test-dir solver/build -L dod_regression` — 1/1 PASSED, 15/15 sub-tests, 0.01 s
+- Build: ✅ `cmake --build build` — clean, 0 errors, 0 warnings
+- ctest all: ✅ `ctest --test-dir build --output-on-failure` — **29/29 PASSED**, 0.09 s total
+- ctest label: ✅ `ctest --test-dir build -L dod_regression` — 1/1 PASSED, 15/15 sub-tests, 0.01 s
 
 **Mission status updates**
 - [x] M5.S3 — DONE. All 15 DoD regression tests green.
@@ -1622,8 +1622,8 @@ path is untouched.  Verify correctness on a 4-block-diagonal 80×80 SPD matrix.
 - `.live-agents` — Alpha line updated
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build` — clean, 0 errors
-- ctest: ✅ `ctest --test-dir solver/build --output-on-failure` — **30/30 PASSED**
+- Build: ✅ `cmake --build build` — clean, 0 errors
+- ctest: ✅ `ctest --test-dir build --output-on-failure` — **30/30 PASSED**
   (29 pre-existing + 1 new ParallelFactor), 0.14 s total
 - ParallelFactor test: residual_serial=O(1e-14), residual_parallel=O(1e-14),
   max |serial-parallel diff| < 1e-10
@@ -1671,8 +1671,8 @@ Agent: Beta | Mission: M6.B1 | Wave: pg:6 (parallel with Alpha=done, Gamma=in-pr
 - Found via CMake `find_package(OpenBLAS CONFIG)` — sets `SMF_HAS_OPENBLAS=ON`.
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build` — clean, 0 errors
-- ctest: ✅ `ctest --test-dir solver/build --output-on-failure` — **31/31 PASSED**
+- Build: ✅ `cmake --build build` — clean, 0 errors
+- ctest: ✅ `ctest --test-dir build --output-on-failure` — **31/31 PASSED**
   (30 pre-existing + 1 new BlasThreadGuard), 0.11 s total
 - BlasThreadGuard tests: RoundTrip ✅, NestedGuard ✅, SerialGuard ✅, ClampZero ✅
 
@@ -1721,8 +1721,8 @@ Agent: Beta | Mission: M6.B1 | Wave: pg:6 (parallel with Alpha=done, Gamma=in-pr
 - **Reference:** ma97_solver_implementation_plan.md §4.3; hsl_ma97.pdf §2.3.
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build` — clean, 0 errors, 1 warning (unused make_kkt, benign)
-- ctest: ✅ `ctest --test-dir solver/build --output-on-failure` — **32/32 PASSED**, 0.14 s total
+- Build: ✅ `cmake --build build` — clean, 0 errors, 1 warning (unused make_kkt, benign)
+- ctest: ✅ `ctest --test-dir build --output-on-failure` — **32/32 PASSED**, 0.14 s total
 - ParallelDeterminism tests: SerialReproducible ✅, DeterministicMode ✅,
   MultiThread_Residual ✅, SortChildrenDeterministic ✅, DeterministicReduceCorrect ✅
 
@@ -1755,12 +1755,12 @@ Conflict check: none — Alpha completed M7.A1 before this session; Beta complet
 
 **What was done**
 - Detected build directory missing (fresh environment); installed libopenblas-dev, liblapack-dev, libgtest-dev, libmetis-dev, libsuitesparse-dev via sudo apt-get.
-- Ran `cmake -S solver -B solver/build -DCMAKE_BUILD_TYPE=Release` — configure succeeded (AMD ON, METIS ON, OpenBLAS ON, GTest 1.14.0, OpenMP 4.5).
-- Ran `cmake --build solver/build -j$(nproc)` — build succeeded, 0 errors, 1 benign warning (unused make_kkt).
+- Ran `cmake -S solver -B build -DCMAKE_BUILD_TYPE=Release` — configure succeeded (AMD ON, METIS ON, OpenBLAS ON, GTest 1.14.0, OpenMP 4.5).
+- Ran `cmake --build build -j$(nproc)` — build succeeded, 0 errors, 1 benign warning (unused make_kkt).
 - Verified M7.A1 artifacts in place: `solver/src/scaling.cpp`, `solver/include/smf/scaling.hpp`, `solver/tests/test_scaling_equilib.cpp` — all present and compiled.
 - Dispatched Beta agent on M7.B1 (stale STARTING entry reset first).
 - Beta created: `solver/include/smf/scaling_matching.hpp`, `solver/src/scaling_matching.cpp`, `docs/scaling_matching_research.md`; wired `scaling_matching.cpp` into `solver/CMakeLists.txt`.
-- Ran pg:7 sync gate: `ctest --test-dir solver/build --output-on-failure` — 33/33 PASSED (0.15 s total).
+- Ran pg:7 sync gate: `ctest --test-dir build --output-on-failure` — 33/33 PASSED (0.15 s total).
 - Updated §5: M7.A1=[x], M7.B1=[x].
 - Updated §6 Current Focus to Phase 8.
 
@@ -1776,8 +1776,8 @@ Conflict check: none — Alpha completed M7.A1 before this session; Beta complet
 - `MA97_SOLVER_BREATHING_PLAN.md` — M7.A1=[x], M7.B1=[x], §6 updated to Phase 8
 
 **Validation / Evidence**
-- Build: ✅ cmake --build solver/build — clean, 0 errors
-- ctest: ✅ ctest --test-dir solver/build --output-on-failure — 33/33 PASSED, 0.15 s
+- Build: ✅ cmake --build build — clean, 0 errors
+- ctest: ✅ ctest --test-dir build --output-on-failure — 33/33 PASSED, 0.15 s
 - ScalingEquilib: IllConditioned_DiagMatrix ✅, ComputeScale_SimpleMatrix ✅, ApplyScaleRoundTrip ✅
 - compute_matching_scale stub compiles and links; returns FeatureNotAvailable ✅
 - docs/scaling_matching_research.md documents MC64 algorithm + Phase 9 path ✅
@@ -1849,7 +1849,7 @@ Initial run failed (SYMSOLVER_SINGULAR). Root cause: `factor_indef` reads matrix
 
 **Validation / Evidence**
 - Build: ✅ `cmake -DSMF_BUILD_IPOPT_ADAPTER=ON` + `cmake --build` — 0 errors, 0 new warnings
-- ctest: ✅ `ctest --test-dir solver/build --output-on-failure` — **34/34 PASSED**, 0.24 s
+- ctest: ✅ `ctest --test-dir build --output-on-failure` — **34/34 PASSED**, 0.24 s
 - IpoptAdapter suite: InitializeStructureSucceeds ✅, MultiSolveIdentityRHS ✅, InertiaNegativeEvals ✅, InertiaCheckCorrect ✅, InertiaCheckWrong ✅, ProvidesInertia ✅
 - Previous 33 tests: all still green ✅
 
@@ -1862,7 +1862,7 @@ Initial run failed (SYMSOLVER_SINGULAR). Root cause: `factor_indef` reads matrix
 **HANDOFF — M8.S1 complete**
 1. M8.S1 done: IPOPT adapter + mock header + gated test, 34/34 green.
 2. Default CMake build (SMF_BUILD_IPOPT_ADAPTER=OFF) is unchanged; existing 33 tests unaffected.
-3. To enable: `cmake -S solver -B solver/build -DSMF_BUILD_IPOPT_ADAPTER=ON`.
+3. To enable: `cmake -S solver -B build -DSMF_BUILD_IPOPT_ADAPTER=ON`.
 4. The `csc_to_cleaned_` value-push pattern is the key mechanism for repeated factorization without re-analysis; any future caller should follow the same pattern.
 5. Next Phase 8 missions (if any) should be assigned by orchestrator.
 
@@ -1905,8 +1905,8 @@ Conflict check: no parallel agents active; Beta/Gamma idle
 - `.live-agents` — updated Alpha line throughout session
 
 **Validation / Evidence**
-- Build: ✅ — `cmake --build solver/build --parallel 4` — `[100%] Built target bench_suite_sparse_matrix_market`; zero warnings
-- Tests: ✅ — `ctest --test-dir solver/build --output-on-failure` — `100% tests passed, 0 tests failed out of 34`
+- Build: ✅ — `cmake --build build --parallel 4` — `[100%] Built target bench_suite_sparse_matrix_market`; zero warnings
+- Tests: ✅ — `ctest --test-dir build --output-on-failure` — `100% tests passed, 0 tests failed out of 34`
 - bench_poisson: Grid 10×10, N=100, nnz=280, Analyse 0.156ms, Factor 0.429ms, Solve 0.050ms, Residual 1.201e+00 (SPD posdef path; larger sizes show numerical issues in current solver), Inertia pos=0 neg=0 zero=0, Peak 653732 kB
 - bench_kkt_ocp: N=15 nnz=25, Factor 0.029ms, Inertia pos=10 neg=5 zero=0
 - bench_random_symmetric: N=100 nnz=133, Residual 0.000e+00, Inertia pos=66 neg=34 zero=0
@@ -1921,8 +1921,8 @@ Conflict check: no parallel agents active; Beta/Gamma idle
 
 **HANDOFF — M8.S2 complete**
 1. M8.S2 done: 4 benchmark executables built and run cleanly; 34/34 tests green.
-2. Benchmarks are NOT registered in CTest — they are standalone executables in `solver/build/benchmarks/`.
-3. To build benchmarks: `cmake -S solver -B solver/build -DSMF_BUILD_BENCHMARKS=ON` (default is ON).
+2. Benchmarks are NOT registered in CTest — they are standalone executables in `build/benchmarks/`.
+3. To build benchmarks: `cmake -S solver -B build -DSMF_BUILD_BENCHMARKS=ON` (default is ON).
 4. Matrix Market benchmark: pass any .mtx file as argv[1]; gracefully handles missing files.
 5. The bench_kkt_ocp uses -1e-6 Schur regularization to ensure invertibility; residual is large due to ill-conditioning, which is expected.
 
@@ -1954,11 +1954,11 @@ Conflict check: no parallel agents active; Beta/Gamma idle
 2. Edited `solver/benchmarks/bench_compare.cpp`: replaced every occurrence of
    `EIGEN_WORLD_VERSION` with `SMF_HAS_EIGEN` (both `#ifdef` and `#ifndef` guards, the
    Eigen include block, and all conditional code sections).
-3. Re-ran `cmake -S solver -B solver/build -DSMF_BUILD_BENCHMARKS=ON -DSMF_BUILD_TESTS=ON`
+3. Re-ran `cmake -S solver -B build -DSMF_BUILD_BENCHMARKS=ON -DSMF_BUILD_TESTS=ON`
    — confirmed `SMF_HAS_EIGEN=1` in generated `flags.make`.
-4. Rebuilt: `cmake --build solver/build --parallel 4` — `[100%] Built target bench_compare`, zero warnings.
-5. Ran `./solver/build/benchmarks/bench_compare` — Eigen(ms) and Speedup columns populated for all 5 matrices.
-6. Ran `ctest --test-dir solver/build --output-on-failure` — **100% tests passed, 0 tests failed out of 33**.
+4. Rebuilt: `cmake --build build --parallel 4` — `[100%] Built target bench_compare`, zero warnings.
+5. Ran `./build/benchmarks/bench_compare` — Eigen(ms) and Speedup columns populated for all 5 matrices.
+6. Ran `ctest --test-dir build --output-on-failure` — **100% tests passed, 0 tests failed out of 33**.
 7. Created `docs/benchmark_results.md` with full results table, timing analysis, and notes on the Poisson2D residual known limitation.
 
 **Files touched**
@@ -1968,7 +1968,7 @@ Conflict check: no parallel agents active; Beta/Gamma idle
 - `.live-agents` — updated Alpha line throughout session
 
 **Validation / Evidence**
-- Build: ✅ — `cmake --build solver/build --parallel 4` — `[100%] Built target bench_compare`; zero errors/warnings
+- Build: ✅ — `cmake --build build --parallel 4` — `[100%] Built target bench_compare`; zero errors/warnings
 - bench_compare output (Eigen columns populated):
   ```
   === bench_compare: smf vs Eigen SimplicialLDLT ===
@@ -1981,7 +1981,7 @@ Conflict check: no parallel agents active; Beta/Gamma idle
   BlockDiag_300              300      600      0.263      0.061     0.23x   2.311e-16   1.813e-16
   Summary: smf is faster than Eigen in 0/5 cases; Average speedup: 0.25x
   ```
-- Tests: ✅ — `ctest --test-dir solver/build --output-on-failure` — `100% tests passed, 0 tests failed out of 33`
+- Tests: ✅ — `ctest --test-dir build --output-on-failure` — `100% tests passed, 0 tests failed out of 33`
 - `docs/benchmark_results.md` exists: ✅
 
 **Mission status updates**
@@ -2037,16 +2037,16 @@ Mode: implement
 
 *Build with SMF_BUILD_C_API=OFF (baseline):*
 ```
-cmake -S solver -B solver/build -DSMF_BUILD_TESTS=ON -DSMF_BUILD_C_API=OFF
-cmake --build solver/build --parallel 4   → [100%] Built target bench_compare
-ctest --test-dir solver/build             → 100% tests passed, 0 tests failed out of 34
+cmake -S solver -B build -DSMF_BUILD_TESTS=ON -DSMF_BUILD_C_API=OFF
+cmake --build build --parallel 4   → [100%] Built target bench_compare
+ctest --test-dir build             → 100% tests passed, 0 tests failed out of 34
 ```
 
 *Build with SMF_BUILD_C_API=ON (new tests):*
 ```
-cmake -S solver -B solver/build -DSMF_BUILD_TESTS=ON -DSMF_BUILD_C_API=ON -DSMF_BUILD_BENCHMARKS=ON
-cmake --build solver/build --parallel 4   → [100%] Built target bench_compare  (zero new warnings)
-ctest --test-dir solver/build             → 100% tests passed, 0 tests failed out of 35
+cmake -S solver -B build -DSMF_BUILD_TESTS=ON -DSMF_BUILD_C_API=ON -DSMF_BUILD_BENCHMARKS=ON
+cmake --build build --parallel 4   → [100%] Built target bench_compare  (zero new warnings)
+ctest --test-dir build             → 100% tests passed, 0 tests failed out of 35
   1/35  CApiTest ...................   Passed    0.00 sec
  ...
 35/35  CooInput ....................   Passed    0.00 sec
@@ -2116,8 +2116,8 @@ No warnings in `smf_c.cpp` or `test_c_api.cpp`.  Pre-existing warnings in `symbo
 **Validation / Evidence**
 
 ```
-cmake --build solver/build   →  [100%] Built target bench_compare  (zero new errors)
-ctest --test-dir solver/build --output-on-failure
+cmake --build build   →  [100%] Built target bench_compare  (zero new errors)
+ctest --test-dir build --output-on-failure
 →  100% tests passed, 0 tests failed out of 37
    36/37 CholmodCompare   Passed  0.01 sec
    37/37 OcpKktRegression Passed  0.01 sec
@@ -2181,8 +2181,8 @@ Residual ‖Ax−b‖∞/‖b‖∞ < 1e-9 on all 100 iterations.
 
 **Validation**
 ```
-cmake --build solver/build  →  100% build green
-ctest --test-dir solver/build --output-on-failure
+cmake --build build  →  100% build green
+ctest --test-dir build --output-on-failure
 →  100% tests passed, 0 tests failed out of 38
    37/38 OcpKktRegression    Passed  0.01 sec
    38/38 MatrixMarketTest    Passed  0.01 sec  (14 subtests all pass)
@@ -2266,9 +2266,9 @@ Conflict check: no other agents active; Beta and Gamma IDLE
 
 **Validation**
 ```
-cmake -S solver -B solver/build -DCMAKE_BUILD_TYPE=Release -DSMF_BUILD_TESTS=ON
-cmake --build solver/build -j4  →  100% build green, 0 errors, 0 warnings
-ctest --test-dir solver/build --output-on-failure
+cmake -S solver -B build -DCMAKE_BUILD_TYPE=Release -DSMF_BUILD_TESTS=ON
+cmake --build build -j4  →  100% build green, 0 errors, 0 warnings
+ctest --test-dir build --output-on-failure
 →  100% tests passed, 0 tests failed out of 39
    All 38 prior tests: PASSED
    39/39 Poisson2D: PASSED (5 subtests: Grid2x2_SPD, Grid3x3_SPD, Grid4x4_SPD, Grid5x5_SPD, Grid10x10_SPD)
@@ -2370,8 +2370,8 @@ which is why Bugs 1–4 being fixed was sufficient for those tests.
 
 **Validation**
 ```
-cmake --build solver/build -j4  →  100% build green, 0 errors, 0 warnings
-ctest --test-dir solver/build --output-on-failure
+cmake --build build -j4  →  100% build green, 0 errors, 0 warnings
+ctest --test-dir build --output-on-failure
 →  100% tests passed, 0 tests failed out of 40
    All 39 prior tests: PASSED
    40/40 IndefLarger: PASSED (4 subtests: Tridiag_4x4, Tridiag_8x8, Poisson2D_3x3_Indef, Poisson2D_4x4_Indef)
@@ -2453,8 +2453,8 @@ Conflict check: no other agents active; Beta DONE, Gamma IDLE
 
 **Validation**
 ```
-cmake --build solver/build -j4  →  clean build, 0 errors
-ctest --test-dir solver/build --output-on-failure  →  41/41 PASSED (including RepeatedFactor)
+cmake --build build -j4  →  clean build, 0 errors
+ctest --test-dir build --output-on-failure  →  41/41 PASSED (including RepeatedFactor)
 bench_compare  →  smf 0.166 ms, ma27 0.046 ms (Poisson2D_100); ~3% improvement, 4x gap remains
 ```
 
@@ -2525,8 +2525,8 @@ For every entry k in `cleaned` with column `old_j` and row `old_i`:
 
 **Validation**
 ```
-cmake --build solver/build -j$(nproc)  →  clean build, 0 errors, 1 pre-existing warning in test file (not touched)
-ctest --test-dir solver/build --output-on-failure  →  41/41 PASSED
+cmake --build build -j$(nproc)  →  clean build, 0 errors, 1 pre-existing warning in test file (not touched)
+ctest --test-dir build --output-on-failure  →  41/41 PASSED
 ```
 
 **Perf delta (estimated)**
@@ -2589,12 +2589,12 @@ All 41 tests green. O(nnz) scatter map operational. -O3 -march=native enabled. D
 
 **Build evidence**
 ```
-cmake --build solver/build --target bench_compare -j$(nproc)  →  0 errors, 0 warnings
+cmake --build build --target bench_compare -j$(nproc)  →  0 errors, 0 warnings
 ```
 
 **Test evidence**
 ```
-ctest --test-dir solver/build --output-on-failure  →  41/41 PASSED
+ctest --test-dir build --output-on-failure  →  41/41 PASSED
 ```
 
 **Benchmark smoke-run (CHOLMOD + Eigen available, MA27/MUMPS not compiled)**
@@ -2628,7 +2628,7 @@ upper neighbours) are each already sorted for lower-CSC input, making
 `std::inplace_merge` strictly sufficient.
 
 **Reproducer**
-`./solver/build/benchmarks/bench_compare` Poisson2D_4000 (N=3969):
+`./build/benchmarks/bench_compare` Poisson2D_4000 (N=3969):
   - Before: smf_a_ms ≈ 10.9ms (repeated-factorization analyse column)
   - After:  smf_a_ms = 2.537ms
 
@@ -2661,9 +2661,9 @@ upper neighbours) are each already sorted for lower-CSC input, making
 
 **Validation**
 ```
-cmake --build solver/build -j$(nproc)  →  0 errors, 0 warnings
-ctest --test-dir solver/build --output-on-failure  →  41/41 PASSED
-./solver/build/benchmarks/bench_compare:
+cmake --build build -j$(nproc)  →  0 errors, 0 warnings
+ctest --test-dir build --output-on-failure  →  41/41 PASSED
+./build/benchmarks/bench_compare:
   Poisson2D_4000 smf_a_ms:  10.9ms → 2.537ms  (−76.7%)  [target ≤7ms ✓]
   BandedSPD_2000 smf_a_ms:  improved proportionally
   All residuals unchanged (correctness preserved)
@@ -2715,8 +2715,8 @@ Close the bench_compare gap vs CHOLMOD/MA27/Eigen. User reported smf at 0.28x av
 - `solver/src/sym_graph.cpp`: Replace per-vertex `std::sort` with `std::inplace_merge` using tracked midpoint
 
 **Validation / Evidence**
-- Build: ✅ 0 errors, 0 new warnings (cmake --build solver/build -j$(nproc))
-- Tests: ✅ 41/41 PASSED (ctest --test-dir solver/build --output-on-failure)
+- Build: ✅ 0 errors, 0 new warnings (cmake --build build -j$(nproc))
+- Tests: ✅ 41/41 PASSED (ctest --test-dir build --output-on-failure)
 - Benchmark results (CI environment, 2026-05-20):
   - Overall speedup ratio: 0.29x → 0.38x vs CHOLMOD; 0.26x → 0.33x vs Eigen
   - Poisson2D_4000 analyse (repeated section): 10.9ms → 2.45ms (−78%)
@@ -2782,9 +2782,9 @@ Fix regression introduced by Session 021's pivot_u=0.6404 clamp: trajectory_opti
 - `MA97_SOLVER_BREATHING_PLAN.md` — Session 025 appended
 
 **Validation / Evidence**
-- Build: ✅ `cmake --build solver/build --target smf_ma97 -j4` — zero errors/warnings
-- Tests: ✅ `ctest --test-dir solver/build --output-on-failure` — **100% tests passed, 0 tests failed out of 42**
-- Install: ✅ `rm -f solver/install/lib/libsmf_ma97.so* && cmake --install solver/build --prefix solver/install` — forced reinstall, timestamp 2026-05-20 15:15
+- Build: ✅ `cmake --build build --target smf_ma97 -j4` — zero errors/warnings
+- Tests: ✅ `ctest --test-dir build --output-on-failure` — **100% tests passed, 0 tests failed out of 42**
+- Install: ✅ `rm -f solver/install/lib/libsmf_ma97.so* && cmake --install build --prefix solver/install` — forced reinstall, timestamp 2026-05-20 15:15
 - Trajectory test: ✅ **EXIT: Solved To Acceptable Level**, 1594 iterations, 10.349s (vs 22-iter restoration failure before fix)
   ```
   Number of Iterations....: 1594
@@ -2840,15 +2840,15 @@ Conflict check: Alpha/Beta idle; Gamma held BUILDING/TESTING/INSTALLING slots se
 2. Added opt-in KKT capture to `solver/src/smf_ma97_plugin.cpp`:
   - `SMF_MA97_CAPTURE_DIR=<dir>` enables capture.
   - `SMF_MA97_CAPTURE_LIMIT=<n>` limits captured factorizations.
-  - Captures Matrix Market `.mtx`, RHS `.rhs`, and small `.meta` files under ignored `solver/build/kkt_captures/`.
+  - Captures Matrix Market `.mtx`, RHS `.rhs`, and small `.meta` files under ignored `build/kkt_captures/`.
 3. Added `solver/benchmarks/bench_kkt_fixture_compare.cpp` and CMake wiring:
   - Reads the captured Matrix Market matrix and RHS.
   - Runs the same matrix/RHS through smf and MA27.
   - Reports dimensions, nnz, inertia, residual `||Ax-b||/(||A||_F||x||+||b||)`, timings, max front/nsteps, and MA27 `INFO(15)` negative eigenvalue count.
 4. Captured real trajectory fixtures:
-  - `solver/build/kkt_captures/kkt_0001.mtx`: 2619 x 2619, 8414 lower-triangle nnz, factor-only.
-  - `solver/build/kkt_captures/kkt_0002.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, paired RHS.
-  - `solver/build/kkt_captures/kkt_0020.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, 4 RHS values captured.
+  - `build/kkt_captures/kkt_0001.mtx`: 2619 x 2619, 8414 lower-triangle nnz, factor-only.
+  - `build/kkt_captures/kkt_0002.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, paired RHS.
+  - `build/kkt_captures/kkt_0020.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, 4 RHS values captured.
 5. Found and fixed a real integration defect:
   - With the old plugin's artificial indefinite `pivot_u` floor of `0.01`, `kkt_0002` had matching inertia but poor smf residual: `1.777965e-05` vs MA27 `1.740731e-18`.
   - With IPOPT's requested `u=1e-8`, the same fixture had matching inertia and smf residual `1.009778e-12` vs MA27 `1.391759e-14`.
@@ -2856,7 +2856,7 @@ Conflict check: Alpha/Beta idle; Gamma held BUILDING/TESTING/INSTALLING slots se
 
 **Validation / Evidence**
 - Build: `smf_ma97` and `bench_kkt_fixture_compare` rebuilt successfully.
-- Install: installed `solver/install/lib/libsmf_ma97.so.1.0.0`; build and installed SHA256 matched (`685b5a5de126dcf3b4fff0c21cdbc526c51bdbe0831e39f64a308e1038ef5036`). CMake still reports a non-fatal permission error writing `solver/build/install_manifest.txt` after copying.
+- Install: installed `solver/install/lib/libsmf_ma97.so.1.0.0`; build and installed SHA256 matched (`685b5a5de126dcf3b4fff0c21cdbc526c51bdbe0831e39f64a308e1038ef5036`). CMake still reports a non-fatal permission error writing `build/install_manifest.txt` after copying.
 - Focused tests: `ctest -R 'IpoptAdapter|SolveResidual|OcpKktRegression|IndefLarger' --output-on-failure` => 4/4 passed.
 - Same-KKT compare (`kkt_0002`, default `u=1e-8`):
   - smf: inertia `(1422,1197,0)`, residual `1.009778e-12`, analyse/factor/solve `5.709/0.938/0.504 ms`.
@@ -2875,7 +2875,7 @@ Conflict check: Alpha/Beta idle; Gamma held BUILDING/TESTING/INSTALLING slots se
 1. The same-KKT harness proves sampled trajectory KKT inertia and residual now agree with MA27, but smf does **not** beat MA27 on the fair fixture.
 2. The trajectory gap is not closed; removing the inaccurate floor improves linear residual but the full IPOPT trajectory still takes 1742 iterations / 11.391 s.
 3. Single next blocker: profile and optimize smf solve path/permutation overhead under IPOPT's MA97 solve-job pattern, especially multi-RHS and partial solve jobs. On fair KKT fixtures, smf solve is about 10-12x slower than MA27 even when residual and inertia match.
-4. Keep the captured fixtures under `solver/build/kkt_captures/` (ignored build cache); regenerate with `SMF_MA97_CAPTURE_DIR` if build cache is cleaned.
+4. Keep the captured fixtures under `build/kkt_captures/` (ignored build cache); regenerate with `SMF_MA97_CAPTURE_DIR` if build cache is cleaned.
 
 ---
 
@@ -2913,8 +2913,8 @@ Conflict check: Alpha/Gamma idle; Beta held BUILDING/TESTING slots sequentially
 - Swept `nemin=8,16,32,64`; structure stayed ~2048-2049 supernodes, so this was not the local lever.
 
 **Validation / Evidence**
-- Build: `cmake --build solver/build --target smf bench_kkt_fixture_compare -j4` succeeded.
-- Focused tests: `ctest --test-dir solver/build -R 'SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` => 4/4 passed.
+- Build: `cmake --build build --target smf bench_kkt_fixture_compare -j4` succeeded.
+- Focused tests: `ctest --test-dir build -R 'SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` => 4/4 passed.
 - Final fair same-KKT compare at `pivot_u=1e-8`, `nemin=8`:
   - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `5.017858e-13`, analyse/factor/solve `5.398/0.885/0.060 ms`; MA27 inertia `(1422,1197,0)`, residual `1.391759e-14`, analyse/factor/solve `0.701/0.548/0.040 ms`.
   - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `6.666944e-19`, analyse/factor/solve `5.920/0.970/0.082 ms`; MA27 inertia `(1422,1197,0)`, residual `2.469458e-19`, analyse/factor/solve `0.907/0.650/0.053 ms`.
@@ -2966,8 +2966,8 @@ Conflict check: Beta/Gamma idle; Alpha held BUILDING/TESTING slots sequentially
 - `MA97_SOLVER_BREATHING_PLAN.md` — §6 updated and Session 028 appended.
 
 **Validation / Evidence**
-- Build: `cmake --build solver/build --target smf test_supernode bench_kkt_fixture_compare -j4` — passed with no warnings.
-- Focused tests: `ctest --test-dir solver/build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
+- Build: `cmake --build build --target smf test_supernode bench_kkt_fixture_compare -j4` — passed with no warnings.
+- Focused tests: `ctest --test-dir build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
 - Final fair same-KKT compare at `pivot_u=1e-8`, `profile_repeats=200`, `nemin=8`:
   - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `~1.1e-12`, analyse/factor/solve `3.98/0.80/0.047 ms`; MA27 inertia `(1422,1197,0)`, residual `~1.4e-14`, analyse/factor/solve `0.70/0.56/0.041 ms`; smf profile full/forward/diag/backward/diagback `0.0378/0.0186/0.0022/0.0169/0.0191 ms`; structure `nsteps=1400`, `width1=898`, `width2=262`, `width3plus=240`, `maxfront=21`, `factor_values=23665`.
   - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `~6.9e-19`, analyse/factor/solve `3.98/0.80/0.046 ms`; MA27 inertia `(1422,1197,0)`, residual `~2.5e-19`, analyse/factor/solve `0.68/0.54/0.041 ms`; smf profile full/forward/diag/backward/diagback `0.0374/0.0185/0.0022/0.0166/0.0188 ms`; same structure.
@@ -3010,8 +3010,8 @@ Conflict check: Alpha/Gamma idle; Beta held BUILDING/TESTING slots sequentially
   - factor-time solve-cache touch/checksum.
 
 **Validation / Evidence**
-- Build: `cmake --build solver/build --target smf bench_kkt_fixture_compare -j4` — passed with no warnings.
-- Focused tests: `ctest --test-dir solver/build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
+- Build: `cmake --build build --target smf bench_kkt_fixture_compare -j4` — passed with no warnings.
+- Focused tests: `ctest --test-dir build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
 - Final fair same-KKT compare at `pivot_u=1e-8`, `profile_repeats=200`, `nemin=8`:
   - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `1.102244e-12`, analyse/factor/solve `4.536/0.916/0.062 ms`; MA27 inertia `(1422,1197,0)`, residual `1.391759e-14`, analyse/factor/solve `0.950/0.693/0.050 ms`; smf profile `first_full=0.061728 ms`, warm `full=0.050066 ms`; structure `nsteps=1400`, `width1=898`, `width2=262`, `width3plus=240`, `maxfront=21`, `factor_values=23665`.
   - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `6.933516e-19`, analyse/factor/solve `4.524/0.918/0.062 ms`; MA27 inertia `(1422,1197,0)`, residual `2.469458e-19`, analyse/factor/solve `0.920/0.734/0.054 ms`; smf profile `first_full=0.060963 ms`, warm `full=0.049289 ms`; same structure.
