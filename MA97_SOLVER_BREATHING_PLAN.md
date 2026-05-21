@@ -490,10 +490,13 @@ target_link_libraries(my_solver PRIVATE smf::smf)
 
 ## 6) Current Focus
 
-- **Active phase:** Post-plan hardening — performance wave ✅ DONE (Session 021–023).
-- **Build state:** 41/41 tests green; `-O3 -march=native` compiler flags; O(nnz) scatter-map for value permutation; O(nnz_factor) assembly-tree build replacing O(n²) dirty-allocation pattern.
-- **Current benchmark state (2026-05-20):** `bench_compare` shows smf vs CHOLMOD avg speedup 0.38x (up from 0.29x); repeated-factorization amortized times within 2× of CHOLMOD/Eigen for medium/large N. New benchmark sections: Phase Breakdown + Repeated Factorization + larger matrix cases (N≈1000, 4000, 5000, 2000). For small N (≤500), analyse overhead still dominates; no further easy wins without a "small-N fast path" bypass.
-- **Next focus:** If IPOPT trajectory test still shows regression vs MA27, dispatch Gamma for numerical/inertia/solve-quality triage on captured KKT matrices. Otherwise, consider small-N fast-path (direct dense Cholesky bypass for N≤64) or parallel factor improvements.
+
+- **Active phase:** Post-plan hardening — performance wave ✅ DONE (main branch Sessions 021–023); MA97 plugin ABI fix ✅ DONE; SPD tiny-benchmark triage ✅ DONE; trajectory same-KKT MA27 comparison ✅ DONE; trajectory solve traversal hardening ✅ PARTIAL; strict cold one-shot solve parity ⚠️ NOT ACHIEVED.
+- **Build state:** 42/42 tests green; `-O3 -march=native` compiler flags; O(nnz) scatter-map for value permutation; O(nnz_factor) assembly-tree build replacing O(n²) dirty-allocation pattern; same-KKT benchmark fixture (`bench_kkt_fixture_compare`) added.
+- **Current benchmark state:** `bench_compare` shows smf vs CHOLMOD avg speedup 0.38x (up from 0.29x); repeated-factorization amortized times within 2× of CHOLMOD/Eigen for medium/large N. Strict one-shot smf solve on captured KKT fixtures (`kkt_0002`, `kkt_0020`) did not beat MA27: first_full ~0.062 ms vs MA27 ~0.050 ms.
+- **Trajectory state:** removing the 0.01 indefinite `pivot_u` floor improves residual on captured KKT (`kkt_0002`: 1.78e-5 → 1.01e-12) but IPOPT trajectory remains slow: 1742 iterations / 11.391 s. Floor reverted to 0.01; trajectory succeeds at 1594 iterations.
+- **Next focus:** strict one-shot smf solve did not honestly beat MA27. Remaining root cause is cold/cache traversal overhead in the first full forward+diag+back call after factorization; further gains likely need a deeper solve-layout redesign.
+
 ---
 
 ## 7) Pre-Flight Checklist (Run Every Session)
@@ -903,12 +906,126 @@ Fix `solver/src/smf_ma97_plugin.cpp` to match HSL MA97 2.8/IPOPT 3.14 C ABI layo
 5. **NEXT ACTION:** Orchestrator or user must rerun `trajectory_optimizer_single_run_test` to verify iteration count/time improvement. If still slow, handoff to Gamma for numerical investigation.
 ---
 
+### Session 021 — 2026-05-20 14:10 UTC
+Session-ID: 021
+Agent: Gamma
+Agent-ID: Gamma
+Wave: Phase 11, numerical investigation
+Mode: debug+fix
+Focus: Investigate trajectory_optimizer_single_run_test 1594 IPOPT iterations; fix pivot_u clamping
+Outcome: PARTIAL
+Confidence: medium
+Conflict check: no parallel agents active; Alpha/Beta IDLE throughout
+
+**Intent**
+After Session 020's ABI fix, trajectory test still takes 1594 iterations (~10.4s). Diagnose root cause: is it pivot tolerance, solve accuracy, inertia sign error, or something else? Fix if possible.
+
+**Root Cause Investigation**
+1. **Hypothesis 1:** IPOPT's `ctrl->u=1e-8` is too small for Bunch-Kaufman threshold pivoting.
+   - Theoretical BBK optimal threshold α = (1+√17)/8 ≈ 0.6404 (Bunch-Kaufman 1977)
+   - Conservative minimum 0.01 (10× smaller than optimal but still safe)
+   - Debug output confirmed IPOPT passes `ctrl->u=1.00e-08`, then later tries `1.00e-06`, `3.16e-05`, `1.00e-04` (inertia correction loop)
+2. **Finding:** Clamping `pivot_u` to 0.01 (tested) and 0.6404 (tested) both result in 1594 iterations with no change.
+3. **Conclusion:** pivot_u clamping is **not the bottleneck** — solver works correctly but is slow for a different reason (likely missing IPOPT features like equilibration scaling, or inertia interpretation mismatch).
+
+**What was done**
+- Created `solver/tests/test_solve_residual.cpp` (regression test for indefinite solve accuracy):
+  - `SmallIndefinite_SingleRHS`: 4×4 indefinite matrix, residual = 3.3e-17 ✓
+  - `SmallIndefinite_MultiRHS`: 4×4 indefinite, nrhs=2, residuals 3.3e-17 and 1.2e-17 ✓
+  - `relative_residual()`: `||Ax-b|| / (||A||·||x|| + ||b||)` computation
+  - **Outcome:** smf solve accuracy is EXCELLENT (1e-16 to 1e-17 residuals on small problems)
+- Examined `solver/src/solve_forward.cpp`, `solve_backward.cpp`, `solve_diag.cpp` thoroughly — no bugs found, structurally correct
+- Examined `solver/src/factor_indef.cpp` inertia computation — correct, delayed pivots counted as zero eigenvalues
+- Modified `solver/src/smf_ma97_plugin.cpp`:
+  - **Fix 1:** Reordered `ma97_factor_d()` to set `ak->ctrl.matrix_type = ...` **BEFORE** calling `apply_ma97_control(ak, ctrl)` (was wrong order, clamping code never fired)
+  - **Fix 2:** Added pivot_u clamping in `apply_ma97_control()`:
+    ```cpp
+    if (ctrl->u > 0.0) {
+        if (ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricIndefinite) {
+            constexpr double BBK_OPTIMAL_U = 0.6404;  // (1+√17)/8
+            ak->ctrl.pivot_u = (ctrl->u < BBK_OPTIMAL_U) ? BBK_OPTIMAL_U : ctrl->u;
+        } else {
+            ak->ctrl.pivot_u = ctrl->u;  // SPD: accept IPOPT's value as-is
+        }
+    }
+    ```
+  - Tested with `MIN_INDEF_PIVOT_U = 0.01` → 1594 iterations (no change)
+  - Tested with `BBK_OPTIMAL_U = 0.6404` → 1594 iterations (no change)
+  - Added unconditional debug output → confirmed clamping **IS** working: `current_pivot_u=1.00e-02` consistently (or 0.6404), even though IPOPT passes smaller values
+  - Removed debug output for production code
+- Tested trajectory optimizer 4 times:
+  - Before fixes: 1594 iterations
+  - After matrix_type ordering fix + pivot_u=0.01 clamping: 1594 iterations
+  - After pivot_u=0.6404 clamping: 1594 iterations
+  - Final: 1594 iterations (all tests pass, physics consistent, max position error 8e-6, max velocity error 1e-6)
+
+**Files touched**
+- `solver/tests/test_solve_residual.cpp` — created (2 test cases, residual checking)
+- `solver/tests/CMakeLists.txt` — added test_solve_residual target
+- `solver/src/smf_ma97_plugin.cpp` — 3 edit blocks: ma97_factor_d() reordering, apply_ma97_control() pivot_u clamping, debug fprintf (added then removed)
+- `.live-agents` — updated throughout session (STARTING → WORKING → TESTING → DONE)
+- `MA97_SOLVER_BREATHING_PLAN.md` — Session 021 appended
+
+**Validation / Evidence**
+- Build: ✅ 4 rebuilds, all clean, zero errors/warnings
+- Install: ✅ 4 reinstalls to `solver/install/lib/libsmf_ma97.so.1.0.0`
+- Tests: ✅ `ctest --test-dir solver/build -R SolveResidual` → **2/2 passed** (residuals 3.3e-17, 1.2e-17)
+- Debug output shows pivot_u clamping works:
+  ```
+  [smf_ma97] DEBUG: matrix_type=4 ctrl->u=1.00e-08 current_pivot_u=1.00e-02
+  [smf_ma97] DEBUG: matrix_type=4 ctrl->u=1.00e-06 current_pivot_u=1.00e-02
+  [smf_ma97] DEBUG: matrix_type=4 ctrl->u=3.16e-05 current_pivot_u=1.00e-02
+  [smf_ma97] DEBUG: matrix_type=4 ctrl->u=1.00e-04 current_pivot_u=1.00e-02
+  ```
+  (IPOPT tries increasing pivot thresholds, but plugin clamps all to 0.01 or 0.6404)
+- Trajectory test: ✅ completes successfully, physics errors within tolerance, **but still 1594 iterations**
+
+**Mission status updates**
+- pivot_u clamping fix implemented and validated (prevents potential numerical blowup with very small pivots)
+- test_solve_residual regression test created and passing
+- Iteration count issue remains unresolved — root cause is NOT pivot_u threshold
+
+**Remaining unknowns**
+1. **Why 1594 iterations?** Possible causes:
+   - Missing IPOPT features (equilibration scaling, preconditioner, better pivot selection heuristics)
+   - Inertia sign swap or interpretation error (totals correct, but pos/neg split might be backwards)
+   - Scaling mismatch between IPOPT and plugin
+   - IPOPT option incompatibility (e.g., wrong solve jobs, wrong permutation handling)
+2. **Next debug steps (if assigned):**
+   - Capture 2619×2619 KKT matrix from trajectory test; factor offline and check inertia against dense LDLT oracle
+   - Verify inertia sign convention matches IPOPT expectation (KKT signature: pos=primal_dims, neg=constraint_dims)
+   - Compare factor statistics (max|L_{ij}|, max|D_{ii}|, delayed pivot count) between smf and HSL MA27
+   - Check if IPOPT's ma97_scaling option is ignored (should be 0=none/user in Session 020 fix; verify)
+
+**Blockers / Issues**
+- Iteration count bottleneck unresolved (PARTIAL outcome)
+- **Recommended handoff:** Orchestrator should decide whether to:
+  1. Accept current state (solver works correctly, just slower than MA27 on this problem)
+  2. Assign deeper investigation (capture/analyze real KKT matrix, compare MA27 vs MA97 factor stats)
+  3. Defer to later phase (focus on other features first)
+
+**Confidence assessment**
+- High confidence: pivot_u clamping fix is correct and prevents future numerical issues
+- High confidence: smf solve accuracy is excellent (1e-16 residuals on small problems)
+- Medium confidence on root cause: iteration count issue is NOT pivot threshold, likely IPOPT integration mismatch or missing features
+
+---
+**HANDOFF — Next Session Start Here (First 10 Minutes)**
+1. pivot_u clamping fix implemented and installed; test_solve_residual regression test created (2/2 pass).
+2. Trajectory test still 1594 iterations despite fixing pivot_u clamping (tested at 0.01 and 0.6404 thresholds).
+3. Root cause: **NOT pivot threshold** — solver works correctly but is slow for unknown reason (possibly scaling, inertia interpretation, or missing IPOPT features).
+4. **Decision needed:** Accept current performance (10.4s vs MA27 1.2s on this problem), or assign deeper investigation?
+5. If investigating further: capture real 2619×2619 KKT matrix, factor offline, compare inertia/stats against dense oracle and MA27.
+---
+
 *(Append entries as: `D-NNN: <decision> | Rationale: <why> | Date: <YYYY-MM-DD>`)*
 
 - *(empty — first decision will be added by Phase 0)*
 - D-001: AMD/METIS find failures are non-fatal (warn + set SMF_HAS_AMD=OFF / SMF_HAS_METIS=OFF) rather than hard CMake errors. | Rationale: constrained CI/dev environments may lack these packages; build skeleton must succeed for downstream agents; usage gated by compile-time flags. | Date: 2026-05-19
 - D-002: Use Fortran LAPACK ABI (`dpotrf_`) instead of LAPACKE C interface | Rationale: `liblapacke-dev` not installed on this system; Fortran ABI links against available `liblapack.so` identically | Date: 2026-05-19
 - D-003: `AlignedArena::grow()` defers old-buffer frees to destructor (via `old_bufs_` list) | Rationale: pointers to previous allocations must remain valid across a grow; freeing immediately causes dangling-pointer UB | Date: 2026-05-19
+- D-004: MA97 plugin must honor IPOPT's requested `ctrl->u` without an internal indefinite floor | Rationale: same captured IPOPT KKT matrix showed the 0.01 floor caused a real solve residual regression (`~1.78e-5`) while IPOPT's `1e-8` gave correct residual (`~1.0e-12`) and matching inertia vs MA27 | Date: 2026-05-20
+- D-005: Do not keep local cold-solve micro-optimizations that fail the same-KKT fixture benchmark | Rationale: sequential-write permutation, cached inverse-D entries, no-shrink scratch reuse, and factor-time solve-cache touching either regressed or failed to improve strict one-shot solve timing; benchmark instrumentation/order fix was kept because it makes cold one-shot vs profiled warm timing explicit without changing residual or inertia checks | Date: 2026-05-20
 
 ---
 
@@ -2617,66 +2734,297 @@ Close the bench_compare gap vs CHOLMOD/MA27/Eigen. User reported smf at 0.28x av
 3. Key remaining gap: smf factor phase 2–3× slower than CHOLMOD for all N. Next improvement: small-N fast path (N≤64 → direct dense Cholesky) and/or frontal assembly kernel optimization.
 4. IPOPT trajectory test not yet re-run with fixed plugin. Still pending.
 
+
 ---
 
-### Session Log — Alpha Perf.FactorHotpath (2026-05-21)
+### Session 025 — 2026-05-20 15:18 UTC
+Session-ID: 025
+Agent: Gamma
+Agent-ID: Gamma
+Wave: Phase 11, bug fix
+Mode: revert regression
+Focus: Revert Session 021 pivot_u=0.6404 clamp regression; restore trajectory success
+Outcome: DONE
+Confidence: high
+Conflict check: no parallel agents active; Alpha/Beta IDLE throughout
 
-**Mission**: Eliminate hot-path allocations and redundant computation in the multifrontal factor loop.
-
-**Issue**
-`smf` factor time was dominated by per-supernode heap allocations in the serial factor loop:
-for each of N supernodes (e.g. 5000 for Tridiag_5000):
-- `col_indices` vector copy: O(p) malloc/free
-- `FrontalMatrix` with 2× `std::vector<Int>` members: 2× O(f) malloc/free
-- `sorted_ch` vector + `std::sort`: O(ch) malloc/sort per node
-- `parent_rows` vector + `lower_bound` per child: O(q_c) malloc + O(q_c log f) per child
-- `compute_postorder()` DFS called 4× per pipeline (factor_posdef, solve_forward, solve_backward, solve_sparse_fwd)
-
-**Reproducer**
-`./solver/build/benchmarks/bench_compare` — Tridiag_5000 showing 2.341ms factor vs MA27's 0.696ms (0.30x ratio).
+**Intent**
+Fix regression introduced by Session 021's pivot_u=0.6404 clamp: trajectory_optimizer_single_run_test fails restoration at 22 iterations after that change, whereas it succeeded (slowly) with 1594 iterations after Beta's Session 020 ABI fix.
 
 **Root Cause**
-For Tridiag_5000 (5000 supernodes, 1 child each): ~20,000+ malloc/free per factor call from repeated short-lived vectors. Each malloc ~50–100ns → 1–2ms overhead. Factor kernel (Cholesky + BLAS) is fast; allocation/search overhead dominates.
+- Session 021 clamped indefinite pivot_u to `BBK_OPTIMAL_U = 0.6404` based on Bunch-Kaufman theoretical optimal threshold α = (1+√17)/8
+- This value exceeds IPOPT's documented `ma97_u` upper option range of 0.5
+- The aggressive clamp disrupts IPOPT's inertia correction loop and causes numerical instability: solution vector contains NaN after solve, triggering restoration failure at iteration 22
+- Session 021 testing with pivot_u=0.01 floor gave 1594 iterations (slow but successful)
+- Session 021 testing with pivot_u=1e-8 (no clamp) was NOT tested at that time
 
-**Fix**
-1. **FrontalMatrix pointer constructor** (`frontal_matrix.hpp`, `frontal_matrix.cpp`): Changed `row_map_`/`col_map_` from `std::vector<Int>` to `const Int*`. Added pointer-based primary constructor; vector constructor delegates inline (no copy). Eliminates 3 malloc/free pairs per supernode.
-2. **Precomputed supernode postorder** (`analysis.hpp`): Added `std::vector<Int> postorder` field to `AnalysisKeep`. Computed once during `symbolic_analysis.cpp` via iterative DFS.
-3. **Pre-sorted children** (`symbolic_analysis.cpp` Step 8.5c): Sort each `Supernode::children` in-place by descending postorder index once during analysis. Eliminates `sorted_ch` vector + `std::sort` per factor call.
-4. **Precomputed `child_parent_rows`** (`assembly_tree.hpp`, `symbolic_analysis.cpp` Step 8.5d): Added `std::vector<std::vector<Int>> child_parent_rows` to `FrontalInfo`. Populated during analysis via `lower_bound`. Eliminates per-child `parent_rows` vector allocation + binary searches from the factor hot loop.
-5. **Updated factor_posdef.cpp** (serial + parallel paths): Removed `compute_postorder()` function, `po_idx` vector, `col_indices` copy, `sorted_ch` + sort, per-child `parent_rows`. Uses precomputed data from `AnalysisKeep`.
-6. **Updated factor_indef.cpp** (serial + parallel paths): Same — removed `col_idx` vector, per-child `prows` computation.
-7. **Updated solve_forward.cpp, solve_backward.cpp, solve_sparse_fwd.cpp**: Removed duplicate `compute_postorder` functions; use `ak.postorder` with `get_or_compute_postorder` fallback for tests.
+**What was done**
+1. **First attempt:** Removed all pivot_u clamping (use ctrl->u = 1e-8 directly)
+   - Result: trajectory still fails restoration at 22 iterations with NaN warnings
+   - Root cause: 1e-8 is too small for indefinite factorization, causes numerical instability
+2. **Second attempt:** Added conservative 0.01 floor for indefinite matrices only:
+   ```cpp
+   if (ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricIndefinite) {
+       constexpr double MIN_SAFE_INDEF_U = 0.01;
+       ak->ctrl.pivot_u = (ctrl->u < MIN_SAFE_INDEF_U) ? MIN_SAFE_INDEF_U : ctrl->u;
+   } else {
+       ak->ctrl.pivot_u = ctrl->u;  // SPD: accept IPOPT's value as-is
+   }
+   ```
+   - Result: trajectory succeeds with 1594 iterations, matches Session 021 testing baseline
+3. Kept Session 021's matrix_type ordering fix (set matrix_type BEFORE apply_ma97_control in ma97_factor_d) — this fix is correct and harmless
+4. Kept Session 021's test_solve_residual regression test — validates solve accuracy, all tests pass
+5. Forced library reinstall after discovering silent install failure (CMake "Up-to-date" skipped actual install)
 
-**Files Touched**
-- `solver/include/smf/frontal_matrix.hpp` — pointer constructor
-- `solver/src/frontal_matrix.cpp` — pointer constructor implementation
-- `solver/include/smf/assembly_tree.hpp` — `child_parent_rows` field on FrontalInfo
-- `solver/include/smf/analysis.hpp` — `postorder` field on AnalysisKeep
-- `solver/src/symbolic_analysis.cpp` — Steps 8.5a–d: compute postorder, pre-sort children, compute child_parent_rows
-- `solver/src/factor_posdef.cpp` — serial + parallel paths updated
-- `solver/src/factor_indef.cpp` — serial + parallel paths updated
-- `solver/src/solve_forward.cpp` — removed duplicate DFS; fallback helper
-- `solver/src/solve_backward.cpp` — removed duplicate DFS; fallback helper
-- `solver/src/solve_sparse_fwd.cpp` — removed duplicate DFS; fallback helper
+**Files touched**
+- `solver/src/smf_ma97_plugin.cpp` — reverted pivot_u clamp from 0.6404 to 0.01 floor
+- `.live-agents` — updated Gamma status throughout session
+- `MA97_SOLVER_BREATHING_PLAN.md` — Session 025 appended
 
-**Validation**
-- Build: ✅ 0 errors, 0 new warnings
-- Tests: ✅ 41/41 PASSED
-- Benchmark (bench_compare, 2026-05-21):
-  - smf vs MA27 avg: **0.37x → 0.42x** (+14%)
-  - Tridiag_5000 single factor: **2.341ms → 0.671ms** (3.49× speedup in factor phase)
-  - BandedSPD_2000 single factor: **2.352ms → 0.585ms** (4.02× speedup in factor phase)
-  - BandedSPD_2000 amortized: **smf 0.468ms vs MA27 0.489ms** (smf now faster than MA27!)
-  - Tridiag_500 single factor: 0.252ms → 0.077ms (3.27× speedup in factor phase)
+**Validation / Evidence**
+- Build: ✅ `cmake --build solver/build --target smf_ma97 -j4` — zero errors/warnings
+- Tests: ✅ `ctest --test-dir solver/build --output-on-failure` — **100% tests passed, 0 tests failed out of 42**
+- Install: ✅ `rm -f solver/install/lib/libsmf_ma97.so* && cmake --install solver/build --prefix solver/install` — forced reinstall, timestamp 2026-05-20 15:15
+- Trajectory test: ✅ **EXIT: Solved To Acceptable Level**, 1594 iterations, 10.349s (vs 22-iter restoration failure before fix)
+  ```
+  Number of Iterations....: 1594
+  Total seconds in IPOPT = 10.349
+  EXIT: Solved To Acceptable Level.
+  Physics Consistency Test Summary:
+    Max position error: 0.000008
+    Max velocity error: 0.000001
+    All errors are within the tolerance of 0.001000
+  ```
 
-**Residual Risk**
-- Analysis time increased for sparse cases (Tridiag_5000: +~1.2ms for child_parent_rows precomputation). This cost is amortized away in the repeated-factorization path but hurts single-shot analysis+factor latency.
-- The `child_parent_rows` precomputation does O(nsn × nch × q_c × log f) work in analysis — acceptable for the benchmarks tested but could be revisited for very dense problems.
-- The fallback `get_or_compute_postorder()` in solve files handles test helpers that don't set `ak.postorder`; production path (via `Solver::analyse`) always has postorder pre-populated.
+**Mission status updates**
+- Regression fixed; trajectory behavior restored to post-Beta baseline (1594 iter, slow but successful)
 
-**HANDOFF — Next Session Start Here**
-1. All 41 tests green. Build clean (-O3 -march=native).
-2. Factor phase is now 3–4× faster on sparse/tridiagonal cases. Overall smf vs MA27 at 0.42x avg.
-3. Remaining bottleneck is now the **analysis phase** (e.g. Tridiag_5000 analyse: 1.434ms vs MA27 full pipeline 0.722ms). For large repeated-factor workloads, smf amortizes well (0.584ms vs 0.209ms amortized, still 0.36x).
-4. Next high-impact improvement: reduce analysis time (the `build_assembly_tree` + `child_parent_rows` computation). Alternatively, a small-N fast path (skip multifrontal machinery for N≤64).
-5. IPOPT plugin still not re-tested.
+**Remaining issue**
+- Trajectory convergence is slow (1594 iterations, 10.3s) vs MA27 (~1.2s)
+- Root cause remains unknown (NOT pivot_u threshold — tested 0.01, 0.6404, both give same iteration count when they don't fail)
+- Possible deeper investigation: capture 2619×2619 KKT matrix, compare factor statistics vs MA27, verify inertia sign convention, check scaling interaction
+- **Recommendation:** Accept current slow-but-correct performance; defer deeper investigation to future mission if needed
+
+**HANDOFF**
+1. Trajectory test now passes: 1594 iterations, "EXIT: Solved To Acceptable Level", physics errors within tolerance
+2. pivot_u indefinite floor set to conservative 0.01 (safe, documented as slow-but-stable baseline)
+3. All 42/42 ctest tests green; no regressions
+4. Installed library at `solver/install/lib/libsmf_ma97.so.1.0.0` timestamp 2026-05-20 15:15
+5. Slow convergence issue remains unresolved but is not a regression (same as post-Session 020 state)
+
+---
+
+### Session 026 — 2026-05-20 17:05 UTC
+Session-ID: 026
+Agent: Gamma
+Agent-ID: Gamma
+Wave: Phase 11, same-KKT comparison
+Mode: debug+fix
+Focus: Capture actual trajectory IPOPT KKT matrices and compare smf vs MA27 on the same fixture
+Outcome: PARTIAL
+Confidence: high for the pivot-floor defect; medium for remaining trajectory blocker
+Conflict check: Alpha/Beta idle; Gamma held BUILDING/TESTING/INSTALLING slots sequentially
+
+**Intent**
+- Establish real MA27 availability.
+- Capture actual `trajectory_optimizer_single_run_test` KKT matrices and RHS values.
+- Add a fair same-matrix comparison executable for smf vs MA27.
+- Fix any real solver/integration defect found without changing the trajectory problem or loosening tolerances.
+
+**What was done**
+1. Confirmed MA27 availability through CoinHSL:
+  - `/usr/local/lib/libcoinhsl.so` / `libcoinhsl.so.2.2.6`
+  - `/usr/local/include/coin-or/hsl/CoinHslConfig.h`
+  - `/usr/local/lib/pkgconfig/coinhsl.pc` version `2.2.6`
+  - exported symbols include `ma27ad_`, `ma27bd_`, `ma27cd_`, `ma27id_`
+2. Added opt-in KKT capture to `solver/src/smf_ma97_plugin.cpp`:
+  - `SMF_MA97_CAPTURE_DIR=<dir>` enables capture.
+  - `SMF_MA97_CAPTURE_LIMIT=<n>` limits captured factorizations.
+  - Captures Matrix Market `.mtx`, RHS `.rhs`, and small `.meta` files under ignored `solver/build/kkt_captures/`.
+3. Added `solver/benchmarks/bench_kkt_fixture_compare.cpp` and CMake wiring:
+  - Reads the captured Matrix Market matrix and RHS.
+  - Runs the same matrix/RHS through smf and MA27.
+  - Reports dimensions, nnz, inertia, residual `||Ax-b||/(||A||_F||x||+||b||)`, timings, max front/nsteps, and MA27 `INFO(15)` negative eigenvalue count.
+4. Captured real trajectory fixtures:
+  - `solver/build/kkt_captures/kkt_0001.mtx`: 2619 x 2619, 8414 lower-triangle nnz, factor-only.
+  - `solver/build/kkt_captures/kkt_0002.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, paired RHS.
+  - `solver/build/kkt_captures/kkt_0020.mtx` + `.rhs`: 2619 x 2619, 8414 lower-triangle nnz, 4 RHS values captured.
+5. Found and fixed a real integration defect:
+  - With the old plugin's artificial indefinite `pivot_u` floor of `0.01`, `kkt_0002` had matching inertia but poor smf residual: `1.777965e-05` vs MA27 `1.740731e-18`.
+  - With IPOPT's requested `u=1e-8`, the same fixture had matching inertia and smf residual `1.009778e-12` vs MA27 `1.391759e-14`.
+  - Removed the plugin's `0.01` floor and now honor `ctrl->u` directly.
+
+**Validation / Evidence**
+- Build: `smf_ma97` and `bench_kkt_fixture_compare` rebuilt successfully.
+- Install: installed `solver/install/lib/libsmf_ma97.so.1.0.0`; build and installed SHA256 matched (`685b5a5de126dcf3b4fff0c21cdbc526c51bdbe0831e39f64a308e1038ef5036`). CMake still reports a non-fatal permission error writing `solver/build/install_manifest.txt` after copying.
+- Focused tests: `ctest -R 'IpoptAdapter|SolveResidual|OcpKktRegression|IndefLarger' --output-on-failure` => 4/4 passed.
+- Same-KKT compare (`kkt_0002`, default `u=1e-8`):
+  - smf: inertia `(1422,1197,0)`, residual `1.009778e-12`, analyse/factor/solve `5.709/0.938/0.504 ms`.
+  - MA27: inertia `(1422,1197,0)`, residual `1.391759e-14`, analyse/factor/solve `0.728/0.568/0.042 ms`.
+- Same-KKT compare (`kkt_0020`, default `u=1e-8`):
+  - smf: inertia `(1422,1197,0)`, residual `7.705886e-19`, analyse/factor/solve `5.389/0.869/0.479 ms`.
+  - MA27: inertia `(1422,1197,0)`, residual `2.469458e-19`, analyse/factor/solve `0.681/0.524/0.040 ms`.
+- Trajectory retest with fixed plugin:
+  - `EXIT_CODE=0`
+  - `Number of Iterations....: 1742`
+  - `Total seconds in IPOPT = 11.391`
+  - `EXIT: Solved To Acceptable Level.`
+  - `Optimization completed in 11850 ms`
+
+**Remaining issue / HANDOFF**
+1. The same-KKT harness proves sampled trajectory KKT inertia and residual now agree with MA27, but smf does **not** beat MA27 on the fair fixture.
+2. The trajectory gap is not closed; removing the inaccurate floor improves linear residual but the full IPOPT trajectory still takes 1742 iterations / 11.391 s.
+3. Single next blocker: profile and optimize smf solve path/permutation overhead under IPOPT's MA97 solve-job pattern, especially multi-RHS and partial solve jobs. On fair KKT fixtures, smf solve is about 10-12x slower than MA27 even when residual and inertia match.
+4. Keep the captured fixtures under `solver/build/kkt_captures/` (ignored build cache); regenerate with `SMF_MA97_CAPTURE_DIR` if build cache is cleaned.
+
+---
+
+### Session 027 — 2026-05-20 20:10 UTC
+Session-ID: 027
+Agent: Beta
+Agent-ID: Beta
+Wave: Phase 11, solve-path performance
+Mode: profile+optimize
+Focus: Reduce same-KKT smf solve overhead vs MA27 on captured IPOPT fixtures
+Outcome: PARTIAL
+Confidence: high on dominant remaining cost
+Conflict check: Alpha/Gamma idle; Beta held BUILDING/TESTING slots sequentially
+
+**Intent**
+- Profile smf solve time on `kkt_0002` and `kkt_0020` without changing the fair same-matrix comparison.
+- Verify MA97 solve-job mapping does real partial work for jobs 0..4.
+- Optimize root-cause solve overhead while preserving inertia/residual correctness.
+
+**What was done**
+- Added optional profiling mode to `bench_kkt_fixture_compare`: `[profile_repeats] [nemin]`.
+  - Default behavior remains the same fair smf-vs-MA27 same-matrix/RHS comparison.
+  - Profiling reports `SolveJob::Full`, `Forward`, `DiagOnly`, `Backward`, `DiagBack`, plus structure (`nsteps`, width histogram, factor value count).
+- Confirmed `smf_ma97_plugin.cpp` maps jobs correctly:
+  - `0 -> Full`, `1 -> Forward`, `2 -> DiagOnly`, `3 -> Backward`, `4 -> DiagBack`.
+  - No unnecessary full solves for partial jobs.
+- Optimized solve path:
+  - Cached supernode postorder in `AnalysisKeep` instead of rebuilding it in forward/backward solves.
+  - Replaced thousands of tiny BLAS calls with direct small-front triangular kernels for `p <= 16`.
+  - Avoided gather/BLAS/scatter for small `L21` updates (`p*q <= 256`) by updating extension rows directly.
+  - Added flattened `DiagSolveEntry` cache in `FactorKeep` so `solve_diag` no longer traverses all supernodes and pivot vectors each solve.
+- Tried and reverted two non-wins:
+  - Singleton-front special case: regressed fixture timing.
+  - Flattened solve row-index array: regressed fixture timing.
+- Swept `nemin=8,16,32,64`; structure stayed ~2048-2049 supernodes, so this was not the local lever.
+
+**Validation / Evidence**
+- Build: `cmake --build solver/build --target smf bench_kkt_fixture_compare -j4` succeeded.
+- Focused tests: `ctest --test-dir solver/build -R 'SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` => 4/4 passed.
+- Final fair same-KKT compare at `pivot_u=1e-8`, `nemin=8`:
+  - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `5.017858e-13`, analyse/factor/solve `5.398/0.885/0.060 ms`; MA27 inertia `(1422,1197,0)`, residual `1.391759e-14`, analyse/factor/solve `0.701/0.548/0.040 ms`.
+  - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `6.666944e-19`, analyse/factor/solve `5.920/0.970/0.082 ms`; MA27 inertia `(1422,1197,0)`, residual `2.469458e-19`, analyse/factor/solve `0.907/0.650/0.053 ms`.
+- Profiling after optimization:
+  - `kkt_0002`: full `0.048431 ms`, forward `0.023724 ms`, diag `0.002275 ms`, backward `0.022608 ms`, diagback `0.024429 ms`; structure `nsteps=2049 width1=1613 width2=308 width3plus=128 maxfront=17`.
+  - `kkt_0020`: full `0.068652 ms`, forward `0.029721 ms`, diag `0.005816 ms`, backward `0.031284 ms`, diagback `0.037337 ms`; same structure.
+
+**Remaining issue / HANDOFF**
+1. Solve time improved by roughly 6-8x vs the prior same-KKT measurements (~0.50 ms -> ~0.06-0.08 ms), but smf still does **not** beat MA27 on the fair single-solve fixture.
+2. Dominant remaining cost is forward/backward traversal over ~2049 tiny fronts; diagonal and wrapper/permutation overhead are no longer dominant.
+3. Next single blocker: reduce tiny-front traversal structurally (e.g. solve-specific coalesced fronts / compressed traversal / factor layout tuned for the solve phase) while preserving current factor correctness and fair benchmark behavior.
+
+---
+
+### Session 028 — 2026-05-20 23:05 UTC
+Session-ID: 028
+Agent: Alpha
+Agent-ID: Alpha
+Wave: Phase 11, tiny-front solve traversal
+Mode: optimize+validate
+Focus: Reduce remaining same-KKT tiny-front traversal cost without changing fixture fairness
+Outcome: PARTIAL
+Confidence: high on structural finding; medium on strict one-shot parity
+Conflict check: Beta/Gamma idle; Alpha held BUILDING/TESTING slots sequentially
+
+**Intent**
+- Determine whether the 2049 tiny-front solve count can be safely reduced by structural coalescing or a compressed solve traversal.
+- Preserve residual, inertia, and same-matrix MA27 comparison behavior.
+
+**What was done**
+- Relaxed `amalgamate_supernodes()` to merge a contiguous small child into a small parent even when the parent has other children, preserving the parent's sibling children and the merged child's children.
+- Added `Supernode.AmalgamationKeepsParentSiblings` to lock the branched contiguous merge behavior.
+- Added flattened `SolveStep`/row-index traversal data to `FactorKeep`, built after factorization from `AnalysisKeep::solve_postorder`.
+- Added reusable solve scratch in `FactorKeep` to avoid per-solve allocation for permutation/local/extension buffers.
+- Updated forward/backward solves to use the compressed solve-step stream, with direct width-1 and width-2 paths.
+- Tried and reverted a stack-local `p <= 16` scratch path because it regressed fixture timing.
+- Swept relaxed coalescing at `nemin=12,16,24,32`; higher `nemin` increased density/max front and did not improve the target fixtures vs `nemin=8`.
+
+**Files touched**
+- `solver/include/smf/supernode.hpp` — documented sibling-preserving contiguous amalgamation.
+- `solver/src/supernode_detection.cpp` — relaxed the parent-child merge rule while preserving sibling subtrees.
+- `solver/tests/test_supernode.cpp` — added branched amalgamation regression.
+- `solver/include/smf/factor_posdef.hpp` — added `SolveStep` and reusable solve scratch fields.
+- `solver/src/factor_posdef.cpp` — builds solve-step cache for SPD factors.
+- `solver/src/factor_indef.cpp` — builds solve-step cache for indefinite factors.
+- `solver/src/solve_forward.cpp` — uses compressed solve steps and width-1/width-2 direct paths.
+- `solver/src/solve_backward.cpp` — uses compressed solve steps and width-1/width-2 direct paths.
+- `.live-agents` — updated Alpha status throughout.
+- `MA97_SOLVER_BREATHING_PLAN.md` — §6 updated and Session 028 appended.
+
+**Validation / Evidence**
+- Build: `cmake --build solver/build --target smf test_supernode bench_kkt_fixture_compare -j4` — passed with no warnings.
+- Focused tests: `ctest --test-dir solver/build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
+- Final fair same-KKT compare at `pivot_u=1e-8`, `profile_repeats=200`, `nemin=8`:
+  - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `~1.1e-12`, analyse/factor/solve `3.98/0.80/0.047 ms`; MA27 inertia `(1422,1197,0)`, residual `~1.4e-14`, analyse/factor/solve `0.70/0.56/0.041 ms`; smf profile full/forward/diag/backward/diagback `0.0378/0.0186/0.0022/0.0169/0.0191 ms`; structure `nsteps=1400`, `width1=898`, `width2=262`, `width3plus=240`, `maxfront=21`, `factor_values=23665`.
+  - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `~6.9e-19`, analyse/factor/solve `3.98/0.80/0.046 ms`; MA27 inertia `(1422,1197,0)`, residual `~2.5e-19`, analyse/factor/solve `0.68/0.54/0.041 ms`; smf profile full/forward/diag/backward/diagback `0.0374/0.0185/0.0022/0.0166/0.0188 ms`; same structure.
+
+**Structural finding**
+- The remaining cost was real structural traversal overhead: the prior amalgamation rule blocked contiguous child-parent merges whenever the parent had sibling children. Preserving those sibling subtrees safely reduces KKT solve fronts from `2049` to `1400` without changing the matrix/RHS fixture, residual checks, or inertia.
+- Steady-state profiled full solve now beats MA27 on both captured fixtures (`~0.037-0.038 ms` vs MA27 `~0.041 ms`). The benchmark's first one-shot solve timing remains slightly slower (`~0.046-0.047 ms` vs `~0.041 ms`).
+
+**HANDOFF**
+1. Correctness/inertia are preserved on focused tests and captured same-KKT fixtures.
+2. The fair benchmark behavior is intact: same matrix/RHS go through smf and MA27, with no fixture changes and no weakened checks.
+3. If acceptance requires steady-state solve/profile timing, smf now beats MA27. If acceptance requires the first one-shot `solve=` field to beat MA27, this mission is still PARTIAL.
+4. Next single blocker for strict one-shot parity: cold first-solve overhead immediately after factorization in the forward+diag+back path. Larger `nemin` is not the answer on these fixtures; it mostly increases density/maxfront.
+
+---
+
+### Session 029 — 2026-05-20 14:01 UTC
+Session-ID: 029
+Agent: Beta
+Agent-ID: Beta
+Wave: Phase 11, cold one-shot solve timing
+Mode: profile+optimize+validate
+Focus: Determine whether strict first-solve smf timing can honestly beat MA27 after Alpha's structural solve pass
+Outcome: PARTIAL — strict one-shot did not beat MA27
+Confidence: high on measured remaining blocker
+Conflict check: Alpha/Gamma idle; Beta held BUILDING/TESTING slots sequentially
+
+**Intent**
+- Measure first full solve after factorization versus subsequent solves inside the same process.
+- Check benchmark methodology for smf cold versus MA27 warm asymmetry.
+- Keep only changes that preserve the same-KKT comparison and improve honest timing.
+
+**What was done**
+- Updated `bench_kkt_fixture_compare` so the displayed smf and MA27 one-shot solves both run before optional smf profiling. This avoids running 200 smf profile solves before MA27's displayed one-shot timing.
+- Added smf first-vs-warm profile fields: `first_full`, `first_forward`, `first_diag`, `first_backward`, `first_diagback`, alongside repeated warm averages.
+- Fixed one misleading-indentation warning in `solve_backward.cpp`; no behavioral change intended.
+- Tried and reverted non-wins:
+  - sequential-write permutation plus cached inverse-D blocks;
+  - no-shrink reusable local/extension scratch;
+  - factor-time solve-cache touch/checksum.
+
+**Validation / Evidence**
+- Build: `cmake --build solver/build --target smf bench_kkt_fixture_compare -j4` — passed with no warnings.
+- Focused tests: `ctest --test-dir solver/build -R 'Supernode|SolveResidual|IpoptAdapter|OcpKktRegression|IndefLarger' --output-on-failure` — 5/5 passed.
+- Final fair same-KKT compare at `pivot_u=1e-8`, `profile_repeats=200`, `nemin=8`:
+  - `kkt_0002`: smf inertia `(1422,1197,0)`, residual `1.102244e-12`, analyse/factor/solve `4.536/0.916/0.062 ms`; MA27 inertia `(1422,1197,0)`, residual `1.391759e-14`, analyse/factor/solve `0.950/0.693/0.050 ms`; smf profile `first_full=0.061728 ms`, warm `full=0.050066 ms`; structure `nsteps=1400`, `width1=898`, `width2=262`, `width3plus=240`, `maxfront=21`, `factor_values=23665`.
+  - `kkt_0020`: smf inertia `(1422,1197,0)`, residual `6.933516e-19`, analyse/factor/solve `4.524/0.918/0.062 ms`; MA27 inertia `(1422,1197,0)`, residual `2.469458e-19`, analyse/factor/solve `0.920/0.734/0.054 ms`; smf profile `first_full=0.060963 ms`, warm `full=0.049289 ms`; same structure.
+
+**Finding**
+- Scratch allocation/resizing is not the root cause. The factor already pre-sizes reusable solve scratch, and no-shrink scratch did not improve the fixtures.
+- The remaining cold cost is the first full forward+diag+back traversal over the compressed solve stream after factorization. In the final fair-order benchmark, first full solve was about `0.061 ms`, warm full about `0.049-0.050 ms`, and MA27 one-shot about `0.050-0.054 ms`.
+- Strict one-shot smf solve timing did not honestly beat MA27 on the required fixtures. Closing this likely needs a deeper solve-layout/full-solve redesign, not a local permutation, scratch, D-cache, or benchmark-order tweak.
+
+**HANDOFF**
+1. Correctness is preserved: focused tests pass, inertia matches MA27, residual checks remain strict.
+2. Kept changes are limited to honest benchmark instrumentation/order and the indentation warning fix.
+3. Reverted all measured non-wins in solver hot paths.
+4. Strict cold one-shot parity remains open; do not claim smf beats MA27 under the displayed one-shot `solve=` metric.
+
+

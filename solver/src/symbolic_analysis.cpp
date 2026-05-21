@@ -352,7 +352,8 @@ namespace smf
         keep->etree = std::move(etree);
         keep->supernodes = std::move(snodes);
         keep->fronts = std::move(fronts);
-        keep->postorder = std::move(sn_postorder);
+        keep->postorder = sn_postorder;
+        keep->solve_postorder = std::move(sn_postorder);
 
         return keep;
     }
