@@ -35,9 +35,15 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <memory>
+#include <sstream>
+#include <string>
 #include <vector>
 
 // ============================================================================
@@ -117,6 +123,8 @@ struct SmfFkeep
 {
     smf::FactorKeep fk;
     int num_neg = 0;
+    int capture_id = 0;
+    bool rhs_captured = false;
 };
 
 // ============================================================================
@@ -232,6 +240,94 @@ static void push_to_cleaned(SmfAkeep* ak)
     }
 }
 
+static int capture_limit()
+{
+    const char* env = std::getenv("SMF_MA97_CAPTURE_LIMIT");
+    if (!env || env[0] == '\0')
+        return 1;
+    const int value = std::atoi(env);
+    return value > 0 ? value : 1;
+}
+
+static std::string capture_path(const char* dir, int id, const char* suffix)
+{
+    std::ostringstream os;
+    os << dir << "/kkt_" << std::setw(4) << std::setfill('0') << id << suffix;
+    return os.str();
+}
+
+static int maybe_capture_matrix(const SmfAkeep* ak)
+{
+    const char* dir = std::getenv("SMF_MA97_CAPTURE_DIR");
+    if (!dir || dir[0] == '\0' || !ak || !ak->ak)
+        return 0;
+
+    static int capture_count = 0;
+    if (capture_count >= capture_limit())
+        return 0;
+
+    const int id = ++capture_count;
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        return 0;
+
+    const smf::CscLower& A = ak->ak->cleaned;
+    const std::string matrix_file = capture_path(dir, id, ".mtx");
+    std::ofstream out(matrix_file);
+    if (!out)
+        return 0;
+
+    out << "%%MatrixMarket matrix coordinate real symmetric\n";
+    out << "% Captured from smf_ma97_plugin ma97_factor_d\n";
+    out << A.n << ' ' << A.n << ' ' << A.nnz() << '\n';
+    out << std::setprecision(17);
+    for (int j = 0; j < A.n; ++j)
+    {
+        for (smf::Int p = A.col_ptr[static_cast<size_t>(j)]; p < A.col_ptr[static_cast<size_t>(j + 1)]; ++p)
+        {
+            const int i = A.row_idx[static_cast<size_t>(p)];
+            out << (i + 1) << ' ' << (j + 1) << ' ' << A.values[static_cast<size_t>(p)] << '\n';
+        }
+    }
+
+    std::ofstream meta(capture_path(dir, id, ".meta"));
+    if (meta)
+    {
+        meta << "id " << id << '\n';
+        meta << "n " << A.n << '\n';
+        meta << "nnz_lower " << A.nnz() << '\n';
+        meta << "source smf_ma97_plugin ma97_factor_d\n";
+    }
+    return id;
+}
+
+static void maybe_capture_rhs(const SmfAkeep* ak, SmfFkeep* fw, const double* x, int ldx, int nrhs)
+{
+    const char* dir = std::getenv("SMF_MA97_CAPTURE_DIR");
+    if (!dir || dir[0] == '\0' || !ak || !fw || fw->capture_id <= 0 || fw->rhs_captured || !x)
+        return;
+
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        return;
+
+    std::ofstream out(capture_path(dir, fw->capture_id, ".rhs"));
+    if (!out)
+        return;
+
+    const int n = ak->n;
+    out << n << ' ' << nrhs << '\n';
+    out << std::setprecision(17);
+    for (int rhs = 0; rhs < nrhs; ++rhs)
+    {
+        for (int i = 0; i < n; ++i)
+            out << x[static_cast<size_t>(rhs * ldx + i)] << '\n';
+    }
+    fw->rhs_captured = true;
+}
+
 static void apply_ma97_control(SmfAkeep* ak, const ma97_control_d* ctrl)
 {
     if (!ak || !ctrl)
@@ -241,23 +337,11 @@ static void apply_ma97_control(SmfAkeep* ak, const ma97_control_d* ctrl)
     if (ctrl->nemin > 0)
         ak->ctrl.nemin = ctrl->nemin;
     
-    // CRITICAL: IPOPT's default ctrl->u is 1e-8 (appropriate for dense Cholesky),
-    // but Bunch-Kaufman indefinite pivoting requires u >= 0.01 (ideally ~0.64).
-    // Clamp to a safe minimum for indefinite matrices to avoid accepting tiny pivots
-    // that lead to huge L factor values and poor solve accuracy.
-    if (ctrl->u > 0.0) {
-        if (ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricIndefinite) {
-            constexpr double MIN_INDEF_PIVOT_U = 0.01;
-            ak->ctrl.pivot_u = (ctrl->u < MIN_INDEF_PIVOT_U) ? MIN_INDEF_PIVOT_U : ctrl->u;
-            if (ctrl->u < MIN_INDEF_PIVOT_U && ctrl->print_level >= 0) {
-                fprintf(stderr, 
-                    "[smf_ma97] WARNING: IPOPT pivot_u=%.2e is too small for indefinite BBK; "
-                    "clamped to %.2e\n", ctrl->u, ak->ctrl.pivot_u);
-            }
-        } else {
-            ak->ctrl.pivot_u = ctrl->u;  // SPD: accept IPOPT's value as-is
-        }
-    }
+    // IPOPT owns MA97 pivot-quality escalation.  Do not floor this value here:
+    // same-matrix KKT comparison showed the old 0.01 floor caused a real solve
+    // residual regression while IPOPT's requested 1e-8 remained accurate.
+    if (ctrl->u > 0.0)
+        ak->ctrl.pivot_u = ctrl->u;
     
     if (ctrl->small > 0.0)
         ak->ctrl.small_pivot = ctrl->small;
@@ -415,6 +499,7 @@ extern "C"
         }
 
         auto* fw = new SmfFkeep();
+        fw->capture_id = maybe_capture_matrix(ak);
         const smf::FactorStatus fs = ak->solver.factor(*ak->ak, ak->ctrl, ak->info, fw->fk);
 
         if (ctrl && ctrl->print_level > 1)
@@ -532,6 +617,8 @@ extern "C"
 
         const int n = ak->n;
         int rc = 0;
+
+        maybe_capture_rhs(ak, fw, x, ldx, nrhs);
 
         // Debug: RHS norm (only if print_level > 1)
         if (ctrl && ctrl->print_level > 1)

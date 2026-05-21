@@ -80,6 +80,44 @@ static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
   return true;
 }
 
+static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
+  fkeep.solve_steps.clear();
+  fkeep.solve_row_indices.clear();
+  fkeep.solve_steps.reserve(keep.solve_postorder.size());
+
+  std::size_t row_count = 0;
+  int max_p = 0;
+  int max_q = 0;
+  for (Int s : keep.solve_postorder)
+  {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const int p = static_cast<int>(keep.supernodes[si].width());
+    const int f = static_cast<int>(keep.fronts[si].front_size());
+    row_count += keep.fronts[si].row_indices.size();
+    max_p = std::max(max_p, p);
+    max_q = std::max(max_q, f - p);
+  }
+  fkeep.solve_row_indices.reserve(row_count);
+
+  for (Int s : keep.solve_postorder) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const FrontalInfo &fi = keep.fronts[si];
+    const Supernode &sn = keep.supernodes[si];
+    SolveStep step;
+    step.row_offset = static_cast<Int>(fkeep.solve_row_indices.size());
+    step.factor_offset = fkeep.factor_col_ptr[si];
+    step.p = static_cast<int>(sn.width());
+    step.f = static_cast<int>(fi.front_size());
+    fkeep.solve_steps.push_back(step);
+    fkeep.solve_row_indices.insert(fkeep.solve_row_indices.end(),
+                                   fi.row_indices.begin(), fi.row_indices.end());
+  }
+
+  fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
+  fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
+  fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
+}
+
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -339,6 +377,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     }
     info.actual_factor_entries =
         static_cast<LongInt>(fkeep.factor_values.size());
+    build_solve_steps(keep, fkeep);
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
     return FactorStatus::Success;
@@ -550,6 +589,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.arena_peak_bytes = static_cast<long>(arena.peak_bytes());
   info.arena_growths = arena.grow_count();
+  build_solve_steps(keep, fkeep);
 
   const auto t1 = std::chrono::steady_clock::now();
   info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();

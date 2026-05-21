@@ -1,7 +1,6 @@
 #pragma once
 #include "smf/types.hpp"
 #include "smf/etree.hpp"
-#include "smf/csc_matrix.hpp"
 #include <vector>
 
 namespace smf {
@@ -44,9 +43,10 @@ std::vector<Supernode> detect_fundamental_supernodes(
 /// Amalgamate supernodes using the nemin threshold.
 ///
 /// Two adjacent supernodes S (child) and P (parent) are merged when:
-///   S.width() < nemin  AND  P.width() < nemin  AND  P.children.size() == 1
+///   S.width() < nemin  AND  P.width() < nemin
 ///
-/// Merging absorbs S into P: P.col_start = S.col_start; P inherits S's children.
+/// Merging absorbs S into P: P.col_start = S.col_start; P inherits S's children
+/// while preserving P's other children.
 /// Repeated bottom-up until stable.
 ///
 /// @param supernodes  fundamental supernodes (taken by value; modified internally)
