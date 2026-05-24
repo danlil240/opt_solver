@@ -7,7 +7,6 @@
 namespace smf {
 
 namespace {
-
 static const std::vector<Int> &get_or_compute_postorder(
     const AnalysisKeep &ak, std::vector<Int> &local_buf) {
   if (!ak.postorder.empty())
@@ -78,8 +77,9 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
                       : get_or_compute_postorder(*ak, po_buf));
   }
 
-  std::vector<double> &b_loc = fkeep.solve_loc;
-  std::vector<double> &tmp = fkeep.solve_tmp;
+  // Per-call scratch keeps solve_backward reentrant for concurrent callers.
+  std::vector<double> b_loc;
+  std::vector<double> tmp;
   tmp.resize(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {

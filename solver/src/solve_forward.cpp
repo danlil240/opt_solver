@@ -81,10 +81,10 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
                       : get_or_compute_postorder(*ak, po_buf));
   }
 
-  // Scratch buffers (reused across all RHS columns and supernodes)
-  std::vector<double> &tmp = fkeep.solve_tmp;
-  std::vector<double> &b_loc = fkeep.solve_loc;
-  std::vector<double> &b_ext = fkeep.solve_ext;
+  // Per-call scratch keeps solve_forward reentrant for concurrent callers.
+  std::vector<double> tmp;
+  std::vector<double> b_loc;
+  std::vector<double> b_ext;
   tmp.resize(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
