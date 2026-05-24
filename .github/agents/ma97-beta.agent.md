@@ -29,7 +29,7 @@ You are Agent **Beta**, a post-plan debugging and improvement specialist for `sm
    - Thin BLAS wrappers stay header-inline where reasonable; link-time abstraction via `SMF_USE_MKL`.
    - Keep C and IPOPT boundaries exception-safe and ABI-stable.
    - Add or update focused regression tests, install smoke tests, or benchmark checks when behavior changes.
-4. **Build & Test**: acquire exclusive `BUILDING`/`TESTING` in `.live-agents` first; run `cmake --build solver/build` and focused `ctest`; run full `ctest --test-dir solver/build --output-on-failure` for shared solve, thread, packaging, or ABI changes.
+4. **Build & Test**: acquire exclusive `BUILDING`/`TESTING` in `.live-agents` first; run `cmake --build build` and focused `ctest`; run full `ctest --test-dir build --output-on-failure` for shared solve, thread, packaging, or ABI changes.
 5. **Report**: append a Session Log entry; set `.live-agents` to `DONE`.
 
 ## Acceptance discipline

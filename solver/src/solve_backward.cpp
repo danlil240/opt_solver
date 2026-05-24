@@ -7,9 +7,34 @@
 namespace smf {
 
 namespace {
+static const std::vector<Int> &get_or_compute_postorder(
+    const AnalysisKeep &ak, std::vector<Int> &local_buf) {
+  if (!ak.postorder.empty())
+    return ak.postorder;
+
+  const Int ns = static_cast<Int>(ak.supernodes.size());
+  local_buf.reserve(static_cast<std::size_t>(ns));
+  std::vector<std::pair<Int, Int>> stack;
+  stack.reserve(static_cast<std::size_t>(ns));
+  for (Int i = 0; i < ns; ++i) {
+    if (ak.supernodes[static_cast<std::size_t>(i)].parent == -1)
+      stack.push_back({i, 0});
+  }
+  while (!stack.empty()) {
+    auto &[node, child_pos] = stack.back();
+    const auto &children = ak.supernodes[static_cast<std::size_t>(node)].children;
+    if (child_pos < static_cast<Int>(children.size())) {
+      stack.push_back({children[static_cast<std::size_t>(child_pos++)], 0});
+    } else {
+      local_buf.push_back(node);
+      stack.pop_back();
+    }
+  }
+  return local_buf;
+}
 
 static void solve_lower_transpose_nonunit_small(double *b, int p,
-                                                const double *L, int lda) {
+                                                 const double *L, int lda) {
   for (int col = p - 1; col >= 0; --col) {
     double value = b[col];
     const double *lcol = L + static_cast<std::ptrdiff_t>(col) * lda;
@@ -33,54 +58,28 @@ static void solve_lower_transpose_unit_small(double *b, int p,
 
 } // anonymous namespace
 
-static const std::vector<Int> &
-get_or_compute_solve_postorder(const AnalysisKeep &ak,
-                               std::vector<Int> &local_buf) {
-  if (!ak.solve_postorder.empty())
-    return ak.solve_postorder;
-  if (!ak.postorder.empty())
-    return ak.postorder;
-
-  const Int ns = static_cast<Int>(ak.supernodes.size());
-  local_buf.reserve(static_cast<std::size_t>(ns));
-  std::vector<std::pair<Int, Int>> stk;
-  stk.reserve(static_cast<std::size_t>(ns));
-  for (Int i = 0; i < ns; ++i)
-    if (ak.supernodes[static_cast<std::size_t>(i)].parent == -1)
-      stk.push_back({i, 0});
-  while (!stk.empty()) {
-    auto &[node, ci] = stk.back();
-    const Int nch = static_cast<Int>(
-        ak.supernodes[static_cast<std::size_t>(node)].children.size());
-    if (ci < nch) {
-      stk.push_back(
-          {ak.supernodes[static_cast<std::size_t>(node)]
-               .children[static_cast<std::size_t>(ci++)],
-           0});
-    } else {
-      local_buf.push_back(node);
-      stk.pop_back();
-    }
-  }
-  return local_buf;
-}
-
 void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
   if (n == 0 || nrhs == 0)
     return;
 
   const bool use_steps = !fkeep.solve_steps.empty();
   const AnalysisKeep *ak = fkeep.analysis;
-  std::vector<Int> local_postorder;
-  const std::vector<Int> *solve_postorder = nullptr;
-  if (!use_steps) {
-    solve_postorder = &get_or_compute_solve_postorder(*ak, local_postorder);
-  }
+  std::vector<Int> po_buf;
+  const std::vector<Int> *postorder = nullptr;
   const int ns = use_steps ? static_cast<int>(fkeep.solve_steps.size())
-                           : static_cast<int>(solve_postorder->size());
+                           : static_cast<int>((!ak->solve_postorder.empty()
+                                                   ? ak->solve_postorder
+                                                   : get_or_compute_postorder(*ak, po_buf))
+                                                  .size());
+  if (!use_steps) {
+    postorder = &(!ak->solve_postorder.empty()
+                      ? ak->solve_postorder
+                      : get_or_compute_postorder(*ak, po_buf));
+  }
 
-  std::vector<double> &b_loc = fkeep.solve_loc;
-  std::vector<double> &tmp = fkeep.solve_tmp;
+  // Per-call scratch keeps solve_backward reentrant for concurrent callers.
+  std::vector<double> b_loc;
+  std::vector<double> tmp;
   tmp.resize(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
@@ -99,7 +98,7 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
         p = step.p;
         f = step.f;
       } else {
-        const Int s = (*solve_postorder)[static_cast<std::size_t>(pos)];
+        const Int s = (*postorder)[static_cast<std::size_t>(pos)];
         const Supernode &sn = ak->supernodes[static_cast<std::size_t>(s)];
         const FrontalInfo &fi = ak->fronts[static_cast<std::size_t>(s)];
         rows = fi.row_indices.data();

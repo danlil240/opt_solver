@@ -5,7 +5,7 @@
 //   rhs   : text file with first line "n nrhs", followed by n*nrhs values
 //
 // Capture from the IPOPT MA97 plugin with:
-//   SMF_MA97_CAPTURE_DIR=solver/build/kkt_captures SMF_MA97_CAPTURE_LIMIT=1 <trajectory-test>
+//   SMF_MA97_CAPTURE_DIR=build/kkt_captures SMF_MA97_CAPTURE_LIMIT=1 <trajectory-test>
 
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
@@ -24,7 +24,8 @@
 #include <vector>
 
 #ifdef SMF_HAS_MA27
-extern "C" {
+extern "C"
+{
     void ma27id_(int* icntl, double* cntl);
     void ma27ad_(int* n,
                  int* nz,
@@ -72,13 +73,15 @@ extern "C" {
 
 using Clock = std::chrono::steady_clock;
 
-struct RhsData {
+struct RhsData
+{
     int n = 0;
     int nrhs = 0;
     std::vector<double> values;
 };
 
-struct Result {
+struct Result
+{
     bool ok = false;
     int status = 0;
     int pos = 0;
@@ -96,7 +99,8 @@ struct Result {
     int raw_info15_neg = -1;
 };
 
-struct SmfProfile {
+struct SmfProfile
+{
     bool ok = false;
     int repeats = 0;
     double first_full_ms = 0.0;
@@ -123,7 +127,7 @@ static double elapsed_ms(Clock::time_point t0, Clock::time_point t1)
     return std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
-static RhsData read_rhs(const std::string& path)
+static RhsData read_rhs(const std::string &path)
 {
     RhsData rhs;
     std::ifstream in(path);
@@ -133,7 +137,7 @@ static RhsData read_rhs(const std::string& path)
     if (rhs.n <= 0 || rhs.nrhs <= 0)
         return RhsData{};
     rhs.values.resize(static_cast<std::size_t>(rhs.n) * static_cast<std::size_t>(rhs.nrhs));
-    for (double& value : rhs.values)
+    for (double &value : rhs.values)
     {
         if (!(in >> value))
             return RhsData{};
@@ -141,7 +145,7 @@ static RhsData read_rhs(const std::string& path)
     return rhs;
 }
 
-static void spmv_sym(const smf::CscLower& A, const double* x, double* y)
+static void spmv_sym(const smf::CscLower &A, const double* x, double* y)
 {
     const int n = static_cast<int>(A.n);
     std::fill(y, y + n, 0.0);
@@ -158,7 +162,7 @@ static void spmv_sym(const smf::CscLower& A, const double* x, double* y)
     }
 }
 
-static double vector_norm2(const std::vector<double>& values)
+static double vector_norm2(const std::vector<double> &values)
 {
     long double sum = 0.0;
     for (double value : values)
@@ -166,7 +170,7 @@ static double vector_norm2(const std::vector<double>& values)
     return std::sqrt(static_cast<double>(sum));
 }
 
-static double matrix_frobenius_norm(const smf::CscLower& A)
+static double matrix_frobenius_norm(const smf::CscLower &A)
 {
     long double sum = 0.0;
     for (int j = 0; j < A.n; ++j)
@@ -182,7 +186,7 @@ static double matrix_frobenius_norm(const smf::CscLower& A)
     return std::sqrt(static_cast<double>(sum));
 }
 
-static double relative_residual(const smf::CscLower& A, const std::vector<double>& x, const std::vector<double>& b)
+static double relative_residual(const smf::CscLower &A, const std::vector<double> &x, const std::vector<double> &b)
 {
     std::vector<double> ax(static_cast<std::size_t>(A.n), 0.0);
     spmv_sym(A, x.data(), ax.data());
@@ -195,7 +199,7 @@ static double relative_residual(const smf::CscLower& A, const std::vector<double
     return denominator > 0.0 ? numerator / denominator : numerator;
 }
 
-static Result run_smf(const smf::CscLower& A, const std::vector<double>& b, double pivot_u, int nemin)
+static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, double pivot_u, int nemin)
 {
     Result result;
     smf::Control ctrl;
@@ -222,7 +226,8 @@ static Result run_smf(const smf::CscLower& A, const std::vector<double>& b, doub
     const smf::FactorStatus fs = solver.factor(*ak, ctrl, info, fk);
     const auto t3 = Clock::now();
     result.status = static_cast<int>(fs);
-    if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays && fs != smf::FactorStatus::Singular)
+    if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays &&
+        fs != smf::FactorStatus::Singular)
         return result;
 
     std::vector<double> x = b;
@@ -251,8 +256,8 @@ static Result run_smf(const smf::CscLower& A, const std::vector<double>& b, doub
     return result;
 }
 
-static SmfProfile run_smf_profile(const smf::CscLower& A, const std::vector<double>& b, double pivot_u, int repeats,
-                                  int nemin)
+static SmfProfile
+run_smf_profile(const smf::CscLower &A, const std::vector<double> &b, double pivot_u, int repeats, int nemin)
 {
     SmfProfile profile;
     profile.repeats = repeats;
@@ -272,13 +277,14 @@ static SmfProfile run_smf_profile(const smf::CscLower& A, const std::vector<doub
 
     smf::FactorKeep fk;
     const smf::FactorStatus fs = solver.factor(*ak, ctrl, info, fk);
-    if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays && fs != smf::FactorStatus::Singular)
+    if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays &&
+        fs != smf::FactorStatus::Singular)
         return profile;
 
     profile.nsteps = static_cast<int>(ak->supernodes.size());
     profile.maxfront = info.max_front_size;
     profile.factor_values = static_cast<long long>(fk.factor_values.size());
-    for (const auto& sn : ak->supernodes)
+    for (const auto &sn : ak->supernodes)
     {
         const int width = sn.width();
         if (width == 1)
@@ -294,7 +300,8 @@ static SmfProfile run_smf_profile(const smf::CscLower& A, const std::vector<doub
     std::vector<double> y(static_cast<std::size_t>(n));
     std::vector<double> z(static_cast<std::size_t>(n));
 
-    auto run_job = [&](smf::SolveJob job, std::vector<double>& values) {
+    auto run_job = [&](smf::SolveJob job, std::vector<double> &values)
+    {
         smf::Info local_info;
         return solver.solve(fk, ctrl, local_info, values.data(), n, 1, job);
     };
@@ -390,7 +397,7 @@ static SmfProfile run_smf_profile(const smf::CscLower& A, const std::vector<doub
 }
 
 #ifdef SMF_HAS_MA27
-static Result run_ma27(const smf::CscLower& A, const std::vector<double>& b, double pivot_u)
+static Result run_ma27(const smf::CscLower &A, const std::vector<double> &b, double pivot_u)
 {
     Result result;
     int n = static_cast<int>(A.n);
@@ -428,8 +435,8 @@ static Result run_ma27(const smf::CscLower& A, const std::vector<double>& b, dou
     double ops = 0.0;
 
     const auto t0 = Clock::now();
-    ma27ad_(&n, &nnz, irn.data(), icn.data(), iw.data(), &liw, ikeep.data(), iw1.data(), &nsteps, &iflag, icntl,
-            cntl, info, &ops);
+    ma27ad_(&n, &nnz, irn.data(), icn.data(), iw.data(), &liw, ikeep.data(), iw1.data(), &nsteps, &iflag, icntl, cntl,
+            info, &ops);
     const auto t1 = Clock::now();
     result.status = info[0];
     if (info[0] < 0)
@@ -455,8 +462,8 @@ static Result run_ma27(const smf::CscLower& A, const std::vector<double>& b, dou
         std::copy(a_in.begin(), a_in.end(), a_fac.begin());
         std::fill(std::begin(info), std::end(info), 0);
         std::vector<int> iw1_bd(static_cast<std::size_t>(std::max(2 * n + nsteps + 100, 1)));
-        ma27bd_(&n, &nnz, irn.data(), icn.data(), a_fac.data(), &la, iw.data(), &liw, ikeep.data(), &nsteps,
-                &maxfrt, iw1_bd.data(), icntl, cntl, info);
+        ma27bd_(&n, &nnz, irn.data(), icn.data(), a_fac.data(), &la, iw.data(), &liw, ikeep.data(), &nsteps, &maxfrt,
+                iw1_bd.data(), icntl, cntl, info);
         result.status = info[0];
         if (info[0] >= 0)
         {
@@ -475,8 +482,7 @@ static Result run_ma27(const smf::CscLower& A, const std::vector<double>& b, dou
     std::vector<int> iw1_cd(static_cast<std::size_t>(std::max(2 * n + nsteps + 100, 1)));
     std::fill(std::begin(info), std::end(info), 0);
     const auto t4 = Clock::now();
-    ma27cd_(&n, a_fac.data(), &la, iw.data(), &liw, w.data(), &maxfrt, x.data(), iw1_cd.data(), &nsteps, icntl,
-            info);
+    ma27cd_(&n, a_fac.data(), &la, iw.data(), &liw, w.data(), &maxfrt, x.data(), iw1_cd.data(), &nsteps, icntl, info);
     const auto t5 = Clock::now();
     if (info[0] < 0)
     {
@@ -501,7 +507,7 @@ static Result run_ma27(const smf::CscLower& A, const std::vector<double>& b, dou
 }
 #endif
 
-static void print_result(const char* name, const Result& result)
+static void print_result(const char* name, const Result &result)
 {
     if (!result.ok)
     {
@@ -509,8 +515,8 @@ static void print_result(const char* name, const Result& result)
         return;
     }
 
-    std::printf("%-5s status=%d inertia=(%d,%d,%d) residual=%.6e analyse=%.3fms factor=%.3fms solve=%.3fms",
-                name, result.status, result.pos, result.neg, result.zero, result.residual, result.analyse_ms,
+    std::printf("%-5s status=%d inertia=(%d,%d,%d) residual=%.6e analyse=%.3fms factor=%.3fms solve=%.3fms", name,
+                result.status, result.pos, result.neg, result.zero, result.residual, result.analyse_ms,
                 result.factor_ms, result.solve_ms);
     std::printf(" entries=%ld flops=%.3e delayed=%d maxfront=%d nsteps=%d", result.factor_entries, result.flops,
                 result.delayed, result.maxfront, result.nsteps);
@@ -519,17 +525,19 @@ static void print_result(const char* name, const Result& result)
     std::printf("\n");
 }
 
-static void print_profile(const SmfProfile& profile)
+static void print_profile(const SmfProfile &profile)
 {
     if (!profile.ok)
     {
         std::puts("smf_profile FAILED");
         return;
     }
-    std::printf("smf_profile repeats=%d first_full=%.6fms full=%.6fms first_forward=%.6fms forward=%.6fms first_diag=%.6fms diag=%.6fms first_backward=%.6fms backward=%.6fms first_diagback=%.6fms diagback=%.6fms residual=%.6e\n",
-                profile.repeats, profile.first_full_ms, profile.full_ms, profile.first_forward_ms,
-                profile.forward_ms, profile.first_diag_ms, profile.diag_ms, profile.first_backward_ms,
-                profile.backward_ms, profile.first_diagback_ms, profile.diagback_ms, profile.residual);
+    std::printf(
+        "smf_profile repeats=%d first_full=%.6fms full=%.6fms first_forward=%.6fms forward=%.6fms first_diag=%.6fms "
+        "diag=%.6fms first_backward=%.6fms backward=%.6fms first_diagback=%.6fms diagback=%.6fms residual=%.6e\n",
+        profile.repeats, profile.first_full_ms, profile.full_ms, profile.first_forward_ms, profile.forward_ms,
+        profile.first_diag_ms, profile.diag_ms, profile.first_backward_ms, profile.backward_ms,
+        profile.first_diagback_ms, profile.diagback_ms, profile.residual);
     std::printf("smf_structure nsteps=%d width1=%d width2=%d width3plus=%d maxfront=%d factor_values=%lld\n",
                 profile.nsteps, profile.width1, profile.width2, profile.width3plus, profile.maxfront,
                 profile.factor_values);
@@ -581,7 +589,8 @@ int main(int argc, char** argv)
     print_result("ma27", ma27_result);
     if (smf_result.ok && ma27_result.ok)
     {
-        std::printf("compare inertia_match=%s residual_ratio_smf_over_ma27=%.6e factor_speedup_smf_over_ma27=%.6e solve_speedup_smf_over_ma27=%.6e\n",
+        std::printf("compare inertia_match=%s residual_ratio_smf_over_ma27=%.6e factor_speedup_smf_over_ma27=%.6e "
+                    "solve_speedup_smf_over_ma27=%.6e\n",
                     (smf_result.neg == ma27_result.neg && smf_result.zero == ma27_result.zero) ? "yes" : "no",
                     ma27_result.residual > 0.0 ? smf_result.residual / ma27_result.residual : -1.0,
                     smf_result.factor_ms > 0.0 ? ma27_result.factor_ms / smf_result.factor_ms : -1.0,

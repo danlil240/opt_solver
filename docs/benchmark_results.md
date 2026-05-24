@@ -4,7 +4,7 @@
 **Platform**: Linux (GitHub Actions runner)  
 **Compiler**: GCC/Clang C++20, `-O2 -march=native`  
 **Reference solver**: Eigen 3.4.0 `SimplicialLDLT`  
-**Benchmark binary**: `solver/build/benchmarks/bench_compare`
+**Benchmark binary**: `build/benchmarks/bench_compare`
 
 ---
 
@@ -82,7 +82,7 @@ machine-precision residuals on Poisson-structured matrices.
 ## 4. Test Suite Status
 
 ```
-ctest --test-dir solver/build --output-on-failure
+ctest --test-dir build --output-on-failure
 
 100% tests passed, 0 tests failed out of 33
 Total Test time (real) =   0.16 sec
@@ -97,16 +97,16 @@ All 33 unit/integration tests green (IPOPT adapter test excluded; requires
 
 ```bash
 # Configure
-cmake -S solver -B solver/build \
+cmake -S solver -B build \
       -DSMF_BUILD_BENCHMARKS=ON \
       -DSMF_BUILD_TESTS=ON
 
 # Build
-cmake --build solver/build --parallel 4
+cmake --build build --parallel 4
 
 # Run comparison benchmark
-./solver/build/benchmarks/bench_compare
+./build/benchmarks/bench_compare
 
 # Run test suite
-ctest --test-dir solver/build --output-on-failure
+ctest --test-dir build --output-on-failure
 ```

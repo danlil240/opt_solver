@@ -29,7 +29,7 @@
 
 ## 2  Benchmark Executables
 
-All benchmarks are standalone executables built under `solver/build/benchmarks/`.  
+All benchmarks are standalone executables built under `build/benchmarks/`.  
 They are **not** ctest tests — run them manually.
 
 | Executable                          | Description                                         |
@@ -161,7 +161,7 @@ The Matrix Market file reader (`smf::read_matrix_market`) was added in M10.S3.
 The benchmark requires a `.mtx` file argument:
 
 ```bash
-./solver/build/benchmarks/bench_suite_sparse_matrix_market /path/to/matrix.mtx
+./build/benchmarks/bench_suite_sparse_matrix_market /path/to/matrix.mtx
 ```
 
 Without an argument, it gracefully reports "no file provided" and exits 0.
@@ -253,14 +253,14 @@ All benchmarks are deterministic (single-thread, no random variation) and can
 be reproduced with:
 
 ```bash
-cmake -S solver -B solver/build -DCMAKE_BUILD_TYPE=Release \
+cmake -S solver -B build -DCMAKE_BUILD_TYPE=Release \
       -DSMF_BUILD_BENCHMARKS=ON -DSMF_BUILD_CHOLMOD_COMPARE=ON
-cmake --build solver/build
-./solver/build/benchmarks/bench_poisson
-./solver/build/benchmarks/bench_random_symmetric
-./solver/build/benchmarks/bench_kkt_ocp
-./solver/build/benchmarks/bench_compare
-ctest --test-dir solver/build --output-on-failure
+cmake --build build
+./build/benchmarks/bench_poisson
+./build/benchmarks/bench_random_symmetric
+./build/benchmarks/bench_kkt_ocp
+./build/benchmarks/bench_compare
+ctest --test-dir build --output-on-failure
 ```
 
 Expected result: **39/39 tests pass**, benchmarks execute without errors.

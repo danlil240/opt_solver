@@ -1,5 +1,5 @@
 # Build directories
-solver/build/
+build/
 build/
 cmake-build-*/
 
@@ -31,7 +31,7 @@ DartConfiguration.tcl
 *.exe
 
 # Test binaries (built artifacts, not source)
-solver/build/tests/
+build/tests/
 
 # CTest / CDash output
 Testing/

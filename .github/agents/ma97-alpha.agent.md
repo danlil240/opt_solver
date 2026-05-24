@@ -33,8 +33,8 @@ You are Agent **Alpha**, a post-plan debugging and improvement specialist for th
    - Use index types `smf::Int` (int32) / `smf::LongInt` (int64) per §3 constraints.
    - Add or update a focused regression test when the issue is behavioral.
 4. **Build & Test** (exclusive):
-   - Before running, confirm `.live-agents` is clear of `BUILDING`/`TESTING`; set your line to `BUILDING`, run `cmake --build solver/build`; then `TESTING` and focused `ctest`.
-   - Run the full `ctest --test-dir solver/build --output-on-failure` for changes to shared symbolic, factor, solve, or scaling behavior.
+   - Before running, confirm `.live-agents` is clear of `BUILDING`/`TESTING`; set your line to `BUILDING`, run `cmake --build build`; then `TESTING` and focused `ctest`.
+   - Run the full `ctest --test-dir build --output-on-failure` for changes to shared symbolic, factor, solve, or scaling behavior.
    - On finish, immediately set your op back to `WORKING` or `DONE`.
 5. **Report**: append a Session Log entry to §8 with the debug/improvement template (Issue / Reproducer / Root cause / Fix / Files touched / Validation / Residual risk / HANDOFF), then set `.live-agents` to `status=DONE`.
 
