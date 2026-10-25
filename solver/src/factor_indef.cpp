@@ -2,6 +2,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/numeric_front.hpp"
 #include "smf/pivoting.hpp"
+#include "smf/scaling.hpp"
 #include "smf/threading.hpp"
 #include "smf/workspace.hpp"
 
@@ -334,6 +335,45 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     info.factor_status = FactorStatus::Singular;
     info.status = map_err;
     return FactorStatus::Singular;
+  }
+
+  fkeep.scale.clear();
+  if (ctrl.scaling != ScalingMethod::None && keep.n > 0) {
+    CscLower clean_mat;
+    clean_mat.n = keep.n;
+    clean_mat.col_ptr = keep.cleaned.col_ptr;
+    clean_mat.row_idx = keep.cleaned.row_idx;
+    clean_mat.values = ws.clean_values;
+
+    const ErrorCode sc_err = compute_scaling_for_method(
+        clean_mat, ctrl.scaling, fkeep.scale, ctrl.print_level);
+    if (sc_err != ErrorCode::Success) {
+      fkeep.factor_values.clear();
+      fkeep.status = FactorStatus::Singular;
+      info.factor_status = FactorStatus::Singular;
+      info.status = sc_err;
+      return FactorStatus::Singular;
+    }
+
+    // Apply scale S * A * S to clean_values and rescatter into ws.perm_values
+    for (Int j = 0; j < keep.n; ++j) {
+      const double sj = fkeep.scale[static_cast<std::size_t>(j)];
+      for (Int p = keep.cleaned.col_ptr[static_cast<std::size_t>(j)];
+           p < keep.cleaned.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+        const Int i = keep.cleaned.row_idx[static_cast<std::size_t>(p)];
+        ws.clean_values[static_cast<std::size_t>(p)] *=
+            fkeep.scale[static_cast<std::size_t>(i)] * sj;
+      }
+    }
+    if (keep.orig_to_perm_idx.empty()) {
+      ws.perm_values = ws.clean_values;
+    } else {
+      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
+      for (std::size_t k = 0; k < ws.clean_values.size(); ++k) {
+        const Int p_slot = keep.orig_to_perm_idx[k];
+        ws.perm_values[static_cast<std::size_t>(p_slot)] += ws.clean_values[k];
+      }
+    }
   }
 
   fkeep.n = keep.n;

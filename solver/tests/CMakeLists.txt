@@ -269,3 +269,16 @@ if(WIN32)
     target_link_libraries(test_numeric_workspace PRIVATE psapi)
 endif()
 add_test(NAME NumericWorkspace COMMAND test_numeric_workspace)
+
+# --- Task 5: Refinement and symmetric matching tests ---
+
+add_executable(test_refinement
+    test_refinement.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_refinement PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_refinement PRIVATE psapi)
+endif()
+add_test(NAME Refinement COMMAND test_refinement --gtest_filter=Refinement.*)
+add_test(NAME Matching COMMAND test_refinement --gtest_filter=Matching.*)

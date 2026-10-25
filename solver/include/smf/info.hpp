@@ -42,6 +42,8 @@ struct Info {
     double       analyse_seconds        = 0.0;
     double       factor_seconds         = 0.0;
     double       solve_seconds          = 0.0;
+    double       refinement_seconds     = 0.0;
+    int          refinement_iterations  = 0;
 
     // Arena memory diagnostics
     long         arena_peak_bytes       = 0;

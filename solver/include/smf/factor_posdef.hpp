@@ -51,6 +51,7 @@ struct FactorKeep {
   int band_n = 0;                  ///< order for banded SPD factor
   int band_kd = 0;                 ///< lower half-bandwidth for banded SPD factor
   std::vector<double> band_factor; ///< banded Cholesky factor (ldab=band_kd+1, col-major)
+  std::vector<double> scale;       ///< positive diagonal scaling S applied during factorization
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };

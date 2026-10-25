@@ -1,5 +1,6 @@
 #include "smf/solve_backward.hpp"
 #include "smf/dense_kernel.hpp"
+#include "smf/scaling.hpp"
 #include "smf/solve_diag.hpp"
 #include "smf/solve_forward.hpp"
 #include "smf/solver.hpp"
@@ -65,6 +66,10 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
   ws.ensure_capacity(n, 0, 0, nrhs);
 
+  const bool has_scale =
+      (!fkeep.scale.empty() &&
+       static_cast<int>(fkeep.scale.size()) == n);
+
   if (fkeep.use_banded_spd) {
     if (job != SolveJob::Full) {
       info.status = ErrorCode::FeatureNotAvailable;
@@ -73,6 +78,10 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     if (n != fkeep.band_n) {
       info.status = ErrorCode::IllegalValue;
       return static_cast<int>(ErrorCode::IllegalValue);
+    }
+
+    if (has_scale) {
+      apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
     }
 
     for (int rhs = 0; rhs < nrhs; ++rhs) {
@@ -103,6 +112,10 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
       }
     }
 
+    if (has_scale) {
+      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
+    }
+
     auto t1 = std::chrono::steady_clock::now();
     info.solve_seconds += std::chrono::duration<double>(t1 - t0).count();
     info.status = ErrorCode::Success;
@@ -111,12 +124,18 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
   switch (job) {
   case SolveJob::Full:
+    if (has_scale)
+      apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
     solve_forward(fkeep, b, n, nrhs, ws);
     for (int j = 0; j < nrhs; ++j)
       solve_diag(fkeep, b + j * n, n);
     solve_backward(fkeep, b, n, nrhs, ws);
+    if (has_scale)
+      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
     break;
   case SolveJob::Forward:
+    if (has_scale)
+      apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
     solve_forward(fkeep, b, n, nrhs, ws);
     break;
   case SolveJob::DiagOnly:
@@ -125,11 +144,15 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     break;
   case SolveJob::Backward:
     solve_backward(fkeep, b, n, nrhs, ws);
+    if (has_scale)
+      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
     break;
   case SolveJob::DiagBack:
     for (int j = 0; j < nrhs; ++j)
       solve_diag(fkeep, b + j * n, n);
     solve_backward(fkeep, b, n, nrhs, ws);
+    if (has_scale)
+      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
     break;
   }
 

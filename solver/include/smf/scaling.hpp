@@ -1,5 +1,7 @@
 #pragma once
 #include "csc_matrix.hpp"
+#include "error.hpp"
+#include "types.hpp"
 #include <vector>
 
 namespace smf {
@@ -11,6 +13,13 @@ namespace smf {
 // num_iterations: 3 for 1-norm, 1 for infinity-norm.
 std::vector<double> compute_equilibration_scale(const CscLower& A,
                                                 int num_iterations = 3);
+
+bool validate_positive_scale(const std::vector<double>& scale, int n) noexcept;
+
+ErrorCode compute_scaling_for_method(const CscLower& A,
+                                     ScalingMethod method,
+                                     std::vector<double>& scale_out,
+                                     int print_level = 0);
 
 // Apply scaling in-place: A_ij <- scale[i] * A_ij * scale[j]
 void apply_scale_to_matrix(CscLower& A, const std::vector<double>& scale);

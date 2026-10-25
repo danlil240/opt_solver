@@ -32,6 +32,7 @@ struct Control {
     // Solve options
     bool           solve_use_blas3_single_rhs    = false;
     bool           solve_multifrontal_forward     = false;
+    int            refinement_max_iters          = 5;
 
     // Diagnostics / logging
     int            print_level   = 0;

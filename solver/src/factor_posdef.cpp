@@ -3,6 +3,7 @@
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/scaling.hpp"
 #include "smf/threading.hpp"
 #include "smf/workspace.hpp"
 #include <algorithm>
@@ -330,6 +331,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   fkeep.band_n = 0;
   fkeep.band_kd = 0;
   fkeep.band_factor.clear();
+  fkeep.scale.clear();
   fkeep.perm = std::vector<int>(keep.perm.begin(), keep.perm.end());
   fkeep.iperm = std::vector<int>(keep.iperm.begin(), keep.iperm.end());
   fkeep.num_perm.resize(static_cast<std::size_t>(n));
@@ -343,19 +345,32 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     return FactorStatus::Success;
   }
 
+  CscLower A_clean_work = keep.cleaned;
+  if (ctrl.scaling != ScalingMethod::None) {
+    const ErrorCode sc_err = compute_scaling_for_method(
+        A_clean_work, ctrl.scaling, fkeep.scale, ctrl.print_level);
+    if (sc_err != ErrorCode::Success) {
+      fkeep.status = FactorStatus::NotPositiveDefinite;
+      info.factor_status = FactorStatus::NotPositiveDefinite;
+      info.status = sc_err;
+      return FactorStatus::NotPositiveDefinite;
+    }
+    apply_scale_to_matrix(A_clean_work, fkeep.scale);
+  }
+
   // Build a CscLower for scatter_original.
   // Identity ordering path reuses cleaned pattern/values directly.
   // Non-identity path permutes values using the O(nnz) scatter map.
   CscLower Ap;
   Ap.n = n;
   if (keep.orig_to_perm_idx.empty()) {
-    Ap.col_ptr = keep.cleaned.col_ptr;
-    Ap.row_idx = keep.cleaned.row_idx;
-    Ap.values = keep.cleaned.values;
+    Ap.col_ptr = A_clean_work.col_ptr;
+    Ap.row_idx = A_clean_work.row_idx;
+    Ap.values = std::move(A_clean_work.values);
   } else {
     const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
     std::vector<double> Ap_values =
-        scatter_values(keep.cleaned, keep.orig_to_perm_idx, nnz_perm);
+        scatter_values(A_clean_work, keep.orig_to_perm_idx, nnz_perm);
     Ap.col_ptr = keep.perm_col_ptr;
     Ap.row_idx = keep.perm_row_idx;
     Ap.values = std::move(Ap_values);
