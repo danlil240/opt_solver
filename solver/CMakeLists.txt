@@ -185,14 +185,36 @@ endif()
 
 # ---- Optional: MA27 via CoinHSL (for comparison benchmarks) ----------------
 set(SMF_HAS_MA27 OFF)
-find_library(COINHSL_LIBRARY coinhsl
-    HINTS /usr/local/lib
+# COINHSL_ROOT may point at an extracted CoinHSL archive (bin/ lib/ include/).
+set(COINHSL_ROOT "" CACHE PATH "Root of an extracted CoinHSL archive")
+set(_smf_coinhsl_lib_hints /usr/local/lib)
+set(_smf_coinhsl_inc_hints /usr/local/include/coin-or/hsl)
+set(_smf_coinhsl_bin_hints "")
+if(COINHSL_ROOT)
+    list(APPEND _smf_coinhsl_lib_hints "${COINHSL_ROOT}/lib" "${COINHSL_ROOT}/bin")
+    list(APPEND _smf_coinhsl_inc_hints "${COINHSL_ROOT}/include")
+    set(_smf_coinhsl_bin_hints "${COINHSL_ROOT}/bin")
+endif()
+# MSVC cannot consume the MinGW .dll.a import library; prefer the MSVC
+# import lib generated from coinhsl_msvc.def (coinhsl.lib) when present.
+find_library(COINHSL_LIBRARY NAMES coinhsl coinhsl_msvc libcoinhsl
+    HINTS ${_smf_coinhsl_lib_hints}
     DOC "CoinHSL library containing MA27")
 find_path(COINHSL_INCLUDE_DIR CoinHslConfig.h
-    HINTS /usr/local/include/coin-or/hsl
+    HINTS ${_smf_coinhsl_inc_hints}
     DOC "CoinHSL include directory")
 if(COINHSL_LIBRARY)
     set(SMF_HAS_MA27 ON)
+    # Locate the MinGW runtime DLLs that libcoinhsl.dll depends on.
+    set(SMF_COINHSL_DLL_DIR "" CACHE PATH
+        "Directory containing libcoinhsl.dll and its MinGW runtime DLLs")
+    if(NOT SMF_COINHSL_DLL_DIR)
+        foreach(_d IN LISTS _smf_coinhsl_bin_hints)
+            if(EXISTS "${_d}/libcoinhsl.dll")
+                set(SMF_COINHSL_DLL_DIR "${_d}")
+            endif()
+        endforeach()
+    endif()
     message(STATUS "smf: CoinHSL/MA27 found at ${COINHSL_LIBRARY} -- SMF_HAS_MA27=ON")
 else()
     message(STATUS "smf: CoinHSL not found -- MA27 benchmark disabled")
@@ -258,6 +280,10 @@ if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
     target_include_directories(smf_bench_baselines INTERFACE ${MKL_INCLUDE_DIR})
     target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_MKL_PARDISO=1)
 endif()
+if(SMF_HAS_MA27 AND COINHSL_LIBRARY)
+    target_link_libraries(smf_bench_baselines INTERFACE ${COINHSL_LIBRARY})
+    target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_MA27_IMPL=1)
+endif()
 
 # ---- Runtime dependency DLL staging (Windows) -----------------------------
 # Point SMF_DEPS_DLL_DIR at a directory containing dependency DLLs
@@ -288,6 +314,20 @@ function(smf_stage_runtime_dlls target)
             list(APPEND _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/${_extra}")
         endif()
     endforeach()
+    # CoinHSL/MA27 ships as a MinGW/gfortran DLL; it needs its own runtime
+    # stack (gfortran, openblas, winpthread, ...) staged alongside.
+    if(SMF_COINHSL_DLL_DIR AND EXISTS "${SMF_COINHSL_DLL_DIR}")
+        foreach(_extra
+                libcoinhsl.dll libhsl.dll libopenblas.dll libgfortran-5.dll
+                libgfortran-4.dll libgfortran-3.dll libgfortran.dll
+                libgomp-1.dll libgcc_s_seh-1.dll libquadmath-0.dll
+                libwinpthread-1.dll libstdc++-6.dll libssp-0.dll
+                libatomic-1.dll libgcc_s_dw2-1.dll libgcc_s_sjlj-1.dll)
+            if(EXISTS "${SMF_COINHSL_DLL_DIR}/${_extra}")
+                list(APPEND _smf_dep_dlls "${SMF_COINHSL_DLL_DIR}/${_extra}")
+            endif()
+        endforeach()
+    endif()
     if(_smf_dep_dlls)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
