@@ -1,5 +1,6 @@
 #include "smf/factor_indef.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/blocked_indef.hpp"
 #include "smf/numeric_front.hpp"
 #include "smf/pivoting.hpp"
 #include "smf/scaling.hpp"
@@ -139,6 +140,15 @@ FrontResult build_and_factor_supernode_front(
   }
 
   const bool is_root = (sn.parent == -1);
+  if (!ctrl.indef_use_reference_kernel &&
+      ctrl.indef_panel_size > 1 &&
+      front.num_rows() >= 16) {
+    if (ws_opt != nullptr) {
+      return factor_front_blocked(front, ctrl, *ws_opt, eff_small, is_root);
+    }
+    NumericWorkspace local_ws;
+    return factor_front_blocked(front, ctrl, local_ws, eff_small, is_root);
+  }
   return factor_front_reference(front, ctrl, eff_small, is_root);
 }
 

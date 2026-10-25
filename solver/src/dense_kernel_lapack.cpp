@@ -145,6 +145,29 @@ void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
   }
 }
 
+void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha, double beta) {
+  for (int j = 0; j < n; ++j) {
+    if (beta == 0.0) {
+      for (int i = 0; i < m; ++i) {
+        C[j * ldc + i] = 0.0;
+      }
+    } else if (beta != 1.0) {
+      for (int i = 0; i < m; ++i) {
+        C[j * ldc + i] *= beta;
+      }
+    }
+    for (int p = 0; p < k; ++p) {
+      const double b_jp = alpha * B[p * ldb + j];
+      if (b_jp != 0.0) {
+        for (int i = 0; i < m; ++i) {
+          C[j * ldc + i] += A[p * lda + i] * b_jp;
+        }
+      }
+    }
+  }
+}
+
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
   if (beta == 0.0) {
@@ -298,6 +321,12 @@ void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
 void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
                const double *B, int ldb, int ldc, double alpha, double beta) {
   cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, alpha, A, lda,
+              B, ldb, beta, C, ldc);
+}
+
+void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha, double beta) {
+  cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m, n, k, alpha, A, lda,
               B, ldb, beta, C, ldc);
 }
 

@@ -44,6 +44,12 @@ void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
                const double *B, int ldb, int ldc, double alpha = 1.0,
                double beta = 0.0);
 
+/// General matrix multiply with B transposed: C := alpha * A * Bᵀ + beta * C
+/// A is m×k (lda), B is n×k (ldb), C is m×n (ldc). Column-major.
+void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha = 1.0,
+                  double beta = 1.0);
+
 /// Matrix-vector: y := alpha * A * x + beta * y. A is m×n, lda.
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha = 1.0, double beta = 0.0);

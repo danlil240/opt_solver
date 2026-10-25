@@ -31,6 +31,7 @@ smf_benchmark(bench_suite_sparse_matrix_market)
 smf_benchmark(bench_compare)
 smf_benchmark(bench_kkt_fixture_compare)
 smf_benchmark(bench_replay)
+smf_benchmark(bench_front_kernel)
 
 # bench_compare: link optional comparison solvers (CHOLMOD, MA27)
 if(SMF_HAS_CHOLMOD AND CHOLMOD_LIBRARY AND CHOLMOD_INCLUDE_DIR)

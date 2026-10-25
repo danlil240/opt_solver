@@ -299,3 +299,15 @@ if(WIN32)
     target_link_libraries(test_benchmark_adapters PRIVATE psapi)
 endif()
 add_test(NAME BenchmarkAdapters COMMAND test_benchmark_adapters)
+
+# --- Task 7: Blocked indefinite frontal kernel tests ---
+
+add_executable(test_blocked_indef
+    test_blocked_indef.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_blocked_indef PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_blocked_indef PRIVATE psapi)
+endif()
+add_test(NAME BlockedIndef COMMAND test_blocked_indef)

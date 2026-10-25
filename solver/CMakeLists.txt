@@ -254,6 +254,7 @@ add_library(smf STATIC
     src/symbolic_analysis.cpp
     src/frontal_matrix.cpp
     src/numeric_front.cpp
+    src/blocked_indef.cpp
     src/factor_stack.cpp
     src/pivoting.cpp
     src/factor_posdef.cpp
