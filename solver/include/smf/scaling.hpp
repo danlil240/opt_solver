@@ -16,10 +16,12 @@ std::vector<double> compute_equilibration_scale(const CscLower& A,
 
 bool validate_positive_scale(const std::vector<double>& scale, int n) noexcept;
 
+// UserSupplied copies `user_scale` (length A.n), which must be positive.
 ErrorCode compute_scaling_for_method(const CscLower& A,
                                      ScalingMethod method,
                                      std::vector<double>& scale_out,
-                                     int print_level = 0);
+                                     int print_level = 0,
+                                     const double* user_scale = nullptr);
 
 // Apply scaling in-place: A_ij <- scale[i] * A_ij * scale[j]
 void apply_scale_to_matrix(CscLower& A, const std::vector<double>& scale);

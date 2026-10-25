@@ -13,11 +13,19 @@ struct Control {
     int            nemin         = 8;       // min columns for supernode amalgamation
 
     // Scaling
-    ScalingMethod  scaling       = ScalingMethod::None;
+    ScalingMethod  scaling       = ScalingMethod::Auto;
+    // ScalingMethod::UserSupplied: n positive factors in original index
+    // order, read during factor() (MA97's user `scale` argument).
+    const double*  user_scale    = nullptr;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter
     double         small_pivot   = 1e-20;   // zero-pivot threshold
+    // Static pivoting (PARDISO-style), off at 0: indefinite fronts never
+    // delay; a column with no acceptable 1x1/2x2 pivot is taken as a 1x1
+    // pivot, its |d| raised to static_pivot_tol * max|A| if smaller. The
+    // factor is then of a perturbed matrix: solve with iterative refinement.
+    double         static_pivot_tol = 0.0;
     int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
 
@@ -27,7 +35,12 @@ struct Control {
     int            expected_refactors = 1;
 
     // Parallelism
+    // num_threads > 1 runs the serial multifrontal engine with num_threads
+    // BLAS threads inside each front. tree_parallel opts into the older
+    // task-parallel tree traversal (serial BLAS per task), which measured
+    // slower than the serial engine on every large-benchmark case so far.
     int            num_threads   = 1;
+    bool           tree_parallel = false;
     bool           deterministic = false;
     uint64_t       memory_budget_bytes = 0; // 0 = unbounded
     int64_t        factor_parallel_min_flops = 10000;

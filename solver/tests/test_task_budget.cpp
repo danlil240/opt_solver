@@ -156,6 +156,7 @@ TEST(TaskBudget, ConcurrentInstancesAndDeepTree) {
             ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
             ctrl.nemin = 1;
             ctrl.num_threads = 2;
+            ctrl.tree_parallel = true;
             ctrl.memory_budget_bytes = 65536;
             Info info;
             auto ak = solver.analyse(A, ctrl, info);

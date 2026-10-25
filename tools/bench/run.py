@@ -88,6 +88,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--binary", default=None, help="Explicit benchmark runner binary")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for solver order")
     parser.add_argument("--timeout", type=float, default=60.0, help="Per-attempt subprocess timeout in seconds")
+    parser.add_argument("--threads", default="1",
+                        help="Comma-separated thread counts to sweep (e.g. 1,8,16); applied to smf, BLAS and OpenMP")
+    parser.add_argument("--serial-solvers", default="ma27",
+                        help="Comma-separated solvers that only run at 1 thread (no parallelism to measure)")
+    parser.add_argument("--solvers", default=None, help="Comma-separated override of the manifest's solver list")
+    parser.add_argument("--cases", default=None, help="Comma-separated matrix_id filter")
     args = parser.parse_args(argv)
 
     if args.trials < 10 and not args.allow_short_trials:
@@ -121,7 +127,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: manifest contains no cases", file=sys.stderr)
         return 2
 
-    solvers = manifest.get("solvers", ["smf"])
+    solvers = args.solvers.split(",") if args.solvers else manifest.get("solvers", ["smf"])
+    thread_list = [int(t) for t in args.threads.split(",") if t]
+    serial_solvers = {x for x in args.serial_solvers.split(",") if x}
+    case_filter = {x for x in args.cases.split(",") if x} if args.cases else None
     required_baselines = manifest.get("required_baselines", []) if args.require_baselines else []
     binary = find_replay_binary(build_dir, args.binary)
 
@@ -130,19 +139,28 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     for case in cases:
         matrix_id = case["matrix_id"]
+        if case_filter is not None and matrix_id not in case_filter:
+            continue
+        # (solver, threads) pairs that timed out or are unavailable on this
+        # case: later attempts would only repeat that, so they are skipped.
+        dead: set = set()
         sequence_id = case.get("sequence_id", matrix_id)
         family_id = case.get("family_id", sequence_id)
         mode = case.get("mode", "cold")
         track = case.get("track", "recommended")
         total_attempts = args.warmups + args.trials
 
-        for attempt_idx in range(total_attempts):
+        for threads, attempt_idx in [(t, a) for t in thread_list for a in range(total_attempts)]:
             is_warmup = attempt_idx < args.warmups
             trial_id = attempt_idx if is_warmup else (attempt_idx - args.warmups)
             ordered_solvers = list(solvers)
             rng.shuffle(ordered_solvers)
 
             for solver_id in ordered_solvers:
+                if threads > 1 and solver_id in serial_solvers:
+                    continue
+                if (solver_id, threads) in dead:
+                    continue
                 if binary is not None and binary.name.startswith("bench_replay"):
                     cmd = [
                         str(binary),
@@ -162,6 +180,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         track,
                         "--trial",
                         str(trial_id),
+                        "--threads",
+                        str(threads),
                         "--JsonlOut",
                         str(records_path),
                     ]
@@ -169,16 +189,27 @@ def main(argv: Optional[List[str]] = None) -> int:
                         cmd.extend(["--mtx", str(case["mtx_path"])])
                     if case.get("matrix_type"):
                         cmd.extend(["--mtype", str(case["matrix_type"])])
+                    if case.get("seq_values_path"):
+                        cmd.extend(["--seq-values", str(case["seq_values_path"])])
                     if is_warmup:
                         cmd.append("--warmup")
                     t0 = time.perf_counter()
                     try:
+                        env = dict(os.environ)
+                        for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+                            env[var] = str(threads)
+                        lines_before = records_path.read_text(encoding="utf-8").count("\n") if records_path.exists() else 0
                         proc = subprocess.run(
                             cmd,
                             capture_output=True,
                             text=True,
                             timeout=args.timeout,
+                            env=env,
                         )
+                        if records_path.exists():
+                            new_lines = records_path.read_text(encoding="utf-8").splitlines()[lines_before:]
+                            if any('"outcome":"Unavailable"' in ln for ln in new_lines):
+                                dead.add((solver_id, threads))
                         if proc.returncode != 0 and not is_warmup:
                             if solver_id == "smf" or solver_id in required_baselines:
                                 any_failure = True
@@ -193,6 +224,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             "track": track,
                             "trial_id": trial_id,
                             "warmup": is_warmup,
+                            "threads": threads,
                             "outcome": "Timeout",
                             "reason": f"subprocess timed out after {args.timeout}s",
                             "wall_ms": (time.perf_counter() - t0) * 1000.0,
@@ -206,6 +238,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         }
                         with records_path.open("a", encoding="utf-8") as f:
                             f.write(json.dumps(rec) + "\n")
+                        dead.add((solver_id, threads))
                         if not is_warmup and (solver_id == "smf" or solver_id in required_baselines):
                             any_failure = True
                 else:

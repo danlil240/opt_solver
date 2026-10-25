@@ -52,14 +52,16 @@ enum class OrderingMethod {
     AutoParallel = 1,
     AMD          = 2,
     METIS        = 3,
-    UserSupplied = 4
+    UserSupplied = 4,
+    Matching     = 5    // matching-based compressed AMD (indefinite, needs values)
 };
 
 enum class ScalingMethod {
     None         = 0,
     Equilibration = 1,
     Matching     = 2,
-    UserSupplied = 3
+    UserSupplied = 3,
+    Auto         = 4    // matching scaling from the analysis when it computed one (else none)
 };
 
 enum class FactorStatus {

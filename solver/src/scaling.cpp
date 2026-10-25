@@ -21,10 +21,20 @@ bool validate_positive_scale(const std::vector<double>& scale, int n) noexcept {
 ErrorCode compute_scaling_for_method(const CscLower& A,
                                      ScalingMethod method,
                                      std::vector<double>& scale_out,
-                                     int print_level) {
+                                     int print_level,
+                                     const double* user_scale) {
     scale_out.clear();
     if (method == ScalingMethod::None) {
         return ErrorCode::Success;
+    }
+    if (method == ScalingMethod::UserSupplied) {
+        if (!user_scale) {
+            return ErrorCode::IllegalValue;
+        }
+        scale_out.assign(user_scale, user_scale + A.n);
+        return validate_positive_scale(scale_out, static_cast<int>(A.n))
+                   ? ErrorCode::Success
+                   : ErrorCode::IllegalValue;
     }
     if (method == ScalingMethod::Equilibration) {
         scale_out = compute_equilibration_scale(A, 3);

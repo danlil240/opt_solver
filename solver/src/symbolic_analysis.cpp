@@ -9,11 +9,48 @@
 #include "smf/sym_graph.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <numeric>
 
 namespace smf
 {
+
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+    static constexpr bool kHaveMetis = true;
+#else
+    static constexpr bool kHaveMetis = false;
+#endif
+
+    // Matching ordering: a matched pair is kept together when either scaled
+    // diagonal is below this (on the GHS_indef KKT set every pair has a zero
+    // diagonal member, so the value barely matters).
+    static constexpr double kMatchingPairTol = 0.1;
+
+    // Auto policy: keep the matching ordering while its predicted flops are
+    // within this factor of AMD's. Measured on GHS_indef and optim20: it wins
+    // at ratios <= ~1.15 (bratu3d, boyd1/2, cont-201/300, kkt_eq_qp), where
+    // AMD's factor delays pivots by the thousand, is neutral to slower from
+    // ~2.2 (kkt_network_flow, ncvxqp9) and loses from ~3.9 (mario002,
+    // aug3dcqp, stokes128).
+    static constexpr double kMatchingFlopsRatio = 1.5;
+
+    // KKT recognition for the auto policy: a diagonal below kSmallDiagonal
+    // times its column's largest off-diagonal cannot be a 1x1 pivot; the
+    // matrix is treated as a saddle point when such columns are at least
+    // kKktSmallDiagonalShare of n (optim20/GHS KKT: 10-87%; GHS indefinite
+    // PDE matrices: 0.3-0.9%) or any diagonal is exactly zero.
+    static constexpr double kSmallDiagonal = 0.01;
+    static constexpr double kKktSmallDiagonalShare = 0.05;
+    // AutoParallel tries METIS when AMD's predicted factor flops (times
+    // Control::expected_refactors) reach this many per row. One-off SuiteSparse
+    // SPD factorizations: METIS won at 8.8e5-1.1e6 (bmwcra_1, cfd2), tied at
+    // 2.1e5 (pwtk) and lost at 1.3e5-4.0e5 (af_shell7, G3_circuit, apache2).
+    static constexpr double kMetisFlopsPerRow = 4.5e5;
+
+    // Below this order delays stay cheap (fronts are bounded by n) and the
+    // matching's fixed cost would dominate (optim20: n <= 4000).
+    static constexpr Int kAutoMatchingMinN = 10000;
 
     static bool is_auto_ordering(OrderingMethod m)
     {
@@ -116,6 +153,52 @@ namespace smf
             auto_order && (half_bw <= 64) && (dense_band || n <= 2048);
 
         std::vector<Int> perm(static_cast<std::size_t>(n));
+        bool amd_ordered = false;
+        MatchingOrderStats matching_stats;
+
+        // Saddle-point / KKT matrices in auto mode get the maximum-product
+        // matching: its scaling (applied by ScalingMethod::Auto) rescues badly
+        // scaled systems, and its compressed ordering replaces AMD unless it
+        // costs more flops (decided in step 5). They are recognised by
+        // diagonals that cannot carry a 1x1 pivot: any exact zero, or many
+        // (regularised constraint blocks) below 1% of their column's largest
+        // off-diagonal. Indefinite PDE matrices have under 1% such columns.
+        const CscLower &C = cleaned.clean;
+        bool auto_matching = false;
+        if (auto_order && !use_identity_ordering && n >= kAutoMatchingMinN &&
+            control.matrix_type == MatrixType::RealSymmetricIndefinite &&
+            C.values.size() == C.row_idx.size())
+        {
+            std::vector<double> diag(static_cast<std::size_t>(n), 0.0), off_max(static_cast<std::size_t>(n), 0.0);
+            for (Int j = 0; j < n; ++j)
+            {
+                for (Int p = C.col_ptr[static_cast<std::size_t>(j)]; p < C.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+                {
+                    const Int i = C.row_idx[static_cast<std::size_t>(p)];
+                    const double a = std::abs(C.values[static_cast<std::size_t>(p)]);
+                    if (i == j)
+                    {
+                        diag[static_cast<std::size_t>(j)] = a;
+                        continue;
+                    }
+                    off_max[static_cast<std::size_t>(i)] = std::max(off_max[static_cast<std::size_t>(i)], a);
+                    off_max[static_cast<std::size_t>(j)] = std::max(off_max[static_cast<std::size_t>(j)], a);
+                }
+            }
+            Int small = 0;
+            bool zero = false;
+            for (std::size_t j = 0; j < diag.size(); ++j)
+            {
+                zero = zero || diag[j] == 0.0;
+                small += (diag[j] < kSmallDiagonal * off_max[j]) ? 1 : 0;
+            }
+            auto_matching = zero || static_cast<double>(small) >= kKktSmallDiagonalShare * static_cast<double>(n);
+        }
+        std::vector<Int> matching_perm;
+        if (auto_matching)
+            auto_matching = matching_order_lower_csc(C, kMatchingPairTol, matching_perm,
+                                                     analyse_scratch_, &matching_stats);
+
         if (use_identity_ordering)
         {
             std::iota(perm.begin(), perm.end(), 0);
@@ -123,21 +206,30 @@ namespace smf
         }
         else
         {
-            // AutoSerial / AMD, and AutoParallel below the METIS size
-            // threshold, resolve to AMD: run it straight off the cleaned
-            // pattern with the solver-owned workspace.
+            // AutoSerial / AMD resolve to AMD: run it straight off the
+            // cleaned pattern with the solver-owned workspace. AutoParallel
+            // starts from AMD too; step 5 tries METIS only when AMD's factor
+            // looks expensive.
+            // Matching falls back to plain AMD when it cannot run (no values,
+            // structurally singular).
+            const bool matching_ordered =
+                control.ordering == OrderingMethod::Matching &&
+                matching_order_lower_csc(C, kMatchingPairTol, perm,
+                                         analyse_scratch_, &matching_stats);
             const bool amd_backend =
                 control.ordering == OrderingMethod::AutoSerial ||
                 control.ordering == OrderingMethod::AMD ||
-                (control.ordering == OrderingMethod::AutoParallel && n <= 8192);
-            if (!(amd_backend && amd_order_lower_csc(n, cleaned.clean.col_ptr,
-                                                     cleaned.clean.row_idx, perm,
-                                                     analyse_scratch_)))
+                control.ordering == OrderingMethod::AutoParallel ||
+                control.ordering == OrderingMethod::Matching;
+            amd_ordered = !matching_ordered && amd_backend &&
+                          amd_order_lower_csc(n, C.col_ptr, C.row_idx, perm,
+                                              analyse_scratch_);
+            if (!matching_ordered && !amd_ordered)
             {
                 auto backend = make_ordering_backend(control.ordering, n, info);
 
                 // Step 3: build symmetric adjacency graph for the cleaned pattern.
-                auto [xadj, adjncy] = build_symmetric_adjacency(cleaned.clean);
+                auto [xadj, adjncy] = build_symmetric_adjacency(C);
 
                 // Step 4: compute fill-reducing permutation.
                 perm = backend->compute_ordering(n, xadj, adjncy);
@@ -152,28 +244,20 @@ namespace smf
             }
             else
             {
-#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
-                info.ordering_used = static_cast<int>(
-                    control.ordering == OrderingMethod::AutoParallel
-                        ? OrderingMethod::METIS
-                        : (control.ordering == OrderingMethod::AutoSerial
-                               ? OrderingMethod::AMD
-                               : control.ordering));
-#else
-                info.ordering_used = static_cast<int>(
-                    control.ordering == OrderingMethod::AutoParallel
-                        ? OrderingMethod::AMD
-                        : (control.ordering == OrderingMethod::AutoSerial
-                               ? OrderingMethod::AMD
-                               : control.ordering));
-#endif
+                OrderingMethod used = control.ordering;
+                if (matching_ordered)
+                    used = OrderingMethod::Matching;
+                else if (amd_ordered || control.ordering == OrderingMethod::AutoSerial)
+                    used = OrderingMethod::AMD;
+                else if (control.ordering == OrderingMethod::AutoParallel)
+                    used = (kHaveMetis && n > 8192) ? OrderingMethod::METIS : OrderingMethod::AMD;
+                info.ordering_used = static_cast<int>(used);
             }
         }
 
         // Temporaries live in a solver-owned buffer reused across analyses
         // (fresh allocations are dominated by page faults at these sizes).
         const auto sn_sz = static_cast<std::size_t>(n);
-        const CscLower &C = cleaned.clean;
         const std::size_t nnz_c = C.row_idx.size();
         const std::size_t work_need = 7 * sn_sz + 1 + 2 * nnz_c;
         if (analyse_work_.size() < work_need)
@@ -188,14 +272,76 @@ namespace smf
         Int *row_col = inv_order + sn_sz;        // nnz
         Int *row_src = row_col + nnz_c;          // nnz
 
-        // Step 5: elimination tree and exact column counts of the ordering.
         std::vector<Int> iperm(sn_sz);
-        for (Int i = 0; i < n; ++i)
-            iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
-        build_row_form(C, iperm.data(), row_ptr, row_col, nullptr, nullptr, head);
-        EliminationTree etree0 = build_elimination_tree_from_rows(n, row_ptr, row_col);
-        const std::vector<Int> colcount0 =
-            filled_column_counts_from_rows(n, row_ptr, row_col, etree0);
+        const auto symbolic_counts = [&](const std::vector<Int> &p, EliminationTree &et,
+                                         std::vector<Int> &cc) {
+            for (Int i = 0; i < n; ++i)
+                iperm[static_cast<std::size_t>(p[static_cast<std::size_t>(i)])] = i;
+            build_row_form(C, iperm.data(), row_ptr, row_col, nullptr, nullptr, head);
+            et = build_elimination_tree_from_rows(n, row_ptr, row_col);
+            cc = filled_column_counts_from_rows(n, row_ptr, row_col, et);
+        };
+        const auto factor_flops = [](const std::vector<Int> &cc) {
+            double fl = 0.0;
+            for (Int c : cc)
+                fl += static_cast<double>(c) * static_cast<double>(c);
+            return fl;
+        };
+
+        EliminationTree etree0;
+        std::vector<Int> colcount0;
+        std::vector<Int> order;
+        std::vector<Supernode> snodes;
+        std::vector<Int> parentf(sn_sz);
+        // Step 5: elimination tree and exact column counts of the ordering.
+        symbolic_counts(perm, etree0, colcount0);
+
+        // AutoParallel on large matrices: METIS costs several us per vertex
+        // (up to ~85% of analysis) and only pays off when AMD's factor is
+        // expensive per row; then it is tried and the cheaper one kept.
+        if (kHaveMetis && amd_ordered &&
+            control.ordering == OrderingMethod::AutoParallel && n > 8192)
+        {
+            const double fl = factor_flops(colcount0);
+            const double refactors = std::max(1, control.expected_refactors);
+            if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
+            {
+                auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
+                auto [xadj, adjncy] = build_symmetric_adjacency(C);
+                std::vector<Int> mperm = backend->compute_ordering(n, xadj, adjncy);
+                if (mperm.size() == sn_sz)
+                {
+                    EliminationTree etm;
+                    std::vector<Int> ccm;
+                    symbolic_counts(mperm, etm, ccm);
+                    if (factor_flops(ccm) < fl)
+                    {
+                        perm = std::move(mperm);
+                        etree0 = std::move(etm);
+                        colcount0 = std::move(ccm);
+                        info.ordering_used = static_cast<int>(OrderingMethod::METIS);
+                    }
+                }
+            }
+        }
+
+        // Auto matching: the compressed ordering keeps 2x2 pivot pairs
+        // together, which AMD's lower predicted fill ignores (AMD's factor
+        // then delays pivots by the thousand). Prefer it unless its exact
+        // flops exceed AMD's by more than a constant factor.
+        if (auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching))
+        {
+            EliminationTree etm;
+            std::vector<Int> ccm;
+            symbolic_counts(matching_perm, etm, ccm);
+            if (factor_flops(ccm) <= kMatchingFlopsRatio * factor_flops(colcount0))
+            {
+                perm = std::move(matching_perm);
+                etree0 = std::move(etm);
+                colcount0 = std::move(ccm);
+                info.ordering_used = static_cast<int>(OrderingMethod::Matching);
+            }
+        }
 
         // Step 6: relabel by the etree postorder (fundamental supernodes
         // become contiguous), then relaxed amalgamation, which returns a
@@ -209,8 +355,6 @@ namespace smf
             parent1[k] = (par >= 0) ? inv_po[par] : -1;
             colcount1[k] = colcount0[static_cast<std::size_t>(old)];
         }
-        std::vector<Int> order;
-        std::vector<Supernode> snodes;
         amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
                            order, snodes);
 
@@ -218,7 +362,6 @@ namespace smf
         for (Int k = 0; k < n; ++k)
             inv_order[order[static_cast<std::size_t>(k)]] = k;
         bool identity_final = true;
-        std::vector<Int> parentf(sn_sz);
         {
             const std::vector<Int> perm0 = perm;
             for (Int k = 0; k < n; ++k)
@@ -234,6 +377,7 @@ namespace smf
         }
         for (Int i = 0; i < n; ++i)
             iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
+
         // Relabelling preserves the tree: numbering 1 *is* the postorder of
         // etree0, so k -> inv_order[k] lists the final labels in postorder.
         EliminationTree etree;
@@ -316,6 +460,7 @@ namespace smf
         keep->fronts = std::move(fronts);
         keep->postorder = sn_postorder;
         keep->solve_postorder = std::move(sn_postorder);
+        keep->matching_scale = std::move(matching_stats.scale);
 
         return keep;
     }

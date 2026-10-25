@@ -1,4 +1,5 @@
 #include "adapter.hpp"
+#include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -280,7 +281,8 @@ public:
         ctrl_ = ctrl;
         track_ = track;
         if (track_ == "recommended" &&
-            ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
+            ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
+            ctrl_.ordering == OrderingMethod::AutoSerial) {
             ctrl_.ordering = OrderingMethod::AutoParallel;
         }
     }
@@ -324,6 +326,7 @@ public:
         stats_.inertia_neg = info.num_negative;
         stats_.inertia_zero = info.num_zero;
         stats_.delayed_pivots = info.delayed_pivots;
+        static_pivots_ = info.static_pivots;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
 
@@ -365,7 +368,12 @@ public:
         }
         Info info;
         const auto t0 = Clock::now();
-        const int rc = solver_.solve(fk_, ctrl_, info, b_and_x.data(), n, nrhs, sws_);
+        // A statically pivoted factor is of a perturbed matrix: refine
+        // against the true one, as PARDISO does after perturbations.
+        if (static_pivots_ > 0) rhs_copy_.assign(b_and_x.begin(), b_and_x.begin() + static_cast<std::ptrdiff_t>(n) * nrhs);
+        int rc = solver_.solve(fk_, ctrl_, info, b_and_x.data(), n, nrhs, sws_);
+        if (rc == 0 && static_pivots_ > 0)
+            refine(base_matrix_, fk_, ctrl_, rhs_copy_, b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
         const auto t1 = Clock::now();
         stats_.solve_ms = ms_since(t0, t1);
         if (rc != 0) {
@@ -389,6 +397,8 @@ private:
     NumericWorkspace nws_;
     SolveWorkspace sws_;
     AdapterStats stats_{};
+    int static_pivots_ = 0;
+    std::vector<double> rhs_copy_;
 };
 
 class UnavailableOrExternalHslAdapter final : public SolverAdapter {
@@ -446,6 +456,8 @@ std::unique_ptr<SolverAdapter> make_hsl_adapter(const std::string &hsl_id) {
 #if defined(SMF_HAS_MA27_IMPL) && SMF_HAS_MA27_IMPL
     if (hsl_id == "ma27") return std::make_unique<Ma27Adapter>();
 #endif
+    if (hsl_id == "ma97") return make_hsl_ma97_adapter();
+    if (hsl_id == "ma57") return make_hsl_ma57_adapter();
     return std::make_unique<UnavailableOrExternalHslAdapter>(hsl_id);
 }
 

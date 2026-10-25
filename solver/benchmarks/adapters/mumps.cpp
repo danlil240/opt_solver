@@ -4,6 +4,7 @@
 #include <dmumps_c.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <vector>
@@ -70,9 +71,10 @@ public:
         return id;
     }
 
-    void configure(const Control &ctrl, const std::string &) override {
+    void configure(const Control &ctrl, const std::string &track) override {
         indefinite_ =
             (ctrl.matrix_type == MatrixType::RealSymmetricIndefinite);
+        track_ = track;
     }
 
     Outcome analyse(const CscLower &A) override {
@@ -123,6 +125,8 @@ public:
         id_.icntl[2] = -1;  // ICNTL(3)
         id_.icntl[3] = 0;   // ICNTL(4): no messages
         id_.icntl[23] = 1;  // ICNTL(24): detect null pivots -> INFOG(28)
+        // IPOPT's MUMPS interface default mumps_pivtol (CNTL(1)).
+        if (track_ == "ipopt") id_.cntl[0] = 1e-6;
 
         id_.n = static_cast<MUMPS_INT>(n_);
         id_.nz = static_cast<MUMPS_INT>(nz);
@@ -153,9 +157,16 @@ public:
         a_.assign(values.begin(), values.end());
         id_.a = a_.data();
 
+        // INFOG(1) = -8/-9 means the analysis' workspace estimate was too
+        // small (delayed pivots); the documented remedy, which IPOPT applies
+        // too, is to raise ICNTL(14) (% extra workspace) and refactor.
         id_.job = 2;
         const auto t0 = Clock::now();
         dmumps_c(&id_);
+        for (int retry = 0; retry < 4 && (id_.infog[0] == -8 || id_.infog[0] == -9); ++retry) {
+            id_.icntl[13] = std::max<MUMPS_INT>(2 * id_.icntl[13], 100);  // ICNTL(14)
+            dmumps_c(&id_);
+        }
         const auto t1 = Clock::now();
         stats_.factor_ms = ms_since(t0, t1);
 
@@ -225,6 +236,7 @@ private:
     DMUMPS_STRUC_C id_{};
     bool initialized_ = false;
     bool indefinite_ = true;
+    std::string track_ = "recommended";
     Int n_ = 0;
     std::vector<MUMPS_INT> irn_, jcn_;
     std::vector<double> a_;

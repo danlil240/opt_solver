@@ -11,7 +11,8 @@ namespace smf {
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
-                                     bool posdef, FactorKeep &fkeep,
+                                     double static_pivot, bool posdef,
+                                     FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st) {
   const std::size_t n = static_cast<std::size_t>(keep.n);
   const std::size_t ns = keep.supernodes.size();
@@ -38,6 +39,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   prm.small_pivot = ctrl.small_pivot;
   prm.nb = std::max(2, ctrl.indef_panel_size);
   prm.posdef = posdef;
+  prm.static_pivot = posdef ? 0.0 : static_pivot;
 
   // Symbolic plan: largest front, factor size, and the peak of the
   // contribution stack when no pivot is delayed.
@@ -218,6 +220,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     st.inertia.positive += kr.inertia.positive;
     st.inertia.negative += kr.inertia.negative;
     st.inertia.zero += kr.inertia.zero;
+    st.static_pivots += kr.static_pivots;
     st.flops += kr.flops;
     st.max_front = std::max(st.max_front, f);
 

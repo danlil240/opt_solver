@@ -126,6 +126,37 @@ PivotChoice select_pivot(const double *F, int f, int k, int num_elig, int limit,
     return {};
 }
 
+// Static pivoting, when no threshold pivot exists among [k, num_elig) (all
+// columns current): take the column whose diagonal is largest relative to
+// its column as a 1x1 pivot, so the growth in L stays as small as it can,
+// and lift |d| to prm.static_pivot (keeping its sign) if it is smaller.
+PivotChoice force_static_pivot(double *F, int f, int k, int num_elig,
+                               const LdltKernelParams &prm,
+                               LdltKernelResult &res) noexcept {
+    const std::size_t sf = static_cast<std::size_t>(f);
+    int best = k;
+    double best_ratio = -1.0;
+    for (int cand = k; cand < num_elig; ++cand) {
+        const double *col = F + static_cast<std::size_t>(cand) * sf;
+        double colmax = 0.0;
+        for (int i = k; i < cand; ++i)
+            colmax = std::max(colmax, std::abs(F[static_cast<std::size_t>(i) * sf + cand]));
+        for (int i = cand + 1; i < f; ++i) colmax = std::max(colmax, std::abs(col[i]));
+        const double a = std::abs(col[cand]);
+        const double ratio = (colmax > 0.0) ? a / colmax : a;
+        if (ratio > best_ratio) {
+            best_ratio = ratio;
+            best = cand;
+        }
+    }
+    double &d = F[static_cast<std::size_t>(best) * sf + best];
+    if (!(std::abs(d) >= prm.static_pivot)) {
+        d = (d < 0.0) ? -prm.static_pivot : prm.static_pivot;
+        ++res.static_pivots;
+    }
+    return {1, best, -1};
+}
+
 // Symmetric swap of positions p < q in the lower-stored front. Columns
 // [0, p) (already-eliminated L) swap rows p and q too. W rows follow when
 // w_cols > 0.
@@ -262,8 +293,11 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
         // Unblocked right-looking: every pivot updates the full trailing
         // triangle. No BLAS calls; fronts this small live in L1/L2.
         while (k < num_elig) {
-            const PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
-            if (pc.kind == 0) break;
+            PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
+            if (pc.kind == 0) {
+                if (!(prm.static_pivot > 0.0)) break;
+                pc = force_static_pivot(F, f, k, num_elig, prm, res);
+            }
             apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res);
         }
         res.num_accepted = k;
@@ -292,8 +326,11 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             // The whole trailing matrix is current now: search every
             // remaining eligible column (handles cross-panel 2x2 pivots).
             const int ss = k;
-            const PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
-            if (pc.kind == 0) break;
+            PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
+            if (pc.kind == 0) {
+                if (!(prm.static_pivot > 0.0)) break;
+                pc = force_static_pivot(F, f, k, num_elig, prm, res);
+            }
             apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res);
             deferred_update(F, f, ss, k, k, W);
         }

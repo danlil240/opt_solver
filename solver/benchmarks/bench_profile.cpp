@@ -82,6 +82,7 @@ struct Timing {
     int delayed = 0;
     long long fent = 0;
     double flops = 0;
+    std::string why;  // failure stage / accuracy, shown with -v
 };
 
 Timing run_once(smf::bench::SolverAdapter &ad, const smf::CscLower &A,
@@ -92,15 +93,24 @@ Timing run_once(smf::bench::SolverAdapter &ad, const smf::CscLower &A,
     std::vector<double> b(static_cast<std::size_t>(n), 1.0);
     std::vector<double> x;
     const auto t0 = Clock::now();
-    if (ad.analyse(A) != smf::bench::Outcome::Success) return t;
+    if (ad.analyse(A) != smf::bench::Outcome::Success) {
+        t.why = "analyse: " + ad.stats().reason;
+        return t;
+    }
     t.analyse = ad.stats().analyse_ms;
     const int steps = c.warm ? static_cast<int>(seq.size()) : 1;
     for (int s = 0; s < steps; ++s) {
         const auto &vals = c.warm ? seq[static_cast<std::size_t>(s)] : A.values;
-        if (ad.factor(vals) != smf::bench::Outcome::Success) return t;
+        if (ad.factor(vals) != smf::bench::Outcome::Success) {
+            t.why = "factor: " + ad.stats().reason;
+            return t;
+        }
         t.factor += ad.stats().factor_ms;
         x = b;
-        if (ad.solve(x, 1) != smf::bench::Outcome::Success) return t;
+        if (ad.solve(x, 1) != smf::bench::Outcome::Success) {
+            t.why = "solve: " + ad.stats().reason;
+            return t;
+        }
         t.solve += ad.stats().solve_ms;
     }
     t.wall = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -109,6 +119,11 @@ Timing run_once(smf::bench::SolverAdapter &ad, const smf::CscLower &A,
     const auto v = smf::bench::validate(Al, b, x, 1);
     t.ok = smf::bench::is_qualified_validation(v);
     t.eta = v.eta_inf;
+    if (!t.ok) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "eta=%.2e omega=%.2e", v.eta_inf, v.omega);
+        t.why = buf;
+    }
     t.delayed = ad.stats().delayed_pivots;
     t.fent = ad.stats().factor_entries;
     t.flops = ad.stats().flops;
@@ -285,6 +300,7 @@ int main(int argc, char **argv) {
             }
             if (!last.ok) {
                 std::printf(" | %-6s %7s %7s %6s %7s %4d %3s", sv.c_str(), "FAIL", "", "", "", last.delayed, "no");
+                if (verbose) std::printf(" [%s]", last.why.c_str());
                 walls.push_back(std::numeric_limits<double>::quiet_NaN());
                 continue;
             }

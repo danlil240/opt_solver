@@ -77,6 +77,8 @@ struct SmfAkeep
     smf::NumericWorkspace nws;
     std::vector<int> sort_perm;
     int n = 0;
+    int capture_id = 0;          // KKT dump sequence id (SMF_KKT_DUMP_DIR)
+    int dump_factorizations = 0; // factorizations dumped for this analysis
 };
 
 struct SmfFkeep
@@ -92,6 +94,43 @@ struct SmfFkeep
     int capture_id = 0;
     bool rhs_captured = false;
 };
+
+// KKT capture for benchmarking (SMF_KKT_DUMP_DIR): the first factorization of
+// each analysis writes <dir>/kkt_s<id>.mtx (cleaned lower triangle, entries in
+// column-major order); every factorization appends its values, in that same
+// order, to <dir>/kkt_s<id>.vals as raw doubles. SMF_KKT_DUMP_MAX (default
+// 200) caps the factorizations recorded per analysis.
+static void dump_kkt(SmfAkeep* ak)
+{
+    static const char* dir = std::getenv("SMF_KKT_DUMP_DIR");
+    if (dir == nullptr || *dir == '\0')
+        return;
+    static int next_id = 0;
+    static const int max_dumps = std::getenv("SMF_KKT_DUMP_MAX") ? std::atoi(std::getenv("SMF_KKT_DUMP_MAX")) : 200;
+    if (ak->dump_factorizations == 0)
+        ak->capture_id = next_id++;
+    if (ak->dump_factorizations >= max_dumps)
+        return;
+    const std::filesystem::path base =
+        std::filesystem::path(dir) / ("kkt_s" + std::to_string(ak->capture_id));
+    const smf::CscLower& A = ak->mat;
+    if (ak->dump_factorizations == 0)
+    {
+        std::ofstream mtx(base.string() + ".mtx");
+        mtx << "%%MatrixMarket matrix coordinate real symmetric\n"
+            << "% IPOPT KKT matrix captured by the smf_ma97 plugin\n"
+            << A.n << " " << A.n << " " << A.row_idx.size() << "\n"
+            << std::setprecision(17);
+        for (smf::Int j = 0; j < A.n; ++j)
+            for (smf::Int k = A.col_ptr[static_cast<size_t>(j)]; k < A.col_ptr[static_cast<size_t>(j) + 1]; ++k)
+                mtx << A.row_idx[static_cast<size_t>(k)] + 1 << " " << j + 1 << " "
+                    << A.values[static_cast<size_t>(k)] << "\n";
+    }
+    std::ofstream vals(base.string() + ".vals", std::ios::binary | std::ios::app);
+    vals.write(reinterpret_cast<const char*>(A.values.data()),
+               static_cast<std::streamsize>(A.values.size() * sizeof(double)));
+    ++ak->dump_factorizations;
+}
 
 static bool build_csc_pattern(SmfAkeep* ak, int n, const int* ptr, const int* row, int base)
 {
@@ -189,11 +228,15 @@ static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctr
         break;
     }
 
+    // scaling <= 0 is "none", or the caller's own scale vector when factor
+    // receives one (applied in ma97_factor_d).
+    if (ctrl->scaling <= 0)
+    {
+        out_ctrl.scaling = smf::ScalingMethod::None;
+        return true;
+    }
     switch (ctrl->scaling)
     {
-    case 0:
-        out_ctrl.scaling = smf::ScalingMethod::None;
-        break;
     case 1:
         out_ctrl.scaling = smf::ScalingMethod::Matching;
         break;
@@ -343,19 +386,44 @@ extern "C"
             info->flag = -6;
             return;
         }
-
-        fill_values(ak, val);
-
-        if (*fkeep)
+        // IPOPT's "reuse" scaling strategies compute MC64 scaling once
+        // (scaling = 1, returned in `scale`) and pass it back with
+        // scaling = 0 on later factorizations.
+        const bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
+        if (!computed_scaling && scale)
         {
-            delete static_cast<SmfFkeep*>(*fkeep);
-            *fkeep = nullptr;
+            ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
+            ak->ctrl.user_scale = scale;
         }
 
-        auto* fw = new SmfFkeep();
+        fill_values(ak, val);
+        dump_kkt(ak);
+
+        // Refactorizations reuse the previous factor object so its storage
+        // (factor values, solve layout) is not reallocated every iteration.
+        auto* fw = *fkeep ? static_cast<SmfFkeep*>(*fkeep) : nullptr;
+        if (fw && fw->n != ak->n)
+        {
+            delete fw;
+            fw = nullptr;
+        }
+        *fkeep = nullptr;
+        if (!fw)
+            fw = new SmfFkeep();
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
         const smf::FactorStatus fs = ak->solver.factor(*ak->ak, ak->mat, ak->ctrl, ak->info, fw->fk, ak->nws);
+        ak->ctrl.user_scale = nullptr;
+        fw->ctrl.user_scale = nullptr;
+
+        // smf reports input/scaling/allocation failures as Singular too;
+        // only SingularMatrix is the MA97 "singular" warning.
+        if (fs == smf::FactorStatus::Singular && ak->info.status != smf::ErrorCode::SingularMatrix)
+        {
+            info->flag = -5;
+            delete fw;
+            return;
+        }
 
         if (ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
             fs == smf::FactorStatus::Success)
@@ -392,7 +460,7 @@ extern "C"
         info->maxsupernode = ak->info.max_supernode_size;
         info->ordering = ak->info.ordering_used;
 
-        if (scale && !fw->fk.scale.empty())
+        if (computed_scaling && scale && !fw->fk.scale.empty())
         {
             std::copy(fw->fk.scale.begin(), fw->fk.scale.end(), scale);
         }

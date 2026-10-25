@@ -72,14 +72,27 @@ set(SMF_HAS_OPENBLAS OFF)
 set(SMF_BLAS_REFERENCE OFF)
 set(SMF_BLAS_BACKEND_NAME "unknown")
 
+# MKL threading layer: "sequential" keeps every MKL call (BLAS, PARDISO)
+# single-threaded; "intel" links mkl_intel_thread + libiomp5 so MKL honours
+# mkl_set_num_threads / MKL_NUM_THREADS (needed for multi-thread benchmarks).
+set(SMF_MKL_THREADING "sequential" CACHE STRING "MKL threading layer: sequential or intel")
+set_property(CACHE SMF_MKL_THREADING PROPERTY STRINGS sequential intel)
+
 if(SMF_USE_MKL)
+    if(SMF_MKL_THREADING STREQUAL "intel")
+        set(_smf_mkl_thread_libs
+            "${_smf_default_conda_lib}/lib/mkl_intel_thread_dll.lib"
+            "${_smf_default_conda_lib}/lib/libiomp5md.lib")
+    else()
+        set(_smf_mkl_thread_libs "${_smf_default_conda_lib}/lib/mkl_sequential_dll.lib")
+    endif()
     if(NOT BLAS_LIBRARIES AND _smf_default_conda_lib
        AND EXISTS "${_smf_default_conda_lib}/lib/mkl_intel_lp64_dll.lib"
        AND EXISTS "${_smf_default_conda_lib}/lib/mkl_sequential_dll.lib"
        AND EXISTS "${_smf_default_conda_lib}/lib/mkl_core_dll.lib")
         set(BLAS_LIBRARIES
             "${_smf_default_conda_lib}/lib/mkl_intel_lp64_dll.lib"
-            "${_smf_default_conda_lib}/lib/mkl_sequential_dll.lib"
+            ${_smf_mkl_thread_libs}
             "${_smf_default_conda_lib}/lib/mkl_core_dll.lib")
         set(LAPACK_LIBRARIES ${BLAS_LIBRARIES})
         set(BLAS_FOUND TRUE)
@@ -398,6 +411,7 @@ add_library(smf STATIC
     src/utils/memory.cpp
     src/dense_indef.cpp
     src/ordering_amd.cpp
+    src/ordering_matching.cpp
     src/ordering_metis.cpp
     src/sym_graph.cpp
     src/etree.cpp

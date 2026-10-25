@@ -1,4 +1,5 @@
 #include "../benchmarks/common/validation.hpp"
+#include "smf/analysis.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
@@ -10,7 +11,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <random>
+#include <utility>
 #include <vector>
 
 using namespace smf;
@@ -313,4 +320,429 @@ TEST(Matching, ScaledKktSequenceWithDelayedPivots) {
         EXPECT_TRUE(smf::bench::is_qualified_validation(val))
             << "step=" << step << " eta_inf=" << val.eta_inf << " omega=" << val.omega;
     }
+}
+
+namespace {
+
+// Random symmetric matrix in lower CSC form: each lower entry is present with
+// probability `density`, magnitude log-uniform in [1e-4, 1e4], random sign.
+CscLower make_random_sym(int n, double density, bool with_diag, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    CscLower A;
+    A.n = n;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < n; ++j) {
+        for (int i = j; i < n; ++i) {
+            if ((i == j && with_diag) || (i != j && unif(rng) < density)) {
+                const double mag = std::pow(10.0, -4.0 + 8.0 * unif(rng));
+                A.row_idx.push_back(i);
+                A.values.push_back(unif(rng) < 0.5 ? -mag : mag);
+            }
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// KKT-structured matrix [H J^T; J 0]: tridiagonal H on nv variables, nc
+// constraint rows with `per_row` entries each, absent (2,2) block.
+CscLower make_random_kkt(int nv, int nc, int per_row, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    std::uniform_int_distribution<int> pick(0, nv - 1);
+    const auto value = [&] {
+        const double mag = std::pow(10.0, -4.0 + 8.0 * unif(rng));
+        return unif(rng) < 0.5 ? -mag : mag;
+    };
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(nv + nc));
+    for (int j = 0; j < nv; ++j) {
+        cols[static_cast<std::size_t>(j)].push_back({j, value()});
+        if (j + 1 < nv) cols[static_cast<std::size_t>(j)].push_back({j + 1, value()});
+    }
+    for (int r = 0; r < nc; ++r) {
+        for (int k = 0; k < per_row; ++k) {
+            cols[static_cast<std::size_t>(pick(rng))].push_back({nv + r, value()});
+        }
+    }
+    CscLower A;
+    A.n = nv + nc;
+    A.col_ptr.push_back(0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end(), [](const auto &a, const auto &b) { return a.first < b.first; });
+        for (const auto &[i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// Dense full symmetric |A| (row-major), duplicates summed.
+std::vector<double> dense_abs(const CscLower &A) {
+    const int n = static_cast<int>(A.n);
+    std::vector<double> d(static_cast<std::size_t>(n) * n, 0.0);
+    for (int j = 0; j < n; ++j) {
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const int i = A.row_idx[static_cast<std::size_t>(p)];
+            d[static_cast<std::size_t>(i) * n + j] += A.values[static_cast<std::size_t>(p)];
+            if (i != j) d[static_cast<std::size_t>(j) * n + i] += A.values[static_cast<std::size_t>(p)];
+        }
+    }
+    for (double &x : d) x = std::abs(x);
+    return d;
+}
+
+} // namespace
+
+TEST(Matching, OptimalAgainstBruteForce) {
+    int compared = 0;
+    for (unsigned seed = 1; seed <= 60; ++seed) {
+        const int n = 3 + static_cast<int>(seed % 5);  // 3..7
+        CscLower A = make_random_sym(n, 0.45, seed % 3 == 0, seed);
+        const std::vector<double> d = dense_abs(A);
+        std::vector<double> cmax(static_cast<std::size_t>(n), 0.0);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                cmax[static_cast<std::size_t>(j)] =
+                    std::max(cmax[static_cast<std::size_t>(j)], d[static_cast<std::size_t>(i) * n + j]);
+        const auto cost = [&](int i, int j) {
+            return std::log(cmax[static_cast<std::size_t>(j)]) - std::log(d[static_cast<std::size_t>(i) * n + j]);
+        };
+
+        // Brute force over perm[j] = row matched to column j.
+        std::vector<int> perm(static_cast<std::size_t>(n));
+        std::iota(perm.begin(), perm.end(), 0);
+        const double inf = std::numeric_limits<double>::infinity();
+        double best = inf;
+        do {
+            double c = 0.0;
+            for (int j = 0; j < n && c < inf; ++j) {
+                const int i = perm[static_cast<std::size_t>(j)];
+                c = d[static_cast<std::size_t>(i) * n + j] > 0.0 ? c + cost(i, j) : inf;
+            }
+            best = std::min(best, c);
+        } while (std::next_permutation(perm.begin(), perm.end()));
+
+        MatchingResult mr = compute_symmetric_matching(A);
+        if (best == inf) {
+            EXPECT_EQ(mr.status, ErrorCode::SingularMatrix) << "seed=" << seed;
+            continue;
+        }
+        ASSERT_EQ(mr.status, ErrorCode::Success) << "seed=" << seed;
+        ASSERT_EQ(mr.matched_rank, n);
+        double got = 0.0;
+        for (int j = 0; j < n; ++j) {
+            const int i = mr.col_to_row[static_cast<std::size_t>(j)];
+            ASSERT_GE(i, 0);
+            ASSERT_EQ(mr.row_to_col[static_cast<std::size_t>(i)], j);
+            ASSERT_GT(d[static_cast<std::size_t>(i) * n + j], 0.0);
+            got += cost(i, j);
+        }
+        EXPECT_NEAR(got, best, 1e-9 * (1.0 + std::abs(best))) << "seed=" << seed << " n=" << n;
+        ++compared;
+    }
+    EXPECT_GT(compared, 30);
+}
+
+TEST(Matching, DenseRowsStayOptimal) {
+    // KKT with a few dense constraint rows (the boyd1 shape): the matching
+    // sets dense rows aside first. Its cost must equal a dense O(n^3)
+    // Hungarian reference on the same costs.
+    for (unsigned seed = 1; seed <= 3; ++seed) {
+        // ~194 entries per constraint row > 10 sqrt(210) = 145: dense.
+        const int nv = 200, nc = 10, n = nv + nc;
+        std::mt19937 rng(seed);
+        std::uniform_real_distribution<double> unif(0.0, 1.0);
+        const auto value = [&] { return std::pow(10.0, -3.0 + 9.0 * unif(rng)) * (unif(rng) < 0.5 ? -1 : 1); };
+        CscLower A;
+        A.n = n;
+        A.col_ptr.push_back(0);
+        for (int j = 0; j < n; ++j) {
+            if (j < nv) {
+                A.row_idx.push_back(j);
+                A.values.push_back(value());
+                if (j + 1 < nv) {
+                    A.row_idx.push_back(j + 1);
+                    A.values.push_back(value());
+                }
+                for (int r = nv; r < n; ++r) {
+                    if (unif(rng) < 0.97) {
+                        A.row_idx.push_back(r);
+                        A.values.push_back(value());
+                    }
+                }
+            }
+            A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+        }
+
+        const std::vector<double> d = dense_abs(A);
+        std::vector<double> cmax(static_cast<std::size_t>(n), 0.0);
+        for (int i = 0; i < n; ++i)
+            for (int j = 0; j < n; ++j)
+                cmax[static_cast<std::size_t>(j)] =
+                    std::max(cmax[static_cast<std::size_t>(j)], d[static_cast<std::size_t>(i) * n + j]);
+        const double forbid = 1e9;
+        const auto cost = [&](int i, int j) {
+            const double a = d[static_cast<std::size_t>(i) * n + j];
+            return a > 0.0 ? std::log(cmax[static_cast<std::size_t>(j)]) - std::log(a) : forbid;
+        };
+
+        // Hungarian (rows 1..n assigned to columns 1..n), O(n^3).
+        const double inf = std::numeric_limits<double>::infinity();
+        std::vector<double> hu(static_cast<std::size_t>(n) + 1, 0.0), hv(static_cast<std::size_t>(n) + 1, 0.0);
+        std::vector<int> p(static_cast<std::size_t>(n) + 1, 0), way(static_cast<std::size_t>(n) + 1, 0);
+        for (int i = 1; i <= n; ++i) {
+            p[0] = i;
+            int j0 = 0;
+            std::vector<double> minv(static_cast<std::size_t>(n) + 1, inf);
+            std::vector<char> used(static_cast<std::size_t>(n) + 1, 0);
+            do {
+                used[static_cast<std::size_t>(j0)] = 1;
+                const int i0 = p[static_cast<std::size_t>(j0)];
+                double delta = inf;
+                int j1 = 0;
+                for (int j = 1; j <= n; ++j) {
+                    if (used[static_cast<std::size_t>(j)]) continue;
+                    const double cur = cost(i0 - 1, j - 1) - hu[static_cast<std::size_t>(i0)] - hv[static_cast<std::size_t>(j)];
+                    if (cur < minv[static_cast<std::size_t>(j)]) {
+                        minv[static_cast<std::size_t>(j)] = cur;
+                        way[static_cast<std::size_t>(j)] = j0;
+                    }
+                    if (minv[static_cast<std::size_t>(j)] < delta) {
+                        delta = minv[static_cast<std::size_t>(j)];
+                        j1 = j;
+                    }
+                }
+                for (int j = 0; j <= n; ++j) {
+                    if (used[static_cast<std::size_t>(j)]) {
+                        hu[static_cast<std::size_t>(p[static_cast<std::size_t>(j)])] += delta;
+                        hv[static_cast<std::size_t>(j)] -= delta;
+                    } else {
+                        minv[static_cast<std::size_t>(j)] -= delta;
+                    }
+                }
+                j0 = j1;
+            } while (p[static_cast<std::size_t>(j0)] != 0);
+            do {
+                const int j1 = way[static_cast<std::size_t>(j0)];
+                p[static_cast<std::size_t>(j0)] = p[static_cast<std::size_t>(j1)];
+                j0 = j1;
+            } while (j0 != 0);
+        }
+        double best = 0.0;
+        for (int j = 1; j <= n; ++j) best += cost(p[static_cast<std::size_t>(j)] - 1, j - 1);
+        ASSERT_LT(best, forbid) << "seed=" << seed;
+
+        MatchingResult mr = compute_symmetric_matching(A);
+        ASSERT_EQ(mr.status, ErrorCode::Success) << "seed=" << seed;
+        ASSERT_EQ(mr.matched_rank, n);
+        double got = 0.0;
+        for (int j = 0; j < n; ++j) got += cost(mr.col_to_row[static_cast<std::size_t>(j)], j);
+        EXPECT_NEAR(got, best, 1e-8 * (1.0 + std::abs(best))) << "seed=" << seed;
+    }
+}
+
+TEST(Matching, KktScalingBoundsEntries) {
+    // Dual feasibility of the matching makes every |s_i a_ij s_j| <= 1.
+    for (unsigned seed = 1; seed <= 4; ++seed) {
+        CscLower A = make_random_kkt(1500, 600, 3, seed);
+        MatchingResult mr = compute_symmetric_matching(A);
+        ASSERT_EQ(mr.status, ErrorCode::Success) << "seed=" << seed;
+        ASSERT_EQ(mr.matched_rank, A.n);
+        double max_scaled = 0.0;
+        for (int j = 0; j < A.n; ++j) {
+            for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+                const int i = A.row_idx[static_cast<std::size_t>(p)];
+                max_scaled = std::max(max_scaled, std::abs(mr.scale[static_cast<std::size_t>(i)] *
+                                                           A.values[static_cast<std::size_t>(p)] *
+                                                           mr.scale[static_cast<std::size_t>(j)]));
+            }
+        }
+        EXPECT_LE(max_scaled, 1.0 + 1e-9) << "seed=" << seed;
+        EXPECT_GT(max_scaled, 0.5) << "seed=" << seed;
+    }
+}
+
+TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
+    // Default Control (auto ordering, ScalingMethod::Auto): a KKT matrix
+    // (zero diagonals) gets the analysis' matching scaling in its factor; a
+    // matrix with a full nonzero diagonal gets no scaling.
+    const auto solve_accurately = [](const CscLower &A, const Control &ctrl, FactorKeep &fk,
+                                     std::unique_ptr<AnalysisKeep> &ak) {
+        Solver solver;
+        Info info;
+        ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace nws;
+        SolveWorkspace sws;
+        ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+        std::vector<double> b(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.37 * static_cast<double>(i)) + 1.5;
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+        refine(A, fk, ctrl, b, x, 1, sws);
+        EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(A, b, x, 1)));
+    };
+
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    // The auto policy starts at n = 10000.
+    {
+        CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
+        FactorKeep fk;
+        std::unique_ptr<AnalysisKeep> ak;
+        solve_accurately(kkt, ctrl, fk, ak);
+        ASSERT_FALSE(ak->matching_scale.empty());
+        EXPECT_EQ(fk.scale, ak->matching_scale);
+    }
+    {
+        // Indefinite tridiagonal with a dominant diagonal of alternating sign.
+        CscLower full_diag;
+        full_diag.n = 12000;
+        full_diag.col_ptr.push_back(0);
+        for (Int j = 0; j < full_diag.n; ++j) {
+            full_diag.row_idx.push_back(j);
+            full_diag.values.push_back((j % 2 == 0) ? 1e5 : -1e5);
+            if (j + 1 < full_diag.n) {
+                full_diag.row_idx.push_back(j + 1);
+                full_diag.values.push_back(1e4 * std::sin(0.1 * j));
+            }
+            full_diag.col_ptr.push_back(static_cast<Int>(full_diag.row_idx.size()));
+        }
+        FactorKeep fk;
+        std::unique_ptr<AnalysisKeep> ak;
+        solve_accurately(full_diag, ctrl, fk, ak);
+        EXPECT_TRUE(ak->matching_scale.empty());
+        EXPECT_TRUE(fk.scale.empty());
+    }
+    {
+        // Explicit matching ordering.
+        Control mc = ctrl;
+        mc.ordering = OrderingMethod::Matching;
+        CscLower kkt = make_random_kkt(8000, 3000, 3, 8);
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(kkt, mc, info);
+        ASSERT_NE(ak.get(), nullptr);
+        EXPECT_EQ(info.ordering_used, static_cast<int>(OrderingMethod::Matching));
+        FactorKeep fk;
+        std::unique_ptr<AnalysisKeep> ak2;
+        solve_accurately(kkt, mc, fk, ak2);
+    }
+}
+
+TEST(StaticPivoting, NeverDelaysAndRefinesToAccuracy) {
+    // Zero-diagonal KKT blocks force delays under threshold pivoting. With
+    // static pivoting on the matching ordering (the combination that solves
+    // GHS_indef's cvxqp3 / ncvxqp3) the fronts accept every column,
+    // perturbing the ones with no acceptable pivot, and refinement recovers
+    // full accuracy.
+    CscLower A = make_random_kkt(1500, 600, 3, 5);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.scaling = ScalingMethod::Matching;
+    Solver solver;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk_delay;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk_delay, nws), FactorStatus::Success);
+    ASSERT_GT(info.delayed_pivots, 0) << "matrix must exercise delays";
+    EXPECT_EQ(info.static_pivots, 0);
+
+    ctrl.ordering = OrderingMethod::Matching;
+    ctrl.static_pivot_tol = 1e-10;
+    auto akm = solver.analyse(A, ctrl, info);
+    ASSERT_NE(akm.get(), nullptr);
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*akm, A, ctrl, info, fk, nws), FactorStatus::Success);
+    EXPECT_EQ(info.delayed_pivots, 0);
+    EXPECT_EQ(info.num_zero, 0);
+
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.21 * static_cast<double>(i));
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+    const RefinementResult rr = refine(A, fk, ctrl, b, x, 1, sws);
+    EXPECT_EQ(rr.status, ErrorCode::Success) << "static_pivots=" << info.static_pivots
+                                             << " eta=" << rr.eta_inf << " omega=" << rr.omega;
+    EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(A, b, x, 1)));
+}
+
+TEST(StaticPivoting, ForcedPivotsAreCountedAndRefined) {
+    // A 2x2 block [[0, 1], [1, 0]] behind tiny couplings: in the leaf front
+    // the zero-diagonal column has no partner, so threshold pivoting delays
+    // it; static pivoting must accept it as a perturbed 1x1 instead.
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 2, 4, 5};
+    A.row_idx = {0, 2, 1, 2, 2};
+    A.values = {0.0, 1.0, 4.0, 1.0, 0.0};
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.nemin = 1;
+    ctrl.static_pivot_tol = 1e-8;
+    Solver solver;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    EXPECT_EQ(info.delayed_pivots, 0);
+    EXPECT_GT(info.static_pivots, 0);
+
+    // x = [1, 2, 3]: b = A x.
+    std::vector<double> b = {3.0, 8.0 + 3.0, 1.0 + 2.0};
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), 3, 1, sws), 0);
+    refine(A, fk, ctrl, b, x, 1, sws);
+    EXPECT_NEAR(x[0], 1.0, 1e-10);
+    EXPECT_NEAR(x[1], 2.0, 1e-10);
+    EXPECT_NEAR(x[2], 3.0, 1e-10);
+}
+
+TEST(Scaling, UserSuppliedScaleIsApplied) {
+    CscLower A = make_badly_scaled_indef(1e6);
+    std::vector<double> s;
+    ASSERT_EQ(compute_matching_scale(A, s, 0), ErrorCode::Success);
+
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.scaling = ScalingMethod::UserSupplied;
+    ctrl.user_scale = s.data();
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    EXPECT_EQ(fk.scale, s);
+
+    std::vector<double> b = {1.0, -2.0, 3.0, -4.0};
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), 4, 1, sws), 0);
+    RefinementResult rr = refine(A, fk, ctrl, b, x, 1, sws);
+    EXPECT_EQ(rr.status, ErrorCode::Success);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(A, b, x, 1)));
+
+    // A missing or non-positive user scale is rejected.
+    ctrl.user_scale = nullptr;
+    FactorKeep fk_bad;
+    EXPECT_NE(solver.factor(*ak, A, ctrl, info, fk_bad, nws), FactorStatus::Success);
+    std::vector<double> bad = s;
+    bad[2] = 0.0;
+    ctrl.user_scale = bad.data();
+    EXPECT_NE(solver.factor(*ak, A, ctrl, info, fk_bad, nws), FactorStatus::Success);
 }

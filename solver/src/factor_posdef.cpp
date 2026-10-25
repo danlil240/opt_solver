@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <numeric>
+#include <optional>
 
 namespace smf {
 
@@ -322,8 +323,11 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
     return fs;
   };
 
+  // ScalingMethod::Auto: the analysis computes no matching for SPD matrices.
+  const ScalingMethod scaling =
+      ctrl.scaling == ScalingMethod::Auto ? ScalingMethod::None : ctrl.scaling;
   const ErrorCode err = map_updated_values_to_permuted(
-      keep, updated, ws, ctrl.scaling != ScalingMethod::None);
+      keep, updated, ws, scaling != ScalingMethod::None);
   if (err != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, err);
 
@@ -353,14 +357,14 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
     return FactorStatus::Success;
   }
 
-  if (ctrl.scaling != ScalingMethod::None) {
+  if (scaling != ScalingMethod::None) {
     CscLower clean_mat;
     clean_mat.n = n;
     clean_mat.col_ptr = keep.cleaned.col_ptr;
     clean_mat.row_idx = keep.cleaned.row_idx;
     clean_mat.values = ws.clean_values;
     const ErrorCode sc_err = compute_scaling_for_method(
-        clean_mat, ctrl.scaling, fkeep.scale, ctrl.print_level);
+        clean_mat, scaling, fkeep.scale, ctrl.print_level, ctrl.user_scale);
     if (sc_err != ErrorCode::Success)
       return fail(FactorStatus::NotPositiveDefinite, sc_err);
     apply_scale_to_matrix(clean_mat, fkeep.scale);
@@ -391,7 +395,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
   }
 
 #ifdef SMF_PARALLEL
-  if (ctrl.num_threads > 1) {
+  if (ctrl.num_threads > 1 && ctrl.tree_parallel) {
     CscLower Ap;
     Ap.n = n;
     Ap.col_ptr = ap_col_ptr;
@@ -410,10 +414,15 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
   }
 #endif // SMF_PARALLEL
 
+  // Threads go to BLAS inside the fronts.
+  std::optional<BlasThreadGuard> blas_threads;
+  if (ctrl.num_threads > 1)
+    blas_threads.emplace(ctrl.num_threads);
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-      0.0, /*posdef=*/true, fkeep, ws, st);
+      0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
+  blas_threads.reset();
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);
 

@@ -282,6 +282,8 @@ if(WIN32)
 endif()
 add_test(NAME Refinement COMMAND test_refinement --gtest_filter=Refinement.*)
 add_test(NAME Matching COMMAND test_refinement --gtest_filter=Matching.*)
+add_test(NAME Scaling COMMAND test_refinement --gtest_filter=Scaling.*)
+add_test(NAME StaticPivoting COMMAND test_refinement --gtest_filter=StaticPivoting.*)
 
 # --- Task 6: Benchmark adapters tests ---
 
@@ -289,13 +291,14 @@ add_executable(test_benchmark_adapters
     test_benchmark_adapters.cpp
     ../benchmarks/common/validation.cpp
     ../benchmarks/adapters/hsl.cpp
+    ../benchmarks/adapters/hsl_dynamic.cpp
     ../benchmarks/adapters/spral.cpp
     ../benchmarks/adapters/mumps.cpp
     ../benchmarks/adapters/pardiso.cpp
     ../benchmarks/adapters/cholmod.cpp
 )
 target_link_libraries(test_benchmark_adapters PRIVATE
-    smf smf_bench_baselines GTest::gtest_main)
+    smf smf_bench_baselines GTest::gtest_main ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(test_benchmark_adapters PRIVATE psapi)
 endif()

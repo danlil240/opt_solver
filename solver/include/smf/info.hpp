@@ -32,6 +32,7 @@ struct Info {
     double       predicted_flops        = 0.0;
     double       actual_flops           = 0.0;
     int          delayed_pivots         = 0;
+    int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
 
     // Assembly tree stats
     int          max_front_size         = 0;

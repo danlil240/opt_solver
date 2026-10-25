@@ -55,6 +55,9 @@ public:
 
 std::unique_ptr<SolverAdapter> make_smf_adapter();
 std::unique_ptr<SolverAdapter> make_hsl_adapter(const std::string &hsl_id);
+/// MA97 / MA57 loaded at runtime from the library named by SMF_HSL_LIBRARY.
+std::unique_ptr<SolverAdapter> make_hsl_ma97_adapter();
+std::unique_ptr<SolverAdapter> make_hsl_ma57_adapter();
 std::unique_ptr<SolverAdapter> make_spral_ssids_adapter();
 std::unique_ptr<SolverAdapter> make_mumps_adapter();
 std::unique_ptr<SolverAdapter> make_pardiso_adapter(const std::string &variant = "mkl_pardiso");

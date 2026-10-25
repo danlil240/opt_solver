@@ -25,6 +25,7 @@ struct AnalysisKeep {
     std::vector<FrontalInfo> fronts;            ///< per-supernode frontal info (child_parent_rows may be empty for large-n analyses)
     std::vector<Int>         postorder;         ///< supernode postorder: postorder[i] = s means supernode s is i-th in children-before-parents order
     std::vector<Int>         solve_postorder;   ///< supernode postorder reused by triangular solves
+    std::vector<double>      matching_scale;    ///< Matching ordering: its matching's scaling of the analysed values (else empty)
     Int                      n = 0;             ///< matrix order (= cleaned.n)
 };
 

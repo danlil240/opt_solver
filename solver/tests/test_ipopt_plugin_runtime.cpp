@@ -195,6 +195,65 @@ TEST(Ma97PluginRuntime, ChangedValuesAndInertia) {
     EXPECT_EQ(fkeep, nullptr);
 }
 
+TEST(Ma97PluginRuntime, ScalingComputedThenReused) {
+    // IPOPT's "reuse" scaling: factor once with scaling = 1 (MC64), which
+    // returns the scale vector, then refactor with scaling = 0 passing that
+    // vector back, which MA97 applies as user-supplied scaling.
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 0;
+
+    // [[4e6, 2e3, 0], [2e3, 0, 1e-3], [0, 1e-3, -1e-5]] (det 36), x = [1, 1, 1]
+    const int n = 3;
+    const int ptr[4] = {0, 2, 4, 5};
+    const int row[5] = {0, 1, 1, 2, 2};
+    const double val[5] = {4e6, 2e3, 0.0, 1e-3, -1e-5};
+    const double rhs[3] = {4e6 + 2e3, 2e3 + 1e-3, 1e-3 - 1e-5};
+
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, ptr, row, nullptr, &akeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+
+    double scale[3] = {0.0, 0.0, 0.0};
+    ctrl.scaling = 1;
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, scale);
+    ASSERT_EQ(info.flag, 0);
+    for (double s : scale) EXPECT_GT(s, 0.0);
+
+    const auto solve_and_check = [&](const char *what) {
+        double x[3] = {rhs[0], rhs[1], rhs[2]};
+        sym.solve(0, 1, x, n, &akeep, &fkeep, &ctrl, &info);
+        ASSERT_EQ(info.flag, 0) << what;
+        for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-8) << what;
+    };
+    solve_and_check("mc64");
+
+    // Reuse a (perturbed) user scale: applied as given, never overwritten.
+    ctrl.scaling = 0;
+    scale[1] *= 2.0;
+    const double kept = scale[1];
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, scale);
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_EQ(scale[1], kept);
+    solve_and_check("reuse");
+
+    // The reused vector is really read: a zero factor is rejected.
+    double zero_scale[3] = {scale[0], 0.0, scale[2]};
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, zero_scale);
+    EXPECT_LT(info.flag, 0) << "flag=" << info.flag;
+
+    // scaling = 0 without a vector is unscaled.
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    solve_and_check("none");
+
+    sym.finalise(&akeep, &fkeep);
+}
+
 TEST(Ma97PluginRuntime, MultipleRhsLeadingDimension) {
     PluginSymbols sym;
     ASSERT_TRUE(sym.load());

@@ -13,6 +13,7 @@ namespace smf {
 struct SerialFactorStats {
   InertiaCounts inertia{};
   int delayed = 0;
+  int static_pivots = 0;
   double flops = 0.0;
   int max_front = 0;
 };
@@ -37,7 +38,8 @@ struct SerialFactorStats {
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
-                                     bool posdef, FactorKeep &fkeep,
+                                     double static_pivot, bool posdef,
+                                     FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st);
 
 } // namespace smf

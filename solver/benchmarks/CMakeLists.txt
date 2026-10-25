@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 add_library(smf_bench_common STATIC
     common/validation.cpp
     adapters/hsl.cpp
+    adapters/hsl_dynamic.cpp
     adapters/spral.cpp
     adapters/mumps.cpp
     adapters/pardiso.cpp
@@ -10,6 +11,7 @@ add_library(smf_bench_common STATIC
 )
 target_link_libraries(smf_bench_common PUBLIC smf smf_bench_baselines)
 target_include_directories(smf_bench_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(smf_bench_common PUBLIC ${CMAKE_DL_LIBS})
 if(WIN32)
     target_link_libraries(smf_bench_common PUBLIC psapi)
 endif()

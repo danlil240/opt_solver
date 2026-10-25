@@ -11,10 +11,120 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <limits>
+#include <fstream>
 #include <string>
 #include <vector>
 
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+#include <mkl.h>
+#endif
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 namespace {
+
+// Binary cache next to a .mtx (<path>.smfbin): large Matrix Market files
+// take seconds to parse, and the harness reloads the matrix for every
+// attempt. Parsing is outside the timed region either way.
+constexpr char kBinMagic[8] = {'S', 'M', 'F', 'B', 'I', 'N', '0', '1'};
+
+bool load_bin_cache(const std::string &mtx_path, smf::CscLower &A) {
+    namespace fs = std::filesystem;
+    const std::string bin = mtx_path + ".smfbin";
+    std::error_code ec;
+    if (!fs::exists(bin, ec) || fs::last_write_time(bin, ec) < fs::last_write_time(mtx_path, ec)) {
+        return false;
+    }
+    std::ifstream in(bin, std::ios::binary);
+    char magic[8];
+    std::int64_t n = 0, nnz = 0;
+    in.read(magic, 8);
+    in.read(reinterpret_cast<char *>(&n), sizeof n);
+    in.read(reinterpret_cast<char *>(&nnz), sizeof nnz);
+    if (!in || std::memcmp(magic, kBinMagic, 8) != 0 || n < 0 || nnz < 0) return false;
+    A.n = static_cast<smf::Int>(n);
+    A.col_ptr.resize(static_cast<std::size_t>(n) + 1);
+    A.row_idx.resize(static_cast<std::size_t>(nnz));
+    A.values.resize(static_cast<std::size_t>(nnz));
+    in.read(reinterpret_cast<char *>(A.col_ptr.data()), static_cast<std::streamsize>(A.col_ptr.size() * sizeof(smf::Int)));
+    in.read(reinterpret_cast<char *>(A.row_idx.data()), static_cast<std::streamsize>(A.row_idx.size() * sizeof(smf::Int)));
+    in.read(reinterpret_cast<char *>(A.values.data()), static_cast<std::streamsize>(A.values.size() * sizeof(double)));
+    return static_cast<bool>(in);
+}
+
+// y = A x for a symmetric matrix stored as lower CSC (values from `vals`).
+void sym_matvec(const smf::CscLower &A, const std::vector<double> &vals,
+                const double *x, double *y) {
+    std::fill(y, y + A.n, 0.0);
+    for (smf::Int j = 0; j < A.n; ++j) {
+        for (smf::Int k = A.col_ptr[static_cast<std::size_t>(j)];
+             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const smf::Int i = A.row_idx[static_cast<std::size_t>(k)];
+            const double a = vals[static_cast<std::size_t>(k)];
+            y[i] += a * x[j];
+            if (i != j) y[j] += a * x[i];
+        }
+    }
+}
+
+// Iterative refinement around a factorization (single right-hand side), the
+// way IPOPT wraps every linear solve: correct x with A dx = b - A x until
+// the normwise backward error stops improving or reaches 1e-14, at most
+// `max_steps` solves. Applied identically to every solver.
+void refine_solution(smf::bench::SolverAdapter &adapter, const smf::CscLower &A,
+                     const std::vector<double> &vals, const std::vector<double> &b,
+                     std::vector<double> &x, int max_steps) {
+    const std::size_t n = static_cast<std::size_t>(A.n);
+    std::vector<double> ax(n), r(n), rowsum(n, 0.0);
+    for (smf::Int j = 0; j < A.n; ++j) {
+        for (smf::Int k = A.col_ptr[static_cast<std::size_t>(j)];
+             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const smf::Int i = A.row_idx[static_cast<std::size_t>(k)];
+            const double a = std::abs(vals[static_cast<std::size_t>(k)]);
+            rowsum[static_cast<std::size_t>(i)] += a;
+            if (i != j) rowsum[static_cast<std::size_t>(j)] += a;
+        }
+    }
+    const double anorm = *std::max_element(rowsum.begin(), rowsum.end());
+    double bnorm = 0.0;
+    for (double v : b) bnorm = std::max(bnorm, std::abs(v));
+    double prev = std::numeric_limits<double>::infinity();
+    for (int it = 0; it <= max_steps; ++it) {
+        sym_matvec(A, vals, x.data(), ax.data());
+        double rnorm = 0.0, xnorm = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            r[i] = b[i] - ax[i];
+            rnorm = std::max(rnorm, std::abs(r[i]));
+            xnorm = std::max(xnorm, std::abs(x[i]));
+        }
+        const double eta = rnorm / (anorm * xnorm + bnorm);
+        if (it == max_steps || eta <= 1e-14 || eta >= 0.5 * prev) break;
+        prev = eta;
+        if (adapter.solve(r, 1) != smf::bench::Outcome::Success) break;
+        for (std::size_t i = 0; i < n; ++i) x[i] += r[i];
+    }
+}
+
+void save_bin_cache(const std::string &mtx_path, const smf::CscLower &A) {
+    const std::string tmp = mtx_path + ".smfbin.tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        const std::int64_t n = A.n;
+        const std::int64_t nnz = static_cast<std::int64_t>(A.row_idx.size());
+        out.write(kBinMagic, 8);
+        out.write(reinterpret_cast<const char *>(&n), sizeof n);
+        out.write(reinterpret_cast<const char *>(&nnz), sizeof nnz);
+        out.write(reinterpret_cast<const char *>(A.col_ptr.data()), static_cast<std::streamsize>(A.col_ptr.size() * sizeof(smf::Int)));
+        out.write(reinterpret_cast<const char *>(A.row_idx.data()), static_cast<std::streamsize>(A.row_idx.size() * sizeof(smf::Int)));
+        out.write(reinterpret_cast<const char *>(A.values.data()), static_cast<std::streamsize>(A.values.size() * sizeof(double)));
+        if (!out) return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, mtx_path + ".smfbin", ec);
+}
 
 smf::CscLower make_tridiag_spd(int n) {
     smf::CscLower A;
@@ -257,8 +367,10 @@ int main(int argc, char **argv) {
     std::string jsonl_out;
     std::string mtx_path;
     std::string mtype;  // "spd" | "indefinite" override for .mtx cases
+    std::string seq_values_path; // recorded value sequence (raw doubles, nnz per step)
     int trial_id = 0;
     int nrhs = 1;
+    int threads = 1;
     bool is_warmup = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -272,11 +384,24 @@ int main(int argc, char **argv) {
         else if (arg == "--track" && i + 1 < argc) track = argv[++i];
         else if (arg == "--trial" && i + 1 < argc) trial_id = std::atoi(argv[++i]);
         else if (arg == "--nrhs" && i + 1 < argc) nrhs = std::max(1, std::atoi(argv[++i]));
+        else if (arg == "--threads" && i + 1 < argc) threads = std::max(1, std::atoi(argv[++i]));
         else if (arg == "--mtx" && i + 1 < argc) mtx_path = argv[++i];
         else if (arg == "--mtype" && i + 1 < argc) mtype = argv[++i];
+        else if (arg == "--seq-values" && i + 1 < argc) seq_values_path = argv[++i];
         else if (arg == "--JsonlOut" && i + 1 < argc) jsonl_out = argv[++i];
         else if (arg == "--warmup") is_warmup = true;
     }
+
+    // One thread budget for every library in the process: smf's tree
+    // parallelism (Control::num_threads), MKL (BLAS / PARDISO) and OpenMP.
+    // run.py also exports OMP/MKL/OPENBLAS_NUM_THREADS so third-party
+    // OpenMP runtimes we cannot reach from here obey the same cap.
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    mkl_set_num_threads(threads);
+#endif
+#if defined(_OPENMP)
+    omp_set_num_threads(threads);
+#endif
 
     if (sequence_id.empty()) sequence_id = case_id;
     if (family_id.empty()) family_id = sequence_id;
@@ -293,6 +418,8 @@ int main(int argc, char **argv) {
     rec.trial_id = trial_id;
     rec.warmup = is_warmup;
     rec.nrhs = nrhs;
+    rec.threads = threads;
+    rec.blas_threads = threads;
 #ifdef SMF_BLAS_BACKEND_STR
     rec.blas_backend = SMF_BLAS_BACKEND_STR;
 #else
@@ -315,14 +442,17 @@ int main(int argc, char **argv) {
     bool is_spd = false;
     smf::CscLower A;
     if (!mtx_path.empty()) {
-        auto mm = smf::read_matrix_market(mtx_path);
-        if (!mm.ok) {
-            rec.outcome = smf::bench::Outcome::InvalidInput;
-            rec.reason = mm.error_message;
-            if (!jsonl_out.empty()) smf::bench::append_run_record_jsonl(jsonl_out, rec);
-            return 1;
+        if (!load_bin_cache(mtx_path, A)) {
+            auto mm = smf::read_matrix_market(mtx_path);
+            if (!mm.ok) {
+                rec.outcome = smf::bench::Outcome::InvalidInput;
+                rec.reason = mm.error_message;
+                if (!jsonl_out.empty()) smf::bench::append_run_record_jsonl(jsonl_out, rec);
+                return 1;
+            }
+            A = std::move(mm.matrix);
+            save_bin_cache(mtx_path, A);
         }
-        A = std::move(mm.matrix);
     } else {
         A = make_builtin_fixture(case_id, is_spd);
     }
@@ -356,6 +486,11 @@ int main(int argc, char **argv) {
     ctrl.matrix_type = is_spd
                            ? smf::MatrixType::RealSymmetricPositiveDefinite
                            : smf::MatrixType::RealSymmetricIndefinite;
+    ctrl.num_threads = threads;
+    // "ipopt" track: the pivot threshold IPOPT itself drives HSL solvers with
+    // (ma27_pivtol / ma57_pivtol / ma97_u default 1e-8), so KKT sequences
+    // captured from IPOPT are factorized the way IPOPT factorizes them.
+    if (track == "ipopt") ctrl.pivot_u = 1e-8;
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =
@@ -383,9 +518,32 @@ int main(int argc, char **argv) {
         rec.per_update_validation.clear();
         rec.per_update_validation.reserve(kSeqSteps);
 
-        // Pre-build the 5 numeric value updates outside the timed region
+        // Pre-build the 5 numeric value updates outside the timed region:
+        // a recorded sequence (e.g. IPOPT iterations) when given, otherwise
+        // synthetic diagonal perturbations.
         std::vector<std::vector<double>> seq_values(kSeqSteps, A.values);
-        for (int step = 0; step < kSeqSteps; ++step) {
+        bool recorded = false;
+        if (!seq_values_path.empty()) {
+            std::ifstream in(seq_values_path, std::ios::binary | std::ios::ate);
+            const std::size_t bytes = in ? static_cast<std::size_t>(in.tellg()) : 0;
+            const std::size_t step_bytes = A.values.size() * sizeof(double);
+            const std::size_t nsteps = step_bytes ? bytes / step_bytes : 0;
+            if (nsteps == 0) {
+                rec.outcome = smf::bench::Outcome::InvalidInput;
+                rec.reason = "unreadable --seq-values file";
+                if (!jsonl_out.empty()) smf::bench::append_run_record_jsonl(jsonl_out, rec);
+                return 1;
+            }
+            for (int step = 0; step < kSeqSteps; ++step) {
+                const std::size_t pick = (nsteps == 1) ? 0
+                                         : static_cast<std::size_t>(step) * (nsteps - 1) / (kSeqSteps - 1);
+                in.seekg(static_cast<std::streamoff>(pick * step_bytes));
+                in.read(reinterpret_cast<char *>(seq_values[static_cast<std::size_t>(step)].data()),
+                        static_cast<std::streamsize>(step_bytes));
+            }
+            recorded = static_cast<bool>(in);
+        }
+        for (int step = 0; step < kSeqSteps && !recorded; ++step) {
             const double delta = 1.0 + 0.05 * static_cast<double>(step);
             for (smf::Int j = 0; j < A.n; ++j) {
                 const smf::Int p0 = A.col_ptr[static_cast<std::size_t>(j)];
@@ -402,6 +560,8 @@ int main(int argc, char **argv) {
         std::vector<std::vector<double>> step_solutions(kSeqSteps, b);
         double total_factor_ms = 0.0;
         double total_solve_ms = 0.0;
+        double total_refine_ms = 0.0;
+        const bool refine = (track == "ipopt" && nrhs == 1);
 
         const auto t0 = std::chrono::steady_clock::now();
         out_a = adapter->analyse(A);
@@ -414,6 +574,13 @@ int main(int argc, char **argv) {
                 out_s = adapter->solve(step_solutions[step], nrhs);
                 total_solve_ms += adapter->stats().solve_ms;
                 if (out_s != smf::bench::Outcome::Success) break;
+                if (refine) {
+                    const auto tr0 = std::chrono::steady_clock::now();
+                    refine_solution(*adapter, A, seq_values[static_cast<std::size_t>(step)], b,
+                                    step_solutions[static_cast<std::size_t>(step)], 3);
+                    total_refine_ms += std::chrono::duration<double, std::milli>(
+                                           std::chrono::steady_clock::now() - tr0).count();
+                }
             }
         } else {
             out_f = out_a;
@@ -425,6 +592,7 @@ int main(int argc, char **argv) {
         rec.analyse_ms = analyse_ms;
         rec.factor_ms = total_factor_ms;
         rec.solve_ms = total_solve_ms;
+        rec.refine_ms = total_refine_ms;
         rec.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         rec.peak_rss_bytes = smf::bench::read_peak_rss_bytes();
         rec.inertia_pos = st.inertia_pos;

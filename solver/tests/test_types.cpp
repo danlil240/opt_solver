@@ -25,12 +25,14 @@ TEST(Types, EnumsCompile) {
     EXPECT_EQ(static_cast<int>(smf::OrderingMethod::AMD),          2);
     EXPECT_EQ(static_cast<int>(smf::OrderingMethod::METIS),        3);
     EXPECT_EQ(static_cast<int>(smf::OrderingMethod::UserSupplied), 4);
+    EXPECT_EQ(static_cast<int>(smf::OrderingMethod::Matching),     5);
 
     // ScalingMethod values
     EXPECT_EQ(static_cast<int>(smf::ScalingMethod::None),         0);
     EXPECT_EQ(static_cast<int>(smf::ScalingMethod::Equilibration), 1);
     EXPECT_EQ(static_cast<int>(smf::ScalingMethod::Matching),     2);
     EXPECT_EQ(static_cast<int>(smf::ScalingMethod::UserSupplied), 3);
+    EXPECT_EQ(static_cast<int>(smf::ScalingMethod::Auto),         4);
 
     // FactorStatus values
     EXPECT_EQ(static_cast<int>(smf::FactorStatus::Success),             0);
@@ -59,7 +61,7 @@ TEST(Types, ControlDefaults) {
     smf::Control c;
     EXPECT_EQ(c.matrix_type,   smf::MatrixType::RealSymmetricIndefinite);
     EXPECT_EQ(c.ordering,      smf::OrderingMethod::AutoSerial);
-    EXPECT_EQ(c.scaling,       smf::ScalingMethod::None);
+    EXPECT_EQ(c.scaling,       smf::ScalingMethod::Auto);
     EXPECT_EQ(c.nemin,         8);
     EXPECT_DOUBLE_EQ(c.pivot_u,      0.01);
     EXPECT_DOUBLE_EQ(c.small_pivot,  1e-20);

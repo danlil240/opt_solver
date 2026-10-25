@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <optional>
 #include <vector>
 
 namespace smf {
@@ -344,16 +345,25 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
 
   const bool use_parallel_path =
 #ifdef SMF_PARALLEL
-      (ctrl.num_threads > 1);
+      (ctrl.num_threads > 1 && ctrl.tree_parallel);
 #else
       false;
 #endif
   if (use_parallel_path) {
     ws.prepare_for_analysis(keep);
   }
+  // ScalingMethod::Auto applies the analysis' matching scaling when it
+  // computed one (saddle-point matrices under auto ordering), else none.
+  ScalingMethod scaling = ctrl.scaling;
+  const double *user_scale = ctrl.user_scale;
+  if (scaling == ScalingMethod::Auto) {
+    scaling = keep.matching_scale.empty() ? ScalingMethod::None
+                                          : ScalingMethod::UserSupplied;
+    user_scale = keep.matching_scale.data();
+  }
   double matrix_max_abs = 0.0;
   const ErrorCode map_err = map_updated_values_to_permuted(
-      keep, updated, ws, ctrl.scaling != ScalingMethod::None, &matrix_max_abs);
+      keep, updated, ws, scaling != ScalingMethod::None, &matrix_max_abs);
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
     fkeep.status = FactorStatus::Singular;
@@ -363,15 +373,24 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
   }
 
   fkeep.scale.clear();
-  if (ctrl.scaling != ScalingMethod::None && keep.n > 0) {
-    CscLower clean_mat;
-    clean_mat.n = keep.n;
-    clean_mat.col_ptr = keep.cleaned.col_ptr;
-    clean_mat.row_idx = keep.cleaned.row_idx;
-    clean_mat.values = ws.clean_values;
-
-    const ErrorCode sc_err = compute_scaling_for_method(
-        clean_mat, ctrl.scaling, fkeep.scale, ctrl.print_level);
+  if (scaling != ScalingMethod::None && keep.n > 0) {
+    // The Matching ordering already matched the analysed values; when they
+    // are being factored unchanged, its scaling is the one to compute.
+    const bool reuse_analysis_matching =
+        scaling == ScalingMethod::Matching && !keep.matching_scale.empty() &&
+        ws.clean_values == keep.cleaned.values;
+    ErrorCode sc_err = ErrorCode::Success;
+    if (reuse_analysis_matching) {
+      fkeep.scale = keep.matching_scale;
+    } else {
+      CscLower clean_mat;
+      clean_mat.n = keep.n;
+      clean_mat.col_ptr = keep.cleaned.col_ptr;
+      clean_mat.row_idx = keep.cleaned.row_idx;
+      clean_mat.values = ws.clean_values;
+      sc_err = compute_scaling_for_method(clean_mat, scaling, fkeep.scale,
+                                          ctrl.print_level, user_scale);
+    }
     if (sc_err != ErrorCode::Success) {
       fkeep.factor_values.clear();
       fkeep.status = FactorStatus::Singular;
@@ -431,7 +450,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
   const std::vector<Int> &ap_row_idx =
       keep.perm_col_ptr.empty() ? keep.cleaned.row_idx : keep.perm_row_idx;
 
-  if (ctrl.scaling != ScalingMethod::None) {
+  if (scaling != ScalingMethod::None) {
     matrix_max_abs = 0.0;
     for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
   }
@@ -441,10 +460,17 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
           : ctrl.small_pivot;
 
   if (!use_parallel_path) {
+    // Threads go to BLAS inside the fronts.
+    std::optional<BlasThreadGuard> blas_threads;
+    if (ctrl.num_threads > 1)
+      blas_threads.emplace(ctrl.num_threads);
     SerialFactorStats st;
+    const double static_pivot =
+        ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-        eff_small, /*posdef=*/false, fkeep, ws, st);
+        eff_small, static_pivot, /*posdef=*/false, fkeep, ws, st);
+    blas_threads.reset();
     if (err != ErrorCode::Success) {
       std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
       fkeep.factor_values.clear();
@@ -454,6 +480,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
       return FactorStatus::Singular;
     }
     info.delayed_pivots = st.delayed;
+    info.static_pivots = st.static_pivots;
     info.num_positive = st.inertia.positive;
     info.num_negative = st.inertia.negative;
     info.num_zero = st.inertia.zero;

@@ -1,5 +1,6 @@
 #pragma once
 #include "smf/types.hpp"
+#include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
 #include <vector>
 #include <memory>
@@ -39,6 +40,22 @@ bool amd_order_lower_csc(Int n,
                          const std::vector<Int>& row_idx,
                          std::vector<Int>& perm,
                          std::vector<Int>& work);
+
+struct MatchingOrderStats {
+    Int pairs = 0;              ///< 2x2 pivot pairs kept adjacent
+    Int nodes = 0;              ///< nodes of the compressed graph
+    std::vector<double> scale;  ///< the matching's symmetric scaling
+};
+
+/// Matching-based compressed ordering for symmetric indefinite matrices:
+/// maximum-product matching, its cycles split into 2x2 pivot pairs (kept
+/// when either scaled diagonal is below `pair_tol`), AMD on the graph with
+/// each pair compressed to one node, pairs adjacent in the result.
+/// Needs values; returns false (caller falls back) when the matrix is
+/// structurally singular or AMD is unavailable. perm[new] = old.
+bool matching_order_lower_csc(const CscLower& A, double pair_tol,
+                              std::vector<Int>& perm, std::vector<Int>& amd_work,
+                              MatchingOrderStats* stats = nullptr);
 
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.

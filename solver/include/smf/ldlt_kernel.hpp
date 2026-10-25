@@ -14,10 +14,12 @@ struct LdltKernelParams {
     int nb = 32;                ///< panel width for the blocked (BLAS-3) path
     int blocked_min_front = 96; ///< fronts smaller than this use the unblocked path
     bool posdef = false;        ///< no pivoting: accept a(k,k) > 0 in order, stop otherwise
+    double static_pivot = 0.0;  ///< > 0: never stop; force a 1x1 with |d| >= static_pivot
 };
 
 struct LdltKernelResult {
     int num_accepted = 0;
+    int static_pivots = 0;      ///< forced pivots whose |d| was raised
     InertiaCounts inertia{};
     double flops = 0.0;
 };
