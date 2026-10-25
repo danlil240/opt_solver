@@ -24,6 +24,7 @@ struct Control {
     // Factorization behaviour
     bool           continue_on_singular = false;
     double         factor_memory_multiplier = 1.1;
+    int            expected_refactors = 1;
 
     // Parallelism
     int            num_threads   = 1;

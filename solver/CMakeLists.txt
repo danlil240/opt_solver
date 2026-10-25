@@ -267,6 +267,7 @@ add_library(smf STATIC
     src/scaling.cpp
     src/scaling_matching.cpp
     src/refinement.cpp
+    src/dispatch_policy.cpp
     src/solver.cpp
     src/workspace.cpp
     src/parallel/task_tree.cpp
