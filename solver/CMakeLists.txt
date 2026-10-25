@@ -42,6 +42,12 @@ set(SMF_REQUIRED_BASELINES "" CACHE STRING "Semicolon-separated list of required
 # ---- Compiler flags -----------------------------------------------------
 if(MSVC)
     add_compile_options(/W4 /EHsc /fp:precise)
+    # Vector ISA for the hand-written dense kernels (the GCC/Clang branch
+    # uses -march=native). Set to "" for a baseline SSE2 build.
+    set(SMF_MSVC_ARCH "AVX2" CACHE STRING "MSVC /arch: value for smf code (empty = compiler default)")
+    if(SMF_MSVC_ARCH)
+        add_compile_options(/arch:${SMF_MSVC_ARCH})
+    endif()
     if(SMF_SANITIZE)
         add_compile_options(/fsanitize=address /Zi)
     else()
@@ -401,6 +407,8 @@ add_library(smf STATIC
     src/frontal_matrix.cpp
     src/numeric_front.cpp
     src/blocked_indef.cpp
+    src/ldlt_kernel.cpp
+    src/multifrontal_serial.cpp
     src/factor_stack.cpp
     src/pivoting.cpp
     src/factor_posdef.cpp

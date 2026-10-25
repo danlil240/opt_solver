@@ -131,6 +131,79 @@ build_symmetric_csr(Int n,
     return {xadj, adjncy};
 }
 
+bool amd_order_lower_csc(Int n,
+                         const std::vector<Int>& col_ptr,
+                         const std::vector<Int>& row_idx,
+                         std::vector<Int>& perm,
+                         std::vector<Int>& work)
+{
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
+    const auto sn = static_cast<std::size_t>(n);
+    perm.resize(sn);
+    if (n == 0) return true;
+
+    // amd_2 consumes the symmetric pattern (no diagonal) in its own Pe/Len/Iw
+    // form with elbow room, plus nine size-n work arrays. Building that form
+    // directly, in a caller-owned buffer, skips amd_order's validation,
+    // A+A^T reconstruction and per-call allocation.
+    std::size_t nz = 0;
+    for (Int j = 0; j < n; ++j)
+        for (Int k = col_ptr[static_cast<std::size_t>(j)];
+             k < col_ptr[static_cast<std::size_t>(j) + 1]; ++k)
+            if (row_idx[static_cast<std::size_t>(k)] != j) nz += 2;
+    if (nz == 0) {
+        std::iota(perm.begin(), perm.end(), 0);
+        return true;
+    }
+    const std::size_t iwlen = nz + nz / 5 + sn;
+    if (work.size() < 9 * sn + iwlen) work.resize(9 * sn + iwlen);
+    Int *Pe = work.data();
+    Int *Len = Pe + sn;
+    Int *Nv = Len + sn;
+    Int *Next = Nv + sn;
+    Int *Last = Next + sn;
+    Int *Head = Last + sn;
+    Int *Elen = Head + sn;
+    Int *Degree = Elen + sn;
+    Int *W = Degree + sn;
+    Int *Iw = W + sn;
+
+    std::fill(Len, Len + sn, 0);
+    for (Int j = 0; j < n; ++j)
+        for (Int k = col_ptr[static_cast<std::size_t>(j)];
+             k < col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const Int i = row_idx[static_cast<std::size_t>(k)];
+            if (i != j) {
+                ++Len[j];
+                ++Len[i];
+            }
+        }
+    Int p = 0;
+    for (Int i = 0; i < n; ++i) {
+        Pe[i] = p;
+        W[i] = p;
+        p += Len[i];
+    }
+    for (Int j = 0; j < n; ++j)
+        for (Int k = col_ptr[static_cast<std::size_t>(j)];
+             k < col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const Int i = row_idx[static_cast<std::size_t>(k)];
+            if (i != j) {
+                Iw[W[j]++] = i;
+                Iw[W[i]++] = j;
+            }
+        }
+    amd_2(static_cast<int>(n), Pe, Iw, Len, static_cast<int>(iwlen),
+          static_cast<int>(nz), Nv, Next, Last, Head, Elen, Degree, W,
+          nullptr, nullptr);
+    std::copy(Last, Last + sn, perm.begin());
+    return true;
+#else
+    (void)n; (void)col_ptr; (void)row_idx; (void)perm; (void)work;
+    return false;
+#endif
+}
+
 std::vector<Int> AmdOrdering::compute_ordering(
     Int n,
     const std::vector<Int>& xadj,

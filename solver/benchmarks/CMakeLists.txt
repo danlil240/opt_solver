@@ -33,6 +33,7 @@ smf_benchmark(bench_compare)
 smf_benchmark(bench_kkt_fixture_compare)
 smf_benchmark(bench_replay)
 smf_benchmark(bench_front_kernel)
+smf_benchmark(bench_profile)
 
 # bench_compare: link optional comparison solvers (CHOLMOD, MA27)
 if(SMF_HAS_CHOLMOD AND CHOLMOD_LIBRARY AND CHOLMOD_INCLUDE_DIR)

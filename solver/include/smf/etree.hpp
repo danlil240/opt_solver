@@ -21,4 +21,10 @@ struct EliminationTree {
 EliminationTree build_elimination_tree(Int n, const std::vector<Int> &col_ptr,
                                        const std::vector<Int> &row_idx);
 
+/// Same tree from the lower triangle stored by rows: row k lists the columns
+/// c <= k with A(k, c) != 0 (any order; diagonal entries are ignored). Avoids
+/// the internal transpose when the caller already has this structure.
+EliminationTree build_elimination_tree_from_rows(Int n, const Int *row_ptr,
+                                                 const Int *row_cols);
+
 } // namespace smf

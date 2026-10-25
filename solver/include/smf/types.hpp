@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -9,6 +10,13 @@ using Int     = int32_t;
 using LongInt = int64_t;
 
 inline constexpr LongInt kMaxFactorStorageEntries = (LongInt{1} << 29); // ~4 GiB of doubles
+
+/// std::isfinite without the out-of-line classification call MSVC emits:
+/// finite iff the exponent bits are not all ones.
+inline bool is_finite_fast(double v) noexcept {
+    const auto bits = std::bit_cast<std::uint64_t>(v);
+    return (bits & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
 
 inline bool checked_add_i64(LongInt a, LongInt b, LongInt &out) noexcept {
     if (a < 0 || b < 0) return false;

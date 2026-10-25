@@ -120,13 +120,12 @@ public:
             return stats_.outcome;
         }
 
-        // INFO(4)/INFO(5) report the minimum real/int workspace the numeric
-        // phase needs; scale generously for pivoting fill (same heuristic
-        // as bench_compare's proven call sequence).
-        la_ = std::max(4 * nz_, static_cast<int>(3.0 * info_[3]))
-              + 2 * n_ + 200;
-        liw2_ = std::max(4 * nz_, static_cast<int>(3.0 * info_[4]))
-                + 2 * n_ + 200;
+        // INFO(5) = NRLNEC and INFO(6) = NIRNEC are the minimum real and
+        // integer workspace for the numeric phase. Size them like IPOPT's
+        // MA27 interface (5x the minimum); factor() grows and retries on
+        // IFLAG -3 / -4 when pivoting needs more.
+        la_ = std::max(2 * nz_, 5 * info_[4]) + 2 * n_ + 200;
+        liw2_ = std::max(2 * nz_, 5 * info_[5]) + 2 * n_ + 200;
         if (liw2_ > liw_) iw_.resize(static_cast<std::size_t>(liw2_));
         a_fac_.assign(static_cast<std::size_t>(la_), 0.0);
         // MA27BD uses IW1 as a work stack of up to ~2n+nsteps entries.
@@ -143,17 +142,34 @@ public:
             stats_.reason = "factor called before analyse";
             return stats_.outcome;
         }
-        for (int p = 0; p < nz_; ++p) {
-            a_fac_[static_cast<std::size_t>(p)] =
-                values[static_cast<std::size_t>(
-                    coo_src_[static_cast<std::size_t>(p)])];
-        }
+        auto scatter = [&] {
+            for (int p = 0; p < nz_; ++p) {
+                a_fac_[static_cast<std::size_t>(p)] =
+                    values[static_cast<std::size_t>(
+                        coo_src_[static_cast<std::size_t>(p)])];
+            }
+        };
+        scatter();
 
         int maxfrt = 0;
         const auto t0 = Clock::now();
-        ma27bd_(&n_, &nz_, irn_.data(), icn_.data(), a_fac_.data(), &la_,
-                iw_.data(), &liw2_, ikeep_.data(), &nsteps_, &maxfrt,
-                iw1_.data(), icntl_, cntl_, info_);
+        // Workspace too small (-3: IW, -4: A): grow at least 2x, as IPOPT's
+        // MA27 interface does, and refactorize. Retries are timed.
+        for (int attempt = 0; attempt < 16; ++attempt) {
+            ma27bd_(&n_, &nz_, irn_.data(), icn_.data(), a_fac_.data(), &la_,
+                    iw_.data(), &liw2_, ikeep_.data(), &nsteps_, &maxfrt,
+                    iw1_.data(), icntl_, cntl_, info_);
+            if (info_[0] == -3) {
+                liw2_ = std::max(2 * liw2_, info_[1]);
+                iw_.resize(static_cast<std::size_t>(liw2_));
+            } else if (info_[0] == -4) {
+                la_ = std::max(2 * la_, info_[1]);
+                a_fac_.resize(static_cast<std::size_t>(la_));
+            } else {
+                break;
+            }
+            scatter();
+        }
         const auto t1 = Clock::now();
         stats_.factor_ms = ms_since(t0, t1);
 
@@ -182,7 +198,8 @@ public:
         stats_.inertia_neg = info_[14];
         stats_.inertia_pos = n_ - info_[14];
         stats_.inertia_zero = 0;
-        stats_.factor_entries = info_[3];
+        // INFO(9) = NRLBDU: real storage actually used by the factors.
+        stats_.factor_entries = info_[8];
         stats_.outcome = Outcome::Success;
         return Outcome::Success;
     }

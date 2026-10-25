@@ -1,6 +1,7 @@
 #include "smf/factor_indef.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/blocked_indef.hpp"
+#include "smf/multifrontal_serial.hpp"
 #include "smf/numeric_front.hpp"
 #include "smf/pivoting.hpp"
 #include "smf/scaling.hpp"
@@ -42,6 +43,8 @@ bool check_analysis_storage_bounds(const AnalysisKeep &keep) noexcept {
   return true;
 }
 
+#ifdef SMF_PARALLEL
+// Per-node front build + factor for the task-parallel path.
 FrontResult build_and_factor_supernode_front(
     Int s,
     const AnalysisKeep &keep,
@@ -151,6 +154,8 @@ FrontResult build_and_factor_supernode_front(
   }
   return factor_front_reference(front, ctrl, eff_small, is_root);
 }
+
+#endif // SMF_PARALLEL
 
 bool finalize_factor_from_front_results(
     const AnalysisKeep &keep,
@@ -337,8 +342,18 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     return FactorStatus::Singular;
   }
 
-  ws.prepare_for_analysis(keep);
-  const ErrorCode map_err = map_updated_values_to_permuted(keep, updated, ws);
+  const bool use_parallel_path =
+#ifdef SMF_PARALLEL
+      (ctrl.num_threads > 1);
+#else
+      false;
+#endif
+  if (use_parallel_path) {
+    ws.prepare_for_analysis(keep);
+  }
+  double matrix_max_abs = 0.0;
+  const ErrorCode map_err = map_updated_values_to_permuted(
+      keep, updated, ws, ctrl.scaling != ScalingMethod::None, &matrix_max_abs);
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
     fkeep.status = FactorStatus::Singular;
@@ -411,31 +426,68 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     return FactorStatus::Success;
   }
 
-  CscLower Ap;
-  Ap.n = keep.n;
-  if (keep.perm_col_ptr.empty()) {
-    Ap.col_ptr = keep.cleaned.col_ptr;
-    Ap.row_idx = keep.cleaned.row_idx;
-  } else {
-    Ap.col_ptr = keep.perm_col_ptr;
-    Ap.row_idx = keep.perm_row_idx;
-  }
-  Ap.values = ws.perm_values;
+  const std::vector<Int> &ap_col_ptr =
+      keep.perm_col_ptr.empty() ? keep.cleaned.col_ptr : keep.perm_col_ptr;
+  const std::vector<Int> &ap_row_idx =
+      keep.perm_col_ptr.empty() ? keep.cleaned.row_idx : keep.perm_row_idx;
 
-  double matrix_max_abs = 0.0;
-  for (double v : Ap.values) {
-    const double av = std::abs(v);
-    if (av > matrix_max_abs) matrix_max_abs = av;
+  if (ctrl.scaling != ScalingMethod::None) {
+    matrix_max_abs = 0.0;
+    for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
   }
   const double eff_small =
       (matrix_max_abs > 0.0 && matrix_max_abs < ctrl.small_pivot)
           ? (ctrl.small_pivot * matrix_max_abs)
           : ctrl.small_pivot;
 
+  if (!use_parallel_path) {
+    SerialFactorStats st;
+    const ErrorCode err = multifrontal_factor_serial(
+        keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
+        eff_small, /*posdef=*/false, fkeep, ws, st);
+    if (err != ErrorCode::Success) {
+      std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
+      fkeep.factor_values.clear();
+      info.status = err;
+      info.factor_status = FactorStatus::Singular;
+      fkeep.status = FactorStatus::Singular;
+      return FactorStatus::Singular;
+    }
+    info.delayed_pivots = st.delayed;
+    info.num_positive = st.inertia.positive;
+    info.num_negative = st.inertia.negative;
+    info.num_zero = st.inertia.zero;
+    info.numerical_rank = static_cast<int>(keep.n) - st.inertia.zero;
+    info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+    info.actual_flops = st.flops;
+    info.max_front_size = std::max(info.max_front_size, st.max_front);
+    info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
+    info.arena_peak_bytes = static_cast<long>(
+        (ws.cb_values.capacity() + ws.kernel_work.capacity()) *
+        sizeof(double));
+
+    ++ws.warmup_calls;
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+    fkeep.status =
+        (st.inertia.zero > 0) ? FactorStatus::Singular : FactorStatus::Success;
+    info.factor_status = fkeep.status;
+    info.status = (fkeep.status == FactorStatus::Success)
+                      ? ErrorCode::Success
+                      : ErrorCode::SingularMatrix;
+    return fkeep.status;
+  }
+
+  CscLower Ap;
+  Ap.n = keep.n;
+  Ap.col_ptr = ap_col_ptr;
+  Ap.row_idx = ap_row_idx;
+  Ap.values = ws.perm_values;
+
   std::atomic<int> alloc_or_input_err{0};
 
 #ifdef SMF_PARALLEL
-  if (ctrl.num_threads > 1) {
+  {
     BlasSerialGuard blas_guard;
     auto process_node = [&](Int s) {
       if (alloc_or_input_err.load(std::memory_order_relaxed) != 0)
@@ -455,38 +507,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     policy.min_task_flops = ctrl.factor_parallel_min_flops;
     policy.deterministic = ctrl.deterministic;
     run_costed_postorder(keep.supernodes, keep.fronts, policy, process_node);
-  } else
-#endif
-  {
-    const std::vector<Int> *postorder_ptr = &keep.postorder;
-    std::vector<Int> fallback_po;
-    if (postorder_ptr->empty()) {
-      fallback_po.resize(static_cast<std::size_t>(ns));
-      std::iota(fallback_po.begin(), fallback_po.end(), 0);
-      postorder_ptr = &fallback_po;
-    }
-    for (Int s : *postorder_ptr) {
-      const std::size_t si = static_cast<std::size_t>(s);
-      const std::size_t prev_l_cap = ws.node_results[si].l_row_ids.capacity();
-      FrontResult fr = build_and_factor_supernode_front(
-          s, keep, Ap, ctrl, eff_small, ws.node_results, &ws);
-      if (fr.status == ErrorCode::AllocationError ||
-          fr.status == ErrorCode::IllegalValue) {
-        fkeep.factor_values.clear();
-        info.status = fr.status;
-        info.factor_status = FactorStatus::Singular;
-        fkeep.status = FactorStatus::Singular;
-        return FactorStatus::Singular;
-      }
-      if (prev_l_cap > 0 && fr.l_row_ids.size() > prev_l_cap) {
-        ++ws.capacity_growths_last_call;
-      }
-      if (fr.l_row_ids.capacity() < prev_l_cap) {
-        fr.l_row_ids.reserve(prev_l_cap);
-      }
-      ws.node_results[si] = std::move(fr);
-    }
   }
+#endif
 
   if (alloc_or_input_err.load() != 0) {
     fkeep.factor_values.clear();

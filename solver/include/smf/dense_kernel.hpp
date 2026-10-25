@@ -50,6 +50,12 @@ void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
                   const double *B, int ldb, int ldc, double alpha = 1.0,
                   double beta = 1.0);
 
+/// Lower-triangle-only update: C := C - A * Bᵀ on the lower triangle of the
+/// m×m matrix C (ldc). A and B are m×k (lda, ldb). The strict upper triangle
+/// of C is not referenced.
+void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
+                             const double *B, int ldb, int ldc);
+
 /// Matrix-vector: y := alpha * A * x + beta * y. A is m×n, lda.
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha = 1.0, double beta = 0.0);

@@ -34,27 +34,42 @@ static const std::vector<Int> &get_or_compute_postorder(
   return local_buf;
 }
 
+// L^T z = b for small p, row-oriented: once z[row] is final it is
+// subtracted from every earlier entry. The updates are independent, unlike
+// the dot-product form whose single accumulator serializes every FMA.
 static void solve_lower_transpose_nonunit_small(double *b, int p,
                                                  const double *L, int lda) {
-  for (int col = p - 1; col >= 0; --col) {
-    double value = b[col];
-    const double *lcol = L + static_cast<std::ptrdiff_t>(col) * lda;
-    for (int row = col + 1; row < p; ++row)
-      value -= lcol[row] * b[row];
-    value /= lcol[col];
-    b[col] = value;
+  for (int row = p - 1; row >= 0; --row) {
+    const double zr = b[row] / L[static_cast<std::ptrdiff_t>(row) * lda + row];
+    b[row] = zr;
+    for (int col = 0; col < row; ++col)
+      b[col] -= L[static_cast<std::ptrdiff_t>(col) * lda + row] * zr;
   }
 }
 
 static void solve_lower_transpose_unit_small(double *b, int p,
                                              const double *L, int lda) {
-  for (int col = p - 1; col >= 0; --col) {
-    double value = b[col];
-    const double *lcol = L + static_cast<std::ptrdiff_t>(col) * lda;
-    for (int row = col + 1; row < p; ++row)
-      value -= lcol[row] * b[row];
-    b[col] = value;
+  for (int row = p - 1; row >= 0; --row) {
+    const double zr = b[row];
+    for (int col = 0; col < row; ++col)
+      b[col] -= L[static_cast<std::ptrdiff_t>(col) * lda + row] * zr;
   }
+}
+
+// Dot product of two contiguous vectors; four accumulators keep the FMA
+// latency off the critical path.
+static double dot_contig(const double *a, const double *b, int n) {
+  double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+  int i = 0;
+  for (; i + 4 <= n; i += 4) {
+    s0 += a[i] * b[i];
+    s1 += a[i + 1] * b[i + 1];
+    s2 += a[i + 2] * b[i + 2];
+    s3 += a[i + 3] * b[i + 3];
+  }
+  for (; i < n; ++i)
+    s0 += a[i] * b[i];
+  return (s0 + s1) + (s2 + s3);
 }
 
 } // anonymous namespace
@@ -82,6 +97,7 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   }
 
   std::vector<double> &b_loc = ws.loc;
+  std::vector<double> &b_ext = ws.ext;
   std::vector<double> &tmp = ws.tmp;
   tmp.resize(static_cast<std::size_t>(n));
 
@@ -143,20 +159,29 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       }
 
       // Gather pivot rows
-      b_loc.resize(static_cast<std::size_t>(p));
+      if (b_loc.size() < static_cast<std::size_t>(p))
+        b_loc.resize(static_cast<std::size_t>(p));
       for (int i = 0; i < p; ++i)
         b_loc[static_cast<std::size_t>(i)] =
             xc[rows[i]];
 
-      // Update b_loc -= L21^T * b_ext
+      // Update b_loc -= L21^T * b_ext, with b_ext gathered once so the
+      // per-column work runs on contiguous data.
       if (q > 0) {
-        for (int j = 0; j < p; ++j) {
-          const double *col =
-              factor_data + static_cast<std::ptrdiff_t>(j) * f + p;
-          double dot = 0.0;
-          for (int i = 0; i < q; ++i)
-            dot += col[i] * xc[rows[p + i]];
-          b_loc[static_cast<std::size_t>(j)] -= dot;
+        if (b_ext.size() < static_cast<std::size_t>(q))
+          b_ext.resize(static_cast<std::size_t>(q));
+        double *be = b_ext.data();
+        for (int i = 0; i < q; ++i)
+          be[i] = xc[rows[p + i]];
+        if (p * q > 4096) {
+          smf_dgemv_transpose(b_loc.data(), q, p, factor_data + p, f, be,
+                              -1.0, 1.0);
+        } else {
+          for (int j = 0; j < p; ++j) {
+            const double *col =
+                factor_data + static_cast<std::ptrdiff_t>(j) * f + p;
+            b_loc[static_cast<std::size_t>(j)] -= dot_contig(col, be, q);
+          }
         }
       }
 

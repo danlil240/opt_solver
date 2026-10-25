@@ -62,6 +62,7 @@ std::vector<double> NumericWorkspace::acquire_contrib(std::size_t elems, bool &a
             std::vector<double> buf = std::move(contrib_pool[i]);
             contrib_pool[i] = std::move(contrib_pool.back());
             contrib_pool.pop_back();
+            contrib_pool_bytes -= buf.capacity() * sizeof(double);
             buf.assign(elems, 0.0);
             return buf;
         }
@@ -69,6 +70,7 @@ std::vector<double> NumericWorkspace::acquire_contrib(std::size_t elems, bool &a
     if (!contrib_pool.empty()) {
         std::vector<double> buf = std::move(contrib_pool.back());
         contrib_pool.pop_back();
+        contrib_pool_bytes -= buf.capacity() * sizeof(double);
         allocated_new = true;
         buf.assign(elems, 0.0);
         return buf;
@@ -78,13 +80,14 @@ std::vector<double> NumericWorkspace::acquire_contrib(std::size_t elems, bool &a
 }
 
 void NumericWorkspace::release_contrib(std::vector<double> &&buf) {
-    if (buf.capacity() == 0) return;
-    std::size_t pool_bytes = buf.capacity() * sizeof(double);
-    for (const auto &b : contrib_pool) {
-        pool_bytes += b.capacity() * sizeof(double);
-    }
-    if (pool_bytes > peak_pool_bytes) {
-        peak_pool_bytes = pool_bytes;
+    // Bounded pool with a running byte count: nothing on the serial path
+    // re-acquires these buffers, so an unbounded pool grew by one entry per
+    // front per factorization and made every release O(pool size).
+    constexpr std::size_t kMaxPooledBuffers = 64;
+    if (buf.capacity() == 0 || contrib_pool.size() >= kMaxPooledBuffers) return;
+    contrib_pool_bytes += buf.capacity() * sizeof(double);
+    if (contrib_pool_bytes > peak_pool_bytes) {
+        peak_pool_bytes = contrib_pool_bytes;
     }
     buf.clear();
     contrib_pool.push_back(std::move(buf));
@@ -92,7 +95,10 @@ void NumericWorkspace::release_contrib(std::vector<double> &&buf) {
 
 ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
                                          const CscLower &updated,
-                                         NumericWorkspace &ws) {
+                                         NumericWorkspace &ws,
+                                         bool need_clean,
+                                         double *max_abs) {
+    if (max_abs != nullptr) *max_abs = 0.0;
     if (updated.n != ak.n || updated.n < 0) {
         return ErrorCode::IllegalValue;
     }
@@ -125,48 +131,50 @@ ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
         return ErrorCode::IllegalValue;
     }
 
+    // Finiteness and max |a| in one pass. Entries dropped by cleaning (out of
+    // range) are included, as before.
+    double vmax = 0.0;
+    bool all_finite = true;
     for (double v : updated.values) {
-        if (!std::isfinite(v)) {
-            return ErrorCode::IllegalValue;
-        }
+        all_finite = all_finite && is_finite_fast(v);
+        vmax = std::max(vmax, std::abs(v));
     }
+    if (!all_finite) {
+        return ErrorCode::IllegalValue;
+    }
+    if (max_abs != nullptr) *max_abs = vmax;
 
-    ws.clean_values.assign(clean_nnz, 0.0);
+    const std::size_t nv = updated.values.size();
+    const double *uv = updated.values.data();
+    if (need_clean) {
+        ws.clean_values.assign(clean_nnz, 0.0);
+    }
     ws.perm_values.assign(perm_nnz, 0.0);
+    double *pv = ws.perm_values.data();
 
-    if (matches_orig) {
-        if (!ak.orig_to_clean_idx.empty()) {
-            for (std::size_t k = 0; k < updated.values.size(); ++k) {
-                const Int c_slot = ak.orig_to_clean_idx[k];
-                if (c_slot >= 0 && static_cast<std::size_t>(c_slot) < clean_nnz) {
-                    ws.clean_values[static_cast<std::size_t>(c_slot)] += updated.values[k];
-                }
-                const Int p_slot = ak.orig_to_perm_direct[k];
-                if (p_slot >= 0 && static_cast<std::size_t>(p_slot) < perm_nnz) {
-                    ws.perm_values[static_cast<std::size_t>(p_slot)] += updated.values[k];
-                }
-            }
-        } else {
-            // Direct copy when orig_to_clean_idx is empty and pattern matches cleaned
-            ws.clean_values = updated.values;
-            if (ak.orig_to_perm_idx.empty()) {
-                ws.perm_values = updated.values;
-            } else {
-                for (std::size_t k = 0; k < updated.values.size(); ++k) {
-                    const Int p_slot = ak.orig_to_perm_idx[k];
-                    ws.perm_values[static_cast<std::size_t>(p_slot)] += updated.values[k];
-                }
+    if (matches_orig && !ak.orig_to_clean_idx.empty()) {
+        const Int *to_perm = ak.orig_to_perm_direct.data();
+        for (std::size_t k = 0; k < nv; ++k) {
+            const Int p_slot = to_perm[k];
+            if (p_slot >= 0) pv[p_slot] += uv[k];
+        }
+        if (need_clean) {
+            const Int *to_clean = ak.orig_to_clean_idx.data();
+            double *cv = ws.clean_values.data();
+            for (std::size_t k = 0; k < nv; ++k) {
+                const Int c_slot = to_clean[k];
+                if (c_slot >= 0) cv[c_slot] += uv[k];
             }
         }
     } else {
-        ws.clean_values = updated.values;
+        // Pattern equals the cleaned one (directly, or an original that
+        // needed no cleaning map).
+        if (need_clean) ws.clean_values.assign(uv, uv + nv);
         if (ak.orig_to_perm_idx.empty()) {
-            ws.perm_values = updated.values;
+            std::copy(uv, uv + nv, pv);
         } else {
-            for (std::size_t k = 0; k < updated.values.size(); ++k) {
-                const Int p_slot = ak.orig_to_perm_idx[k];
-                ws.perm_values[static_cast<std::size_t>(p_slot)] += updated.values[k];
-            }
+            const Int *to_perm = ak.orig_to_perm_idx.data();
+            for (std::size_t k = 0; k < nv; ++k) pv[to_perm[k]] += uv[k];
         }
     }
 

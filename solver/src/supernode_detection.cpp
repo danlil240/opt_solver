@@ -4,6 +4,32 @@
 namespace smf
 {
 
+    std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
+                                                    const Int *row_cols,
+                                                    const EliminationTree &etree)
+    {
+        const auto sn = static_cast<std::size_t>(n);
+        std::vector<Int> count(sn, 1); // +1 for the diagonal entry
+        std::vector<Int> mark(sn, -1);
+        const Int *parent = etree.parent.data();
+        // For each row i: every k in row i contributes i to all vertices on
+        // the etree path k -> i (excluding i itself, the diagonal slot).
+        for (Int i = 0; i < n; ++i)
+        {
+            for (Int p = row_ptr[i]; p < row_ptr[i + 1]; ++p)
+            {
+                Int w = row_cols[p];
+                while (w >= 0 && w != i && mark[static_cast<std::size_t>(w)] != i)
+                {
+                    mark[static_cast<std::size_t>(w)] = i;
+                    ++count[static_cast<std::size_t>(w)];
+                    w = parent[w];
+                }
+            }
+        }
+        return count;
+    }
+
     // Compute exact simplicial column counts |L_{*w}| of the Cholesky factor.
     // Characterization (Liu 1990): i in Struct(L_{*w}) iff A(i,k) != 0 for some
     // k whose etree path to i passes through w.  For each row i we therefore
@@ -19,8 +45,6 @@ namespace smf
                                                 const EliminationTree &etree)
     {
         const auto sn = static_cast<std::size_t>(n);
-        std::vector<Int> count(sn, 1); // +1 for the diagonal entry
-        std::vector<Int> mark(sn, -1);
 
         // Transpose lower CSC -> upper CSR: for each row i, the columns k < i
         // with A(i,k) != 0 (subdiagonal entries only; diagonals skipped).
@@ -51,24 +75,7 @@ namespace smf
                 }
         }
 
-        // For each row i: every k in urow[i] contributes i to all vertices on
-        // the etree path k -> i (excluding i itself, the diagonal slot).
-        for (Int i = 0; i < n; ++i)
-        {
-            for (Int p = ucol[static_cast<std::size_t>(i)];
-                 p < ucol[static_cast<std::size_t>(i) + 1]; ++p)
-            {
-                Int w = urow[static_cast<std::size_t>(p)];
-                while (w >= 0 && w != i &&
-                       mark[static_cast<std::size_t>(w)] != i)
-                {
-                    mark[static_cast<std::size_t>(w)] = i;
-                    ++count[static_cast<std::size_t>(w)];
-                    w = etree.parent[static_cast<std::size_t>(w)];
-                }
-            }
-        }
-        return count;
+        return filled_column_counts_from_rows(n, ucol.data(), urow.data(), etree);
     }
 
     std::vector<Supernode> detect_fundamental_supernodes(Int n,
@@ -226,6 +233,189 @@ namespace smf
         }
 
         return result;
+    }
+
+    void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
+                            std::vector<Int> &order, std::vector<Supernode> &snodes)
+    {
+        order.resize(static_cast<std::size_t>(n));
+        snodes.clear();
+        if (n == 0)
+            return;
+        const auto sn = static_cast<std::size_t>(n);
+
+        // Every size-n / size-nsn temporary lives in one block (two-phase:
+        // nsn is only known after the fundamental pass).
+        std::vector<Int> work(3 * sn + 1, 0);
+        Int *nchildren = work.data();          // n
+        Int *snode_of = nchildren + sn;        // n
+        Int *first = snode_of + sn;            // nsn + 1 <= n + 1
+
+        // Fundamental supernodes of the postordered numbering.
+        for (Int j = 0; j < n; ++j)
+            if (parent[static_cast<std::size_t>(j)] >= 0)
+                ++nchildren[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])];
+        Int nsn = 0;
+        for (Int j = 0; j < n; ++j)
+        {
+            const bool new_snode =
+                (j == 0) || (parent[static_cast<std::size_t>(j) - 1] != j) ||
+                (nchildren[static_cast<std::size_t>(j)] != 1) ||
+                (colcount[static_cast<std::size_t>(j) - 1] !=
+                 colcount[static_cast<std::size_t>(j)] + 1);
+            if (new_snode)
+                first[nsn++] = j;
+            snode_of[static_cast<std::size_t>(j)] = nsn - 1;
+        }
+        first[nsn] = n;
+        const auto nsz = static_cast<std::size_t>(nsn);
+        std::vector<Int> swork(11 * nsz + 2, 0);
+        Int *sparent = swork.data();           // nsn
+        Int *nelim = sparent + nsz;            // nsn
+        Int *group = nelim + nsz;              // nsn
+        Int *gparent = group + nsz;            // nsn
+        Int *ch_ptr = gparent + nsz;           // nsn + 1
+        Int *ch = ch_ptr + nsz + 1;            // nsn
+        Int *gcol_ptr = ch + nsz;              // nsn + 1
+        Int *new_id = gcol_ptr + nsz + 1;      // nsn
+        Int *post = new_id + nsz;              // nsn
+        Int *stk_node = post + nsz;            // nsn
+        Int *stk_ci = stk_node + nsz;          // nsn
+        std::fill(sparent, sparent + nsn, -1);
+        for (Int s = 0; s < nsn; ++s)
+        {
+            const auto si = static_cast<std::size_t>(s);
+            nelim[si] = first[si + 1] - first[si];
+            const Int pc = parent[static_cast<std::size_t>(first[si + 1]) - 1];
+            if (pc >= 0)
+                sparent[si] = snode_of[static_cast<std::size_t>(pc)];
+        }
+
+        // Merge bottom-up (children have smaller indices). group[s] is the
+        // supernode s was merged into; survivors point to themselves.
+        for (Int s = 0; s < nsn; ++s)
+            group[static_cast<std::size_t>(s)] = s;
+        if (nemin > 1)
+        {
+            for (Int s = 0; s < nsn; ++s)
+            {
+                const Int p = sparent[static_cast<std::size_t>(s)];
+                if (p < 0)
+                    continue;
+                if (nelim[static_cast<std::size_t>(s)] < nemin &&
+                    nelim[static_cast<std::size_t>(p)] < nemin)
+                {
+                    group[static_cast<std::size_t>(s)] = p;
+                    nelim[static_cast<std::size_t>(p)] += nelim[static_cast<std::size_t>(s)];
+                }
+            }
+        }
+        // Resolve to survivors: a target always has a larger index than the
+        // merged node, so a descending sweep sees every target resolved.
+        for (Int s = nsn - 1; s >= 0; --s)
+        {
+            const auto si = static_cast<std::size_t>(s);
+            group[si] = group[static_cast<std::size_t>(group[si])];
+        }
+
+        // Group tree and its children (in increasing survivor index).
+        std::fill(gparent, gparent + nsn, -1);
+        for (Int g = 0; g < nsn; ++g)
+        {
+            if (group[static_cast<std::size_t>(g)] != g)
+                continue;
+            const Int p = sparent[static_cast<std::size_t>(g)];
+            if (p >= 0)
+            {
+                gparent[static_cast<std::size_t>(g)] = group[static_cast<std::size_t>(p)];
+                ++ch_ptr[static_cast<std::size_t>(gparent[static_cast<std::size_t>(g)]) + 1];
+            }
+        }
+        for (Int g = 0; g < nsn; ++g)
+            ch_ptr[static_cast<std::size_t>(g) + 1] += ch_ptr[static_cast<std::size_t>(g)];
+        {
+            Int *head = new_id; // free until the DFS below
+            std::copy(ch_ptr, ch_ptr + nsn, head);
+            for (Int g = 0; g < nsn; ++g)
+                if (group[static_cast<std::size_t>(g)] == g && gparent[static_cast<std::size_t>(g)] >= 0)
+                    ch[head[gparent[static_cast<std::size_t>(g)]]++] = g;
+        }
+
+        // Columns of each group in increasing input index.
+        for (Int s = 0; s < nsn; ++s)
+            gcol_ptr[static_cast<std::size_t>(group[static_cast<std::size_t>(s)]) + 1] +=
+                first[static_cast<std::size_t>(s) + 1] - first[static_cast<std::size_t>(s)];
+        for (Int g = 0; g < nsn; ++g)
+            gcol_ptr[static_cast<std::size_t>(g) + 1] += gcol_ptr[static_cast<std::size_t>(g)];
+        Int *gcols = nchildren; // nchildren is dead; reuse its n slots
+        {
+            Int *head = new_id; // free until the DFS below
+            std::copy(gcol_ptr, gcol_ptr + nsn, head);
+            for (Int j = 0; j < n; ++j)
+            {
+                const Int g = group[static_cast<std::size_t>(snode_of[static_cast<std::size_t>(j)])];
+                gcols[head[g]++] = j;
+            }
+        }
+
+        // Postorder DFS of the group tree; each group's columns are emitted
+        // contiguously, which keeps the order topological.
+        std::fill(new_id, new_id + nsn, -1);
+        Int ng = 0;
+        {
+            Int top = 0;
+            for (Int g = nsn - 1; g >= 0; --g)
+                if (group[static_cast<std::size_t>(g)] == g && gparent[static_cast<std::size_t>(g)] < 0)
+                {
+                    stk_node[top] = g;
+                    stk_ci[top] = 0;
+                    ++top;
+                }
+            while (top > 0)
+            {
+                const Int g = stk_node[top - 1];
+                const Int c0 = ch_ptr[g];
+                const Int c1 = ch_ptr[g + 1];
+                const Int ci = stk_ci[top - 1];
+                if (c0 + ci < c1)
+                {
+                    stk_ci[top - 1] = ci + 1;
+                    stk_node[top] = ch[c0 + ci];
+                    stk_ci[top] = 0;
+                    ++top;
+                }
+                else
+                {
+                    new_id[g] = ng;
+                    post[ng++] = g;
+                    --top;
+                }
+            }
+        }
+
+        snodes.resize(static_cast<std::size_t>(ng));
+        Int pos = 0;
+        for (Int i = 0; i < ng; ++i)
+        {
+            const Int g = post[static_cast<std::size_t>(i)];
+            Supernode &out = snodes[static_cast<std::size_t>(i)];
+            out.col_start = pos;
+            for (Int t = gcol_ptr[static_cast<std::size_t>(g)]; t < gcol_ptr[static_cast<std::size_t>(g) + 1]; ++t)
+                order[static_cast<std::size_t>(pos++)] = gcols[static_cast<std::size_t>(t)];
+            out.col_end = pos;
+            const Int gp = gparent[static_cast<std::size_t>(g)];
+            out.parent = (gp >= 0) ? new_id[static_cast<std::size_t>(gp)] : -1;
+            out.children.clear();
+            out.children.reserve(static_cast<std::size_t>(
+                ch_ptr[static_cast<std::size_t>(g) + 1] - ch_ptr[static_cast<std::size_t>(g)]));
+        }
+        // Children were numbered before their parent; push in increasing index.
+        for (Int i = 0; i < ng; ++i)
+        {
+            const Int par = snodes[static_cast<std::size_t>(i)].parent;
+            if (par >= 0)
+                snodes[static_cast<std::size_t>(par)].children.push_back(i);
+        }
     }
 
 } // namespace smf

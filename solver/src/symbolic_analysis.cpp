@@ -21,113 +21,59 @@ namespace smf
                 m == OrderingMethod::AutoParallel);
     }
 
+    // Rows are sorted within each cleaned column, so the last one is the
+    // farthest from the diagonal.
     static Int max_lower_bandwidth(const CscLower &A)
     {
         Int bw = 0;
         for (Int j = 0; j < A.n; ++j)
         {
-            for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
-                 p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
-            {
-                const Int i = A.row_idx[static_cast<std::size_t>(p)];
-                const Int d = i - j; // lower CSC => i >= j
-                if (d > bw)
-                    bw = d;
-            }
+            const Int p1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
+            if (p1 > A.col_ptr[static_cast<std::size_t>(j)])
+                bw = std::max(bw, A.row_idx[static_cast<std::size_t>(p1) - 1] - j);
         }
         return bw;
     }
 
-    // Permute a lower-CSC matrix: given perm[new]=old, build the matrix
-    // in the new ordering. For lower-CSC: entry (i,j) with i>=j in old ordering
-    // becomes (iperm[i], iperm[j]) in new ordering; we keep only new_i >= new_j.
-    static CscLower permute_lower_csc(const CscLower &A,
-                                      const std::vector<Int> & /* perm */, // perm[new]=old
-                                      const std::vector<Int> &iperm)       // iperm[old]=new
+    // Lower triangle of P A P^T by rows (ip = inverse permutation): row r
+    // lists the columns c <= r with an entry, and with `src` also the cleaned
+    // entry it came from. With `col_count`, the entries per permuted column
+    // are counted in the same sweep.
+    static void build_row_form(const CscLower &C, const Int *ip, Int *row_ptr,
+                               Int *row_col, Int *src, Int *col_count, Int *head)
     {
-        const Int n = A.n;
-        // Count entries per new column
-        std::vector<Int> count(static_cast<std::size_t>(n), 0);
-        for (Int old_j = 0; old_j < n; ++old_j)
-        {
-            const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-            for (Int p = A.col_ptr[static_cast<std::size_t>(old_j)]; p < A.col_ptr[static_cast<std::size_t>(old_j) + 1];
-                 ++p)
-            {
-                const Int old_i = A.row_idx[static_cast<std::size_t>(p)];
-                const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-                if (new_i >= new_j)
-                    ++count[static_cast<std::size_t>(new_j)];
-                else
-                    ++count[static_cast<std::size_t>(new_i)];
-            }
-        }
-
-        CscLower B;
-        B.n = n;
-        B.col_ptr.resize(static_cast<std::size_t>(n) + 1, 0);
-        for (Int j = 0; j < n; ++j)
-            B.col_ptr[static_cast<std::size_t>(j) + 1] =
-                B.col_ptr[static_cast<std::size_t>(j)] + count[static_cast<std::size_t>(j)];
-        const Int nnz = B.col_ptr[static_cast<std::size_t>(n)];
-        B.row_idx.resize(static_cast<std::size_t>(nnz));
-        B.values.resize(static_cast<std::size_t>(nnz), 0.0);
-
-        std::vector<Int> pos(B.col_ptr.begin(), B.col_ptr.begin() + n);
-
-        for (Int old_j = 0; old_j < n; ++old_j)
-        {
-            const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-            for (Int p = A.col_ptr[static_cast<std::size_t>(old_j)]; p < A.col_ptr[static_cast<std::size_t>(old_j) + 1];
-                 ++p)
-            {
-                const Int old_i = A.row_idx[static_cast<std::size_t>(p)];
-                const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-                Int col, row;
-                if (new_i >= new_j)
-                {
-                    col = new_j;
-                    row = new_i;
-                }
-                else
-                {
-                    col = new_i;
-                    row = new_j;
-                }
-                const Int slot = pos[static_cast<std::size_t>(col)]++;
-                B.row_idx[static_cast<std::size_t>(slot)] = row;
-                B.values[static_cast<std::size_t>(slot)] = A.values[static_cast<std::size_t>(p)];
-            }
-        }
-
-        // Sort each column's row indices (and values accordingly)
-        // Workspace allocated once outside the loop; resize() does not reallocate
-        // when shrinking, so at most O(max_col_width) allocations total.
-        std::vector<std::pair<Int, double>> ws;
+        const Int n = C.n;
+        const Int *cp = C.col_ptr.data();
+        const Int *ri = C.row_idx.data();
+        std::fill(row_ptr, row_ptr + n + 1, 0);
+        if (col_count != nullptr)
+            std::fill(col_count, col_count + n, 0);
         for (Int j = 0; j < n; ++j)
         {
-            const Int start = B.col_ptr[static_cast<std::size_t>(j)];
-            const Int end = B.col_ptr[static_cast<std::size_t>(j) + 1];
-            const Int len = end - start;
-            if (len <= 1)
-                continue;
-
-            ws.resize(static_cast<std::size_t>(len));
-            for (Int k = 0; k < len; ++k)
-                ws[static_cast<std::size_t>(k)] = {B.row_idx[static_cast<std::size_t>(start + k)],
-                                                    B.values[static_cast<std::size_t>(start + k)]};
-            std::sort(ws.begin(), ws.end(),
-                      [](const std::pair<Int, double> &a, const std::pair<Int, double> &b) {
-                          return a.first < b.first;
-                      });
-            for (Int k = 0; k < len; ++k)
+            const Int pj = ip[j];
+            for (Int k = cp[j]; k < cp[j + 1]; ++k)
             {
-                B.row_idx[static_cast<std::size_t>(start + k)] = ws[static_cast<std::size_t>(k)].first;
-                B.values[static_cast<std::size_t>(start + k)] = ws[static_cast<std::size_t>(k)].second;
+                const Int pi = ip[ri[k]];
+                ++row_ptr[std::max(pi, pj) + 1];
+                if (col_count != nullptr)
+                    ++col_count[std::min(pi, pj)];
             }
         }
-
-        return B;
+        for (Int r = 0; r < n; ++r)
+            row_ptr[r + 1] += row_ptr[r];
+        std::copy(row_ptr, row_ptr + n, head);
+        for (Int j = 0; j < n; ++j)
+        {
+            const Int pj = ip[j];
+            for (Int k = cp[j]; k < cp[j + 1]; ++k)
+            {
+                const Int pi = ip[ri[k]];
+                const Int slot = head[std::max(pi, pj)]++;
+                row_col[slot] = std::min(pi, pj);
+                if (src != nullptr)
+                    src[slot] = k;
+            }
+        }
     }
 
     std::unique_ptr<AnalysisKeep> Solver::analyse(const CscLower &A, const Control &control, Info &info)
@@ -177,13 +123,25 @@ namespace smf
         }
         else
         {
-            auto backend = make_ordering_backend(control.ordering, n, info);
+            // AutoSerial / AMD, and AutoParallel below the METIS size
+            // threshold, resolve to AMD: run it straight off the cleaned
+            // pattern with the solver-owned workspace.
+            const bool amd_backend =
+                control.ordering == OrderingMethod::AutoSerial ||
+                control.ordering == OrderingMethod::AMD ||
+                (control.ordering == OrderingMethod::AutoParallel && n <= 8192);
+            if (!(amd_backend && amd_order_lower_csc(n, cleaned.clean.col_ptr,
+                                                     cleaned.clean.row_idx, perm,
+                                                     analyse_scratch_)))
+            {
+                auto backend = make_ordering_backend(control.ordering, n, info);
 
-            // Step 3: build symmetric adjacency graph for the cleaned pattern.
-            auto [xadj, adjncy] = build_symmetric_adjacency(cleaned.clean);
+                // Step 3: build symmetric adjacency graph for the cleaned pattern.
+                auto [xadj, adjncy] = build_symmetric_adjacency(cleaned.clean);
 
-            // Step 4: compute fill-reducing permutation.
-            perm = backend->compute_ordering(n, xadj, adjncy);
+                // Step 4: compute fill-reducing permutation.
+                perm = backend->compute_ordering(n, xadj, adjncy);
+            }
             if (perm.empty())
             {
                 // Ordering failed — fall back to identity permutation.
@@ -212,139 +170,122 @@ namespace smf
             }
         }
 
-        // Build inverse permutation
-        std::vector<Int> iperm(static_cast<std::size_t>(n));
+        // Temporaries live in a solver-owned buffer reused across analyses
+        // (fresh allocations are dominated by page faults at these sizes).
+        const auto sn_sz = static_cast<std::size_t>(n);
+        const CscLower &C = cleaned.clean;
+        const std::size_t nnz_c = C.row_idx.size();
+        const std::size_t work_need = 7 * sn_sz + 1 + 2 * nnz_c;
+        if (analyse_work_.size() < work_need)
+            analyse_work_.resize(work_need);
+        Int *row_ptr = analyse_work_.data();     // n + 1
+        Int *head = row_ptr + sn_sz + 1;         // n
+        Int *col_count = head + sn_sz;           // n
+        Int *inv_po = col_count + sn_sz;         // n
+        Int *parent1 = inv_po + sn_sz;           // n
+        Int *colcount1 = parent1 + sn_sz;        // n
+        Int *inv_order = colcount1 + sn_sz;      // n
+        Int *row_col = inv_order + sn_sz;        // nnz
+        Int *row_src = row_col + nnz_c;          // nnz
+
+        // Step 5: elimination tree and exact column counts of the ordering.
+        std::vector<Int> iperm(sn_sz);
         for (Int i = 0; i < n; ++i)
             iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
+        build_row_form(C, iperm.data(), row_ptr, row_col, nullptr, nullptr, head);
+        EliminationTree etree0 = build_elimination_tree_from_rows(n, row_ptr, row_col);
+        const std::vector<Int> colcount0 =
+            filled_column_counts_from_rows(n, row_ptr, row_col, etree0);
 
-        // Step 5: permute the cleaned matrix.
-        CscLower A_perm;
-        const CscLower *A_ord = nullptr;
-        if (use_identity_ordering)
-            A_ord = &cleaned.clean;
-        else
+        // Step 6: relabel by the etree postorder (fundamental supernodes
+        // become contiguous), then relaxed amalgamation, which returns a
+        // further topological reordering making merged groups contiguous.
+        for (Int k = 0; k < n; ++k)
+            inv_po[etree0.postorder[static_cast<std::size_t>(k)]] = k;
+        for (Int k = 0; k < n; ++k)
         {
-            A_perm = permute_lower_csc(cleaned.clean, perm, iperm);
-            A_ord = &A_perm;
+            const Int old = etree0.postorder[static_cast<std::size_t>(k)];
+            const Int par = etree0.parent[static_cast<std::size_t>(old)];
+            parent1[k] = (par >= 0) ? inv_po[par] : -1;
+            colcount1[k] = colcount0[static_cast<std::size_t>(old)];
         }
+        std::vector<Int> order;
+        std::vector<Supernode> snodes;
+        amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
+                           order, snodes);
 
-        // Step 6: build elimination tree
-        EliminationTree etree = build_elimination_tree(n, A_ord->col_ptr, A_ord->row_idx);
+        // Final permutation and its elimination tree (relabelled, not rebuilt).
+        for (Int k = 0; k < n; ++k)
+            inv_order[order[static_cast<std::size_t>(k)]] = k;
+        bool identity_final = true;
+        std::vector<Int> parentf(sn_sz);
+        {
+            const std::vector<Int> perm0 = perm;
+            for (Int k = 0; k < n; ++k)
+            {
+                const Int k1 = order[static_cast<std::size_t>(k)];
+                const Int p1 = parent1[k1];
+                parentf[static_cast<std::size_t>(k)] = (p1 >= 0) ? inv_order[p1] : -1;
+                const Int old = perm0[static_cast<std::size_t>(
+                    etree0.postorder[static_cast<std::size_t>(k1)])];
+                perm[static_cast<std::size_t>(k)] = old;
+                identity_final = identity_final && (old == k);
+            }
+        }
+        for (Int i = 0; i < n; ++i)
+            iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
+        // Relabelling preserves the tree: numbering 1 *is* the postorder of
+        // etree0, so k -> inv_order[k] lists the final labels in postorder.
+        EliminationTree etree;
+        etree.parent = std::move(parentf);
+        etree.postorder.assign(inv_order, inv_order + n);
+        etree.max_depth = etree0.max_depth;
 
-        // Step 7: detect and amalgamate supernodes
-        auto snodes = detect_fundamental_supernodes(n, A_ord->col_ptr, A_ord->row_idx, etree);
-        snodes = amalgamate_supernodes(std::move(snodes), static_cast<Int>(control.nemin));
+        // Step 7: permuted pattern by double transpose. Walking the final
+        // row form in increasing row order emits every permuted column
+        // already sorted and records where each cleaned entry lands (otp).
+        // When the final order is the identity the cleaned matrix is used.
+        CscLower A_perm;
+        std::vector<Int> otp;
+        if (!identity_final)
+        {
+            build_row_form(C, iperm.data(), row_ptr, row_col, row_src, col_count, head);
+            A_perm.n = n;
+            A_perm.col_ptr.resize(sn_sz + 1);
+            A_perm.col_ptr[0] = 0;
+            for (std::size_t c = 0; c < sn_sz; ++c)
+                A_perm.col_ptr[c + 1] = A_perm.col_ptr[c] + col_count[c];
+            A_perm.row_idx.resize(nnz_c);
+            otp.resize(nnz_c);
+            std::copy(A_perm.col_ptr.begin(), A_perm.col_ptr.end() - 1, head);
+            for (Int r = 0; r < n; ++r)
+            {
+                for (Int t = row_ptr[r]; t < row_ptr[r + 1]; ++t)
+                {
+                    const Int slot = head[row_col[t]]++;
+                    A_perm.row_idx[static_cast<std::size_t>(slot)] = r;
+                    otp[static_cast<std::size_t>(row_src[t])] = slot;
+                }
+            }
+        }
 
         // Step 8: build assembly tree and fill info predictions
-        auto fronts = build_assembly_tree(*A_ord, snodes, info);
+        auto fronts = build_assembly_tree(identity_final ? C : A_perm, snodes, info);
 
-        // Step 8.5a: compute supernode postorder (children before parents) via iterative DFS.
+        // Step 8.5: supernodes are numbered in postorder by construction;
+        // the factor's LIFO contribution stack wants children in descending
+        // postorder.
         const Int nsn = static_cast<Int>(snodes.size());
-        std::vector<Int> sn_postorder;
-        sn_postorder.reserve(static_cast<std::size_t>(nsn));
-        {
-            std::vector<std::pair<Int,Int>> stk; // (node, next_child_idx)
-            stk.reserve(static_cast<std::size_t>(nsn));
-            for (Int i = 0; i < nsn; ++i)
-                if (snodes[static_cast<std::size_t>(i)].parent == -1)
-                    stk.push_back({i, 0});
-            while (!stk.empty()) {
-                auto& [node, ci] = stk.back();
-                const Int nch = static_cast<Int>(snodes[static_cast<std::size_t>(node)].children.size());
-                if (ci < nch) {
-                    const Int child = snodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci)];
-                    ++ci;
-                    stk.push_back({child, 0});
-                } else {
-                    sn_postorder.push_back(node);
-                    stk.pop_back();
-                }
-            }
-        }
-
-        // Step 8.5b: build inverse postorder for sort key.
-        std::vector<Int> po_idx(static_cast<std::size_t>(nsn));
-        for (Int i = 0; i < nsn; ++i)
-            po_idx[static_cast<std::size_t>(sn_postorder[static_cast<std::size_t>(i)])] = i;
-
-        // Step 8.5c: pre-sort each supernode's children by descending postorder index.
-        // Factor's LIFO fstack freeing requires this order; doing it once in analysis
-        // eliminates the per-supernode sorted_ch vector + std::sort in the factor hot loop.
+        std::vector<Int> sn_postorder(static_cast<std::size_t>(nsn));
+        std::iota(sn_postorder.begin(), sn_postorder.end(), 0);
         for (Int s = 0; s < nsn; ++s) {
             auto& ch = snodes[static_cast<std::size_t>(s)].children;
-            if (ch.size() > 1)
-                std::sort(ch.begin(), ch.end(), [&](Int a, Int b) {
-                    return po_idx[static_cast<std::size_t>(a)] >
-                           po_idx[static_cast<std::size_t>(b)];
-                });
-        }
-
-        // Step 8.5d: pre-compute child-parent row scatter maps only for smaller
-        // matrices; for larger cases this can dominate one-shot analyse time.
-        const bool precompute_child_maps = (n <= 1200);
-        if (precompute_child_maps) {
-            for (Int s = 0; s < nsn; ++s) {
-                const Supernode& sn = snodes[static_cast<std::size_t>(s)];
-                FrontalInfo& fi = fronts[static_cast<std::size_t>(s)];
-                const std::size_t nch = sn.children.size();
-                fi.child_parent_rows.resize(nch);
-                for (std::size_t k = 0; k < nch; ++k) {
-                    const Int c = sn.children[k];
-                    const FrontalInfo& cfi = fronts[static_cast<std::size_t>(c)];
-                    const Int cp = snodes[static_cast<std::size_t>(c)].width();
-                    const Int q_c = cfi.front_size() - cp;
-                    fi.child_parent_rows[k].resize(static_cast<std::size_t>(q_c));
-                    for (Int i = 0; i < q_c; ++i) {
-                        const Int ext_row = cfi.row_indices[static_cast<std::size_t>(cp + i)];
-                        const auto it = std::lower_bound(fi.row_indices.begin(),
-                                                         fi.row_indices.end(), ext_row);
-                        fi.child_parent_rows[k][static_cast<std::size_t>(i)] =
-                            static_cast<Int>(it - fi.row_indices.begin());
-                    }
-                }
-            }
+            std::reverse(ch.begin(), ch.end());
         }
 
         // Step 9: record timing
         const auto t1 = std::chrono::steady_clock::now();
         info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
-
-        // Step 9.5: build orig_to_perm_idx scatter map (before moving A_perm).
-        // For each entry k in cleaned (0-based), compute the slot in A_perm where it lands.
-        // Since A_perm.row_idx is sorted within each column (post-sort from permute_lower_csc),
-        // we use std::lower_bound: O(nnz * log(max_col_width)).
-        // This map enables O(nnz) value-only permutation on every factorization call.
-        std::vector<Int> otp;
-        if (!use_identity_ordering) {
-            const Int nnz_orig = static_cast<Int>(cleaned.clean.values.size());
-            otp.resize(static_cast<std::size_t>(nnz_orig));
-            for (Int old_j = 0; old_j < n; ++old_j)
-            {
-                const Int new_j = iperm[static_cast<std::size_t>(old_j)];
-                for (Int k = cleaned.clean.col_ptr[static_cast<std::size_t>(old_j)];
-                     k < cleaned.clean.col_ptr[static_cast<std::size_t>(old_j) + 1]; ++k)
-                {
-                    const Int old_i =
-                        cleaned.clean.row_idx[static_cast<std::size_t>(k)];
-                    const Int new_i = iperm[static_cast<std::size_t>(old_i)];
-                    // Determine which column this entry lands in after lower-triangle
-                    // enforcement: col = min(new_i, new_j), row = max(new_i, new_j).
-                    const Int perm_col = (new_i >= new_j) ? new_j : new_i;
-                    const Int perm_row = (new_i >= new_j) ? new_i : new_j;
-                    // Binary-search within the sorted column of A_perm.
-                    const Int cs =
-                        A_perm.col_ptr[static_cast<std::size_t>(perm_col)];
-                    const Int ce =
-                        A_perm.col_ptr[static_cast<std::size_t>(perm_col) + 1];
-                    auto it = std::lower_bound(
-                        A_perm.row_idx.begin() + cs,
-                        A_perm.row_idx.begin() + ce,
-                        perm_row);
-                    otp[static_cast<std::size_t>(k)] =
-                        static_cast<Int>(it - A_perm.row_idx.begin());
-                }
-            }
-        }
 
         // Step 10: assemble AnalysisKeep
         auto keep = std::make_unique<AnalysisKeep>();
@@ -357,17 +298,17 @@ namespace smf
             const Int c_idx = keep->orig_to_clean_idx[k];
             if (c_idx >= 0) {
                 keep->orig_to_perm_direct[k] =
-                    otp.empty() ? c_idx : otp[static_cast<std::size_t>(c_idx)];
+                    identity_final ? c_idx : otp[static_cast<std::size_t>(c_idx)];
             }
         }
         keep->cleaned = std::move(cleaned.clean);
         // Store permuted pattern for fast value-only permutation in factor.
         // For identity ordering we keep these empty and factor reuses cleaned pattern.
-        if (!use_identity_ordering) {
+        if (!identity_final) {
             keep->perm_col_ptr = std::move(A_perm.col_ptr);
             keep->perm_row_idx = std::move(A_perm.row_idx);
+            keep->orig_to_perm_idx = std::move(otp);
         }
-        keep->orig_to_perm_idx = std::move(otp);
         keep->perm = std::move(perm);
         keep->iperm = std::move(iperm);
         keep->etree = std::move(etree);

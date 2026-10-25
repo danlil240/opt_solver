@@ -355,3 +355,7 @@ if(WIN32)
     target_link_libraries(test_dispatch_policy PRIVATE psapi)
 endif()
 add_test(NAME DispatchPolicy COMMAND test_dispatch_policy)
+
+add_executable(test_lean_engine test_lean_engine.cpp)
+target_link_libraries(test_lean_engine PRIVATE smf GTest::gtest_main)
+add_test(NAME LeanEngine COMMAND test_lean_engine)

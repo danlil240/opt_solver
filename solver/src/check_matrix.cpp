@@ -48,24 +48,26 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
     }
 
     // Fast path: a single O(nnz) validation pass detects the common case of
-    // already-clean input (sorted unique rows, all in range, diagonal present
-    // in every column). Avoids the per-column Entry sort/dedup machinery and
-    // copies the arrays wholesale instead of pushing entries one by one.
+    // already-clean input (sorted unique rows, all in range). Avoids the
+    // per-column Entry sort/dedup machinery and copies the arrays wholesale
+    // instead of pushing entries one by one. Missing diagonals are only
+    // counted (the slow path does not insert them either).
     bool clean = true;
+    int missing_diag = 0;
     for (Int j = 0; j < n && clean; ++j) {
-        Int prev = -1;
-        bool has_diag = false;
-        for (Int k = A.col_ptr[static_cast<std::size_t>(j)];
-             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+        const Int k0 = A.col_ptr[static_cast<std::size_t>(j)];
+        const Int k1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
+        Int prev = j - 1;
+        for (Int k = k0; k < k1; ++k) {
             const Int i = A.row_idx[static_cast<std::size_t>(k)];
-            if (i < j || i >= n || i <= prev) {
+            if (i <= prev || i >= n) {
                 clean = false;
                 break;
             }
             prev = i;
-            has_diag = (i == j);
         }
-        if (!has_diag) clean = false;
+        // Sorted rows >= j: the diagonal, when present, is the first entry.
+        if (k0 == k1 || A.row_idx[static_cast<std::size_t>(k0)] != j) ++missing_diag;
     }
 
     if (clean) {
@@ -77,9 +79,10 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
         for (Int k = 0; k < nnz; ++k) {
             result.original_to_clean[static_cast<std::size_t>(k)] = k;
         }
+        result.missing_diag = missing_diag;
         info.matrix_duplicates = 0;
         info.matrix_out_of_range = 0;
-        info.matrix_missing_diag = 0;
+        info.matrix_missing_diag = missing_diag;
         return result;
     }
 

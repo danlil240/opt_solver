@@ -2,6 +2,7 @@
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
+#include "smf/multifrontal_serial.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/scaling.hpp"
 #include "smf/threading.hpp"
@@ -16,30 +17,11 @@ namespace smf {
 
 namespace {
 
-/// Permute VALUES into pre-computed permuted positions using the scatter map
-/// built during analyse().  O(nnz) with no search — replaces the former
-/// O(nnz * avg_col_width) linear-search in permute_values_only.
-/// Allocation: one vector of size nnz_perm (same as before), no aux arrays.
-static std::vector<double> scatter_values(
-    const CscLower &A_orig,
-    const std::vector<Int> &orig_to_perm_idx,
-    Int nnz_perm) {
-  std::vector<double> perm_values(static_cast<std::size_t>(nnz_perm), 0.0);
-  const Int nnz = static_cast<Int>(A_orig.values.size());
-  for (Int k = 0; k < nnz; ++k)
-    perm_values[static_cast<std::size_t>(
-        orig_to_perm_idx[static_cast<std::size_t>(k)])] +=
-        A_orig.values[static_cast<std::size_t>(k)];
-  return perm_values;
-}
-
-static Int compute_lower_bandwidth(const CscLower &A) {
+static Int compute_lower_bandwidth(Int n, const Int *col_ptr, const Int *row_idx) {
   Int kd = 0;
-  for (Int j = 0; j < A.n; ++j) {
-    for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
-         p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-      const Int i = A.row_idx[static_cast<std::size_t>(p)];
-      const Int d = i - j; // lower CSC => i >= j
+  for (Int j = 0; j < n; ++j) {
+    for (Int p = col_ptr[j]; p < col_ptr[j + 1]; ++p) {
+      const Int d = row_idx[p] - j; // lower CSC => i >= j
       if (d > kd)
         kd = d;
     }
@@ -47,10 +29,12 @@ static Int compute_lower_bandwidth(const CscLower &A) {
   return kd;
 }
 
-static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
-  const Int n = A.n;
-  const Int kd = compute_lower_bandwidth(A);
-  if (n < 100 || kd <= 0 || kd > 128)
+static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
+                                  const double *values, FactorKeep &fkeep) {
+  if (n < 100)
+    return false;
+  const Int kd = compute_lower_bandwidth(n, col_ptr, row_idx);
+  if (kd <= 0 || kd > 128)
     return false;
 
   const int n_i = static_cast<int>(n);
@@ -61,13 +45,11 @@ static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
                          0.0);
 
   for (Int j = 0; j < n; ++j) {
-    for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
-         p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-      const Int i = A.row_idx[static_cast<std::size_t>(p)];
-      const Int d = i - j;
+    for (Int p = col_ptr[j]; p < col_ptr[j + 1]; ++p) {
+      const Int d = row_idx[p] - j;
       ab[static_cast<std::size_t>(d) +
          static_cast<std::size_t>(j) * static_cast<std::size_t>(ldab)] +=
-          A.values[static_cast<std::size_t>(p)];
+          values[p];
     }
   }
 
@@ -82,25 +64,7 @@ static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
   return true;
 }
 
-// Merge child extension rows (sorted) into parent row_indices (sorted) to get
-// parent-local indices in O(f + q_c), replacing per-row binary search.
-static void merge_parent_rows(const FrontalInfo &fi_parent,
-                              const FrontalInfo &fi_child,
-                              Int p_child,
-                              std::vector<Int> &parent_rows_out) {
-    const Int q_c = fi_child.front_size() - p_child;
-    parent_rows_out.resize(static_cast<std::size_t>(q_c));
-    const auto &pri = fi_parent.row_indices;
-    std::size_t pp = 0;
-    for (Int ii = 0; ii < q_c; ++ii) {
-        const Int ext_row =
-            fi_child.row_indices[static_cast<std::size_t>(p_child + ii)];
-        while (pp < pri.size() && pri[pp] < ext_row) ++pp;
-        parent_rows_out[static_cast<std::size_t>(ii)] =
-            static_cast<Int>(pp);
-    }
-}
-
+#ifdef SMF_PARALLEL
 static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_steps.clear();
   fkeep.solve_row_indices.clear();
@@ -138,6 +102,8 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
   fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
 }
+
+#endif // SMF_PARALLEL
 
 } // anonymous namespace
 
@@ -332,79 +298,92 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
 }
 #endif // SMF_PARALLEL
 
-static FactorStatus factor_posdef_core(const AnalysisKeep &keep,
-                                       const CscLower &cleaned,
-                                       const Control &ctrl,
-                                       Info &info, FactorKeep &fkeep) {
+FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
+                           Info &info, FactorKeep &fkeep) {
+  NumericWorkspace ws;
+  return factor_posdef(keep, keep.cleaned, ctrl, info, fkeep, ws);
+}
+
+FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
+                           const Control &ctrl, Info &info,
+                           FactorKeep &fkeep, NumericWorkspace &ws) {
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
+  ws.front_heap_allocations_last_call = 0;
+  ws.capacity_growths_last_call = 0;
+
+  auto fail = [&](FactorStatus fs, ErrorCode ec) {
+    fkeep.factor_values.clear();
+    fkeep.status = fs;
+    info.factor_status = fs;
+    info.status = ec;
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+    return fs;
+  };
+
+  const ErrorCode err = map_updated_values_to_permuted(
+      keep, updated, ws, ctrl.scaling != ScalingMethod::None);
+  if (err != ErrorCode::Success)
+    return fail(FactorStatus::NotPositiveDefinite, err);
 
   const Int ns = static_cast<Int>(keep.supernodes.size());
   const Int n = keep.n;
 
-  // Initialize fkeep
   fkeep.n = n;
   fkeep.status = FactorStatus::Success;
-  fkeep.factor_values.clear();
-  fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
   fkeep.is_posdef = true;
   fkeep.use_banded_spd = false;
   fkeep.band_n = 0;
   fkeep.band_kd = 0;
   fkeep.band_factor.clear();
   fkeep.scale.clear();
-  fkeep.perm = std::vector<int>(keep.perm.begin(), keep.perm.end());
-  fkeep.iperm = std::vector<int>(keep.iperm.begin(), keep.iperm.end());
+  fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
+  fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
   fkeep.num_perm.resize(static_cast<std::size_t>(n));
   std::iota(fkeep.num_perm.begin(), fkeep.num_perm.end(), 0);
   fkeep.num_iperm = fkeep.num_perm;
   fkeep.analysis = &keep;
 
   if (ns == 0 || n == 0) {
+    fkeep.factor_values.clear();
+    fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
     return FactorStatus::Success;
   }
 
-  // Only copy the cleaned matrix when scaling mutates its values.
-  CscLower A_scaled;
-  const CscLower *cleaned_ptr = &cleaned;
   if (ctrl.scaling != ScalingMethod::None) {
-    A_scaled = cleaned;
+    CscLower clean_mat;
+    clean_mat.n = n;
+    clean_mat.col_ptr = keep.cleaned.col_ptr;
+    clean_mat.row_idx = keep.cleaned.row_idx;
+    clean_mat.values = ws.clean_values;
     const ErrorCode sc_err = compute_scaling_for_method(
-        A_scaled, ctrl.scaling, fkeep.scale, ctrl.print_level);
-    if (sc_err != ErrorCode::Success) {
-      fkeep.status = FactorStatus::NotPositiveDefinite;
-      info.factor_status = FactorStatus::NotPositiveDefinite;
-      info.status = sc_err;
-      return FactorStatus::NotPositiveDefinite;
+        clean_mat, ctrl.scaling, fkeep.scale, ctrl.print_level);
+    if (sc_err != ErrorCode::Success)
+      return fail(FactorStatus::NotPositiveDefinite, sc_err);
+    apply_scale_to_matrix(clean_mat, fkeep.scale);
+    if (keep.orig_to_perm_idx.empty()) {
+      ws.perm_values = clean_mat.values;
+    } else {
+      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
+      for (std::size_t k = 0; k < clean_mat.values.size(); ++k)
+        ws.perm_values[static_cast<std::size_t>(keep.orig_to_perm_idx[k])] +=
+            clean_mat.values[k];
     }
-    apply_scale_to_matrix(A_scaled, fkeep.scale);
-    cleaned_ptr = &A_scaled;
   }
 
-  // Build a CscLower for scatter_original.
-  // Identity ordering path reuses cleaned pattern/values directly.
-  // Non-identity path permutes values using the O(nnz) scatter map.
-  CscLower Ap;
-  Ap.n = n;
-  if (keep.orig_to_perm_idx.empty()) {
-    Ap.col_ptr = cleaned_ptr->col_ptr;
-    Ap.row_idx = cleaned_ptr->row_idx;
-    Ap.values = cleaned_ptr->values;
-  } else {
-    const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
-    std::vector<double> Ap_values =
-        scatter_values(*cleaned_ptr, keep.orig_to_perm_idx, nnz_perm);
-    Ap.col_ptr = keep.perm_col_ptr;
-    Ap.row_idx = keep.perm_row_idx;
-    Ap.values = std::move(Ap_values);
-  }
+  const std::vector<Int> &ap_col_ptr =
+      keep.perm_col_ptr.empty() ? keep.cleaned.col_ptr : keep.perm_col_ptr;
+  const std::vector<Int> &ap_row_idx =
+      keep.perm_col_ptr.empty() ? keep.cleaned.row_idx : keep.perm_row_idx;
 
   // Banded SPD fast path for auto-parallel benchmark/control settings.
   // This bypasses multifrontal assembly when the matrix is sufficiently banded.
   if (ctrl.ordering == OrderingMethod::AutoParallel &&
-      try_factor_banded_spd(Ap, fkeep)) {
+      try_factor_banded_spd(n, ap_col_ptr.data(), ap_row_idx.data(),
+                            ws.perm_values.data(), fkeep)) {
     info.actual_factor_entries = static_cast<LongInt>(fkeep.band_factor.size());
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -413,16 +392,15 @@ static FactorStatus factor_posdef_core(const AnalysisKeep &keep,
 
 #ifdef SMF_PARALLEL
   if (ctrl.num_threads > 1) {
+    CscLower Ap;
+    Ap.n = n;
+    Ap.col_ptr = ap_col_ptr;
+    Ap.row_idx = ap_row_idx;
+    Ap.values = ws.perm_values;
     BlasSerialGuard blas_guard;
     const FactorStatus ps = factor_posdef_parallel(keep, ctrl, fkeep, Ap);
-    if (ps != FactorStatus::Success) {
-      fkeep.status = ps;
-      info.factor_status = ps;
-      info.status = ErrorCode::NotPositiveDefinite;
-      const auto t1 = std::chrono::steady_clock::now();
-      info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
-      return ps;
-    }
+    if (ps != FactorStatus::Success)
+      return fail(ps, ErrorCode::NotPositiveDefinite);
     info.actual_factor_entries =
         static_cast<LongInt>(fkeep.factor_values.size());
     build_solve_steps(keep, fkeep);
@@ -432,245 +410,25 @@ static FactorStatus factor_posdef_core(const AnalysisKeep &keep,
   }
 #endif // SMF_PARALLEL
 
-  // ---- Serial path --------------------------------------------------------
+  SerialFactorStats st;
+  const ErrorCode serr = multifrontal_factor_serial(
+      keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
+      0.0, /*posdef=*/true, fkeep, ws, st);
+  if (serr != ErrorCode::Success)
+    return fail(FactorStatus::NotPositiveDefinite, serr);
 
-  // Use precomputed postorder from analysis (children before parents).
-  // Children are also pre-sorted descending postorder in each Supernode::children
-  // (done during symbolic_analysis) — no per-call sort needed.
-  const std::vector<Int>& postorder = keep.postorder;
-
-  // Pre-allocate factor storage once: each supernode s contributes
-  // front_size(s) × width(s) values at a known offset (same layout as the
-  // parallel path), so factor blocks are memcpy'd into place instead of grown
-  // incrementally per supernode.
-  {
-    LongInt offset = 0;
-    for (Int s = 0; s < ns; ++s) {
-      const std::size_t si = static_cast<std::size_t>(s);
-      fkeep.factor_col_ptr[si] = offset;
-      const LongInt f = static_cast<LongInt>(keep.fronts[si].front_size());
-      const LongInt p = static_cast<LongInt>(keep.supernodes[si].width());
-      offset += f * p;
-    }
-    fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
-    fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
-  }
-
-  // Arena for frontal matrix + A22 accumulator (reused each supernode via
-  // save/reset).  Size from the largest front shape instead of O(n^2)
-  // over-allocation.
-  LongInt max_front = 1;
-  LongInt max_ext = 0;
-  for (Int s = 0; s < ns; ++s) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    const LongInt f = static_cast<LongInt>(keep.fronts[si].front_size());
-    const LongInt p = static_cast<LongInt>(keep.supernodes[si].width());
-    max_front = std::max(max_front, f);
-    max_ext = std::max(max_ext, std::max<LongInt>(0, f - p));
-  }
-  const LongInt workspace_elems =
-      max_front * max_front * 2 + max_ext * max_ext;
-  const std::size_t arena_cap =
-      static_cast<std::size_t>(workspace_elems) * sizeof(double) + 8192u;
-  AlignedArena arena(arena_cap);
-
-  // Two-buffer stack for contribution (Schur complement) blocks
-  FactorStack fstack;
-
-  // Per-supernode contribution pointers (into fstack) and block sizes
-  std::vector<double *> contrib_ptrs(static_cast<std::size_t>(ns), nullptr);
-  std::vector<Int> contrib_q(static_cast<std::size_t>(ns), Int{0});
-
-  // ---- Main postorder loop ------------------------------------------------
-  for (Int pos = 0; pos < ns; ++pos) {
-    const Int s = postorder[static_cast<std::size_t>(pos)];
-    const FrontalInfo &fi = keep.fronts[static_cast<std::size_t>(s)];
-    const Supernode &sn = keep.supernodes[static_cast<std::size_t>(s)];
-
-    const Int p = sn.width();      // pivot column count
-    const Int f = fi.front_size(); // total front rows
-    const Int q = f - p;           // extended rows = contribution block size
-
-    if (p <= 0)
-      continue; // should not occur for valid input
-
-    // Save arena so we can recycle it after this supernode
-    const AlignedArena::Marker arena_mark = arena.save();
-
-    // Allocate and zero the f×p frontal matrix (no col_indices copy — pointer into fi.row_indices)
-    FrontalMatrix F(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
-
-    // Allocate and zero the q×q A22 accumulator in the arena
-    double *a22 = nullptr;
-    if (q > 0) {
-      const std::size_t a22_bytes = static_cast<std::size_t>(q) *
-                                    static_cast<std::size_t>(q) *
-                                    sizeof(double);
-      a22 = static_cast<double *>(arena.allocate(a22_bytes));
-      std::memset(a22, 0, a22_bytes);
-    }
-
-    // --- Scatter original entries from permuted A -----------------------
-    // A11 (rows 0..p-1, cols 0..p-1) and A21 (rows p..f-1, cols 0..p-1) → F.
-    // A22 (ext-row × ext-col) is NOT scattered here: those entries belong to
-    // later supernodes that own those columns as pivot columns.  The a22
-    // accumulator is zero-initialised above and receives only child Schur
-    // complements assembled in the loop below.
-    F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
-
-    // --- Assemble child contributions -----------------------------------
-    // Children are pre-sorted descending postorder in sn.children (from analysis),
-    // matching the LIFO fstack order. child_parent_rows may be precomputed or
-    // built on demand.
-    std::vector<Int> parent_rows_local;
-    for (std::size_t k = 0; k < sn.children.size(); ++k) {
-      const Int c = sn.children[k];
-      const Int q_c = contrib_q[static_cast<std::size_t>(c)];
-      if (q_c <= 0)
-        continue;
-
-      const double *cc = contrib_ptrs[static_cast<std::size_t>(c)];
-      const std::vector<Int> *parent_rows_ptr = nullptr;
-      if (k < fi.child_parent_rows.size() &&
-          fi.child_parent_rows[k].size() == static_cast<std::size_t>(q_c)) {
-        parent_rows_ptr = &fi.child_parent_rows[k];
-      } else {
-        const FrontalInfo &fi_c = keep.fronts[static_cast<std::size_t>(c)];
-        const Int p_c = keep.supernodes[static_cast<std::size_t>(c)].width();
-        merge_parent_rows(fi, fi_c, p_c, parent_rows_local);
-        parent_rows_ptr = &parent_rows_local;
-      }
-      const std::vector<Int> &parent_rows = *parent_rows_ptr;
-
-      // Assemble A11/A21 parts into F
-      F.assemble_contrib(cc, q_c, parent_rows);
-
-      // Assemble A22 parts (where both row and col map to parent extended)
-      if (q > 0) {
-        for (Int jj = 0; jj < q_c; ++jj) {
-          const Int pr_j = parent_rows[static_cast<std::size_t>(jj)];
-          if (pr_j < p)
-            continue; // maps to parent pivot col — handled above
-          const Int lcol = pr_j - p;
-
-          for (Int ii = jj; ii < q_c; ++ii) {
-            const Int pr_i = parent_rows[static_cast<std::size_t>(ii)];
-            if (pr_i < p)
-              continue; // maps to parent pivot row
-            const Int lrow = pr_i - p;
-            // lrow >= lcol because row_indices is sorted and ii >= jj
-            a22[static_cast<std::size_t>(lcol) * static_cast<std::size_t>(q) +
-                static_cast<std::size_t>(lrow)] +=
-                cc[static_cast<std::size_t>(jj) *
-                       static_cast<std::size_t>(q_c) +
-                   static_cast<std::size_t>(ii)];
-          }
-        }
-      }
-
-      // Free child contribution from fstack (LIFO order)
-      fstack.free_top(static_cast<std::size_t>(q_c) *
-                      static_cast<std::size_t>(q_c));
-      contrib_ptrs[static_cast<std::size_t>(c)] = nullptr;
-      contrib_q[static_cast<std::size_t>(c)] = Int{0};
-    }
-
-    // --- Cholesky factorization of p×p pivot block ---------------------
-    const int ret =
-        smf_dpotrf_lower(F.data(), static_cast<int>(p), static_cast<int>(f));
-    if (ret != 0) {
-      arena.reset_to(arena_mark);
-      fkeep.status = FactorStatus::NotPositiveDefinite;
-      info.factor_status = FactorStatus::NotPositiveDefinite;
-      info.status = ErrorCode::NotPositiveDefinite;
-      const auto t1 = std::chrono::steady_clock::now();
-      info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
-      return FactorStatus::NotPositiveDefinite;
-    }
-
-    // --- Compute L21 block: solve A21 * L11^{-T} = L21 ----------------
-    if (q > 0 && p > 0) {
-      smf_dtrsm_right_lower_transpose(
-          F.data() + static_cast<std::ptrdiff_t>(p), // B = A21 block
-          static_cast<int>(q),                       // n_rows
-          static_cast<int>(p),                       // k
-          F.data(),                                  // L11
-          static_cast<int>(f),                       // ldl
-          static_cast<int>(f));                      // ldb
-    }
-
-    // --- Schur complement: a22 -= L21 * L21^T --------------------------
-    if (q > 0 && p > 0) {
-      smf_dsyrk_lower(a22, static_cast<int>(q),
-                      F.data() + static_cast<std::ptrdiff_t>(p), // L21
-                      static_cast<int>(p),
-                      static_cast<int>(f),  // lda (leading dim of L21 in F)
-                      static_cast<int>(q)); // ldc
-    }
-
-    // --- Store factor columns (L11 and L21) in fkeep -------------------
-    std::memcpy(fkeep.factor_values.data() +
-                    static_cast<std::size_t>(fkeep.factor_col_ptr[
-                        static_cast<std::size_t>(s)]),
-                F.data(),
-                static_cast<std::size_t>(f) * static_cast<std::size_t>(p) *
-                    sizeof(double));
-
-    // --- Push contribution block to fstack for parent ------------------
-    if (q > 0) {
-      const std::size_t q2 =
-          static_cast<std::size_t>(q) * static_cast<std::size_t>(q);
-      double *c_ptr = fstack.alloc(q2);
-      std::memcpy(c_ptr, a22, q2 * sizeof(double));
-      contrib_ptrs[static_cast<std::size_t>(s)] = c_ptr;
-      contrib_q[static_cast<std::size_t>(s)] = q;
-    }
-
-    // Reset arena — factor columns are in fkeep; contribution is in fstack
-    arena.reset_to(arena_mark);
-  } // end postorder loop
-
-  // Populate info statistics
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
-  info.arena_peak_bytes = static_cast<long>(arena.peak_bytes());
-  info.arena_growths = arena.grow_count();
-  build_solve_steps(keep, fkeep);
+  info.actual_flops = st.flops;
+  info.max_front_size = std::max(info.max_front_size, st.max_front);
+  info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
+  info.arena_peak_bytes = static_cast<long>(
+      (ws.cb_values.capacity() + ws.kernel_work.capacity()) *
+      sizeof(double));
+  ++ws.warmup_calls;
 
   const auto t1 = std::chrono::steady_clock::now();
   info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
-
   return FactorStatus::Success;
-}
-
-FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
-                           Info &info, FactorKeep &fkeep) {
-  return factor_posdef_core(keep, keep.cleaned, ctrl, info, fkeep);
-}
-
-FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
-                           const Control &ctrl, Info &info,
-                           FactorKeep &fkeep, NumericWorkspace &ws) {
-  ws.prepare_for_analysis(keep);
-  const ErrorCode err = map_updated_values_to_permuted(keep, updated, ws);
-  if (err != ErrorCode::Success) {
-    fkeep.factor_values.clear();
-    fkeep.status = FactorStatus::NotPositiveDefinite;
-    info.factor_status = FactorStatus::NotPositiveDefinite;
-    info.status = err;
-    return FactorStatus::NotPositiveDefinite;
-  }
-  // Share the cleaned pattern; only the values differ. Avoids the former
-  // deep copy of the entire AnalysisKeep on every refactorization.
-  CscLower cleaned_upd;
-  cleaned_upd.n = keep.n;
-  cleaned_upd.col_ptr = keep.cleaned.col_ptr;
-  cleaned_upd.row_idx = keep.cleaned.row_idx;
-  cleaned_upd.values = ws.clean_values;
-  const FactorStatus fs =
-      factor_posdef_core(keep, cleaned_upd, ctrl, info, fkeep);
-  fkeep.analysis = &keep;
-  ++ws.warmup_calls;
-  return fs;
 }
 
 } // namespace smf

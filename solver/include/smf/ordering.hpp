@@ -31,6 +31,15 @@ public:
         const std::vector<Int>& adjncy) override;
 };
 
+/// AMD ordering of a lower-CSC pattern via amd_2, using `work` (grown as
+/// needed and reusable across calls) for every AMD array. Returns false when
+/// AMD is not compiled in. perm[new] = old.
+bool amd_order_lower_csc(Int n,
+                         const std::vector<Int>& col_ptr,
+                         const std::vector<Int>& row_idx,
+                         std::vector<Int>& perm,
+                         std::vector<Int>& work);
+
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.
 /// Used as input to ordering backends and the elimination tree.

@@ -156,7 +156,8 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       }
 
       // (a) Gather pivot values: b_loc[k] = xcol[ row_indices[k] ]
-      b_loc.resize(static_cast<std::size_t>(p));
+      if (b_loc.size() < static_cast<std::size_t>(p))
+        b_loc.resize(static_cast<std::size_t>(p));
       for (int k = 0; k < p; ++k)
         b_loc[static_cast<std::size_t>(k)] =
             xcol[rows[k]];
@@ -180,19 +181,28 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       for (int k = 0; k < p; ++k)
         xcol[rows[k]] = b_loc[static_cast<std::size_t>(k)];
 
-      // (d) Update extended rows: b_ext -= L21 * b_loc
+      // (d) Update extended rows: b_ext -= L21 * b_loc. The product is
+      // accumulated contiguously and scattered once per row.
       if (q > 0) {
-        if (p * q <= 256) {
-          for (int j = 0; j < p; ++j) {
+        if (b_ext.size() < static_cast<std::size_t>(q))
+          b_ext.resize(static_cast<std::size_t>(q));
+        if (p * q <= 4096) {
+          double *t = b_ext.data();
+          {
+            const double x0 = b_loc[0];
+            const double *col = L + p;
+            for (int k = 0; k < q; ++k)
+              t[k] = col[k] * x0;
+          }
+          for (int j = 1; j < p; ++j) {
             const double xj = b_loc[static_cast<std::size_t>(j)];
             const double *col = L + static_cast<std::ptrdiff_t>(j) * f + p;
-            for (int k = 0; k < q; ++k) {
-              const int row = rows[p + k];
-              xcol[row] -= col[k] * xj;
-            }
+            for (int k = 0; k < q; ++k)
+              t[k] += col[k] * xj;
           }
+          for (int k = 0; k < q; ++k)
+            xcol[rows[p + k]] -= t[k];
         } else {
-          b_ext.resize(static_cast<std::size_t>(q));
           for (int k = 0; k < q; ++k)
             b_ext[static_cast<std::size_t>(k)] =
                 xcol[rows[p + k]];

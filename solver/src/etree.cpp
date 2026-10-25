@@ -5,6 +5,84 @@
 
 namespace smf {
 
+namespace {
+
+// Children lists, postorder and depth for a parent array (shared by both
+// etree builders).
+void finish_elimination_tree(Int n, std::vector<Int> parent, EliminationTree &et)
+{
+    const auto sn = static_cast<std::size_t>(n);
+    // All temporaries in one block: children CSR (ch_start, children), a
+    // fill cursor, and the DFS stacks (node, child cursor) reused as the
+    // depth array afterwards.
+    std::vector<Int> work(5 * sn + 1, 0);
+    Int *ch_start = work.data();         // n + 1
+    Int *children = ch_start + sn + 1;   // n
+    Int *cursor = children + sn;         // n
+    Int *stk_node = cursor + sn;         // n
+    Int *stk_ci = stk_node + sn;         // n
+
+    // Phase 2: build children lists (flat CSR) for postorder traversal
+    for (Int j = 0; j < n; ++j)
+        if (parent[static_cast<std::size_t>(j)] >= 0)
+            ++ch_start[parent[static_cast<std::size_t>(j)] + 1];
+    for (Int k = 0; k < n; ++k)
+        ch_start[k + 1] += ch_start[k];
+    std::copy(ch_start, ch_start + n, cursor);
+    for (Int j = 0; j < n; ++j)
+        if (parent[static_cast<std::size_t>(j)] >= 0)
+            children[cursor[parent[static_cast<std::size_t>(j)]]++] = j;
+
+    // Iterative postorder DFS (leaves before parents) with index cursors.
+    std::vector<Int> postorder;
+    postorder.reserve(sn);
+    {
+        Int top = 0;
+        // Push roots in reverse index order so smallest-index root is
+        // processed first (gives ascending postorder for chains).
+        for (Int j = n - 1; j >= 0; --j)
+            if (parent[static_cast<std::size_t>(j)] == -1) {
+                stk_node[top] = j;
+                stk_ci[top] = 0;
+                ++top;
+            }
+        while (top > 0) {
+            const Int node = stk_node[top - 1];
+            const Int ci = stk_ci[top - 1];
+            const Int c0 = ch_start[node];
+            const Int c1 = ch_start[node + 1];
+            if (c0 + ci < c1) {
+                stk_ci[top - 1] = ci + 1;
+                stk_node[top] = children[c0 + ci];
+                stk_ci[top] = 0;
+                ++top;
+            } else {
+                postorder.push_back(node);
+                --top;
+            }
+        }
+    }
+
+    // Phase 3: compute max_depth via bottom-up pass in postorder
+    // depth[j] = length of longest path from j down to a leaf
+    Int *depth = stk_node;
+    std::fill(depth, depth + n, 0);
+    Int max_depth = 0;
+    for (Int j : postorder) {
+        const Int pj = parent[static_cast<std::size_t>(j)];
+        if (pj >= 0)
+            depth[pj] = std::max(depth[pj], depth[j] + 1);
+        max_depth = std::max(max_depth, depth[j]);
+    }
+
+    et.parent    = std::move(parent);
+    et.postorder = std::move(postorder);
+    et.max_depth = max_depth;
+}
+
+} // namespace
+
+
 EliminationTree build_elimination_tree(
     Int n,
     const std::vector<Int>& col_ptr,
@@ -73,69 +151,35 @@ EliminationTree build_elimination_tree(
         }
     }
 
-    // Phase 2: build children lists (flat CSR) for postorder traversal
-    std::vector<Int> ch_start(sn + 1, 0);
-    for (Int j = 0; j < n; ++j)
-        if (parent[static_cast<std::size_t>(j)] >= 0)
-            ++ch_start[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)]) + 1];
-    for (Int k = 0; k < n; ++k)
-        ch_start[static_cast<std::size_t>(k) + 1] += ch_start[static_cast<std::size_t>(k)];
-    std::vector<Int> children(static_cast<std::size_t>(ch_start[sn]));
-    {
-        std::vector<Int> pos(ch_start.begin(), ch_start.begin() + static_cast<std::ptrdiff_t>(n));
-        for (Int j = 0; j < n; ++j)
-            if (parent[static_cast<std::size_t>(j)] >= 0)
-                children[static_cast<std::size_t>(pos[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])]++)] = j;
-    }
+    finish_elimination_tree(n, std::move(parent), et);
+    return et;
+}
 
-    // Iterative postorder DFS (leaves before parents) with index cursors —
-    // no per-node pair pushes and no vector-of-vectors allocations.
-    std::vector<Int> postorder;
-    postorder.reserve(sn);
-    {
-        std::vector<Int> stk_node;
-        std::vector<Int> stk_ci;
-        stk_node.reserve(sn);
-        stk_ci.reserve(sn);
-        // Push roots in reverse index order so smallest-index root is
-        // processed first (gives ascending postorder for chains).
-        for (Int j = n - 1; j >= 0; --j)
-            if (parent[static_cast<std::size_t>(j)] == -1) {
-                stk_node.push_back(j);
-                stk_ci.push_back(0);
+EliminationTree build_elimination_tree_from_rows(Int n, const Int *row_ptr,
+                                                 const Int *row_cols)
+{
+    EliminationTree et;
+    if (n == 0) return et;
+    const auto sn = static_cast<std::size_t>(n);
+    std::vector<Int> parent(sn, -1);
+    std::vector<Int> ancestor(sn, -1);
+    for (Int k = 0; k < n; ++k) {
+        for (Int p = row_ptr[k]; p < row_ptr[k + 1]; ++p) {
+            Int r = row_cols[p];
+            if (r >= k) continue; // diagonal
+            while (ancestor[static_cast<std::size_t>(r)] != -1 &&
+                   ancestor[static_cast<std::size_t>(r)] != k) {
+                const Int t = ancestor[static_cast<std::size_t>(r)];
+                ancestor[static_cast<std::size_t>(r)] = k;
+                r = t;
             }
-        while (!stk_node.empty()) {
-            const Int node = stk_node.back();
-            const Int ci = stk_ci.back();
-            const Int c0 = ch_start[static_cast<std::size_t>(node)];
-            const Int c1 = ch_start[static_cast<std::size_t>(node) + 1];
-            if (c0 + ci < c1) {
-                stk_ci.back() = ci + 1;
-                stk_node.push_back(children[static_cast<std::size_t>(c0 + ci)]);
-                stk_ci.push_back(0);
-            } else {
-                postorder.push_back(node);
-                stk_node.pop_back();
-                stk_ci.pop_back();
+            if (ancestor[static_cast<std::size_t>(r)] == -1) {
+                parent[static_cast<std::size_t>(r)]   = k;
+                ancestor[static_cast<std::size_t>(r)] = k;
             }
         }
     }
-
-    // Phase 3: compute max_depth via bottom-up pass in postorder
-    // depth[j] = length of longest path from j down to a leaf
-    std::vector<Int> depth(sn, 0);
-    Int max_depth = 0;
-    for (Int j : postorder) {
-        if (parent[static_cast<std::size_t>(j)] >= 0)
-            depth[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])] =
-                std::max(depth[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])],
-                         depth[static_cast<std::size_t>(j)] + 1);
-        max_depth = std::max(max_depth, depth[static_cast<std::size_t>(j)]);
-    }
-
-    et.parent    = std::move(parent);
-    et.postorder = std::move(postorder);
-    et.max_depth = max_depth;
+    finish_elimination_tree(n, std::move(parent), et);
     return et;
 }
 

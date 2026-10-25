@@ -14,7 +14,7 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   if (!fkeep.diag_entries.empty()) {
     for (const DiagSolveEntry &entry : fkeep.diag_entries) {
       if (entry.tag == 1) {
-        if (entry.d00 == 0.0 || !std::isfinite(entry.d00)) {
+        if (entry.d00 == 0.0 || !is_finite_fast(entry.d00)) {
           x[entry.row0] = 0.0;
         } else {
           x[entry.row0] /= entry.d00;

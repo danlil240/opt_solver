@@ -87,6 +87,12 @@ public:
   std::unique_ptr<FactorKeep> factor_solve(const CscLower &A,
                                            const Control &ctrl, Info &info,
                                            double *b, int n, int nrhs = 1);
+
+private:
+  /// Ordering workspace and analysis temporaries reused by successive
+  /// analyse() calls.
+  std::vector<Int> analyse_scratch_;
+  std::vector<Int> analyse_work_;
 };
 
 } // namespace smf

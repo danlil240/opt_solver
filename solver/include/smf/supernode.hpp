@@ -40,6 +40,28 @@ std::vector<Supernode> detect_fundamental_supernodes(
     const std::vector<Int>& row_idx,
     const EliminationTree& etree);
 
+/// Exact column counts |L_{*j}| (diagonal included) from the lower triangle
+/// stored by rows (row i lists columns k <= i, any order; the diagonal is
+/// ignored).
+std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
+                                                const Int *row_cols,
+                                                const EliminationTree &etree);
+
+/// Relaxed amalgamation that may merge *any* child into its parent, not only
+/// the child whose columns happen to precede the parent's.
+///
+/// `parent` and `colcount` describe the elimination tree of a postordered
+/// column numbering (children before parents, subtrees contiguous). A child
+/// merges into its parent when both have fewer than `nemin` eliminated
+/// columns (counting columns merged so far). Because merged groups are no
+/// longer contiguous in the input numbering, a new column order is returned
+/// in `order` (order[new] = old index of the input numbering); it is a
+/// topological order of the same elimination tree, so the factor's fill is
+/// unchanged. `snodes` receives the amalgamated supernodes in that order,
+/// numbered in postorder with children lists in increasing index.
+void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
+                        std::vector<Int> &order, std::vector<Supernode> &snodes);
+
 /// Amalgamate supernodes using the nemin threshold.
 ///
 /// Two adjacent supernodes S (child) and P (parent) are merged when:
