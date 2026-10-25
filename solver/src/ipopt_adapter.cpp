@@ -200,12 +200,9 @@ namespace smf
 
         if (new_matrix)
         {
-            // Update matrix values, push them into the analysis keep, then
-            // re-factorize.
             fill_values(values);
-            push_values_to_cleaned();
 
-            const FactorStatus fs = solver_.factor(*ak_, ctrl_, info_, fk_);
+            const FactorStatus fs = solver_.factor(*ak_, mat_, ctrl_, info_, fk_, nws_);
 
             if (fs == FactorStatus::Singular)
             {
@@ -228,7 +225,7 @@ namespace smf
         // Solve for all nrhs right-hand sides (column-major, each column length n_).
         if (nrhs > 0)
         {
-            const int rc = solver_.solve(fk_, ctrl_, info_, rhs_vals, n_, nrhs, SolveJob::Full);
+            const int rc = solver_.solve(fk_, ctrl_, info_, rhs_vals, n_, nrhs, sws_, SolveJob::Full);
             if (rc != 0)
             {
                 return Ipopt::SYMSOLVER_FATAL_ERROR;
