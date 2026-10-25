@@ -1,5 +1,7 @@
 #include "smf/ordering_metis.hpp"
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
 #include <metis.h>
+#endif
 #include <vector>
 #include <algorithm>
 #include <memory>
@@ -14,6 +16,7 @@ std::vector<Int> MetisOrdering::compute_ordering(
 {
     if (n == 0) return {};
 
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
     // METIS uses idx_t (= int32_t or int64_t depending on build)
     // Our Int = int32_t; METIS default is idx_t = int32_t. Safe to cast.
     idx_t metis_n = static_cast<idx_t>(n);
@@ -40,6 +43,11 @@ std::vector<Int> MetisOrdering::compute_ordering(
 
     std::vector<Int> perm(perm_m.begin(), perm_m.end());
     return perm;
+#else
+    info.status = ErrorCode::Success;
+    AmdOrdering fallback;
+    return fallback.compute_ordering(n, xadj, adjncy);
+#endif
 }
 
 // OrderingBackend interface override — delegates to the Info overload

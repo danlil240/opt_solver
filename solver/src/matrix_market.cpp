@@ -110,6 +110,7 @@ MatrixMarketResult read_matrix_market(const char *path) {
     int  rows           = 0;
     int  cols           = 0;
     int  nnz_file       = 0;
+    int  entries_read   = 0;
     bool is_symmetric   = false;
     bool is_integer     = false;
     bool is_pattern     = false;
@@ -221,15 +222,32 @@ MatrixMarketResult read_matrix_market(const char *path) {
         double v = 0.0;
 
         if (is_pattern) {
-            if (!(ss >> r >> c)) continue;  // skip malformed
+            if (!(ss >> r >> c)) {
+                result.error_message =
+                    std::string("line ") + std::to_string(line_no) +
+                    ": malformed pattern coordinate line";
+                return result;
+            }
             v = 1.0;
         } else if (is_integer) {
             long iv = 0;
-            if (!(ss >> r >> c >> iv)) continue;
+            if (!(ss >> r >> c >> iv)) {
+                result.error_message =
+                    std::string("line ") + std::to_string(line_no) +
+                    ": malformed integer coordinate line";
+                return result;
+            }
             v = static_cast<double>(iv);
         } else {
-            if (!(ss >> r >> c >> v)) continue;
+            if (!(ss >> r >> c >> v)) {
+                result.error_message =
+                    std::string("line ") + std::to_string(line_no) +
+                    ": malformed real coordinate line";
+                return result;
+            }
         }
+
+        ++entries_read;
 
         // Convert 1-based → 0-based
         r -= 1;
@@ -269,8 +287,12 @@ MatrixMarketResult read_matrix_market(const char *path) {
             std::to_string(rows) + " x " + std::to_string(cols);
         return result;
     }
-
-    (void)nnz_file; // trust actual data count rather than declared count
+    if (entries_read != nnz_file) {
+        result.error_message =
+            std::string("declared nnz (") + std::to_string(nnz_file) +
+            ") does not match entries read (" + std::to_string(entries_read) + ")";
+        return result;
+    }
 
     result.matrix = coo_to_lower_csc(rows, coo);
     result.ok     = true;

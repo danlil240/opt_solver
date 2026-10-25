@@ -1,5 +1,7 @@
 #include "smf/ordering.hpp"
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
 #include <suitesparse/amd.h>
+#endif
 #include <algorithm>
 #include <numeric>
 #include <stdexcept>
@@ -7,6 +9,80 @@
 #include <vector>
 
 namespace smf {
+
+namespace {
+#if !(defined(SMF_HAS_AMD) && SMF_HAS_AMD)
+std::vector<Int> fallback_minimum_degree_ordering(
+    Int n,
+    const std::vector<Int>& xadj,
+    const std::vector<Int>& adjncy)
+{
+    std::vector<Int> perm;
+    perm.reserve(static_cast<std::size_t>(n));
+    if (n <= 0) return perm;
+    if (adjncy.empty() || static_cast<Int>(xadj.size()) < n + 1) {
+        perm.resize(static_cast<std::size_t>(n));
+        std::iota(perm.begin(), perm.end(), 0);
+        return perm;
+    }
+
+    std::vector<std::vector<Int>> adj(static_cast<std::size_t>(n));
+    std::vector<uint8_t> eliminated(static_cast<std::size_t>(n), 0);
+    std::vector<Int> deg(static_cast<std::size_t>(n), 0);
+    for (Int i = 0; i < n; ++i) {
+        const Int start = xadj[static_cast<std::size_t>(i)];
+        const Int end   = xadj[static_cast<std::size_t>(i) + 1];
+        adj[static_cast<std::size_t>(i)].assign(
+            adjncy.begin() + start, adjncy.begin() + end);
+        deg[static_cast<std::size_t>(i)] = end - start;
+    }
+
+    for (Int step = 0; step < n; ++step) {
+        Int pivot = -1;
+        Int best_deg = n + 1;
+        for (Int v = 0; v < n; ++v) {
+            if (!eliminated[static_cast<std::size_t>(v)] &&
+                deg[static_cast<std::size_t>(v)] < best_deg) {
+                best_deg = deg[static_cast<std::size_t>(v)];
+                pivot = v;
+                if (best_deg == 0) break;
+            }
+        }
+        if (pivot < 0) break;
+        eliminated[static_cast<std::size_t>(pivot)] = 1;
+        perm.push_back(pivot);
+
+        std::vector<Int> nbrs;
+        for (Int u : adj[static_cast<std::size_t>(pivot)]) {
+            if (!eliminated[static_cast<std::size_t>(u)]) {
+                nbrs.push_back(u);
+            }
+        }
+        adj[static_cast<std::size_t>(pivot)].clear();
+
+        for (std::size_t a = 0; a < nbrs.size(); ++a) {
+            const Int u = nbrs[a];
+            auto& list_u = adj[static_cast<std::size_t>(u)];
+            list_u.erase(
+                std::remove_if(list_u.begin(), list_u.end(), [&](Int w) {
+                    return eliminated[static_cast<std::size_t>(w)] != 0;
+                }),
+                list_u.end());
+            for (std::size_t b = 0; b < nbrs.size(); ++b) {
+                if (a == b) continue;
+                const Int w = nbrs[b];
+                if (!std::binary_search(list_u.begin(), list_u.end(), w)) {
+                    list_u.insert(
+                        std::lower_bound(list_u.begin(), list_u.end(), w), w);
+                }
+            }
+            deg[static_cast<std::size_t>(u)] = static_cast<Int>(list_u.size());
+        }
+    }
+    return perm;
+}
+#endif
+} // anonymous namespace
 
 // Build symmetric CSR (no self-loops) from lower-CSC.
 // For each off-diagonal entry (i,j) with i>j in the lower CSC:
@@ -67,6 +143,7 @@ std::vector<Int> AmdOrdering::compute_ordering(
         std::iota(perm.begin(), perm.end(), 0);
         return perm;
     }
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
     // amd_order takes (n, Ap, Ai, P, Control, Info)
     // Ap and Ai are const int* — our Int is int32_t = int, so direct cast is fine.
     int result = amd_order(
@@ -81,6 +158,9 @@ std::vector<Int> AmdOrdering::compute_ordering(
         throw std::runtime_error("amd_order failed with code " + std::to_string(result));
     }
     return perm;
+#else
+    return fallback_minimum_degree_ordering(n, xadj, adjncy);
+#endif
 }
 
 } // namespace smf

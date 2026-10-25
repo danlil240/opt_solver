@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 
+add_library(smf_bench_common STATIC common/validation.cpp)
+target_link_libraries(smf_bench_common PUBLIC smf)
+target_include_directories(smf_bench_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+if(WIN32)
+    target_link_libraries(smf_bench_common PUBLIC psapi)
+endif()
+
 # Helper macro: add a standalone benchmark executable
 macro(smf_benchmark name)
     add_executable(${name} ${name}.cpp)
-    target_link_libraries(${name} PRIVATE smf)
+    target_link_libraries(${name} PRIVATE smf smf_bench_common)
     if(TARGET Eigen3::Eigen)
         target_link_libraries(${name} PRIVATE Eigen3::Eigen)
         target_compile_definitions(${name} PRIVATE SMF_HAS_EIGEN=1)

@@ -7,6 +7,7 @@
 // Capture from the IPOPT MA97 plugin with:
 //   SMF_MA97_CAPTURE_DIR=build/kkt_captures SMF_MA97_CAPTURE_LIMIT=1 <trajectory-test>
 
+#include "common/validation.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
@@ -199,7 +200,7 @@ static double relative_residual(const smf::CscLower &A, const std::vector<double
     return denominator > 0.0 ? numerator / denominator : numerator;
 }
 
-static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, double pivot_u, int nemin)
+static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, int nrhs, double pivot_u, int nemin)
 {
     Result result;
     smf::Control ctrl;
@@ -207,7 +208,7 @@ static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, doub
     ctrl.pivot_u = pivot_u;
     ctrl.nemin = nemin;
     ctrl.small_pivot = 1e-20;
-    ctrl.continue_on_singular = true;
+    ctrl.continue_on_singular = false;
 
     smf::Info info;
     smf::Solver solver;
@@ -226,13 +227,12 @@ static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, doub
     const smf::FactorStatus fs = solver.factor(*ak, ctrl, info, fk);
     const auto t3 = Clock::now();
     result.status = static_cast<int>(fs);
-    if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays &&
-        fs != smf::FactorStatus::Singular)
+    if (fs != smf::FactorStatus::Success)
         return result;
 
     std::vector<double> x = b;
     const auto t4 = Clock::now();
-    const int rc = solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, smf::SolveJob::Full);
+    const int rc = solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), nrhs, smf::SolveJob::Full);
     const auto t5 = Clock::now();
     if (rc != 0)
     {
@@ -240,11 +240,13 @@ static Result run_smf(const smf::CscLower &A, const std::vector<double> &b, doub
         return result;
     }
 
-    result.ok = true;
+    const smf::bench::Validation val = smf::bench::validate(A, b, x, nrhs);
+    const smf::bench::Outcome out = smf::bench::qualify_outcome(smf::bench::Outcome::Success, val);
+    result.ok = (out == smf::bench::Outcome::Success);
     result.pos = info.num_positive;
     result.neg = info.num_negative;
     result.zero = info.num_zero;
-    result.residual = relative_residual(A, x, b);
+    result.residual = val.eta_inf;
     result.analyse_ms = elapsed_ms(t0, t1);
     result.factor_ms = elapsed_ms(t2, t3);
     result.solve_ms = elapsed_ms(t4, t5);
@@ -579,9 +581,9 @@ int main(int argc, char** argv)
     std::printf("fixture matrix=%s rhs=%s\n", matrix_path.c_str(), rhs_path.c_str());
     std::printf("n=%d nnz_lower=%d nrhs=%d pivot_u=%.3e nemin=%d normA_fro=%.6e normb=%.6e\n", loaded.matrix.n,
                 static_cast<int>(loaded.matrix.nnz()), rhs_data.nrhs, pivot_u, nemin,
-                matrix_frobenius_norm(loaded.matrix), vector_norm2(b));
+                matrix_frobenius_norm(loaded.matrix), vector_norm2(rhs_data.values));
 
-    Result smf_result = run_smf(loaded.matrix, b, pivot_u, nemin);
+    Result smf_result = run_smf(loaded.matrix, rhs_data.values, rhs_data.nrhs, pivot_u, nemin);
     print_result("smf", smf_result);
 
 #ifdef SMF_HAS_MA27
@@ -598,6 +600,9 @@ int main(int argc, char** argv)
     }
 #else
     std::puts("ma27 not compiled in: configure with CoinHSL/MA27 available for oracle comparison");
+#if defined(SMF_REQUIRE_BENCHMARK_BASELINES) && SMF_REQUIRE_BENCHMARK_BASELINES
+    return 1;
+#endif
 #endif
 
     if (profile_repeats > 0)

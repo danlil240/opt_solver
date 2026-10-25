@@ -1,5 +1,7 @@
 # smf Solver — Benchmark Results
 
+> **Historical Notice (2026-10-25):** This document preserves a historical snapshot from 2026-05-20 and is **not** current release or qualification evidence. Under the 2026-10-25 numerical qualification contract (`eta_inf <= 1e-10`, `omega <= 1e-8` on the original unscaled system; see [2026-10-25-solver-performance-design.md](superpowers/specs/2026-10-25-solver-performance-design.md)), runs with large residuals fail qualification as `Inaccurate`. The earlier explanation in §3.3 attributing the `Poisson2D` residual to a benchmark `spmv_sym` instrumentation bug has been retired (it was an `assembly_tree` fill-propagation bug fixed in Session 022). New qualified evidence is generated via `tools/bench/run.py` and `tools/bench/report.py`.
+
 **Date**: 2026-05-20  
 **Platform**: Linux (GitHub Actions runner)  
 **Compiler**: GCC/Clang C++20, `-O2 -march=native`  

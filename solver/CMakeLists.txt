@@ -22,26 +22,89 @@ option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
 option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
 option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD found)" OFF)
 option(SMF_BUILD_MA97_PLUGIN   "Build libsmf_ma97.so HSL MA97 plugin (IPOPT dynamic loader)" ON)
+option(SMF_REQUIRE_BENCHMARK_BASELINES "Fail configuration/execution when required benchmark baselines are missing" OFF)
+set(SMF_REQUIRED_BASELINES "" CACHE STRING "Semicolon-separated list of required baseline solvers when SMF_REQUIRE_BENCHMARK_BASELINES=ON")
 
 # ---- Compiler flags -----------------------------------------------------
-add_compile_options(-Wall -Wextra -Wpedantic -O3 -march=native -g)
-
-if(SMF_SANITIZE)
-    add_compile_options(-fsanitize=address,undefined)
-    add_link_options(-fsanitize=address,undefined)
+if(MSVC)
+    add_compile_options(/W4 /EHsc /fp:precise)
+    if(SMF_SANITIZE)
+        add_compile_options(/fsanitize=address /Zi)
+    else()
+        add_compile_options($<$<CONFIG:Release>:/O2>)
+    endif()
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic -fno-fast-math -g)
+    if(SMF_SANITIZE)
+        add_compile_options(-O1 -fno-omit-frame-pointer -fsanitize=address,undefined)
+        add_link_options(-fsanitize=address,undefined)
+    else()
+        add_compile_options(-O3 -march=native)
+    endif()
 endif()
 
 if(SMF_DETERMINISTIC)
     add_compile_definitions(SMF_DETERMINISTIC=1)
 endif()
 
-# ---- Required: BLAS & LAPACK --------------------------------------------
-find_package(BLAS REQUIRED)
-find_package(LAPACK REQUIRED)
+# ---- BLAS & LAPACK + backend verification -------------------------------
+set(SMF_HAS_OPENBLAS OFF)
+set(SMF_BLAS_REFERENCE OFF)
+set(SMF_BLAS_BACKEND_NAME "unknown")
+
+if(SMF_USE_MKL)
+    set(BLA_VENDOR Intel10_64lp)
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+    find_path(MKL_INCLUDE_DIR mkl.h
+        HINTS ENV MKLROOT
+        PATH_SUFFIXES include
+        PATHS /opt/intel/oneapi/mkl/latest/include /usr/include/mkl /usr/include)
+    if(NOT MKL_INCLUDE_DIR)
+        message(FATAL_ERROR "smf: SMF_USE_MKL=ON requested, but mkl.h was not found.")
+    endif()
+    set(SMF_BLAS_BACKEND_NAME "mkl")
+    message(STATUS "smf: Intel MKL verified (include: ${MKL_INCLUDE_DIR}, libs: ${BLAS_LIBRARIES})")
+else()
+    find_package(BLAS QUIET)
+    find_package(LAPACK QUIET)
+    if(BLAS_FOUND AND LAPACK_FOUND)
+        set(SMF_BLAS_BACKEND_NAME "system")
+        find_package(OpenBLAS QUIET CONFIG)
+        if(OpenBLAS_FOUND)
+            set(SMF_HAS_OPENBLAS ON)
+            set(SMF_BLAS_BACKEND_NAME "openblas")
+            message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
+        else()
+            find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
+                PATHS
+                    /usr/include/x86_64-linux-gnu/openblas-pthread
+                    /usr/include/openblas-pthread
+                    /usr/include/openblas
+                    /usr/include/x86_64-linux-gnu
+                    /usr/local/include
+            )
+            if(OPENBLAS_CBLAS_INCLUDE_DIR)
+                set(SMF_HAS_OPENBLAS ON)
+                set(SMF_BLAS_BACKEND_NAME "openblas")
+                message(STATUS "smf: OpenBLAS cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
+            endif()
+        endif()
+    else()
+        set(SMF_BLAS_REFERENCE ON)
+        set(SMF_BLAS_BACKEND_NAME "reference")
+        set(BLAS_LIBRARIES "")
+        set(LAPACK_LIBRARIES "")
+        message(WARNING "smf: External BLAS/LAPACK not found -- using portable reference BLAS/LAPACK (SMF_BLAS_REFERENCE=1)")
+    endif()
+endif()
 
 # ---- Optional: OpenMP ---------------------------------------------------
 if(SMF_ENABLE_OPENMP)
-    find_package(OpenMP REQUIRED COMPONENTS CXX)
+    find_package(OpenMP QUIET COMPONENTS CXX)
+    if(NOT OpenMP_CXX_FOUND)
+        message(WARNING "smf: OpenMP not found -- building single-threaded.")
+    endif()
 endif()
 
 # ---- Optional: SuiteSparse AMD (soft-fail with warning) -----------------
@@ -127,6 +190,24 @@ else()
     message(STATUS "smf: MUMPS not found -- MUMPS benchmark disabled")
 endif()
 
+# ---- Enforce required benchmark baselines when requested -----------------
+if(SMF_REQUIRE_BENCHMARK_BASELINES)
+    set(_smf_req_list "${SMF_REQUIRED_BASELINES}")
+    if(NOT _smf_req_list)
+        set(_smf_req_list "MA27;CHOLMOD;MUMPS")
+    endif()
+    foreach(_base IN LISTS _smf_req_list)
+        string(TOUPPER "${_base}" _base_upper)
+        if(_base_upper STREQUAL "MA27" AND NOT SMF_HAS_MA27)
+            message(FATAL_ERROR "smf: SMF_REQUIRE_BENCHMARK_BASELINES=ON requires MA27, which was not found.")
+        elseif(_base_upper STREQUAL "CHOLMOD" AND NOT SMF_HAS_CHOLMOD)
+            message(FATAL_ERROR "smf: SMF_REQUIRE_BENCHMARK_BASELINES=ON requires CHOLMOD, which was not found.")
+        elseif(_base_upper STREQUAL "MUMPS" AND NOT SMF_HAS_MUMPS)
+            message(FATAL_ERROR "smf: SMF_REQUIRE_BENCHMARK_BASELINES=ON requires MUMPS, which was not found.")
+        endif()
+    endforeach()
+endif()
+
 # ---- Optional: Eigen3 (test-only reference oracle) ----
 if(SMF_BUILD_TESTS)
     find_package(Eigen3 QUIET CONFIG)
@@ -137,7 +218,21 @@ endif()
 
 # ---- GTest (required when building tests) --------------------------------
 if(SMF_BUILD_TESTS)
-    find_package(GTest REQUIRED)
+    find_package(GTest QUIET)
+    if(NOT GTest_FOUND)
+        message(STATUS "smf: System GTest not found -- using in-tree GTest fallback")
+        add_library(smf_gtest STATIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gtest_fallback/gtest_lib.cpp)
+        target_include_directories(smf_gtest PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gtest_fallback/include)
+        add_library(smf_gtest_main STATIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gtest_fallback/gtest_main.cpp)
+        target_link_libraries(smf_gtest_main PUBLIC smf_gtest)
+        add_library(GTest::GTest ALIAS smf_gtest)
+        add_library(GTest::Main ALIAS smf_gtest_main)
+        add_library(GTest::gtest ALIAS smf_gtest)
+        add_library(GTest::gtest_main ALIAS smf_gtest_main)
+    endif()
     enable_testing()
     include(CTest)
 endif()
@@ -183,6 +278,12 @@ target_include_directories(smf PUBLIC
     $<INSTALL_INTERFACE:include>
 )
 
+if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
+    target_include_directories(smf PUBLIC ${MKL_INCLUDE_DIR})
+elseif(SMF_HAS_OPENBLAS AND OPENBLAS_CBLAS_INCLUDE_DIR)
+    target_include_directories(smf PUBLIC ${OPENBLAS_CBLAS_INCLUDE_DIR})
+endif()
+
 # Required for linking smf into shared libraries (e.g. libsmf_ma97.so)
 set_property(TARGET smf PROPERTY POSITION_INDEPENDENT_CODE ON)
 
@@ -194,6 +295,9 @@ target_link_libraries(smf PUBLIC
 if(SMF_ENABLE_OPENMP AND TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(smf PUBLIC OpenMP::OpenMP_CXX)
     target_compile_definitions(smf PUBLIC SMF_PARALLEL=1)
+    if(MSVC)
+        target_compile_options(smf PUBLIC /openmp:llvm)
+    endif()
 endif()
 
 if(SMF_HAS_AMD)
@@ -212,32 +316,10 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_DETERMINISTIC}>:SMF_DETERMINISTIC=1>
     $<$<BOOL:${SMF_HAS_OPENBLAS}>:SMF_HAS_OPENBLAS=1>
     $<$<BOOL:${SMF_USE_MKL}>:SMF_USE_MKL=1>
+    $<$<BOOL:${SMF_BLAS_REFERENCE}>:SMF_BLAS_REFERENCE=1>
+    $<$<BOOL:${SMF_REQUIRE_BENCHMARK_BASELINES}>:SMF_REQUIRE_BENCHMARK_BASELINES=1>
+    SMF_BLAS_BACKEND_STR="${SMF_BLAS_BACKEND_NAME}"
 )
-
-# ---- Optional: detect OpenBLAS thread API --------------------------------
-set(SMF_HAS_OPENBLAS OFF)
-if(NOT SMF_USE_MKL)
-    find_package(OpenBLAS QUIET CONFIG)
-    if(NOT OpenBLAS_FOUND)
-        # Fallback: look for the cblas header that ships with the pthread variant.
-        find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
-            PATHS
-                /usr/include/x86_64-linux-gnu/openblas-pthread
-                /usr/include/openblas-pthread
-                /usr/include/openblas
-                /usr/include/x86_64-linux-gnu
-                /usr/local/include
-        )
-        if(OPENBLAS_CBLAS_INCLUDE_DIR)
-            set(SMF_HAS_OPENBLAS ON)
-            message(STATUS "smf: OpenBLAS cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
-            target_include_directories(smf PUBLIC ${OPENBLAS_CBLAS_INCLUDE_DIR})
-        endif()
-    else()
-        set(SMF_HAS_OPENBLAS ON)
-        message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
-    endif()
-endif()
 
 
 if(SMF_BUILD_TESTS)
@@ -303,9 +385,11 @@ if(SMF_BUILD_MA97_PLUGIN)
     target_include_directories(smf_ma97 PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
     set_target_properties(smf_ma97 PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
         SOVERSION 1
         VERSION   1.0.0)
     install(TARGETS smf_ma97
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
     message(STATUS "smf: MA97 plugin enabled -- will build libsmf_ma97.so")

@@ -220,3 +220,12 @@ add_test(NAME Poisson2D COMMAND test_poisson_2d)
 add_executable(test_indef_larger test_indef_larger.cpp)
 target_link_libraries(test_indef_larger PRIVATE smf GTest::gtest_main)
 add_test(NAME IndefLarger COMMAND test_indef_larger)
+
+# --- Task 1: Benchmark validation tests ---
+
+add_executable(test_benchmark_validation
+    test_benchmark_validation.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_benchmark_validation PRIVATE smf GTest::gtest_main)
+add_test(NAME BenchmarkValidation COMMAND test_benchmark_validation)
