@@ -31,4 +31,13 @@ TEST(Inertia, SPD3x3_Inertia) {
     dense_ldlt_indef(A,3,3,0.01,1e-20,piv,in);
     EXPECT_EQ(in.positive,3); EXPECT_EQ(in.negative,0);
 }
+TEST(Inertia, AddInertia2x2_ExtremeScaling) {
+    for (double scale : {1e-100, 1e100}) {
+        InertiaCounts c{};
+        add_inertia_2x2(0.0, 1.0 * scale, 0.0, 1e-20, c);
+        EXPECT_EQ(c.positive, 1) << "scale=" << scale;
+        EXPECT_EQ(c.negative, 1) << "scale=" << scale;
+        EXPECT_EQ(c.zero, 0) << "scale=" << scale;
+    }
+}
 int main(int argc,char**argv){testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}

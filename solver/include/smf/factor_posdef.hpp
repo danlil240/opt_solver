@@ -29,8 +29,12 @@ struct FactorKeep {
       factor_values; ///< packed L columns (per supernode, col-major)
   std::vector<int> factor_col_ptr; ///< factor_col_ptr[s] = start of supernode s
                                    ///< in factor_values
-  std::vector<int> perm;           ///< copy of analysis permutation
-  std::vector<int> iperm;          ///< copy of inverse permutation
+  std::vector<int> perm;           ///< total permutation perm[new] = old
+  std::vector<int> iperm;          ///< total inverse permutation iperm[old] = new
+  std::vector<int> num_perm;       ///< numerical permutation num_perm[new_piv] = sym_idx
+  std::vector<int> num_iperm;      ///< inverse numerical permutation num_iperm[sym_idx] = new_piv
+  Int n = 0;                       ///< matrix order
+  FactorStatus status = FactorStatus::Success; ///< completion status of factorization
   // [s][k] = pivot type for fully-summed column k of supernode s:
   //  1 = 1×1 accepted, 2 = first of 2×2, -1 = second of 2×2, 0 = delayed
   std::vector<std::vector<int8_t>> pivot_types; ///< [s][k] = pivot type per supernode column

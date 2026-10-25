@@ -59,11 +59,13 @@ static void solve_lower_transpose_unit_small(double *b, int p,
 } // anonymous namespace
 
 void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
-  if (n == 0 || nrhs == 0)
+  if (n <= 0 || nrhs <= 0 || x == nullptr)
     return;
 
   const bool use_steps = !fkeep.solve_steps.empty();
   const AnalysisKeep *ak = fkeep.analysis;
+  if (!use_steps && ak == nullptr)
+    return;
   std::vector<Int> po_buf;
   const std::vector<Int> *postorder = nullptr;
   const int ns = use_steps ? static_cast<int>(fkeep.solve_steps.size())

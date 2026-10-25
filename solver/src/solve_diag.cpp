@@ -1,5 +1,7 @@
 #include "smf/solve_diag.hpp"
+#include "smf/pivoting.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 
@@ -12,13 +14,19 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   if (!fkeep.diag_entries.empty()) {
     for (const DiagSolveEntry &entry : fkeep.diag_entries) {
       if (entry.tag == 1) {
-        x[entry.row0] /= entry.d00;
+        if (entry.d00 == 0.0 || !std::isfinite(entry.d00)) {
+          x[entry.row0] = 0.0;
+        } else {
+          x[entry.row0] /= entry.d00;
+        }
       } else if (entry.tag == 2) {
-        const double det = entry.d00 * entry.d11 - entry.d10 * entry.d10;
         const double x0 = x[entry.row0];
         const double x1 = x[entry.row1];
-        x[entry.row0] = (entry.d11 * x0 - entry.d10 * x1) / det;
-        x[entry.row1] = (-entry.d10 * x0 + entry.d00 * x1) / det;
+        double y0 = 0.0;
+        double y1 = 0.0;
+        solve_2x2_scaled(entry.d00, entry.d10, entry.d11, x0, x1, y0, y1);
+        x[entry.row0] = y0;
+        x[entry.row1] = y1;
       }
     }
     return;

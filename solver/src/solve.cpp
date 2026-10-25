@@ -18,15 +18,48 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
 
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
                   double *b, int n, int nrhs, SolveJob job) const {
-  (void)ctrl;
   auto t0 = std::chrono::steady_clock::now();
+
+  const int expected_n =
+      (fkeep.n > 0) ? static_cast<int>(fkeep.n)
+                    : (fkeep.use_banded_spd ? fkeep.band_n
+                                            : static_cast<int>(fkeep.perm.size()));
+
+  if (n <= 0 || nrhs <= 0 || b == nullptr ||
+      (expected_n > 0 && n != expected_n) ||
+      static_cast<int>(fkeep.perm.size()) != n ||
+      static_cast<int>(fkeep.iperm.size()) != n) {
+    info.status = ErrorCode::IllegalValue;
+    return static_cast<int>(ErrorCode::IllegalValue);
+  }
+
+  switch (job) {
+  case SolveJob::Full:
+  case SolveJob::Forward:
+  case SolveJob::DiagOnly:
+  case SolveJob::Backward:
+  case SolveJob::DiagBack:
+    break;
+  default:
+    info.status = ErrorCode::IllegalValue;
+    return static_cast<int>(ErrorCode::IllegalValue);
+  }
+
+  if (fkeep.status != FactorStatus::Success && !ctrl.continue_on_singular) {
+    info.status = (fkeep.status == FactorStatus::NotPositiveDefinite)
+                      ? ErrorCode::NotPositiveDefinite
+                      : ErrorCode::SingularMatrix;
+    return static_cast<int>(info.status);
+  }
 
   if (fkeep.use_banded_spd) {
     if (job != SolveJob::Full) {
-      return -1;
+      info.status = ErrorCode::FeatureNotAvailable;
+      return static_cast<int>(ErrorCode::FeatureNotAvailable);
     }
     if (n != fkeep.band_n) {
-      return -2;
+      info.status = ErrorCode::IllegalValue;
+      return static_cast<int>(ErrorCode::IllegalValue);
     }
 
     std::vector<double> rhs_perm(static_cast<std::size_t>(n) *
@@ -45,6 +78,7 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
                                     fkeep.band_factor.data(),
                                     fkeep.band_kd + 1, n);
     if (rc != 0) {
+      info.status = ErrorCode::SingularMatrix;
       return rc;
     }
 
@@ -60,6 +94,7 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
     auto t1 = std::chrono::steady_clock::now();
     info.solve_seconds += std::chrono::duration<double>(t1 - t0).count();
+    info.status = ErrorCode::Success;
     return 0;
   }
 
@@ -89,6 +124,7 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
   auto t1 = std::chrono::steady_clock::now();
   info.solve_seconds += std::chrono::duration<double>(t1 - t0).count();
+  info.status = ErrorCode::Success;
   return 0;
 }
 

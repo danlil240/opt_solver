@@ -62,12 +62,14 @@ static void solve_lower_unit_small(double *b, int p, const double *L,
 } // anonymous namespace
 
 void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
-  if (n == 0 || nrhs == 0)
+  if (n <= 0 || nrhs <= 0 || x == nullptr)
     return;
 
   const std::vector<int> &iperm = fkeep.iperm;
   const bool use_steps = !fkeep.solve_steps.empty();
   const AnalysisKeep *ak = fkeep.analysis;
+  if (!use_steps && ak == nullptr)
+    return;
   std::vector<Int> po_buf;
   const std::vector<Int> *postorder = nullptr;
   const Int ns = use_steps ? static_cast<Int>(fkeep.solve_steps.size())

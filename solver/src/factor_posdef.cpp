@@ -320,6 +320,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   const Int n = keep.n;
 
   // Initialize fkeep
+  fkeep.n = n;
+  fkeep.status = FactorStatus::Success;
   fkeep.factor_values.clear();
   fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
   fkeep.is_posdef = true;
@@ -329,6 +331,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   fkeep.band_factor.clear();
   fkeep.perm = std::vector<int>(keep.perm.begin(), keep.perm.end());
   fkeep.iperm = std::vector<int>(keep.iperm.begin(), keep.iperm.end());
+  fkeep.num_perm.resize(static_cast<std::size_t>(n));
+  std::iota(fkeep.num_perm.begin(), fkeep.num_perm.end(), 0);
+  fkeep.num_iperm = fkeep.num_perm;
   fkeep.analysis = &keep;
 
   if (ns == 0 || n == 0) {
@@ -370,7 +375,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     BlasSerialGuard blas_guard;
     const FactorStatus ps = factor_posdef_parallel(keep, ctrl, fkeep, Ap);
     if (ps != FactorStatus::Success) {
+      fkeep.status = ps;
       info.factor_status = ps;
+      info.status = ErrorCode::NotPositiveDefinite;
       const auto t1 = std::chrono::steady_clock::now();
       info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
       return ps;
@@ -536,7 +543,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
         smf_dpotrf_lower(F.data(), static_cast<int>(p), static_cast<int>(f));
     if (ret != 0) {
       arena.reset_to(arena_mark);
+      fkeep.status = FactorStatus::NotPositiveDefinite;
       info.factor_status = FactorStatus::NotPositiveDefinite;
+      info.status = ErrorCode::NotPositiveDefinite;
       const auto t1 = std::chrono::steady_clock::now();
       info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
       return FactorStatus::NotPositiveDefinite;

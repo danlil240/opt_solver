@@ -229,3 +229,19 @@ add_executable(test_benchmark_validation
 )
 target_link_libraries(test_benchmark_validation PRIVATE smf GTest::gtest_main)
 add_test(NAME BenchmarkValidation COMMAND test_benchmark_validation)
+
+# --- Task 2: Indefinite adversarial & factor identity tests ---
+
+add_executable(test_indef_adversarial
+    test_indef_adversarial.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_indef_adversarial PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_indef_adversarial PRIVATE psapi)
+endif()
+add_test(NAME IndefAdversarial COMMAND test_indef_adversarial)
+
+add_executable(test_factor_identity test_factor_identity.cpp)
+target_link_libraries(test_factor_identity PRIVATE smf GTest::gtest_main)
+add_test(NAME FactorIdentity COMMAND test_factor_identity)

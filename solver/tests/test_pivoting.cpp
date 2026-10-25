@@ -100,6 +100,18 @@ TEST(Pivot, SymSwap) {
   EXPECT_NEAR(F.at(1, 0), 2.0, 1e-12);
 }
 
+// Test 6: Secondary pivot test must not select a zero diagonal at row r
+TEST(Pivot, SecondaryZeroDiagUses2x2) {
+  AlignedArena arena(4096);
+  // Spec reproducer #2: [[0.005, 1, 0], [1, 0, 2], [0, 2, 1]], u = 0.01
+  double v[] = {0.005, 1.0, 0.0, 1.0, 0.0, 2.0, 0.0, 2.0, 1.0};
+  auto F = make_front(3, 3, v, arena);
+  auto r = choose_pivot(F, 0, 3, 0.01, 1e-20);
+  EXPECT_EQ(r.decision, PivotDecision::Accept2x2);
+  EXPECT_EQ(r.col0, 0);
+  EXPECT_EQ(r.col1, 1);
+}
+
 int main(int argc, char **argv) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

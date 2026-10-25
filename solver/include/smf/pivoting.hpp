@@ -59,4 +59,15 @@ void apply_pivot_2x2(FrontalMatrix &F, int k, int num_fs, double small);
 /// num_fs).
 void sym_swap_front(FrontalMatrix &F, int p, int q, int num_fs);
 
+/// Compute scaled determinant of 2×2 symmetric block [[d00, d10], [d10, d11]].
+/// Sets scale_out = max(|d00|, |d10|, |d11|) and returns (d00/s)*(d11/s) - (d10/s)^2.
+double scaled_det_2x2(double d00, double d10, double d11, double &scale_out) noexcept;
+
+/// Solve 2×2 symmetric system [[d00, d10], [d10, d11]] * [y0, y1]^T = [rhs0, rhs1]^T
+/// using scale-normalized arithmetic to avoid intermediate overflow/underflow.
+/// Returns false if the 2×2 block is numerically singular or non-finite.
+bool solve_2x2_scaled(double d00, double d10, double d11,
+                      double rhs0, double rhs1,
+                      double &y0, double &y1) noexcept;
+
 } // namespace smf

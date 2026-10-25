@@ -9,6 +9,11 @@ std::unique_ptr<FactorKeep> Solver::factor_solve(const CscLower &A,
                                                  const Control &ctrl,
                                                  Info &info, double *b, int n,
                                                  int nrhs) {
+  if (n <= 0 || nrhs <= 0 || b == nullptr || n != static_cast<int>(A.n)) {
+    info.status = ErrorCode::IllegalValue;
+    return nullptr;
+  }
+
   // Scaling: if Equilibration requested, scale A and b before factorization
   std::vector<double> scale;
   const bool do_scale = (ctrl.scaling == ScalingMethod::Equilibration);
@@ -29,17 +34,27 @@ std::unique_ptr<FactorKeep> Solver::factor_solve(const CscLower &A,
 
   // Step 1: symbolic analysis
   auto ak = analyse(*A_ptr, ctrl, info);
-  if (!ak)
+  if (!ak || info.status != ErrorCode::Success)
     return nullptr;
 
   // Step 2: factorization
   FactorKeep fkeep;
   const FactorStatus fs = factor(*ak, ctrl, info, fkeep);
-  if (fs != FactorStatus::Success)
+  if (fs != FactorStatus::Success) {
+    info.factor_status = fs;
+    if (info.status == ErrorCode::Success) {
+      info.status = (fs == FactorStatus::NotPositiveDefinite)
+                        ? ErrorCode::NotPositiveDefinite
+                        : ErrorCode::SingularMatrix;
+    }
     return nullptr;
+  }
 
   // Step 3: solve in-place (ak is still alive here)
-  solve(fkeep, ctrl, info, b, n, nrhs);
+  const int solve_rc = solve(fkeep, ctrl, info, b, n, nrhs);
+  if (solve_rc != 0) {
+    return nullptr;
+  }
 
   // Unscale solution: x <- S * x  (S is symmetric, so same operation)
   if (do_scale) {
