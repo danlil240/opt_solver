@@ -1,7 +1,11 @@
 #pragma once
 
 #include "result.hpp"
+#if __has_include("smf/csc_matrix.hpp")
 #include "smf/csc_matrix.hpp"
+#else
+#include "../../include/smf/csc_matrix.hpp"
+#endif
 
 #include <span>
 #include <vector>

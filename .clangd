@@ -1,0 +1,6 @@
+CompileFlags:
+  Add:
+    - -std=c++20
+    - -IC:/Users/daniel/projects/opt_solver/solver/include
+    - -IC:/Users/daniel/projects/opt_solver/solver/benchmarks
+    - -IC:/Users/daniel/projects/opt_solver/solver/cmake/gtest_fallback/include

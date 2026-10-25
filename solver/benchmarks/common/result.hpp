@@ -1,7 +1,12 @@
 #pragma once
 
+#if __has_include("smf/csc_matrix.hpp")
 #include "smf/csc_matrix.hpp"
 #include "smf/types.hpp"
+#else
+#include "../../include/smf/csc_matrix.hpp"
+#include "../../include/smf/types.hpp"
+#endif
 
 #include <cstdint>
 #include <limits>

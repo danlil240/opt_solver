@@ -2,8 +2,13 @@
 
 #include "../common/result.hpp"
 #include "../common/validation.hpp"
+#if __has_include("smf/control.hpp")
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#else
+#include "../../include/smf/control.hpp"
+#include "../../include/smf/csc_matrix.hpp"
+#endif
 
 #include <memory>
 #include <span>
