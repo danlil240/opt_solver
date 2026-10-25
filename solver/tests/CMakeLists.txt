@@ -245,3 +245,15 @@ add_test(NAME IndefAdversarial COMMAND test_indef_adversarial)
 add_executable(test_factor_identity test_factor_identity.cpp)
 target_link_libraries(test_factor_identity PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorIdentity COMMAND test_factor_identity)
+
+# --- Task 3: Delayed pivots and full-front stability tests ---
+
+add_executable(test_delayed_pivots
+    test_delayed_pivots.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_delayed_pivots PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_delayed_pivots PRIVATE psapi)
+endif()
+add_test(NAME DelayedPivots COMMAND test_delayed_pivots)
