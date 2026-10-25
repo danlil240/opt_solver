@@ -18,7 +18,7 @@ struct Control {
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter
     double         small_pivot   = 1e-20;   // zero-pivot threshold
-    int            indef_panel_size = 32;   // blocked indefinite panel width
+    int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
 
     // Factorization behaviour

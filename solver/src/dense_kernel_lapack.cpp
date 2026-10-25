@@ -282,6 +282,34 @@ void dpbtrs_(char *uplo, int *n, int *kd, int *nrhs, double *ab, int *ldab,
 namespace smf {
 
 int smf_dpotrf_lower(double *A, int n, int lda) {
+  if (n < 0 || lda < std::max(1, n)) {
+    return -1;
+  }
+  if (n <= 12) {
+    for (int j = 0; j < n; ++j) {
+      double *col_j = A + static_cast<std::size_t>(j) * lda;
+      double sum = col_j[j];
+      for (int k = 0; k < j; ++k) {
+        const double ljk = A[static_cast<std::size_t>(k) * lda + j];
+        sum -= ljk * ljk;
+      }
+      if (!(sum > 0.0) || !std::isfinite(sum)) {
+        return j + 1;
+      }
+      const double ljj = std::sqrt(sum);
+      col_j[j] = ljj;
+      const double inv_ljj = 1.0 / ljj;
+      for (int i = j + 1; i < n; ++i) {
+        double s = col_j[i];
+        for (int k = 0; k < j; ++k) {
+          const double *col_k = A + static_cast<std::size_t>(k) * lda;
+          s -= col_k[i] * col_k[j];
+        }
+        col_j[i] = s * inv_ljj;
+      }
+    }
+    return 0;
+  }
   char uplo = 'L';
   int info = 0;
   dpotrf_(&uplo, &n, A, &lda, &info);
@@ -289,6 +317,35 @@ int smf_dpotrf_lower(double *A, int n, int lda) {
 }
 
 int smf_dpbtrf_lower(double *AB, int n, int kd, int ldab) {
+  if (n < 0 || kd < 0 || ldab < kd + 1) {
+    return -1;
+  }
+  if (kd <= 8 && n <= 512) {
+    for (int j = 0; j < n; ++j) {
+      double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+      const double ajj = col_j[0];
+      if (!(ajj > 0.0) || !std::isfinite(ajj)) {
+        return j + 1;
+      }
+      const double ljj = std::sqrt(ajj);
+      col_j[0] = ljj;
+      const int klen = std::min(kd, n - 1 - j);
+      if (klen > 0) {
+        const double inv_ljj = 1.0 / ljj;
+        for (int r = 1; r <= klen; ++r) {
+          col_j[r] *= inv_ljj;
+        }
+        for (int c = 1; c <= klen; ++c) {
+          const double l_jc = col_j[c];
+          double *col_jc = AB + static_cast<std::size_t>(j + c) * ldab;
+          for (int r = c; r <= klen; ++r) {
+            col_jc[r - c] -= col_j[r] * l_jc;
+          }
+        }
+      }
+    }
+    return 0;
+  }
   char uplo = 'L';
   int info = 0;
   dpbtrf_(&uplo, &n, &kd, AB, &ldab, &info);
@@ -297,6 +354,26 @@ int smf_dpbtrf_lower(double *AB, int n, int kd, int ldab) {
 
 void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
                                      const double *L, int ldl, int ldb) {
+  if (n_rows <= 0 || k <= 0) return;
+  if (k <= 8 && n_rows * k <= 128) {
+    for (int j = 0; j < k; ++j) {
+      double *b_j = B + static_cast<std::size_t>(j) * ldb;
+      for (int p = 0; p < j; ++p) {
+        const double l_jp = L[static_cast<std::size_t>(p) * ldl + j];
+        if (l_jp != 0.0) {
+          const double *b_p = B + static_cast<std::size_t>(p) * ldb;
+          for (int i = 0; i < n_rows; ++i) {
+            b_j[i] -= b_p[i] * l_jp;
+          }
+        }
+      }
+      const double inv_ljj = 1.0 / L[static_cast<std::size_t>(j) * ldl + j];
+      for (int i = 0; i < n_rows; ++i) {
+        b_j[i] *= inv_ljj;
+      }
+    }
+    return;
+  }
   // B := B * L^{-T}  — right, lower, transpose, non-unit, alpha=1
   cblas_dtrsm(CblasColMajor, CblasRight, CblasLower, CblasTrans, CblasNonUnit,
               n_rows, k, 1.0, L, ldl, B, ldb);
@@ -304,6 +381,31 @@ void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
 
 int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
                      int ldab, int ldb) {
+  if (n < 0 || kd < 0 || nrhs < 0 || ldab < kd + 1 || ldb < std::max(1, n)) {
+    return -1;
+  }
+  if (nrhs == 1 && kd <= 16) {
+    double *x = B;
+    for (int j = 0; j < n; ++j) {
+      const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+      x[j] /= col_j[0];
+      const int klen = std::min(kd, n - 1 - j);
+      const double xj = x[j];
+      for (int r = 1; r <= klen; ++r) {
+        x[j + r] -= col_j[r] * xj;
+      }
+    }
+    for (int j = n - 1; j >= 0; --j) {
+      const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+      const int klen = std::min(kd, n - 1 - j);
+      double sum = x[j];
+      for (int r = 1; r <= klen; ++r) {
+        sum -= col_j[r] * x[j + r];
+      }
+      x[j] = sum / col_j[0];
+    }
+    return 0;
+  }
   char uplo = 'L';
   int info = 0;
   dpbtrs_(&uplo, &n, &kd, &nrhs, const_cast<double *>(AB), &ldab, B, &ldb,
@@ -313,6 +415,22 @@ int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
 
 void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
                      int ldc) {
+  if (k <= 0 || n_cols <= 0) return;
+  if (n_cols <= 8 && k * n_cols <= 128) {
+    for (int p = 0; p < n_cols; ++p) {
+      const double *a_p = A + static_cast<std::size_t>(p) * lda;
+      for (int j = 0; j < k; ++j) {
+        const double a_jp = a_p[j];
+        if (a_jp != 0.0) {
+          double *c_j = C + static_cast<std::size_t>(j) * ldc;
+          for (int i = j; i < k; ++i) {
+            c_j[i] -= a_p[i] * a_jp;
+          }
+        }
+      }
+    }
+    return;
+  }
   // C := -1 * A * A^T + 1 * C  (lower, no-transpose)
   cblas_dsyrk(CblasColMajor, CblasLower, CblasNoTrans, k, n_cols, -1.0, A, lda,
               1.0, C, ldc);
@@ -332,33 +450,118 @@ void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
 
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
+  if (m <= 0 || n <= 0) return;
+  if (m * n <= 256) {
+    if (beta == 0.0) {
+      for (int i = 0; i < m; ++i) y[i] = 0.0;
+    } else if (beta != 1.0) {
+      for (int i = 0; i < m; ++i) y[i] *= beta;
+    }
+    for (int j = 0; j < n; ++j) {
+      const double axj = alpha * x[j];
+      if (axj != 0.0) {
+        const double *col_j = A + static_cast<std::size_t>(j) * lda;
+        for (int i = 0; i < m; ++i) {
+          y[i] += col_j[i] * axj;
+        }
+      }
+    }
+    return;
+  }
   cblas_dgemv(CblasColMajor, CblasNoTrans, m, n, alpha, A, lda, x, 1, beta, y,
               1);
 }
 
 void smf_dgemv_transpose(double *y, int m, int n, const double *A, int lda,
                          const double *x, double alpha, double beta) {
+  if (m <= 0 || n <= 0) return;
+  if (m * n <= 256) {
+    for (int j = 0; j < n; ++j) {
+      const double *col_j = A + static_cast<std::size_t>(j) * lda;
+      double sum = 0.0;
+      for (int i = 0; i < m; ++i) {
+        sum += col_j[i] * x[i];
+      }
+      if (beta == 0.0) {
+        y[j] = alpha * sum;
+      } else {
+        y[j] = alpha * sum + beta * y[j];
+      }
+    }
+    return;
+  }
   cblas_dgemv(CblasColMajor, CblasTrans, m, n, alpha, A, lda, x, 1, beta, y,
               1);
 }
 
 void smf_dtrsv_lower(double *b, int n, const double *L, int lda) {
+  if (n <= 0) return;
+  if (n <= 16) {
+    for (int j = 0; j < n; ++j) {
+      const double *col_j = L + static_cast<std::size_t>(j) * lda;
+      b[j] /= col_j[j];
+      const double bj = b[j];
+      if (bj != 0.0) {
+        for (int i = j + 1; i < n; ++i) {
+          b[i] -= col_j[i] * bj;
+        }
+      }
+    }
+    return;
+  }
   cblas_dtrsv(CblasColMajor, CblasLower, CblasNoTrans, CblasNonUnit, n, L, lda,
               b, 1);
 }
 
 void smf_dtrsv_lower_transpose(double *b, int n, const double *L, int lda) {
+  if (n <= 0) return;
+  if (n <= 16) {
+    for (int j = n - 1; j >= 0; --j) {
+      const double *col_j = L + static_cast<std::size_t>(j) * lda;
+      double sum = b[j];
+      for (int i = j + 1; i < n; ++i) {
+        sum -= col_j[i] * b[i];
+      }
+      b[j] = sum / col_j[j];
+    }
+    return;
+  }
   cblas_dtrsv(CblasColMajor, CblasLower, CblasTrans, CblasNonUnit, n, L, lda, b,
               1);
 }
 
 void smf_dtrsv_lower_unit(double *b, int n, const double *L, int lda) {
+  if (n <= 0) return;
+  if (n <= 16) {
+    for (int j = 0; j < n; ++j) {
+      const double bj = b[j];
+      if (bj != 0.0) {
+        const double *col_j = L + static_cast<std::size_t>(j) * lda;
+        for (int i = j + 1; i < n; ++i) {
+          b[i] -= col_j[i] * bj;
+        }
+      }
+    }
+    return;
+  }
   cblas_dtrsv(CblasColMajor, CblasLower, CblasNoTrans, CblasUnit, n, L, lda, b,
               1);
 }
 
 void smf_dtrsv_lower_transpose_unit(double *b, int n, const double *L,
                                     int lda) {
+  if (n <= 0) return;
+  if (n <= 16) {
+    for (int j = n - 1; j >= 0; --j) {
+      const double *col_j = L + static_cast<std::size_t>(j) * lda;
+      double sum = b[j];
+      for (int i = j + 1; i < n; ++i) {
+        sum -= col_j[i] * b[i];
+      }
+      b[j] = sum;
+    }
+    return;
+  }
   cblas_dtrsv(CblasColMajor, CblasLower, CblasTrans, CblasUnit, n, L, lda, b,
               1);
 }

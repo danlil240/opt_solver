@@ -4,9 +4,76 @@
 namespace smf
 {
 
+    // Compute exact simplicial column counts |L_{*w}| of the Cholesky factor.
+    // Characterization (Liu 1990): i in Struct(L_{*w}) iff A(i,k) != 0 for some
+    // k whose etree path to i passes through w.  For each row i we therefore
+    // walk the path k -> i from every column k containing i, crediting row i
+    // to each vertex on the path.  mark[w] == i means row i was already
+    // credited to column w; walks for a given i stop at the first credited
+    // vertex because the whole suffix up to i is then already credited as
+    // well.  Grouping the walks per i (outer loop) is what makes this
+    // early-stop dedup valid.  Time O(nnz + union-of-path lengths).
+    static std::vector<Int> filled_col_counts(Int n,
+                                                const std::vector<Int> &col_ptr,
+                                                const std::vector<Int> &row_idx,
+                                                const EliminationTree &etree)
+    {
+        const auto sn = static_cast<std::size_t>(n);
+        std::vector<Int> count(sn, 1); // +1 for the diagonal entry
+        std::vector<Int> mark(sn, -1);
+
+        // Transpose lower CSC -> upper CSR: for each row i, the columns k < i
+        // with A(i,k) != 0 (subdiagonal entries only; diagonals skipped).
+        std::vector<Int> ucol(sn + 1, 0);
+        for (Int k = 0; k < n; ++k)
+            for (Int p = col_ptr[static_cast<std::size_t>(k)];
+                 p < col_ptr[static_cast<std::size_t>(k) + 1]; ++p)
+            {
+                const Int i = row_idx[static_cast<std::size_t>(p)];
+                if (i > k)
+                    ++ucol[static_cast<std::size_t>(i) + 1];
+            }
+        for (Int i = 0; i < n; ++i)
+            ucol[static_cast<std::size_t>(i) + 1] +=
+                ucol[static_cast<std::size_t>(i)];
+        std::vector<Int> urow(static_cast<std::size_t>(ucol[sn]));
+        {
+            std::vector<Int> pos(ucol.begin(),
+                                   ucol.begin() + static_cast<std::ptrdiff_t>(n));
+            for (Int k = 0; k < n; ++k)
+                for (Int p = col_ptr[static_cast<std::size_t>(k)];
+                     p < col_ptr[static_cast<std::size_t>(k) + 1]; ++p)
+                {
+                    const Int i = row_idx[static_cast<std::size_t>(p)];
+                    if (i > k)
+                        urow[static_cast<std::size_t>(
+                            pos[static_cast<std::size_t>(i)]++)] = k;
+                }
+        }
+
+        // For each row i: every k in urow[i] contributes i to all vertices on
+        // the etree path k -> i (excluding i itself, the diagonal slot).
+        for (Int i = 0; i < n; ++i)
+        {
+            for (Int p = ucol[static_cast<std::size_t>(i)];
+                 p < ucol[static_cast<std::size_t>(i) + 1]; ++p)
+            {
+                Int w = urow[static_cast<std::size_t>(p)];
+                while (w >= 0 && w != i &&
+                       mark[static_cast<std::size_t>(w)] != i)
+                {
+                    mark[static_cast<std::size_t>(w)] = i;
+                    ++count[static_cast<std::size_t>(w)];
+                    w = etree.parent[static_cast<std::size_t>(w)];
+                }
+            }
+        }
+        return count;
+    }
+
     std::vector<Supernode> detect_fundamental_supernodes(Int n,
                                                          const std::vector<Int> &col_ptr,
-                                                         const std::vector<Int> & /*row_idx*/,
+                                                         const std::vector<Int> &row_idx,
                                                          const EliminationTree &etree)
     {
         if (n == 0)
@@ -21,25 +88,29 @@ namespace smf
                 ++nchildren[static_cast<std::size_t>(p)];
         }
 
-        // col_count[j] = number of structural entries in column j (includes diagonal)
-        auto col_count = [&](Int j) -> Int
-        { return col_ptr[static_cast<std::size_t>(j) + 1] - col_ptr[static_cast<std::size_t>(j)]; };
+        // Filled column counts |L_{*j}| (structure of the factor, not of A).
+        // Using original column counts fragments large ordered separators into
+        // singleton supernodes; filled counts recover the true fundamental
+        // supernodes (Liu-Ng-Peyton): j continues the supernode of j-1 iff
+        //   (1) etree.parent[j-1] == j
+        //   (2) j-1 is j's only etree child
+        //   (3) |L_{*j-1}| == |L_{*j}| + 1
+        std::vector<Int> colcount =
+            filled_col_counts(n, col_ptr, row_idx, etree);
 
-        // Assign each column to a supernode.
-        // Column j continues the previous supernode iff ALL hold:
-        //   (1) etree.parent[j-1] == j   (j is the direct parent of j-1)
-        //   (2) nchildren[j] == 1         (j-1 is j's only etree child)
-        //   (3) col_count[j-1] == col_count[j] + 1
         std::vector<Int> snode_id(static_cast<std::size_t>(n), -1);
         std::vector<Int> snode_start; // first column of each supernode
+        snode_start.reserve(static_cast<std::size_t>(n));
         for (Int j = 0; j < n; ++j)
         {
             bool new_snode = (j == 0);
             if (!new_snode)
             {
                 const Int par_prev = etree.parent[static_cast<std::size_t>(j - 1)];
-                new_snode = (par_prev != j) || (nchildren[static_cast<std::size_t>(j)] != 1) ||
-                            (col_count(j - 1) != col_count(j) + 1);
+                new_snode = (par_prev != j) ||
+                            (nchildren[static_cast<std::size_t>(j)] != 1) ||
+                            (colcount[static_cast<std::size_t>(j - 1)] !=
+                             colcount[static_cast<std::size_t>(j)] + 1);
             }
             if (new_snode)
             {
@@ -84,80 +155,53 @@ namespace smf
 
         const Int nsn = static_cast<Int>(supernodes.size());
 
-        // Iteratively merge small child supernodes into small parents.
-        // A supernode is invalid (merged away) when col_start == -1.
-        // Because parents always have higher column indices than children (etree
-        // property), processing 0..nsn-1 in order lets cascading merges happen
-        // within a single pass.  The outer loop repeats until stable.
-        bool changed = true;
-        while (changed)
+        // Single bottom-up pass: parents always have larger indices than
+        // children (etree property), so cascading merges settle in one sweep.
+        // new_parent[c] tracks each node's current effective parent; dead
+        // supernodes are skipped through when the final tree is rebuilt.
+        std::vector<Int> new_parent(static_cast<std::size_t>(nsn));
+        std::vector<char> dead(static_cast<std::size_t>(nsn), 0);
+        for (Int s = 0; s < nsn; ++s)
+            new_parent[static_cast<std::size_t>(s)] =
+                supernodes[static_cast<std::size_t>(s)].parent;
+
+        for (Int s = 0; s < nsn; ++s)
         {
-            changed = false;
-            for (Int s = 0; s < nsn; ++s)
+            if (dead[static_cast<std::size_t>(s)])
+                continue;
+            const Int p = new_parent[static_cast<std::size_t>(s)];
+            if (p < 0 || dead[static_cast<std::size_t>(p)])
+                continue;
+
+            if (supernodes[static_cast<std::size_t>(s)].width() < nemin &&
+                supernodes[static_cast<std::size_t>(p)].width() < nemin &&
+                supernodes[static_cast<std::size_t>(s)].col_end ==
+                    supernodes[static_cast<std::size_t>(p)].col_start)
             {
-                if (supernodes[static_cast<std::size_t>(s)].col_start < 0)
-                    continue;
-                const Int p = supernodes[static_cast<std::size_t>(s)].parent;
-                if (p < 0)
-                    continue;
-                if (supernodes[static_cast<std::size_t>(p)].col_start < 0)
-                    continue;
-
-                if (supernodes[static_cast<std::size_t>(s)].width() < nemin &&
-                    supernodes[static_cast<std::size_t>(p)].width() < nemin &&
-                    supernodes[static_cast<std::size_t>(s)].col_end ==
-                        supernodes[static_cast<std::size_t>(p)].col_start)
-                {
-                    // Merge s into p: p absorbs s's column range, replaces child s
-                    // with s's children, and keeps any other existing children.
-                    supernodes[static_cast<std::size_t>(p)].col_start =
-                        supernodes[static_cast<std::size_t>(s)].col_start;
-
-                    std::vector<Int> merged_children;
-                    merged_children.reserve(supernodes[static_cast<std::size_t>(p)].children.size() +
-                                            supernodes[static_cast<std::size_t>(s)].children.size());
-
-                    for (Int c : supernodes[static_cast<std::size_t>(p)].children)
-                        if (c != s)
-                            merged_children.push_back(c);
-                    for (Int c : supernodes[static_cast<std::size_t>(s)].children)
-                        merged_children.push_back(c);
-
-                    supernodes[static_cast<std::size_t>(p)].children = std::move(merged_children);
-
-                    for (Int c : supernodes[static_cast<std::size_t>(p)].children)
-                        supernodes[static_cast<std::size_t>(c)].parent = p;
-
-                    // Invalidate s
-                    supernodes[static_cast<std::size_t>(s)].col_start = -1;
-                    supernodes[static_cast<std::size_t>(s)].col_end = -1;
-                    changed = true;
-                }
+                // Merge s into p: absorb s's column range; s's children become
+                // children of p (their new_parent is re-pointed below).
+                supernodes[static_cast<std::size_t>(p)].col_start =
+                    supernodes[static_cast<std::size_t>(s)].col_start;
+                dead[static_cast<std::size_t>(s)] = 1;
+                for (Int c : supernodes[static_cast<std::size_t>(s)].children)
+                    new_parent[static_cast<std::size_t>(c)] = p;
             }
         }
 
-        // Collect surviving supernodes and sort by col_start (preserves postorder)
+        // Collect survivors (sorted by col_start preserves postorder)
         std::vector<Int> valid;
         valid.reserve(static_cast<std::size_t>(nsn));
         for (Int s = 0; s < nsn; ++s)
-            if (supernodes[static_cast<std::size_t>(s)].col_start >= 0)
+            if (!dead[static_cast<std::size_t>(s)])
                 valid.push_back(s);
-
-        std::sort(valid.begin(), valid.end(),
-                  [&](Int a, Int b)
-                  {
-                      return supernodes[static_cast<std::size_t>(a)].col_start <
-                             supernodes[static_cast<std::size_t>(b)].col_start;
-                  });
 
         const Int nr = static_cast<Int>(valid.size());
 
-        // Map original SN index → result index
+        // Resolve each node's effective parent through dead supernodes
         std::vector<Int> orig_to_ri(static_cast<std::size_t>(nsn), -1);
         for (Int i = 0; i < nr; ++i)
             orig_to_ri[static_cast<std::size_t>(valid[static_cast<std::size_t>(i)])] = i;
 
-        // Build result supernodes
         std::vector<Supernode> result(static_cast<std::size_t>(nr));
         for (Int i = 0; i < nr; ++i)
         {
@@ -167,14 +211,15 @@ namespace smf
             result[static_cast<std::size_t>(i)].parent = -1;
         }
 
-        // Rebuild parent/children links using the (updated) parent pointers
         for (Int i = 0; i < nr; ++i)
         {
             const Int s = valid[static_cast<std::size_t>(i)];
-            const Int orig_par = supernodes[static_cast<std::size_t>(s)].parent;
-            if (orig_par < 0)
+            Int par = new_parent[static_cast<std::size_t>(s)];
+            while (par >= 0 && dead[static_cast<std::size_t>(par)])
+                par = new_parent[static_cast<std::size_t>(par)];
+            if (par < 0)
                 continue;
-            const Int ri_par = orig_to_ri[static_cast<std::size_t>(orig_par)];
+            const Int ri_par = orig_to_ri[static_cast<std::size_t>(par)];
             result[static_cast<std::size_t>(i)].parent = ri_par;
             if (ri_par >= 0)
                 result[static_cast<std::size_t>(ri_par)].children.push_back(i);

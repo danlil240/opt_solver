@@ -73,33 +73,50 @@ EliminationTree build_elimination_tree(
         }
     }
 
-    // Phase 2: build children lists for postorder traversal
-    std::vector<std::vector<Int>> children(sn);
+    // Phase 2: build children lists (flat CSR) for postorder traversal
+    std::vector<Int> ch_start(sn + 1, 0);
     for (Int j = 0; j < n; ++j)
         if (parent[static_cast<std::size_t>(j)] >= 0)
-            children[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])].push_back(j);
+            ++ch_start[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)]) + 1];
+    for (Int k = 0; k < n; ++k)
+        ch_start[static_cast<std::size_t>(k) + 1] += ch_start[static_cast<std::size_t>(k)];
+    std::vector<Int> children(static_cast<std::size_t>(ch_start[sn]));
+    {
+        std::vector<Int> pos(ch_start.begin(), ch_start.begin() + static_cast<std::ptrdiff_t>(n));
+        for (Int j = 0; j < n; ++j)
+            if (parent[static_cast<std::size_t>(j)] >= 0)
+                children[static_cast<std::size_t>(pos[static_cast<std::size_t>(parent[static_cast<std::size_t>(j)])]++)] = j;
+    }
 
-    // Iterative postorder DFS (leaves before parents)
+    // Iterative postorder DFS (leaves before parents) with index cursors —
+    // no per-node pair pushes and no vector-of-vectors allocations.
     std::vector<Int> postorder;
     postorder.reserve(sn);
     {
-        std::stack<std::pair<Int, bool>> s;
-        // Push all roots in reverse index order so smallest-index root is
+        std::vector<Int> stk_node;
+        std::vector<Int> stk_ci;
+        stk_node.reserve(sn);
+        stk_ci.reserve(sn);
+        // Push roots in reverse index order so smallest-index root is
         // processed first (gives ascending postorder for chains).
         for (Int j = n - 1; j >= 0; --j)
-            if (parent[static_cast<std::size_t>(j)] == -1)
-                s.push({j, false});
-        while (!s.empty()) {
-            auto [node, processed] = s.top();
-            s.pop();
-            if (processed) {
-                postorder.push_back(node);
+            if (parent[static_cast<std::size_t>(j)] == -1) {
+                stk_node.push_back(j);
+                stk_ci.push_back(0);
+            }
+        while (!stk_node.empty()) {
+            const Int node = stk_node.back();
+            const Int ci = stk_ci.back();
+            const Int c0 = ch_start[static_cast<std::size_t>(node)];
+            const Int c1 = ch_start[static_cast<std::size_t>(node) + 1];
+            if (c0 + ci < c1) {
+                stk_ci.back() = ci + 1;
+                stk_node.push_back(children[static_cast<std::size_t>(c0 + ci)]);
+                stk_ci.push_back(0);
             } else {
-                s.push({node, true});
-                const auto& ch = children[static_cast<std::size_t>(node)];
-                // Push children in reverse order so left-most child is on top
-                for (Int k = static_cast<Int>(ch.size()) - 1; k >= 0; --k)
-                    s.push({ch[static_cast<std::size_t>(k)], false});
+                postorder.push_back(node);
+                stk_node.pop_back();
+                stk_ci.pop_back();
             }
         }
     }

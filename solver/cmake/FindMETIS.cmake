@@ -6,6 +6,10 @@ include(FindPackageHandleStandardArgs)
 # Explicitly search system paths first (coin-or metis is NOT the METIS 5 API)
 find_path(METIS_INCLUDE_DIR
     NAMES metis.h
+    HINTS
+        "$ENV{CONDA_PREFIX}/Library/include"
+        "$ENV{CONDA_PREFIX}/include"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/include"
     PATHS
         /usr/include
         /usr/local/include
@@ -17,6 +21,10 @@ endif()
 
 find_library(METIS_LIBRARY
     NAMES metis
+    HINTS
+        "$ENV{CONDA_PREFIX}/Library/lib"
+        "$ENV{CONDA_PREFIX}/lib"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/lib"
     PATHS
         /usr/lib
         /usr/lib/x86_64-linux-gnu

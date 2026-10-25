@@ -178,13 +178,17 @@ FrontResult factor_front_reference(NumericFront& front,
                     res.d_blocks.push_back(FrontDiagBlock{
                         1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
 
+                    const double inv_d = 1.0 / d00;
+                    double *col_k = front.data() + static_cast<std::size_t>(k) * f;
                     for (int i = k + 1; i < f; ++i) {
-                        front.at(i, k) /= d00;
+                        col_k[i] *= inv_d;
                     }
                     for (int j = k + 1; j < f; ++j) {
-                        const double w_jk = d00 * front.at(j, k);
+                        const double w_jk = d00 * col_k[j];
+                        if (w_jk == 0.0) continue;
+                        double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                         for (int i = j; i < f; ++i) {
-                            front.at(i, j) -= front.at(i, k) * w_jk;
+                            col_j[i] -= col_k[i] * w_jk;
                         }
                     }
                     const double rem = static_cast<double>(f - (k + 1));
@@ -216,13 +220,17 @@ FrontResult factor_front_reference(NumericFront& front,
                         res.d_blocks.push_back(FrontDiagBlock{
                             1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
 
+                        const double inv_d = 1.0 / d00;
+                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
                         for (int i = k + 1; i < f; ++i) {
-                            front.at(i, k) /= d00;
+                            col_k[i] *= inv_d;
                         }
                         for (int j = k + 1; j < f; ++j) {
-                            const double w_jk = d00 * front.at(j, k);
+                            const double w_jk = d00 * col_k[j];
+                            if (w_jk == 0.0) continue;
+                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                             for (int i = j; i < f; ++i) {
-                                front.at(i, j) -= front.at(i, k) * w_jk;
+                                col_j[i] -= col_k[i] * w_jk;
                             }
                         }
                         const double rem = static_cast<double>(f - (k + 1));
@@ -286,24 +294,27 @@ FrontResult factor_front_reference(NumericFront& front,
                                 d10,
                                 d11});
 
+                            double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                            double *col_k1 = front.data() + static_cast<std::size_t>(k + 1) * f;
                             for (int i = k + 2; i < f; ++i) {
-                                const double a0 = front.at(i, k);
-                                const double a1 = front.at(i, k + 1);
+                                const double a0 = col_k[i];
+                                const double a1 = col_k1[i];
                                 double l0 = 0.0;
                                 double l1 = 0.0;
                                 solve_2x2_scaled(d00, d10, d11, a0, a1, l0, l1);
-                                front.at(i, k) = l0;
-                                front.at(i, k + 1) = l1;
+                                col_k[i] = l0;
+                                col_k1[i] = l1;
                             }
 
                             for (int j = k + 2; j < f; ++j) {
-                                const double lj0 = front.at(j, k);
-                                const double lj1 = front.at(j, k + 1);
+                                const double lj0 = col_k[j];
+                                const double lj1 = col_k1[j];
                                 const double wj0 = d00 * lj0 + d10 * lj1;
                                 const double wj1 = d10 * lj0 + d11 * lj1;
+                                if (wj0 == 0.0 && wj1 == 0.0) continue;
+                                double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                                 for (int i = j; i < f; ++i) {
-                                    front.at(i, j) -=
-                                        front.at(i, k) * wj0 + front.at(i, k + 1) * wj1;
+                                    col_j[i] -= col_k[i] * wj0 + col_k1[i] * wj1;
                                 }
                             }
                             const double rem = static_cast<double>(f - (k + 2));

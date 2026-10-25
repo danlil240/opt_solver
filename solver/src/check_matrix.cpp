@@ -47,6 +47,42 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
         return result;
     }
 
+    // Fast path: a single O(nnz) validation pass detects the common case of
+    // already-clean input (sorted unique rows, all in range, diagonal present
+    // in every column). Avoids the per-column Entry sort/dedup machinery and
+    // copies the arrays wholesale instead of pushing entries one by one.
+    bool clean = true;
+    for (Int j = 0; j < n && clean; ++j) {
+        Int prev = -1;
+        bool has_diag = false;
+        for (Int k = A.col_ptr[static_cast<std::size_t>(j)];
+             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const Int i = A.row_idx[static_cast<std::size_t>(k)];
+            if (i < j || i >= n || i <= prev) {
+                clean = false;
+                break;
+            }
+            prev = i;
+            has_diag = (i == j);
+        }
+        if (!has_diag) clean = false;
+    }
+
+    if (clean) {
+        result.clean.n = n;
+        result.clean.col_ptr = A.col_ptr;
+        result.clean.row_idx = A.row_idx;
+        result.clean.values = A.values;
+        result.original_to_clean.resize(nnz_sz);
+        for (Int k = 0; k < nnz; ++k) {
+            result.original_to_clean[static_cast<std::size_t>(k)] = k;
+        }
+        info.matrix_duplicates = 0;
+        info.matrix_out_of_range = 0;
+        info.matrix_missing_diag = 0;
+        return result;
+    }
+
     // Initialise output
     result.original_to_clean.assign(nnz_sz, -1);
     result.clean.n = n;

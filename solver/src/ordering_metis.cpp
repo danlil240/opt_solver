@@ -61,15 +61,19 @@ std::vector<Int> MetisOrdering::compute_ordering(
 }
 
 // Factory — create the right ordering backend for the requested method.
+// AutoParallel uses METIS nested dissection only at scale (n > 8192), where
+// its tree parallelism actually pays; below that AMD is both cheaper and at
+// least as good fill-wise on measured workloads.
 std::unique_ptr<OrderingBackend> make_ordering_backend(
     OrderingMethod method, Int n, Info& info)
 {
-    (void)n;
     (void)info;
     switch (method) {
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
         case OrderingMethod::AutoParallel:
-            [[fallthrough]];
+            if (n > 8192)
+                return std::make_unique<MetisOrdering>();
+            return std::make_unique<AmdOrdering>();
         case OrderingMethod::METIS:
             return std::make_unique<MetisOrdering>();
 #endif

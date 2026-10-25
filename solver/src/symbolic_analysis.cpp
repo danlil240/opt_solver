@@ -155,11 +155,19 @@ namespace smf
         }
 
         // Step 2: choose ordering strategy.
-        // For narrow-band matrices in Auto modes, identity ordering preserves
-        // structure and avoids expensive ordering/permutation overhead.
+        // Identity ordering is optimal for genuinely banded matrices (the
+        // band is densely occupied, e.g. tridiagonal / block-banded KKT), and
+        // ordering overhead does not amortise on small problems.  A matrix
+        // like 2D Poisson has a *sparse* band (bw~63 but only ~5 nnz/col), so
+        // it falls through to the fill-reducing backend on large n.
         const bool auto_order = is_auto_ordering(control.ordering);
         const Int half_bw = max_lower_bandwidth(cleaned.clean);
-        const bool use_identity_ordering = auto_order && (half_bw <= 64);
+        const LongInt nnz_lower = cleaned.clean.col_ptr[static_cast<std::size_t>(n)];
+        const bool dense_band =
+            static_cast<LongInt>(half_bw + 1) * static_cast<LongInt>(n) <=
+            2 * nnz_lower;
+        const bool use_identity_ordering =
+            auto_order && (half_bw <= 64) && (dense_band || n <= 2048);
 
         std::vector<Int> perm(static_cast<std::size_t>(n));
         if (use_identity_ordering)

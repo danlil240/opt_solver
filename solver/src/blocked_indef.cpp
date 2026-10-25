@@ -78,45 +78,25 @@ FrontResult factor_front_blocked(NumericFront &front,
             }
         };
 
-        // Apply blocked trailing update front(col_start..f-1, col_start..f-1) -= L21 * W^T
+        // Apply blocked trailing update front(col_start..f-1, col_start..f-1) -= L21 * W^T.
+        // One GEMM over the whole trailing rectangle: it also writes the upper
+        // triangle of the diagonal block, which is never read (all accesses in
+        // this file, the reference kernel, and front_max_abs use i >= j).
         auto flush_panel = [&](int p_start, int p_end, int col_start_to_update) {
             const int jb = p_end - p_start;
-            if (jb <= 0 || col_start_to_update >= f) return;
-            const int tile_b = std::max(16, std::min(nb, 64));
-
-            for (int j0 = col_start_to_update; j0 < f; j0 += tile_b) {
-                const int bw = std::min(tile_b, f - j0);
-
-                // 1. Diagonal triangle of tile [j0, j0 + bw)
-                for (int jj = 0; jj < bw; ++jj) {
-                    const int col = j0 + jj;
-                    for (int p = 0; p < jb; ++p) {
-                        const double w_jp = W_ptr[static_cast<std::size_t>(p) * f + col];
-                        if (w_jp == 0.0) continue;
-                        const double *l_col =
-                            front.data() + static_cast<std::size_t>(p_start + p) * f;
-                        for (int ii = jj; ii < bw; ++ii) {
-                            front.at(j0 + ii, col) -= l_col[j0 + ii] * w_jp;
-                        }
-                    }
-                }
-
-                // 2. Sub-diagonal rectangle [j0 + bw, f) x [j0, j0 + bw) via BLAS-3 GEMM
-                const int m_sub = f - (j0 + bw);
-                if (m_sub > 0) {
-                    smf_dgemm_nt(&front.at(j0 + bw, j0),
-                                 m_sub,
-                                 bw,
-                                 jb,
-                                 &front.at(j0 + bw, p_start),
-                                 f,
-                                 W_ptr + j0,
-                                 f,
-                                 f,
-                                 -1.0,
-                                 1.0);
-                }
-            }
+            const int m_rem = f - col_start_to_update;
+            if (jb <= 0 || m_rem <= 0) return;
+            smf_dgemm_nt(&front.at(col_start_to_update, col_start_to_update),
+                         m_rem,
+                         m_rem,
+                         jb,
+                         &front.at(col_start_to_update, p_start),
+                         f,
+                         W_ptr + col_start_to_update,
+                         f,
+                         f,
+                         -1.0,
+                         1.0);
         };
 
         // Try to select and eliminate one 1x1 or 2x2 pivot within [k, search_limit),
@@ -162,15 +142,21 @@ FrontResult factor_front_blocked(NumericFront &front,
                         1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
 
                     const int p_col = k - panel_start;
+                    const double inv_d = 1.0 / d00;
+                    double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                    double *w_p = W_ptr + static_cast<std::size_t>(p_col) * f;
                     for (int i = k + 1; i < f; ++i) {
-                        const double w_ik = front.at(i, k);
-                        W_ptr[static_cast<std::size_t>(p_col) * f + i] = w_ik;
-                        front.at(i, k) = w_ik / d00;
+                        const double w_ik = col_k[i];
+                        w_p[i] = w_ik;
+                        col_k[i] = w_ik * inv_d;
                     }
                     for (int j = k + 1; j < update_col_limit; ++j) {
-                        const double w_jk = W_ptr[static_cast<std::size_t>(p_col) * f + j];
+                        const double w_jk = w_p[j];
+                        if (w_jk == 0.0) continue;
+                        const double *col_k2 = col_k;
+                        double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                         for (int i = j; i < f; ++i) {
-                            front.at(i, j) -= front.at(i, k) * w_jk;
+                            col_j[i] -= col_k2[i] * w_jk;
                         }
                     }
                     const double rem = static_cast<double>(f - (k + 1));
@@ -200,15 +186,21 @@ FrontResult factor_front_blocked(NumericFront &front,
                             1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
 
                         const int p_col = k - panel_start;
+                        const double inv_d = 1.0 / d00;
+                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                        double *w_p = W_ptr + static_cast<std::size_t>(p_col) * f;
                         for (int i = k + 1; i < f; ++i) {
-                            const double w_ik = front.at(i, k);
-                            W_ptr[static_cast<std::size_t>(p_col) * f + i] = w_ik;
-                            front.at(i, k) = w_ik / d00;
+                            const double w_ik = col_k[i];
+                            w_p[i] = w_ik;
+                            col_k[i] = w_ik * inv_d;
                         }
                         for (int j = k + 1; j < update_col_limit; ++j) {
-                            const double w_jk = W_ptr[static_cast<std::size_t>(p_col) * f + j];
+                            const double w_jk = w_p[j];
+                            if (w_jk == 0.0) continue;
+                            const double *col_k2 = col_k;
+                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                             for (int i = j; i < f; ++i) {
-                                front.at(i, j) -= front.at(i, k) * w_jk;
+                                col_j[i] -= col_k2[i] * w_jk;
                             }
                         }
                         const double rem = static_cast<double>(f - (k + 1));
@@ -273,24 +265,29 @@ FrontResult factor_front_blocked(NumericFront &front,
                                     d11});
 
                                 const int p_col = k - panel_start;
+                                double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                                double *col_k1 = front.data() + static_cast<std::size_t>(k + 1) * f;
+                                double *w_p0 = W_ptr + static_cast<std::size_t>(p_col) * f;
+                                double *w_p1 = W_ptr + static_cast<std::size_t>(p_col + 1) * f;
                                 for (int i = k + 2; i < f; ++i) {
-                                    const double a0 = front.at(i, k);
-                                    const double a1 = front.at(i, k + 1);
-                                    W_ptr[static_cast<std::size_t>(p_col) * f + i] = a0;
-                                    W_ptr[static_cast<std::size_t>(p_col + 1) * f + i] = a1;
+                                    const double a0 = col_k[i];
+                                    const double a1 = col_k1[i];
+                                    w_p0[i] = a0;
+                                    w_p1[i] = a1;
                                     double l0 = 0.0;
                                     double l1 = 0.0;
                                     solve_2x2_scaled(d00, d10, d11, a0, a1, l0, l1);
-                                    front.at(i, k) = l0;
-                                    front.at(i, k + 1) = l1;
+                                    col_k[i] = l0;
+                                    col_k1[i] = l1;
                                 }
 
                                 for (int j = k + 2; j < update_col_limit; ++j) {
-                                    const double wj0 = W_ptr[static_cast<std::size_t>(p_col) * f + j];
-                                    const double wj1 = W_ptr[static_cast<std::size_t>(p_col + 1) * f + j];
+                                    const double wj0 = w_p0[j];
+                                    const double wj1 = w_p1[j];
+                                    if (wj0 == 0.0 && wj1 == 0.0) continue;
+                                    double *col_j = front.data() + static_cast<std::size_t>(j) * f;
                                     for (int i = j; i < f; ++i) {
-                                        front.at(i, j) -=
-                                            front.at(i, k) * wj0 + front.at(i, k + 1) * wj1;
+                                        col_j[i] -= col_k[i] * wj0 + col_k1[i] * wj1;
                                     }
                                 }
                                 const double rem = static_cast<double>(f - (k + 2));

@@ -82,6 +82,25 @@ static bool try_factor_banded_spd(const CscLower &A, FactorKeep &fkeep) {
   return true;
 }
 
+// Merge child extension rows (sorted) into parent row_indices (sorted) to get
+// parent-local indices in O(f + q_c), replacing per-row binary search.
+static void merge_parent_rows(const FrontalInfo &fi_parent,
+                              const FrontalInfo &fi_child,
+                              Int p_child,
+                              std::vector<Int> &parent_rows_out) {
+    const Int q_c = fi_child.front_size() - p_child;
+    parent_rows_out.resize(static_cast<std::size_t>(q_c));
+    const auto &pri = fi_parent.row_indices;
+    std::size_t pp = 0;
+    for (Int ii = 0; ii < q_c; ++ii) {
+        const Int ext_row =
+            fi_child.row_indices[static_cast<std::size_t>(p_child + ii)];
+        while (pp < pri.size() && pri[pp] < ext_row) ++pp;
+        parent_rows_out[static_cast<std::size_t>(ii)] =
+            static_cast<Int>(pp);
+    }
+}
+
 static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_steps.clear();
   fkeep.solve_row_indices.clear();
@@ -313,8 +332,10 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
 }
 #endif // SMF_PARALLEL
 
-FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
-                           Info &info, FactorKeep &fkeep) {
+static FactorStatus factor_posdef_core(const AnalysisKeep &keep,
+                                       const CscLower &cleaned,
+                                       const Control &ctrl,
+                                       Info &info, FactorKeep &fkeep) {
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
 
@@ -345,17 +366,21 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     return FactorStatus::Success;
   }
 
-  CscLower A_clean_work = keep.cleaned;
+  // Only copy the cleaned matrix when scaling mutates its values.
+  CscLower A_scaled;
+  const CscLower *cleaned_ptr = &cleaned;
   if (ctrl.scaling != ScalingMethod::None) {
+    A_scaled = cleaned;
     const ErrorCode sc_err = compute_scaling_for_method(
-        A_clean_work, ctrl.scaling, fkeep.scale, ctrl.print_level);
+        A_scaled, ctrl.scaling, fkeep.scale, ctrl.print_level);
     if (sc_err != ErrorCode::Success) {
       fkeep.status = FactorStatus::NotPositiveDefinite;
       info.factor_status = FactorStatus::NotPositiveDefinite;
       info.status = sc_err;
       return FactorStatus::NotPositiveDefinite;
     }
-    apply_scale_to_matrix(A_clean_work, fkeep.scale);
+    apply_scale_to_matrix(A_scaled, fkeep.scale);
+    cleaned_ptr = &A_scaled;
   }
 
   // Build a CscLower for scatter_original.
@@ -364,13 +389,13 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   CscLower Ap;
   Ap.n = n;
   if (keep.orig_to_perm_idx.empty()) {
-    Ap.col_ptr = A_clean_work.col_ptr;
-    Ap.row_idx = A_clean_work.row_idx;
-    Ap.values = std::move(A_clean_work.values);
+    Ap.col_ptr = cleaned_ptr->col_ptr;
+    Ap.row_idx = cleaned_ptr->row_idx;
+    Ap.values = cleaned_ptr->values;
   } else {
     const Int nnz_perm = keep.perm_col_ptr[static_cast<std::size_t>(n)];
     std::vector<double> Ap_values =
-        scatter_values(A_clean_work, keep.orig_to_perm_idx, nnz_perm);
+        scatter_values(*cleaned_ptr, keep.orig_to_perm_idx, nnz_perm);
     Ap.col_ptr = keep.perm_col_ptr;
     Ap.row_idx = keep.perm_row_idx;
     Ap.values = std::move(Ap_values);
@@ -414,6 +439,23 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   // (done during symbolic_analysis) — no per-call sort needed.
   const std::vector<Int>& postorder = keep.postorder;
 
+  // Pre-allocate factor storage once: each supernode s contributes
+  // front_size(s) × width(s) values at a known offset (same layout as the
+  // parallel path), so factor blocks are memcpy'd into place instead of grown
+  // incrementally per supernode.
+  {
+    LongInt offset = 0;
+    for (Int s = 0; s < ns; ++s) {
+      const std::size_t si = static_cast<std::size_t>(s);
+      fkeep.factor_col_ptr[si] = offset;
+      const LongInt f = static_cast<LongInt>(keep.fronts[si].front_size());
+      const LongInt p = static_cast<LongInt>(keep.supernodes[si].width());
+      offset += f * p;
+    }
+    fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
+    fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
+  }
+
   // Arena for frontal matrix + A22 accumulator (reused each supernode via
   // save/reset).  Size from the largest front shape instead of O(n^2)
   // over-allocation.
@@ -428,13 +470,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   }
   const LongInt workspace_elems =
       max_front * max_front * 2 + max_ext * max_ext;
-  const LongInt hint_elems =
-      info.predicted_factor_entries > 0 ? info.predicted_factor_entries
-                                        : LongInt{1};
   const std::size_t arena_cap =
-      static_cast<std::size_t>(std::max(workspace_elems, hint_elems)) *
-          sizeof(double) +
-      8192u;
+      static_cast<std::size_t>(workspace_elems) * sizeof(double) + 8192u;
   AlignedArena arena(arena_cap);
 
   // Two-buffer stack for contribution (Schur complement) blocks
@@ -443,10 +480,6 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   // Per-supernode contribution pointers (into fstack) and block sizes
   std::vector<double *> contrib_ptrs(static_cast<std::size_t>(ns), nullptr);
   std::vector<Int> contrib_q(static_cast<std::size_t>(ns), Int{0});
-
-  if (info.predicted_factor_entries > 0)
-    fkeep.factor_values.reserve(
-        static_cast<std::size_t>(info.predicted_factor_entries));
 
   // ---- Main postorder loop ------------------------------------------------
   for (Int pos = 0; pos < ns; ++pos) {
@@ -457,10 +490,6 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     const Int p = sn.width();      // pivot column count
     const Int f = fi.front_size(); // total front rows
     const Int q = f - p;           // extended rows = contribution block size
-
-    // Record start of this supernode's factor
-    fkeep.factor_col_ptr[static_cast<std::size_t>(s)] =
-        static_cast<LongInt>(fkeep.factor_values.size());
 
     if (p <= 0)
       continue; // should not occur for valid input
@@ -508,15 +537,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
       } else {
         const FrontalInfo &fi_c = keep.fronts[static_cast<std::size_t>(c)];
         const Int p_c = keep.supernodes[static_cast<std::size_t>(c)].width();
-        parent_rows_local.resize(static_cast<std::size_t>(q_c));
-        for (Int ii = 0; ii < q_c; ++ii) {
-          const Int ext_row =
-              fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-          const auto it = std::lower_bound(fi.row_indices.begin(),
-                                           fi.row_indices.end(), ext_row);
-          parent_rows_local[static_cast<std::size_t>(ii)] =
-              static_cast<Int>(it - fi.row_indices.begin());
-        }
+        merge_parent_rows(fi, fi_c, p_c, parent_rows_local);
         parent_rows_ptr = &parent_rows_local;
       }
       const std::vector<Int> &parent_rows = *parent_rows_ptr;
@@ -588,9 +609,12 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     }
 
     // --- Store factor columns (L11 and L21) in fkeep -------------------
-    fkeep.factor_values.insert(fkeep.factor_values.end(), F.data(),
-                               F.data() + static_cast<std::ptrdiff_t>(f) *
-                                              static_cast<std::ptrdiff_t>(p));
+    std::memcpy(fkeep.factor_values.data() +
+                    static_cast<std::size_t>(fkeep.factor_col_ptr[
+                        static_cast<std::size_t>(s)]),
+                F.data(),
+                static_cast<std::size_t>(f) * static_cast<std::size_t>(p) *
+                    sizeof(double));
 
     // --- Push contribution block to fstack for parent ------------------
     if (q > 0) {
@@ -606,10 +630,6 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
     arena.reset_to(arena_mark);
   } // end postorder loop
 
-  // Sentinel: end of last supernode's factor data
-  fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] =
-      static_cast<LongInt>(fkeep.factor_values.size());
-
   // Populate info statistics
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.arena_peak_bytes = static_cast<long>(arena.peak_bytes());
@@ -620,6 +640,11 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
 
   return FactorStatus::Success;
+}
+
+FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
+                           Info &info, FactorKeep &fkeep) {
+  return factor_posdef_core(keep, keep.cleaned, ctrl, info, fkeep);
 }
 
 FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
@@ -634,9 +659,15 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
     info.status = err;
     return FactorStatus::NotPositiveDefinite;
   }
-  AnalysisKeep temp_ak = keep;
-  temp_ak.cleaned.values = ws.clean_values;
-  const FactorStatus fs = factor_posdef(temp_ak, ctrl, info, fkeep);
+  // Share the cleaned pattern; only the values differ. Avoids the former
+  // deep copy of the entire AnalysisKeep on every refactorization.
+  CscLower cleaned_upd;
+  cleaned_upd.n = keep.n;
+  cleaned_upd.col_ptr = keep.cleaned.col_ptr;
+  cleaned_upd.row_idx = keep.cleaned.row_idx;
+  cleaned_upd.values = ws.clean_values;
+  const FactorStatus fs =
+      factor_posdef_core(keep, cleaned_upd, ctrl, info, fkeep);
   fkeep.analysis = &keep;
   ++ws.warmup_calls;
   return fs;

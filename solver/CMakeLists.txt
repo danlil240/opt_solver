@@ -6,12 +6,26 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ---- CMake module path --------------------------------------------------
+# ---- CMake module path & optional local conda/mamba prefix ---------------
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+set(_smf_default_conda_lib "")
+if(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}/Library")
+    file(TO_CMAKE_PATH "$ENV{CONDA_PREFIX}/Library" _smf_default_conda_lib)
+elseif(DEFINED ENV{USERPROFILE} AND EXISTS "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library")
+    file(TO_CMAKE_PATH "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library" _smf_default_conda_lib)
+endif()
+if(_smf_default_conda_lib)
+    list(APPEND CMAKE_PREFIX_PATH "${_smf_default_conda_lib}")
+endif()
 
 # ---- Options ------------------------------------------------------------
 option(SMF_ENABLE_OPENMP       "Enable OpenMP parallelism"              ON)
-option(SMF_USE_MKL             "Use Intel MKL instead of OpenBLAS"      OFF)
+set(_smf_default_use_mkl OFF)
+if(_smf_default_conda_lib AND EXISTS "${_smf_default_conda_lib}/include/mkl.h")
+    set(_smf_default_use_mkl ON)
+endif()
+option(SMF_USE_MKL             "Use Intel MKL instead of OpenBLAS"      ${_smf_default_use_mkl})
 option(SMF_USE_METIS           "Enable METIS 5 fill-reducing ordering"  ON)
 option(SMF_USE_SUITESPARSE_AMD "Enable SuiteSparse AMD ordering"        ON)
 option(SMF_DETERMINISTIC       "Enable deterministic (reproducible) mode" OFF)
@@ -53,11 +67,24 @@ set(SMF_BLAS_REFERENCE OFF)
 set(SMF_BLAS_BACKEND_NAME "unknown")
 
 if(SMF_USE_MKL)
-    set(BLA_VENDOR Intel10_64lp)
-    find_package(BLAS REQUIRED)
-    find_package(LAPACK REQUIRED)
+    if(NOT BLAS_LIBRARIES AND _smf_default_conda_lib
+       AND EXISTS "${_smf_default_conda_lib}/lib/mkl_intel_lp64_dll.lib"
+       AND EXISTS "${_smf_default_conda_lib}/lib/mkl_sequential_dll.lib"
+       AND EXISTS "${_smf_default_conda_lib}/lib/mkl_core_dll.lib")
+        set(BLAS_LIBRARIES
+            "${_smf_default_conda_lib}/lib/mkl_intel_lp64_dll.lib"
+            "${_smf_default_conda_lib}/lib/mkl_sequential_dll.lib"
+            "${_smf_default_conda_lib}/lib/mkl_core_dll.lib")
+        set(LAPACK_LIBRARIES ${BLAS_LIBRARIES})
+        set(BLAS_FOUND TRUE)
+        set(LAPACK_FOUND TRUE)
+    else()
+        set(BLA_VENDOR Intel10_64lp)
+        find_package(BLAS REQUIRED)
+        find_package(LAPACK REQUIRED)
+    endif()
     find_path(MKL_INCLUDE_DIR mkl.h
-        HINTS ENV MKLROOT
+        HINTS ENV MKLROOT "${_smf_default_conda_lib}/include"
         PATH_SUFFIXES include
         PATHS /opt/intel/oneapi/mkl/latest/include /usr/include/mkl /usr/include)
     if(NOT MKL_INCLUDE_DIR)
@@ -174,18 +201,18 @@ endif()
 # ---- Optional: MUMPS (for comparison benchmarks) -------------------------
 set(SMF_HAS_MUMPS OFF)
 find_library(DMUMPS_LIBRARY NAMES dmumps_seq dmumps
-    HINTS /usr/lib /usr/lib/x86_64-linux-gnu
+    HINTS "${_smf_default_conda_lib}/lib" /usr/lib /usr/lib/x86_64-linux-gnu
     DOC "MUMPS double-precision library")
 find_path(MUMPS_INCLUDE_DIR dmumps_c.h
-    HINTS /usr/include
+    HINTS "${_smf_default_conda_lib}/include" /usr/include
     DOC "MUMPS include directory")
 if(DMUMPS_LIBRARY AND MUMPS_INCLUDE_DIR)
     find_library(MUMPS_COMMON_LIBRARY NAMES mumps_common_seq mumps_common
-        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+        HINTS "${_smf_default_conda_lib}/lib" /usr/lib /usr/lib/x86_64-linux-gnu)
     find_library(MPISEQ_LIBRARY NAMES mpiseq_seq mpiseq
-        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+        HINTS "${_smf_default_conda_lib}/lib" /usr/lib /usr/lib/x86_64-linux-gnu)
     find_library(PORD_LIBRARY NAMES pord
-        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+        HINTS "${_smf_default_conda_lib}/lib" /usr/lib /usr/lib/x86_64-linux-gnu)
     set(SMF_HAS_MUMPS ON)
     message(STATUS "smf: MUMPS found at ${DMUMPS_LIBRARY} -- SMF_HAS_MUMPS=ON")
 else()
@@ -236,7 +263,11 @@ endif()
 # Point SMF_DEPS_DLL_DIR at a directory containing dependency DLLs
 # (e.g. a conda env's Library/bin) and they are copied next to executables
 # registered via smf_stage_runtime_dlls(target).
-set(SMF_DEPS_DLL_DIR "" CACHE PATH
+set(_smf_default_dll_dir "")
+if(_smf_default_conda_lib AND EXISTS "${_smf_default_conda_lib}/bin")
+    set(_smf_default_dll_dir "${_smf_default_conda_lib}/bin")
+endif()
+set(SMF_DEPS_DLL_DIR "${_smf_default_dll_dir}" CACHE PATH
     "Directory containing third-party runtime DLLs to stage beside executables")
 function(smf_stage_runtime_dlls target)
     if(NOT (WIN32 AND SMF_DEPS_DLL_DIR AND EXISTS "${SMF_DEPS_DLL_DIR}"))
@@ -382,7 +413,11 @@ endif()
 
 if(SMF_HAS_AMD)
     target_link_libraries(smf PUBLIC SuiteSparseAMD::amd)
-    target_include_directories(smf PUBLIC /usr/include/suitesparse)
+    get_filename_component(_amd_parent_inc "${SuiteSparseAMD_INCLUDE_DIR}" DIRECTORY)
+    target_include_directories(smf PUBLIC
+        "${SuiteSparseAMD_INCLUDE_DIR}"
+        "${_amd_parent_inc}"
+        /usr/include/suitesparse)
 endif()
 
 if(SMF_HAS_METIS)
@@ -468,6 +503,7 @@ if(SMF_BUILD_MA97_PLUGIN)
         WINDOWS_EXPORT_ALL_SYMBOLS ON
         SOVERSION 1
         VERSION   1.0.0)
+    smf_stage_runtime_dlls(smf_ma97)
     install(TARGETS smf_ma97
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

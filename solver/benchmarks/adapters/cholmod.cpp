@@ -24,7 +24,8 @@ class CholmodSolverAdapter final : public SolverAdapter {
 public:
     CholmodSolverAdapter() {
         cholmod_start(&c_);
-        c_.print = 0;  // silence benchmark output
+        c_.print = 0;     // silence benchmark output
+        c_.final_ll = 1;  // enforce true LL^T Cholesky (reject indefinite matrices)
     }
 
     ~CholmodSolverAdapter() override {
@@ -52,6 +53,11 @@ public:
 
     Outcome analyse(const CscLower &A) override {
         stats_ = AdapterStats{};
+        if (indefinite_) {
+            stats_.outcome = Outcome::Unavailable;
+            stats_.reason = "CHOLMOD supports SPD matrices only";
+            return stats_.outcome;
+        }
         if (L_) {
             cholmod_free_factor(&L_, &c_);
             L_ = nullptr;

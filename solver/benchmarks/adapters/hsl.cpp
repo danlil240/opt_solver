@@ -33,6 +33,10 @@ public:
     void configure(const Control &ctrl, const std::string &track) override {
         ctrl_ = ctrl;
         track_ = track;
+        if (track_ == "recommended" &&
+            ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
+            ctrl_.ordering = OrderingMethod::AutoParallel;
+        }
     }
 
     Outcome analyse(const CscLower &A) override {
@@ -63,12 +67,11 @@ public:
             stats_.reason = "values size mismatch";
             return stats_.outcome;
         }
-        CscLower updated = base_matrix_;
-        updated.values.assign(values.begin(), values.end());
+        base_matrix_.values.assign(values.begin(), values.end());
 
         Info info;
         const auto t0 = Clock::now();
-        const FactorStatus fs = solver_.factor(*ak_, updated, ctrl_, info, fk_, nws_);
+        const FactorStatus fs = solver_.factor(*ak_, base_matrix_, ctrl_, info, fk_, nws_);
         const auto t1 = Clock::now();
         stats_.factor_ms = ms_since(t0, t1);
         stats_.inertia_pos = info.num_positive;

@@ -150,6 +150,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         str(manifest_path),
                         "--case",
                         matrix_id,
+                        "--sequence-id",
+                        sequence_id,
+                        "--family-id",
+                        family_id,
                         "--solver",
                         solver_id,
                         "--mode",
@@ -161,6 +165,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "--JsonlOut",
                         str(records_path),
                     ]
+                    if case.get("mtx_path"):
+                        cmd.extend(["--mtx", str(case["mtx_path"])])
+                    if case.get("matrix_type"):
+                        cmd.extend(["--mtype", str(case["matrix_type"])])
                     if is_warmup:
                         cmd.append("--warmup")
                     t0 = time.perf_counter()
