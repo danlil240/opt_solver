@@ -267,3 +267,33 @@ TEST(RepeatedFactor, FactorSolve_50iters) {
         << "iter=" << iter << "  rel.residual=" << rr;
   }
 }
+
+TEST(RepeatedFactor, IndefWorkspace_100iters) {
+  const CscLower base = make_base5();
+  const int n = base.n;
+
+  Control ctrl;
+  ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+
+  Solver solver;
+  Info info_a;
+  auto ak = solver.analyse(base, ctrl, info_a);
+  ASSERT_NE(ak.get(), nullptr);
+
+  NumericWorkspace nws;
+  SolveWorkspace sws;
+  FactorKeep fk;
+  XorShift32 rng(0x13572468u);
+  const std::vector<double> b0 = {1.0, 2.0, 3.0, 4.0, 5.0};
+
+  for (int iter = 0; iter < 100; ++iter) {
+    CscLower Ap = perturb_values(base, rng, 0.05, 0.10);
+    Info info_f;
+    ASSERT_EQ(solver.factor(*ak, Ap, ctrl, info_f, fk, nws), FactorStatus::Success);
+    std::vector<double> x = b0;
+    Info info_s;
+    ASSERT_EQ(solver.solve(fk, ctrl, info_s, x.data(), n, 1, sws), 0);
+    const double rr = relative_residual(Ap, x.data(), b0.data());
+    EXPECT_LT(rr, 1e-9) << "iter=" << iter;
+  }
+}

@@ -146,6 +146,8 @@ namespace smf
             // Trivially empty analysis
             auto keep = std::make_unique<AnalysisKeep>();
             keep->n = 0;
+            keep->orig_col_ptr = A.col_ptr;
+            keep->orig_row_idx = A.row_idx;
             keep->cleaned = std::move(cleaned.clean);
             const auto t1 = std::chrono::steady_clock::now();
             info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -339,6 +341,17 @@ namespace smf
         // Step 10: assemble AnalysisKeep
         auto keep = std::make_unique<AnalysisKeep>();
         keep->n = n;
+        keep->orig_col_ptr = A.col_ptr;
+        keep->orig_row_idx = A.row_idx;
+        keep->orig_to_clean_idx = std::move(cleaned.original_to_clean);
+        keep->orig_to_perm_direct.resize(keep->orig_to_clean_idx.size(), -1);
+        for (std::size_t k = 0; k < keep->orig_to_clean_idx.size(); ++k) {
+            const Int c_idx = keep->orig_to_clean_idx[k];
+            if (c_idx >= 0) {
+                keep->orig_to_perm_direct[k] =
+                    otp.empty() ? c_idx : otp[static_cast<std::size_t>(c_idx)];
+            }
+        }
         keep->cleaned = std::move(cleaned.clean);
         // Store permuted pattern for fast value-only permutation in factor.
         // For identity ordering we keep these empty and factor reuses cleaned pattern.

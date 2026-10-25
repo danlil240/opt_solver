@@ -14,4 +14,8 @@ namespace smf {
 FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
                           Info &info, FactorKeep &fkeep);
 
+FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws);
+
 } // namespace smf

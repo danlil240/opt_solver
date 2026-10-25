@@ -17,18 +17,20 @@ struct DiagSolveEntry {
 };
 
 struct SolveStep {
-  Int row_offset = 0;
-  int factor_offset = 0;
+  LongInt row_offset = 0;
+  LongInt factor_offset = 0;
   int p = 0;
   int f = 0;
 };
 
-/// Result of SPD multifrontal factorization.
+struct NumericWorkspace;
+struct SolveWorkspace;
+
+/// Result of SPD or indefinite multifrontal factorization.
 struct FactorKeep {
   std::vector<double>
       factor_values; ///< packed L columns (per supernode, col-major)
-  std::vector<int> factor_col_ptr; ///< factor_col_ptr[s] = start of supernode s
-                                   ///< in factor_values
+  std::vector<LongInt> factor_col_ptr; ///< factor_col_ptr[s] = 64-bit start offset of supernode s
   std::vector<int> perm;           ///< total permutation perm[new] = old
   std::vector<int> iperm;          ///< total inverse permutation iperm[old] = new
   std::vector<int> num_perm;       ///< numerical permutation num_perm[new_piv] = sym_idx
@@ -41,9 +43,9 @@ struct FactorKeep {
   std::vector<DiagSolveEntry> diag_entries; ///< flattened D blocks for solve_diag
   std::vector<SolveStep> solve_steps; ///< flattened front traversal for triangular solves
   std::vector<Int> solve_row_indices; ///< row indices referenced by solve_steps
-  mutable std::vector<double> solve_tmp; ///< reusable solve permutation scratch
-  mutable std::vector<double> solve_loc; ///< reusable local pivot scratch
-  mutable std::vector<double> solve_ext; ///< reusable extension scratch
+  std::vector<double> solve_tmp; ///< legacy scratch (not mutated by const solve)
+  std::vector<double> solve_loc; ///< legacy scratch (not mutated by const solve)
+  std::vector<double> solve_ext; ///< legacy scratch (not mutated by const solve)
   bool is_posdef = false;          ///< true if factorization used SPD path (D = I)
   bool use_banded_spd = false;     ///< true when SPD factor stored in banded LAPACK form
   int band_n = 0;                  ///< order for banded SPD factor
@@ -57,5 +59,9 @@ struct FactorKeep {
 /// Returns FactorStatus::Success or FactorStatus::NotPositiveDefinite.
 FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
                            Info &info, FactorKeep &fkeep);
+
+FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
+                           const Control &ctrl, Info &info,
+                           FactorKeep &fkeep, NumericWorkspace &ws);
 
 } // namespace smf

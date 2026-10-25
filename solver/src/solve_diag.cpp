@@ -50,7 +50,7 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
 
     const int p = static_cast<int>(sn.width());
     const int f = static_cast<int>(fi.front_size());
-    const int start = fkeep.factor_col_ptr[si];
+    const LongInt start = fkeep.factor_col_ptr[si];
 
     for (int k = 0; k < p; ++k) {
       const std::size_t ki = static_cast<std::size_t>(k);

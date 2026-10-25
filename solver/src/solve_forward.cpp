@@ -4,6 +4,7 @@
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_posdef.hpp"
 #include "smf/supernode.hpp"
+#include "smf/workspace.hpp"
 #include <algorithm>
 #include <cstddef>
 #include <vector>
@@ -61,7 +62,8 @@ static void solve_lower_unit_small(double *b, int p, const double *L,
 
 } // anonymous namespace
 
-void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
+void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
+                   SolveWorkspace &ws) {
   if (n <= 0 || nrhs <= 0 || x == nullptr)
     return;
 
@@ -83,10 +85,9 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
                       : get_or_compute_postorder(*ak, po_buf));
   }
 
-  // Per-call scratch keeps solve_forward reentrant for concurrent callers.
-  std::vector<double> tmp;
-  std::vector<double> b_loc;
-  std::vector<double> b_ext;
+  std::vector<double> &tmp = ws.tmp;
+  std::vector<double> &b_loc = ws.loc;
+  std::vector<double> &b_ext = ws.ext;
   tmp.resize(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
@@ -204,6 +205,11 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
       }
     }
   }
+}
+
+void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
+  SolveWorkspace ws;
+  solve_forward(fkeep, x, n, nrhs, ws);
 }
 
 } // namespace smf

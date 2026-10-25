@@ -4,6 +4,7 @@
 #include "smf/frontal_matrix.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/threading.hpp"
+#include "smf/workspace.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -104,7 +105,7 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
     const FrontalInfo &fi = keep.fronts[si];
     const Supernode &sn = keep.supernodes[si];
     SolveStep step;
-    step.row_offset = static_cast<Int>(fkeep.solve_row_indices.size());
+    step.row_offset = static_cast<LongInt>(fkeep.solve_row_indices.size());
     step.factor_offset = fkeep.factor_col_ptr[si];
     step.p = static_cast<int>(sn.width());
     step.f = static_cast<int>(fi.front_size());
@@ -134,12 +135,12 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
   // Each supernode s contributes front_size(s) × width(s) factor values.
   fkeep.factor_col_ptr.resize(static_cast<std::size_t>(ns) + 1, 0);
   {
-    int offset = 0;
+    LongInt offset = 0;
     for (Int s = 0; s < ns; ++s) {
       fkeep.factor_col_ptr[static_cast<std::size_t>(s)] = offset;
-      const Int f = keep.fronts[static_cast<std::size_t>(s)].front_size();
-      const Int p = keep.supernodes[static_cast<std::size_t>(s)].width();
-      offset += static_cast<int>(f) * static_cast<int>(p);
+      const LongInt f = keep.fronts[static_cast<std::size_t>(s)].front_size();
+      const LongInt p = keep.supernodes[static_cast<std::size_t>(s)].width();
+      offset += f * p;
     }
     fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
     fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
@@ -444,7 +445,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 
     // Record start of this supernode's factor
     fkeep.factor_col_ptr[static_cast<std::size_t>(s)] =
-        static_cast<int>(fkeep.factor_values.size());
+        static_cast<LongInt>(fkeep.factor_values.size());
 
     if (p <= 0)
       continue; // should not occur for valid input
@@ -592,7 +593,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 
   // Sentinel: end of last supernode's factor data
   fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] =
-      static_cast<int>(fkeep.factor_values.size());
+      static_cast<LongInt>(fkeep.factor_values.size());
 
   // Populate info statistics
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
@@ -604,6 +605,26 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
   info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
 
   return FactorStatus::Success;
+}
+
+FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
+                           const Control &ctrl, Info &info,
+                           FactorKeep &fkeep, NumericWorkspace &ws) {
+  ws.prepare_for_analysis(keep);
+  const ErrorCode err = map_updated_values_to_permuted(keep, updated, ws);
+  if (err != ErrorCode::Success) {
+    fkeep.factor_values.clear();
+    fkeep.status = FactorStatus::NotPositiveDefinite;
+    info.factor_status = FactorStatus::NotPositiveDefinite;
+    info.status = err;
+    return FactorStatus::NotPositiveDefinite;
+  }
+  AnalysisKeep temp_ak = keep;
+  temp_ak.cleaned.values = ws.clean_values;
+  const FactorStatus fs = factor_posdef(temp_ak, ctrl, info, fkeep);
+  fkeep.analysis = &keep;
+  ++ws.warmup_calls;
+  return fs;
 }
 
 } // namespace smf

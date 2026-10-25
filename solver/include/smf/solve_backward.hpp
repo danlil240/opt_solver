@@ -10,4 +10,7 @@ namespace smf {
 /// @param nrhs number of RHS columns
 void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs = 1);
 
+void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
+                    SolveWorkspace &ws);
+
 } // namespace smf

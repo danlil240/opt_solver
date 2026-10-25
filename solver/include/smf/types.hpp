@@ -1,10 +1,38 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 
 namespace smf {
 
 using Int     = int32_t;
 using LongInt = int64_t;
+
+inline constexpr LongInt kMaxFactorStorageEntries = (LongInt{1} << 29); // ~4 GiB of doubles
+
+inline bool checked_add_i64(LongInt a, LongInt b, LongInt &out) noexcept {
+    if (a < 0 || b < 0) return false;
+    if (a > std::numeric_limits<LongInt>::max() - b) return false;
+    out = a + b;
+    return true;
+}
+
+inline bool checked_mul_i64(LongInt a, LongInt b, LongInt &out) noexcept {
+    if (a < 0 || b < 0) return false;
+    if (a == 0 || b == 0) {
+        out = 0;
+        return true;
+    }
+    if (a > std::numeric_limits<LongInt>::max() / b) return false;
+    out = a * b;
+    return true;
+}
+
+inline bool checked_storage_elements(LongInt rows, LongInt cols, LongInt &out,
+                                     LongInt max_entries = kMaxFactorStorageEntries) noexcept {
+    if (!checked_mul_i64(rows, cols, out)) return false;
+    return out <= max_entries;
+}
 
 enum class MatrixType {
     RealSymmetricPositiveDefinite = 3,

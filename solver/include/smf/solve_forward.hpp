@@ -13,4 +13,7 @@ namespace smf {
 /// @param nrhs  number of RHS columns (x is n × nrhs, column-major, ldx=n)
 void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs = 1);
 
+void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
+                   SolveWorkspace &ws);
+
 } // namespace smf

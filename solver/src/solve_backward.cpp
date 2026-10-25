@@ -1,6 +1,7 @@
 #include "smf/solve_backward.hpp"
 #include "smf/analysis.hpp"
 #include "smf/dense_kernel.hpp"
+#include "smf/workspace.hpp"
 #include <cstddef>
 #include <vector>
 
@@ -58,7 +59,8 @@ static void solve_lower_transpose_unit_small(double *b, int p,
 
 } // anonymous namespace
 
-void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
+void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
+                    SolveWorkspace &ws) {
   if (n <= 0 || nrhs <= 0 || x == nullptr)
     return;
 
@@ -79,9 +81,8 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
                       : get_or_compute_postorder(*ak, po_buf));
   }
 
-  // Per-call scratch keeps solve_backward reentrant for concurrent callers.
-  std::vector<double> b_loc;
-  std::vector<double> tmp;
+  std::vector<double> &b_loc = ws.loc;
+  std::vector<double> &tmp = ws.tmp;
   tmp.resize(static_cast<std::size_t>(n));
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
@@ -184,6 +185,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
     for (int j = 0; j < n; ++j)
       xc[j] = tmp[static_cast<std::size_t>(j)];
   }
+}
+
+void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs) {
+  SolveWorkspace ws;
+  solve_backward(fkeep, x, n, nrhs, ws);
 }
 
 } // namespace smf

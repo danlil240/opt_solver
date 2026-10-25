@@ -257,3 +257,15 @@ if(WIN32)
     target_link_libraries(test_delayed_pivots PRIVATE psapi)
 endif()
 add_test(NAME DelayedPivots COMMAND test_delayed_pivots)
+
+# --- Task 4: NumericWorkspace and SolveWorkspace tests ---
+
+add_executable(test_numeric_workspace
+    test_numeric_workspace.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_numeric_workspace PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_numeric_workspace PRIVATE psapi)
+endif()
+add_test(NAME NumericWorkspace COMMAND test_numeric_workspace)

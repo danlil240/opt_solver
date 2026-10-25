@@ -5,6 +5,7 @@
 #include "smf/factor_posdef.hpp"
 #include "smf/info.hpp"
 #include "smf/types.hpp"
+#include "smf/workspace.hpp"
 #include <memory>
 
 namespace smf {
@@ -54,6 +55,10 @@ public:
   FactorStatus factor(const AnalysisKeep &ak, const Control &ctrl, Info &info,
                       FactorKeep &fkeep) const;
 
+  FactorStatus factor(const AnalysisKeep &ak, const CscLower &updated,
+                      const Control &ctrl, Info &info, FactorKeep &fkeep,
+                      NumericWorkspace &ws) const;
+
   /// Solve A x = b for a single or multiple RHS.
   /// @param fkeep  from a prior factor() call
   /// @param ctrl   solver control
@@ -65,6 +70,10 @@ public:
   /// @returns 0 on success
   int solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b,
             int n, int nrhs = 1, SolveJob job = SolveJob::Full) const;
+
+  int solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b,
+            int n, int nrhs, SolveWorkspace &ws,
+            SolveJob job = SolveJob::Full) const;
 
   /// Combined analyse + factor + solve in a single call.
   /// Solves A x = b in-place; returns the FactorKeep for inspection.
