@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
-add_library(smf_bench_common STATIC common/validation.cpp)
+add_library(smf_bench_common STATIC
+    common/validation.cpp
+    adapters/hsl.cpp
+    adapters/spral.cpp
+    adapters/mumps.cpp
+    adapters/pardiso.cpp
+    adapters/cholmod.cpp
+)
 target_link_libraries(smf_bench_common PUBLIC smf)
 target_include_directories(smf_bench_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(WIN32)
@@ -23,6 +30,7 @@ smf_benchmark(bench_random_symmetric)
 smf_benchmark(bench_suite_sparse_matrix_market)
 smf_benchmark(bench_compare)
 smf_benchmark(bench_kkt_fixture_compare)
+smf_benchmark(bench_replay)
 
 # bench_compare: link optional comparison solvers (CHOLMOD, MA27)
 if(SMF_HAS_CHOLMOD AND CHOLMOD_LIBRARY AND CHOLMOD_INCLUDE_DIR)

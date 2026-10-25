@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "suite": "kkt",
+  "description": "Frozen KKT sequence manifest across 10 application families (6 train / 2 val / 2 test)",
+  "solvers": ["smf", "ma27", "ma57", "ma86", "ma97", "ssids", "mumps", "mkl_pardiso", "panua_pardiso"],
+  "required_baselines": ["ma27", "ma57", "ma86", "ma97", "ssids", "mumps"],
+  "families": {
+    "train": ["ocp_lqr", "vtol_intercept", "robot_arm_mpc", "ac_opf", "contact_qp", "chem_process"],
+    "validation": ["autonomous_driving_nmpc", "quadrotor_swing"],
+    "test": ["fixed_wing_guidance", "spacecraft_rendezvous"]
+  },
+  "cases": [
+    {
+      "matrix_id": "smoke_kkt_4",
+      "sequence_id": "ocp_lqr_seq_01",
+      "family_id": "ocp_lqr",
+      "symmetry": "indefinite",
+      "n": 4,
+      "split": "train",
+      "mode": "warm_sequence",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    }
+  ]
+}

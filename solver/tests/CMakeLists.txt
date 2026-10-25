@@ -282,3 +282,20 @@ if(WIN32)
 endif()
 add_test(NAME Refinement COMMAND test_refinement --gtest_filter=Refinement.*)
 add_test(NAME Matching COMMAND test_refinement --gtest_filter=Matching.*)
+
+# --- Task 6: Benchmark adapters tests ---
+
+add_executable(test_benchmark_adapters
+    test_benchmark_adapters.cpp
+    ../benchmarks/common/validation.cpp
+    ../benchmarks/adapters/hsl.cpp
+    ../benchmarks/adapters/spral.cpp
+    ../benchmarks/adapters/mumps.cpp
+    ../benchmarks/adapters/pardiso.cpp
+    ../benchmarks/adapters/cholmod.cpp
+)
+target_link_libraries(test_benchmark_adapters PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_benchmark_adapters PRIVATE psapi)
+endif()
+add_test(NAME BenchmarkAdapters COMMAND test_benchmark_adapters)

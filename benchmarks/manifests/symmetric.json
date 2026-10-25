@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "suite": "symmetric",
+  "description": "General SPD and symmetric indefinite manifest with family-disjoint splits",
+  "solvers": ["smf", "ma27", "ma57", "ma86", "ma87", "ma97", "ssids", "mumps", "mkl_pardiso", "cholmod"],
+  "required_baselines": ["ma57", "ma86", "ma87", "ma97", "cholmod"],
+  "cases": [
+    {
+      "matrix_id": "smoke_spd_tridiag_10",
+      "sequence_id": "smoke_spd_tridiag_10",
+      "family_id": "fdm_poisson",
+      "symmetry": "spd",
+      "n": 10,
+      "split": "train",
+      "mode": "cold",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    },
+    {
+      "matrix_id": "smoke_indef_exchange_2",
+      "sequence_id": "smoke_indef_exchange_2",
+      "family_id": "adversarial_indef",
+      "symmetry": "indefinite",
+      "n": 2,
+      "split": "test",
+      "mode": "cold",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    }
+  ]
+}
