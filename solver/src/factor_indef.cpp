@@ -449,7 +449,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
       }
       ws.node_results[static_cast<std::size_t>(s)] = std::move(fr);
     };
-    run_parallel_postorder(keep.supernodes, process_node, ctrl.num_threads);
+    ExecutionPolicy policy;
+    policy.threads = ctrl.num_threads;
+    policy.memory_budget_bytes = ctrl.memory_budget_bytes;
+    policy.min_task_flops = ctrl.factor_parallel_min_flops;
+    policy.deterministic = ctrl.deterministic;
+    run_costed_postorder(keep.supernodes, keep.fronts, policy, process_node);
   } else
 #endif
   {

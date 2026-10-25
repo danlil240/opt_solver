@@ -28,6 +28,7 @@ struct Control {
     // Parallelism
     int            num_threads   = 1;
     bool           deterministic = false;
+    uint64_t       memory_budget_bytes = 0; // 0 = unbounded
     int64_t        factor_parallel_min_flops = 10000;
     int64_t        solve_parallel_min_entries = 100000;
 

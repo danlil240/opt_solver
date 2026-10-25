@@ -311,3 +311,15 @@ if(WIN32)
     target_link_libraries(test_blocked_indef PRIVATE psapi)
 endif()
 add_test(NAME BlockedIndef COMMAND test_blocked_indef)
+
+# --- Task 8: Task budget and memory-aware parallel scheduling tests ---
+
+add_executable(test_task_budget
+    test_task_budget.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_task_budget PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_task_budget PRIVATE psapi)
+endif()
+add_test(NAME TaskBudget COMMAND test_task_budget)
