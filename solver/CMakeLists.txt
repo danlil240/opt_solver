@@ -184,11 +184,86 @@ if(DMUMPS_LIBRARY AND MUMPS_INCLUDE_DIR)
         HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
     find_library(MPISEQ_LIBRARY NAMES mpiseq_seq mpiseq
         HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
+    find_library(PORD_LIBRARY NAMES pord
+        HINTS /usr/lib /usr/lib/x86_64-linux-gnu)
     set(SMF_HAS_MUMPS ON)
     message(STATUS "smf: MUMPS found at ${DMUMPS_LIBRARY} -- SMF_HAS_MUMPS=ON")
 else()
     message(STATUS "smf: MUMPS not found -- MUMPS benchmark disabled")
 endif()
+
+# ---- Benchmark baseline adapters: consolidated dependency interface ------
+# Adapter sources are compiled into both smf_bench_common (benchmarks/) and
+# test_benchmark_adapters (tests/), so discovered baseline includes, libraries
+# and activation defines are carried by a single interface target.
+add_library(smf_bench_baselines INTERFACE)
+if(SMF_HAS_CHOLMOD AND CHOLMOD_LIBRARY AND CHOLMOD_INCLUDE_DIR)
+    target_link_libraries(smf_bench_baselines INTERFACE ${CHOLMOD_LIBRARY})
+    target_include_directories(smf_bench_baselines INTERFACE ${CHOLMOD_INCLUDE_DIR})
+    target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_CHOLMOD_IMPL=1)
+    # Optional SuiteSparse support libraries (required by static CHOLMOD
+    # builds; harmless when CHOLMOD is a shared library).
+    foreach(_ss_lib suitesparseconfig amd colamd camd ccolamd)
+        find_library(SMF_SS_${_ss_lib}_LIBRARY NAMES ${_ss_lib})
+        if(SMF_SS_${_ss_lib}_LIBRARY)
+            target_link_libraries(smf_bench_baselines INTERFACE
+                ${SMF_SS_${_ss_lib}_LIBRARY})
+        endif()
+    endforeach()
+endif()
+if(SMF_HAS_MUMPS AND DMUMPS_LIBRARY AND MUMPS_INCLUDE_DIR)
+    set(_smf_mumps_bench_libs ${DMUMPS_LIBRARY})
+    if(MUMPS_COMMON_LIBRARY)
+        list(APPEND _smf_mumps_bench_libs ${MUMPS_COMMON_LIBRARY})
+    endif()
+    if(PORD_LIBRARY)
+        list(APPEND _smf_mumps_bench_libs ${PORD_LIBRARY})
+    endif()
+    if(MPISEQ_LIBRARY)
+        list(APPEND _smf_mumps_bench_libs ${MPISEQ_LIBRARY})
+    endif()
+    target_link_libraries(smf_bench_baselines INTERFACE ${_smf_mumps_bench_libs})
+    target_include_directories(smf_bench_baselines INTERFACE ${MUMPS_INCLUDE_DIR})
+    target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_MUMPS_IMPL=1)
+endif()
+if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
+    # MKL PARDISO symbols are exported by mkl_rt, already linked via BLAS.
+    target_include_directories(smf_bench_baselines INTERFACE ${MKL_INCLUDE_DIR})
+    target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_MKL_PARDISO=1)
+endif()
+
+# ---- Runtime dependency DLL staging (Windows) -----------------------------
+# Point SMF_DEPS_DLL_DIR at a directory containing dependency DLLs
+# (e.g. a conda env's Library/bin) and they are copied next to executables
+# registered via smf_stage_runtime_dlls(target).
+set(SMF_DEPS_DLL_DIR "" CACHE PATH
+    "Directory containing third-party runtime DLLs to stage beside executables")
+function(smf_stage_runtime_dlls target)
+    if(NOT (WIN32 AND SMF_DEPS_DLL_DIR AND EXISTS "${SMF_DEPS_DLL_DIR}"))
+        return()
+    endif()
+    file(GLOB _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/mkl_*.dll")
+    if(_smf_dep_dlls)
+        list(FILTER _smf_dep_dlls EXCLUDE REGEX
+            "blacs|scalapack|cdft|tbb_thread")
+    endif()
+    foreach(_extra
+            libiomp5md.dll libomp.dll
+            cholmod.dll amd.dll camd.dll colamd.dll ccolamd.dll
+            suitesparseconfig.dll metis.dll
+            dmumps.dll cmumps.dll smumps.dll zmumps.dll
+            libblas.dll liblapack.dll libcblas.dll)
+        if(EXISTS "${SMF_DEPS_DLL_DIR}/${_extra}")
+            list(APPEND _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/${_extra}")
+        endif()
+    endforeach()
+    if(_smf_dep_dlls)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_smf_dep_dlls} "$<TARGET_FILE_DIR:${target}>"
+            VERBATIM)
+    endif()
+endfunction()
 
 # ---- Enforce required benchmark baselines when requested -----------------
 if(SMF_REQUIRE_BENCHMARK_BASELINES)

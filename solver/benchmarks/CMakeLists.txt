@@ -8,7 +8,7 @@ add_library(smf_bench_common STATIC
     adapters/pardiso.cpp
     adapters/cholmod.cpp
 )
-target_link_libraries(smf_bench_common PUBLIC smf)
+target_link_libraries(smf_bench_common PUBLIC smf smf_bench_baselines)
 target_include_directories(smf_bench_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 if(WIN32)
     target_link_libraries(smf_bench_common PUBLIC psapi)
@@ -22,6 +22,7 @@ macro(smf_benchmark name)
         target_link_libraries(${name} PRIVATE Eigen3::Eigen)
         target_compile_definitions(${name} PRIVATE SMF_HAS_EIGEN=1)
     endif()
+    smf_stage_runtime_dlls(${name})
 endmacro()
 
 smf_benchmark(bench_poisson)

@@ -44,6 +44,7 @@ TEST(BenchmarkAdapters, SmfAdapterAndAllRegisteredAdapters) {
     ASSERT_FALSE(ids.empty());
 
     for (const auto &id : ids) {
+        SCOPED_TRACE("adapter=" + id);
         auto adapter = make_solver_adapter(id);
         ASSERT_NE(adapter.get(), nullptr) << "Null adapter for " << id;
         AdapterIdentity ident = adapter->identity();
@@ -109,7 +110,11 @@ TEST(BenchmarkAdapters, SmfAdapterAndAllRegisteredAdapters) {
             EXPECT_EQ(st.inertia_zero, 0);
         }
 
-        // Test 3: Singularity detection
+        // Test 3: Singularity must never produce a falsely successful solve.
+        // Factor-time detection (MUMPS/CHOLMOD/smf) is preferred, but solvers
+        // that internally regularize (e.g. MKL PARDISO pivot perturbation) may
+        // report factor Success; in that case the solution must fail the shared
+        // backward-error qualification on the original system.
         {
             Control ctrl;
             ctrl.matrix_type = ident.supports_indefinite
@@ -119,7 +124,16 @@ TEST(BenchmarkAdapters, SmfAdapterAndAllRegisteredAdapters) {
             CscLower S2 = make_singular_2x2();
             ASSERT_EQ(adapter->analyse(S2), Outcome::Success);
             Outcome f_out = adapter->factor(S2.values);
-            EXPECT_NE(f_out, Outcome::Success);
+            if (f_out == Outcome::Success) {
+                std::vector<double> b = {1.0, 1.0};
+                std::vector<double> x = b;
+                Outcome s_out = adapter->solve(x, 1);
+                if (s_out == Outcome::Success) {
+                    auto v = validate(S2, b, x, 1);
+                    EXPECT_FALSE(is_qualified_validation(v))
+                        << "singular solve passed qualification for " << id;
+                }
+            }
         }
     }
 }

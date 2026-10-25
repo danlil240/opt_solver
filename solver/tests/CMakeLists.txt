@@ -294,10 +294,12 @@ add_executable(test_benchmark_adapters
     ../benchmarks/adapters/pardiso.cpp
     ../benchmarks/adapters/cholmod.cpp
 )
-target_link_libraries(test_benchmark_adapters PRIVATE smf GTest::gtest_main)
+target_link_libraries(test_benchmark_adapters PRIVATE
+    smf smf_bench_baselines GTest::gtest_main)
 if(WIN32)
     target_link_libraries(test_benchmark_adapters PRIVATE psapi)
 endif()
+smf_stage_runtime_dlls(test_benchmark_adapters)
 add_test(NAME BenchmarkAdapters COMMAND test_benchmark_adapters)
 
 # --- Task 7: Blocked indefinite frontal kernel tests ---
