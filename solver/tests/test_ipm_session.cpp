@@ -1,6 +1,8 @@
 // IpmSession with every IPM feature off: a pass-through to Solver that must
-// reproduce it exactly on recorded IPOPT KKT sequences.
+// reproduce it exactly on recorded IPOPT KKT sequences. Then Feature 1:
+// inertia learning and early abort.
 
+#include "../benchmarks/common/validation.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/dense_indef.hpp"
@@ -95,6 +97,65 @@ double max_rel_diff(const std::vector<double> &a, const std::vector<double> &b) 
         s = std::max(s, std::abs(b[i]));
     }
     return s > 0.0 ? d / s : d;
+}
+
+// KKT [[H, J^T], [J, 0]] with kN = 40 primal and kM = 15 constraint rows
+// (the Task 6 fixture of test_ipm_hooks.cpp). H = diag(-1, -1, -1, 2, ...):
+// the three negative coordinates lie in null(J), J has full row rank, so the
+// inertia is (37, 18, 0).
+constexpr int kN = 40;
+constexpr int kM = 15;
+
+CscLower small_kkt() {
+    std::vector<std::vector<std::pair<int, double>>> cols(kN + kM);
+    for (int j = 0; j < kN; ++j)
+        cols[static_cast<std::size_t>(j)].push_back({j, j < 3 ? -1.0 : 2.0 + 0.01 * j});
+    for (int i = 0; i < kM; ++i) {
+        cols[static_cast<std::size_t>(3 + i)].push_back({kN + i, 1.0 + 0.1 * i});
+        cols[static_cast<std::size_t>(18 + i)].push_back({kN + i, 0.5});
+        cols[static_cast<std::size_t>(33 + i % 7)].push_back({kN + i, 0.25});
+    }
+    CscLower A;
+    A.n = kN + kM;
+    A.col_ptr.push_back(0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (const auto &[i, x] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(x);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// Value of entry (row, col) of a lower CSC matrix (it must be in the pattern).
+double &entry(CscLower &A, Int row, Int col) {
+    for (Int p = A.col_ptr[static_cast<std::size_t>(col)]; p < A.col_ptr[static_cast<std::size_t>(col) + 1]; ++p)
+        if (A.row_idx[static_cast<std::size_t>(p)] == row) return A.values[static_cast<std::size_t>(p)];
+    ADD_FAILURE() << "entry (" << row << ", " << col << ") not in the pattern";
+    static double dummy = 0.0;
+    return dummy;
+}
+
+// small_kkt with H shifted so that 6 directions of null(J) are negative:
+// H_jj = -20 for j = 3, 4, 5 outweighs the positive columns J couples them
+// to. Same pattern; inertia (34, 21, 0).
+CscLower bad_kkt() {
+    CscLower A = small_kkt();
+    for (Int j = 3; j < 6; ++j) entry(A, j, j) = -20.0;
+    return A;
+}
+
+// small_kkt with the last row of J zeroed: J is rank-deficient by 1 and the
+// KKT has one zero eigenvalue (inertia (37, 17, 1)).
+CscLower singular_kkt() {
+    CscLower A = small_kkt();
+    const Int r = kN + kM - 1;
+    entry(A, r, 3 + kM - 1) = 0.0;
+    entry(A, r, 18 + kM - 1) = 0.0;
+    entry(A, r, 33 + (kM - 1) % 7) = 0.0;
+    return A;
 }
 
 // 2x2 saddle point [[1, 1], [1, 0]] plus an SPD diagonal block: n = 3,
@@ -258,4 +319,207 @@ TEST(IpmSession, DeferredAnalysisAndErrors) {
     EXPECT_EQ(session.factor(v), IpmFactorStatus::Ok);
     EXPECT_EQ(session.stats().factorizations, 3);
     EXPECT_EQ(session.stats().accepted, 1);
+}
+
+// ---------------------------------------------------------------------------
+// Feature 1: inertia learning and early abort.
+
+namespace {
+
+// Backward error of x as a solution of A x = b.
+double eta(const CscLower &A, const std::vector<double> &b, const std::vector<double> &x) {
+    return smf::bench::validate(A, b, x, 1).eta_inf;
+}
+
+// A session on the small KKT pattern with Feature 1 on (IpmControl defaults).
+struct AbortHarness {
+    Control ctrl = ipopt_control();
+    CscLower good = small_kkt();
+    CscLower bad = bad_kkt();
+    IpmSession session;
+    int n = static_cast<int>(good.n);
+
+    AbortHarness() { EXPECT_EQ(session.analyse(good, {}, ctrl, IpmControl{}), ErrorCode::Success); }
+
+    // Factor the good KKT and solve with it: the session learns 18.
+    void accept_good() {
+        ASSERT_EQ(session.factor(good.values), IpmFactorStatus::Ok);
+        ASSERT_EQ(session.inertia().negative, kM + 3);
+        std::vector<double> x = rhs(good.n);
+        ASSERT_EQ(session.solve(x.data(), n, 1), 0);
+        EXPECT_LE(eta(good, rhs(good.n), x), 1e-10);
+    }
+};
+
+} // namespace
+
+TEST(IpmSession, FixtureInertia) {
+    // The fixtures' inertia, with every feature off.
+    const Control ctrl = ipopt_control();
+    const std::pair<CscLower, InertiaCounts> cases[] = {
+        {small_kkt(), {37, 18, 0}}, {bad_kkt(), {34, 21, 0}}, {singular_kkt(), {37, 17, 1}}};
+    for (const auto &[A, want] : cases) {
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, {}, ctrl, features_off()), ErrorCode::Success);
+        const IpmFactorStatus st = s.factor(A.values);
+        EXPECT_TRUE(st == IpmFactorStatus::Ok || st == IpmFactorStatus::Singular);
+        const InertiaCounts got = s.inertia();
+        EXPECT_TRUE(got.positive == want.positive && got.negative == want.negative && got.zero == want.zero)
+            << "inertia (" << got.positive << ", " << got.negative << ", " << got.zero << ")";
+    }
+}
+
+TEST(IpmSession, LearnsAndAborts) {
+    AbortHarness h;
+    EXPECT_FALSE(h.session.expected_negatives().has_value());
+    h.accept_good();
+    ASSERT_TRUE(h.session.expected_negatives().has_value());
+    EXPECT_EQ(*h.session.expected_negatives(), 18);
+
+    EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::WrongInertia);
+    EXPECT_EQ(h.session.info().factor_status, FactorStatus::InertiaExceeded);
+    EXPECT_GT(h.session.info().num_negative, 18); // partial count
+    EXPECT_LE(h.session.info().num_negative, 21);
+    EXPECT_GT(h.session.inertia().negative, 18);
+    const IpmStats &st = h.session.stats();
+    EXPECT_EQ(st.factorizations, 2);
+    EXPECT_EQ(st.accepted, 1);
+    EXPECT_EQ(st.aborted, 1);
+    EXPECT_GE(st.flops_avoided, 0.0);
+    EXPECT_EQ(st.flops_avoided, h.session.info().aborted_flops_skipped);
+
+    // A refactor with the right inertia (IPOPT's next delta) is not aborted.
+    EXPECT_EQ(h.session.factor(h.good.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(h.session.inertia().negative, 18);
+    EXPECT_EQ(h.session.stats().aborted, 1);
+}
+
+TEST(IpmSession, NoAbortBeforeFirstAccept) {
+    AbortHarness h;
+    EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(h.session.inertia().negative, 21);
+    // A factor that is never solved with teaches nothing.
+    EXPECT_EQ(h.session.factor(h.good.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(h.session.inertia().negative, 21);
+    EXPECT_FALSE(h.session.expected_negatives().has_value());
+    EXPECT_EQ(h.session.stats().aborted, 0);
+    EXPECT_EQ(h.session.stats().accepted, 0);
+}
+
+TEST(IpmSession, SolveAfterAbortCompletes) {
+    AbortHarness h;
+    h.accept_good();
+    ASSERT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::WrongInertia);
+
+    const std::vector<double> b = rhs(h.bad.n);
+    std::vector<double> x = b;
+    ASSERT_EQ(h.session.solve(x.data(), h.n, 1), 0);
+    EXPECT_LE(eta(h.bad, b, x), 1e-10);
+    // The completed factor is the one accepted: full inertia, learned.
+    EXPECT_EQ(h.session.inertia().negative, 21);
+    EXPECT_EQ(h.session.inertia().positive, 34);
+    EXPECT_EQ(h.session.stats().accepted, 2);
+    EXPECT_EQ(*h.session.expected_negatives(), 21);
+    // Further solves reuse the completed factor.
+    std::vector<double> y = b;
+    ASSERT_EQ(h.session.solve(y.data(), h.n, 1), 0);
+    EXPECT_EQ(max_rel_diff(y, x), 0.0);
+    EXPECT_EQ(h.session.stats().accepted, 2);
+}
+
+// Ruling 1: the completion refactors with the FACTOR's Control and user
+// scale, not with what a caller set for the solve (the MA97 plugin sets the
+// solve's control block, with no scale, right before solving).
+TEST(IpmSession, SolveAfterAbortUsesFactorScale) {
+    AbortHarness h;
+    Control fctrl = h.ctrl;
+    fctrl.scaling = ScalingMethod::UserSupplied;
+    std::vector<double> scale(static_cast<std::size_t>(h.n));
+    for (std::size_t i = 0; i < scale.size(); ++i) scale[i] = 0.5 + 0.01 * static_cast<double>(i);
+
+    h.session.set_control(fctrl);
+    h.session.set_user_scale(scale.data());
+    ASSERT_EQ(h.session.factor(h.good.values), IpmFactorStatus::Ok);
+    h.session.set_control(fctrl); // solve-time control: no user scale
+    std::vector<double> x = rhs(h.good.n);
+    ASSERT_EQ(h.session.solve(x.data(), h.n, 1), 0);
+    ASSERT_EQ(*h.session.expected_negatives(), 18);
+
+    h.session.set_control(fctrl);
+    h.session.set_user_scale(scale.data());
+    ASSERT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::WrongInertia);
+    // The caller's buffer is gone (a zero scale would be rejected).
+    std::fill(scale.begin(), scale.end(), 0.0);
+    Control sctrl = fctrl;
+    sctrl.solve_use_blas3_single_rhs = false;
+    h.session.set_control(sctrl);
+
+    const std::vector<double> b = rhs(h.bad.n);
+    x = b;
+    ASSERT_EQ(h.session.solve(x.data(), h.n, 1), 0);
+    EXPECT_LE(eta(h.bad, b, x), 1e-10);
+    EXPECT_EQ(h.session.inertia().negative, 21);
+}
+
+TEST(IpmSession, ExplicitExpectationAndSwitches) {
+    {
+        // An explicit expectation arms the abort before any accept ...
+        AbortHarness h;
+        EXPECT_EQ(h.session.factor(h.bad.values, 18), IpmFactorStatus::WrongInertia);
+        EXPECT_EQ(h.session.stats().aborted, 1);
+        // ... and overrides the learned one.
+        h.accept_good();
+        EXPECT_EQ(h.session.factor(h.bad.values, 21), IpmFactorStatus::Ok);
+        EXPECT_EQ(h.session.factor(h.good.values, 10), IpmFactorStatus::WrongInertia);
+    }
+    {
+        // learn_inertia off: no learned expectation, no abort.
+        IpmControl ipm;
+        ipm.learn_inertia = false;
+        AbortHarness h;
+        ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, ipm), ErrorCode::Success);
+        h.accept_good();
+        EXPECT_FALSE(h.session.expected_negatives().has_value());
+        EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
+    }
+    {
+        // abort off: never aborts, even with an explicit expectation.
+        AbortHarness h;
+        ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, features_off()), ErrorCode::Success);
+        h.accept_good();
+        EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
+        EXPECT_EQ(h.session.factor(h.bad.values, 18), IpmFactorStatus::Ok);
+        EXPECT_EQ(h.session.stats().aborted, 0);
+    }
+    {
+        // A new analysis forgets the expectation.
+        AbortHarness h;
+        h.accept_good();
+        ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, IpmControl{}), ErrorCode::Success);
+        EXPECT_FALSE(h.session.expected_negatives().has_value());
+        EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
+    }
+}
+
+// Review Focus 3: a singular KKT has fewer negatives than expected, so the
+// abort never fires; its zero pivots are still reported.
+TEST(IpmSession, SingularStillReportsZeros) {
+    const CscLower S = singular_kkt();
+    {
+        AbortHarness h; // no accepted factor
+        const IpmFactorStatus st = h.session.factor(S.values);
+        EXPECT_TRUE(st == IpmFactorStatus::Singular || st == IpmFactorStatus::Ok);
+        EXPECT_NE(st, IpmFactorStatus::WrongInertia);
+        EXPECT_GE(h.session.inertia().zero, 1);
+    }
+    {
+        AbortHarness h; // expectation 18 learned, then the singular one
+        h.accept_good();
+        const IpmFactorStatus st = h.session.factor(S.values);
+        EXPECT_TRUE(st == IpmFactorStatus::Singular || st == IpmFactorStatus::Ok);
+        EXPECT_NE(st, IpmFactorStatus::WrongInertia);
+        EXPECT_GE(h.session.inertia().zero, 1);
+        EXPECT_EQ(h.session.stats().aborted, 0);
+    }
 }

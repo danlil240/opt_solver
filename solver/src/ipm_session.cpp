@@ -17,8 +17,12 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   stats_ = IpmStats{};
   ctrl_ = ctrl;
   ipm_ = ipm;
+  factor_ctrl_ = ctrl;
+  factor_scale_.clear();
+  expected_neg_.reset();
   user_scale_once_ = false;
   solvable_ = false;
+  aborted_ = false;
   pending_accept_ = false;
   last_spd_ok_ = false;
 
@@ -52,8 +56,9 @@ ErrorCode IpmSession::run_analysis() {
 }
 
 IpmFactorStatus IpmSession::factor(std::span<const double> values,
-                                   std::optional<int> /*expected_negatives*/) {
+                                   std::optional<int> expected_negatives) {
   solvable_ = false;
+  aborted_ = false;
   pending_accept_ = false;
   last_spd_ok_ = false;
   if (mat_.n <= 0) {
@@ -66,22 +71,45 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
   }
   std::copy(values.begin(), values.end(), mat_.values.begin());
 
-  const auto clear_user_scale = [this] {
-    if (user_scale_once_) {
-      ctrl_.user_scale = nullptr;
-      user_scale_once_ = false;
-    }
-  };
-
-  if (!ak_ && run_analysis() != ErrorCode::Success) {
-    clear_user_scale();
-    return IpmFactorStatus::Error;
+  // This factor's own Control, kept for completing an abort in solve(): the
+  // caller may replace ctrl_ (solve options) and drop its scale buffer.
+  factor_ctrl_ = ctrl_;
+  if (ctrl_.user_scale != nullptr) {
+    factor_scale_.assign(ctrl_.user_scale, ctrl_.user_scale + mat_.n);
+    factor_ctrl_.user_scale = factor_scale_.data();
+  } else {
+    factor_scale_.clear();
+  }
+  if (user_scale_once_) {
+    ctrl_.user_scale = nullptr;
+    user_scale_once_ = false;
   }
 
-  const FactorStatus fs = solver_.factor(*ak_, mat_, ctrl_, info_, fk_, nws_);
-  info_.factor_status = fs;
-  clear_user_scale();
+  if (!ak_ && run_analysis() != ErrorCode::Success) return IpmFactorStatus::Error;
+
+  // Early abort: armed with an expectation (explicit, else learned) on an
+  // indefinite matrix. Negative pivots only accumulate, so exceeding the
+  // expectation proves the inertia wrong.
+  int limit = -1;
+  const std::optional<int> expected = expected_negatives ? expected_negatives : expected_neg_;
+  if (ipm_.abort_on_wrong_inertia && expected && *expected >= 0 &&
+      factor_ctrl_.matrix_type != MatrixType::RealSymmetricPositiveDefinite)
+    limit = *expected;
+
   ++stats_.factorizations;
+  const IpmFactorStatus result = run_factor(limit);
+  if (result == IpmFactorStatus::WrongInertia) {
+    ++stats_.aborted;
+    stats_.flops_avoided += info_.aborted_flops_skipped;
+  }
+  return result;
+}
+
+IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
+  factor_ctrl_.max_negative_pivots = max_negative_pivots;
+  const FactorStatus fs = solver_.factor(*ak_, mat_, factor_ctrl_, info_, fk_, nws_);
+  factor_ctrl_.max_negative_pivots = -1;
+  info_.factor_status = fs;
 
   IpmFactorStatus result = IpmFactorStatus::Error;
   switch (fs) {
@@ -94,20 +122,23 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
     if (info_.status == ErrorCode::SingularMatrix) result = IpmFactorStatus::Singular;
     break;
   case FactorStatus::InertiaExceeded:
-    ++stats_.aborted;
     result = IpmFactorStatus::WrongInertia;
     break;
   case FactorStatus::NotPositiveDefinite:
     break;
   }
   solvable_ = result == IpmFactorStatus::Ok || result == IpmFactorStatus::Singular;
+  aborted_ = result == IpmFactorStatus::WrongInertia;
   pending_accept_ = solvable_;
-  last_spd_ok_ = ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
+  last_spd_ok_ = factor_ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
                  fs == FactorStatus::Success;
   return result;
 }
 
 int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
+  // Safety: the caller wants to solve with a factor that stopped early (a
+  // wrong expectation). Factor the same values in full first.
+  if (aborted_ && ak_) run_factor(-1);
   if (!solvable_) {
     solve_info_.status = ErrorCode::NotInitialised;
     return static_cast<int>(ErrorCode::NotInitialised);
@@ -116,6 +147,7 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
   if (rc == 0 && pending_accept_) {
     ++stats_.accepted;
     pending_accept_ = false;
+    if (ipm_.learn_inertia && !last_spd_ok_) expected_neg_ = info_.num_negative;
   }
   return rc;
 }

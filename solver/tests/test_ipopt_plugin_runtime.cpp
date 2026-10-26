@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -342,4 +345,120 @@ TEST(Ma97PluginRuntime, QualityRetryAndTeardown) {
 
     sym.free_fkeep(&fkeep);
     EXPECT_EQ(fkeep, nullptr);
+}
+
+namespace {
+
+// Lower-CSC KKT of test_ipm_session.cpp: [[H, J^T], [J, 0]], 40 primal and
+// 15 constraint rows, H = diag(-1, -1, -1, 2, ...); inertia (37, 18, 0).
+// With `bad`, H_jj = -20 for j = 3, 4, 5: inertia (34, 21, 0).
+struct SmallKkt {
+    int n = 55;
+    std::vector<int> ptr, row;
+    std::vector<double> val;
+    explicit SmallKkt(bool bad) {
+        std::vector<std::vector<std::pair<int, double>>> cols(55);
+        for (int j = 0; j < 40; ++j)
+            cols[j].push_back({j, j < 3 ? -1.0 : (bad && j < 6) ? -20.0 : 2.0 + 0.01 * j});
+        for (int i = 0; i < 15; ++i) {
+            cols[3 + i].push_back({40 + i, 1.0 + 0.1 * i});
+            cols[18 + i].push_back({40 + i, 0.5});
+            cols[33 + i % 7].push_back({40 + i, 0.25});
+        }
+        ptr.push_back(0);
+        for (auto &c : cols) {
+            std::sort(c.begin(), c.end());
+            for (const auto &[i, x] : c) {
+                row.push_back(i);
+                val.push_back(x);
+            }
+            ptr.push_back(static_cast<int>(row.size()));
+        }
+    }
+    // A * ones (symmetric, from the lower triangle).
+    std::vector<double> rhs_of_ones() const {
+        std::vector<double> b(n, 0.0);
+        for (int j = 0; j < n; ++j)
+            for (int p = ptr[j]; p < ptr[j + 1]; ++p) {
+                b[row[p]] += val[p];
+                if (row[p] != j) b[j] += val[p];
+            }
+        return b;
+    }
+};
+
+void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    if (*value) setenv(name, value, 1); else unsetenv(name);
+#endif
+}
+
+} // namespace
+
+// SMF_IPM_ABORT=1: once a factor has been solved with, a later one with more
+// negative pivots stops early. MA97 has no status for that: flag 0 and
+// num_neg = the partial count (> the learned 18), which IPOPT rejects. A
+// scale computed by that factor is still returned, and a solve with its
+// fkeep completes the factorization first.
+TEST(Ma97PluginRuntime, EarlyAbortOnWrongInertia) {
+    // The plugin reads SMF_IPM_ABORT once, at its first analyse after it is
+    // loaded (the earlier tests unload it again).
+    set_env("SMF_IPM_ABORT", "1");
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+
+    const SmallKkt good(false), bad(true);
+    const int n = good.n;
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 0;
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, good.ptr.data(), good.row.data(), nullptr, &akeep, &ctrl, &info, nullptr);
+    set_env("SMF_IPM_ABORT", "");
+    ASSERT_EQ(info.flag, 0);
+
+    // No expectation yet: the bad matrix factors in full.
+    sym.factor(4, bad.ptr.data(), bad.row.data(), bad.val.data(), &akeep, &fkeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_EQ(info.num_neg, 21);
+
+    // Accepted (solved with): 18 is learned.
+    sym.factor(4, good.ptr.data(), good.row.data(), good.val.data(), &akeep, &fkeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    ASSERT_EQ(info.num_neg, 18);
+    std::vector<double> x = good.rhs_of_ones();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+
+    // Wrong inertia, in a factor that also computes the scaling.
+    std::vector<double> scale(n, -1.0);
+    ctrl.scaling = 1;
+    sym.factor(4, bad.ptr.data(), bad.row.data(), bad.val.data(), &akeep, &fkeep, &ctrl, &info, scale.data());
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_GT(info.num_neg, 18);
+    EXPECT_LE(info.num_neg, 21);
+    for (double s : scale) EXPECT_GT(s, 0.0);
+
+    // Solving with the aborted factor completes it: the bad system's answer.
+    ctrl.scaling = 0;
+    x = bad.rhs_of_ones();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_EQ(info.num_neg, 21);
+    for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-9);
+
+    // The returned scale is reusable (IPOPT's next factor passes it back).
+    sym.factor(4, good.ptr.data(), good.row.data(), good.val.data(), &akeep, &fkeep, &ctrl, &info, scale.data());
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_LE(info.num_neg, 21); // expectation is now 21: no abort
+    x = good.rhs_of_ones();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+    for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-9);
+
+    sym.finalise(&akeep, &fkeep);
 }

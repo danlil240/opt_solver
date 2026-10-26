@@ -249,7 +249,7 @@ def ipopt_env(threads: int) -> dict:
 
 
 def solver_options(solver: str) -> list[str]:
-    if solver == "smf":
+    if solver in ("smf", "smf_abort"):
         return ["linear_solver ma97", f"hsllib {BUILD_REL / 'smf_ma97.dll'}"]
     if solver == "smf_noscale":
         # IPOPT's MA97 interface defaults to MC64 scaling, which the plugin
@@ -268,10 +268,16 @@ def solver_options(solver: str) -> list[str]:
 
 
 def solver_env(solver: str) -> dict:
-    """Extra environment variables per solver id (smf* always traces factorizations)."""
+    """Extra environment variables per solver id (smf* always traces factorizations).
+
+    smf_abort = smf with the IPM early abort on wrong inertia (SMF_IPM_ABORT=1).
+    """
+    env = {}
     if solver.startswith("smf"):
-        return {"SMF_PLUGIN_STATS": "2"}
-    return {}
+        env["SMF_PLUGIN_STATS"] = "2"
+    if solver == "smf_abort":
+        env["SMF_IPM_ABORT"] = "1"
+    return env
 
 
 def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
@@ -442,11 +448,12 @@ def e2e(args) -> int:
         nl = build_nl(name, args.scale)
         for t in threads:
             for s in solvers:
-                res = run_ipopt(nl, s, WORK / "e2e" / f"{name}_{s}_t{t}", t, timeout=args.timeout,
-                                 max_iter=max_iter_for(name))
+                rundir = WORK / "e2e" / f"{name}_{s}_t{t}"
+                res = run_ipopt(nl, s, rundir, t, timeout=args.timeout, max_iter=max_iter_for(name))
                 res["model"] = name
+                res["log"] = (rundir / "ipopt.log").relative_to(REPO).as_posix()
                 results.append(res)
-                print(f"{name:22s} t={t:2d} {s:6s} {res['status'][:28]:28s} iters={res['iterations']} "
+                print(f"{name:22s} t={t:2d} {s:9s} {res['status'][:28]:28s} iters={res['iterations']} "
                       f"wall={res['ipopt_wall_s']:.2f}s fact={res['linear_system_factorization_s']} "
                       f"solve={res['linear_system_backsolve_s']}", flush=True)
     out = pathlib.Path(args.output)

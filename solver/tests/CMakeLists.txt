@@ -308,10 +308,16 @@ endif()
 add_test(NAME IpmHooks COMMAND test_ipm_hooks)
 set_tests_properties(IpmHooks PROPERTIES TIMEOUT 30)
 
-# --- IPM mode: IpmSession (features off: pass-through to Solver) ---
+# --- IPM mode: IpmSession (pass-through to Solver; Feature 1 inertia learning and early abort) ---
 
-add_executable(test_ipm_session test_ipm_session.cpp)
+add_executable(test_ipm_session
+    test_ipm_session.cpp
+    ../benchmarks/common/validation.cpp
+)
 target_link_libraries(test_ipm_session PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_session PRIVATE psapi)
+endif()
 add_test(NAME IpmSession COMMAND test_ipm_session)
 set_tests_properties(IpmSession PROPERTIES TIMEOUT 60)
 

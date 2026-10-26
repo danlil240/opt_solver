@@ -88,14 +88,24 @@ struct SmfFkeep
     int n = 0;
     int num_neg = 0;
     int num_two = 0;
+    bool aborted = false; // factor stopped on wrong inertia: num_neg is a partial count
 };
 
-// The IPM features stay off here until their default is decided.
+static bool env_flag(const char* name, bool fallback)
+{
+    const char* v = std::getenv(name);
+    return (v == nullptr || *v == '\0') ? fallback : std::atoi(v) != 0;
+}
+
+// The IPM features are read from the environment until their defaults are
+// decided (the MA97 interface has no slots for them):
+//   SMF_IPM_ABORT=1  inertia learning and early abort (Feature 1), default off.
 static smf::IpmControl plugin_ipm_control()
 {
+    static const bool abort_on = env_flag("SMF_IPM_ABORT", false);
     smf::IpmControl ipm;
-    ipm.learn_inertia = false;
-    ipm.abort_on_wrong_inertia = false;
+    ipm.learn_inertia = abort_on;
+    ipm.abort_on_wrong_inertia = abort_on;
     ipm.static_mode = smf::StaticMode::Off;
     return ipm;
 }
@@ -441,7 +451,8 @@ extern "C"
         // is not counted as factorization time.
         const bool analysed_before = session.analysis_keep() != nullptr;
         const auto t_factor = std::chrono::steady_clock::now();
-        session.factor(ak->mat.values);
+        const smf::IpmFactorStatus status = session.factor(ak->mat.values);
+        const bool aborted = status == smf::IpmFactorStatus::WrongInertia;
         const smf::Info& si = session.info();
         if (session.analysis_keep() == nullptr)
         {
@@ -461,6 +472,7 @@ extern "C"
         fw->session = ak->session;
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
+        fw->aborted = false;
         if (g_stats.enabled)
         {
             ++g_stats.factors;
@@ -472,11 +484,14 @@ extern "C"
                         fs == smf::FactorStatus::Success;
         // Per-factorization trace (SMF_PLUGIN_STATS>=2); corr=1 when the previous
         // plugin call was also a factorization (IPOPT inertia correction).
+        // abort=1: stopped on wrong inertia (partial counts); skipped = the
+        // predicted flops of the fronts it did not factor; flops = actual.
         if (g_stats.trace)
         {
             std::fprintf(stderr,
                          "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
-                         "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d\n",
+                         "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d abort=%d flops=%.6e "
+                         "skipped=%.6e\n",
                          g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, si.delayed_pivots,
                          si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
                          pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
@@ -484,13 +499,44 @@ extern "C"
                          ctrl ? ctrl->scaling : -1, computed_scaling ? "out" : (scale ? "in" : "-"),
                          ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
                          static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
-                                                        [](const auto& de) { return de.tag == 2; })));
+                                                        [](const auto& de) { return de.tag == 2; })),
+                         aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0);
         }
         g_stats.last_call_was_factor = true;
 
-        // smf reports input/scaling/allocation failures as Singular too;
-        // only SingularMatrix is the MA97 "singular" warning.
-        if (fs == smf::FactorStatus::Singular && si.status != smf::ErrorCode::SingularMatrix)
+        // Wrong inertia: the factorization stopped once its negative pivots
+        // exceeded the learned expectation. MA97 has no status for it, so it
+        // is a successful factor whose num_neg (the partial count, already
+        // above the expectation) IPOPT rejects; it then refactors with a
+        // larger delta. A solve with this fkeep completes the factorization.
+        // The scaling ran before the abort: return it as for any factor
+        // (IPOPT's reuse strategies keep it for later factorizations).
+        if (aborted)
+        {
+            if (computed_scaling && scale && !fk.scale.empty())
+                std::copy(fk.scale.begin(), fk.scale.end(), scale);
+            fw->num_neg = si.num_negative;
+            fw->num_two = 0;
+            fw->aborted = true;
+            info->flag = 0;
+            info->num_neg = fw->num_neg;
+            info->num_two = 0;
+            info->matrix_rank = ak->n;
+            info->num_delay = si.delayed_pivots;
+            info->maxfront = si.max_front_size;
+            info->num_factor = static_cast<long>(si.actual_factor_entries);
+            info->num_flops = static_cast<long>(si.actual_flops);
+            info->maxsupernode = si.max_supernode_size;
+            info->ordering = si.ordering_used;
+            *fkeep = fw;
+            return;
+        }
+
+        // Every other status but Ok / Singular is a failure; smf reports
+        // input/scaling/allocation failures as FactorStatus::Singular too,
+        // which IpmSession maps to Error (only SingularMatrix is the MA97
+        // "singular" warning).
+        if (status != smf::IpmFactorStatus::Ok && status != smf::IpmFactorStatus::Singular)
         {
             info->flag = -5;
             delete fw;
@@ -532,16 +578,10 @@ extern "C"
             std::copy(fk.scale.begin(), fk.scale.end(), scale);
         }
 
-        if (fs == smf::FactorStatus::Singular)
+        if (status == smf::IpmFactorStatus::Singular)
         {
             info->flag = 7;
             *fkeep = fw;
-            return;
-        }
-        if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays)
-        {
-            info->flag = -5;
-            delete fw;
             return;
         }
 
@@ -630,6 +670,20 @@ extern "C"
                               buf.data() + static_cast<size_t>(j + 1) * n,
                               x + static_cast<size_t>(j) * ldx);
             }
+        }
+
+        // A solve after an aborted factor completed it first: report the
+        // full inertia from now on.
+        if (fw->aborted && rc == 0)
+        {
+            const smf::InertiaCounts in = session.inertia();
+            fw->num_neg = in.negative;
+            const auto& de = session.factor_keep().diag_entries;
+            fw->num_two = static_cast<int>(std::count_if(de.begin(), de.end(), [](const auto& d) { return d.tag == 2; }));
+            fw->aborted = false;
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] completed aborted factor %ld before a solve: neg=%d\n",
+                             g_stats.factors, fw->num_neg);
         }
 
         g_stats.last_call_was_factor = false;

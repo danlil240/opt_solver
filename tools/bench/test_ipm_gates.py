@@ -1,6 +1,6 @@
 import unittest
 
-from ipm_gates import identical_iterations, iteration_lines
+from ipm_gates import gate_abort, identical_iterations, iteration_lines, trace_entries
 
 HEADER = "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls"
 ITERS = [
@@ -42,6 +42,122 @@ class TestIdenticalIterations(unittest.TestCase):
 
     def test_lines_extracted(self):
         self.assertEqual(iteration_lines(log(ITERS, 0.125)), ITERS)
+
+
+
+def trace(k, corr, neg, abort=0, skipped=0.0, t=0.01, two=3):
+    return (f"[smf_ma97] factor {k}: corr={corr} delays=3 static=0 pos={10 - neg} neg={neg} zero=0 "
+            f"L=1000 t={t} scaling=0 scale=in u=1.0e-08 ordering=2(req 5) nemin=8 two={two} "
+            f"abort={abort} flops=2.000000e+06 skipped={skipped:.6e}")
+
+
+# Factor 2 has the wrong inertia (neg 5 > 4) and IPOPT refactors (factor 3,
+# corr=1). With the abort, factor 2 stops at a partial count of 5 of its 6.
+BASE_TRACE = [trace(1, 0, 4), trace(2, 0, 6), trace(3, 1, 4), trace(4, 0, 4)]
+FEAT_TRACE = [trace(1, 0, 4, t=0.02), trace(2, 0, 5, abort=1, skipped=1e6, two=0), trace(3, 1, 4),
+              trace(4, 0, 4, t=0.5)]
+
+
+def run_log(iters, traces, status="Optimal Solution Found."):
+    return "\n".join(["This is Ipopt version 3.14.20", HEADER] + iters + [f"EXIT: {status}"] + traces)
+
+
+def row(model, solver, fact_s, corrections=1):
+    return {"model": model, "solver": solver, "status": "Optimal Solution Found.", "iterations": 2,
+            "linear_system_factorization_s": fact_s, "inertia_corrections": corrections}
+
+
+class TestAbortGate(unittest.TestCase):
+    def setUp(self):
+        self.base = [row("a", "smf", 1.0), row("b", "smf", 0.5, corrections=0)]
+        self.feat = [row("a", "smf_abort", 0.9), row("b", "smf_abort", 0.5, corrections=0)]
+        self.logs_base = {"a": run_log(ITERS, BASE_TRACE), "b": run_log(ITERS, BASE_TRACE[:1])}
+        self.logs_feat = {"a": run_log(ITERS, FEAT_TRACE), "b": run_log(ITERS, BASE_TRACE[:1])}
+
+    def gate(self, **kw):
+        return gate_abort(self.base, self.feat, self.logs_base, self.logs_feat, **kw)
+
+    def test_identical_logs_and_ten_percent_saving_pass(self):
+        res = self.gate()
+        self.assertTrue(res["pass"])
+        a = res["models"]["a"]
+        self.assertTrue(a["identical"])
+        self.assertAlmostEqual(a["fact_saving"], 0.1)
+        self.assertEqual(a["aborts"], 1)
+        self.assertEqual(a["flops_avoided"], 1e6)
+        self.assertAlmostEqual(a["flops_avoided_frac"], 1e6 / 8e6)
+        self.assertTrue(res["models"]["b"]["identical"])
+        self.assertEqual(res["models"]["b"]["fact_saving"], 0.0)
+
+    def test_one_differing_log_fails(self):
+        changed = list(ITERS)
+        changed[1] = changed[1].replace("5.25e-04", "5.26e-04")
+        self.logs_feat["b"] = run_log(changed, BASE_TRACE[:1])
+        res = self.gate()
+        self.assertFalse(res["pass"])
+        self.assertFalse(res["models"]["b"]["identical"])
+        self.assertTrue(res["models"]["a"]["identical"])
+
+    def test_different_exit_status_fails(self):
+        self.feat[1]["status"] = "Maximum Number of Iterations Exceeded."
+        self.assertFalse(self.gate()["models"]["b"]["identical"])
+
+    def test_small_saving_fails(self):
+        self.feat[0]["linear_system_factorization_s"] = 0.97
+        res = self.gate()
+        self.assertTrue(res["all_identical"])
+        self.assertFalse(res["pass"])
+
+    def test_saving_must_be_on_a_tuning_model(self):
+        self.assertFalse(self.gate(tuning={"b"})["pass"])
+        self.assertTrue(self.gate(tuning={"a"})["pass"])
+
+    def test_saving_of_a_diverged_run_does_not_count(self):
+        changed = list(ITERS)
+        changed[1] = changed[1].replace("5.25e-04", "5.26e-04")
+        self.logs_feat["a"] = run_log(changed, FEAT_TRACE)
+        res = self.gate()
+        self.assertFalse(res["models"]["a"]["identical"])
+        self.assertFalse(res["saving_met"])
+
+    def test_saving_needs_corrections(self):
+        self.base[0]["inertia_corrections"] = 0
+        self.assertFalse(self.gate()["pass"])
+
+    def test_accepted_factorization_must_match(self):
+        feat = list(FEAT_TRACE)
+        feat[3] = feat[3].replace("delays=3", "delays=4")
+        self.logs_feat["a"] = run_log(ITERS, feat)
+        res = self.gate()
+        self.assertFalse(res["models"]["a"]["identical"])
+        self.assertFalse(res["models"]["a"]["trace_match"])
+        self.assertTrue(res["models"]["a"]["iterations_identical"])
+
+    def test_abort_of_an_accepted_factorization_fails(self):
+        feat = list(FEAT_TRACE)
+        feat[3] = trace(4, 0, 3, abort=1)  # base accepted factor 4 (the last one)
+        self.logs_feat["a"] = run_log(ITERS, feat)
+        self.assertFalse(self.gate()["models"]["a"]["identical"])
+
+    def test_completed_abort_fails(self):
+        self.logs_feat["a"] = run_log(ITERS, FEAT_TRACE + [
+            "[smf_ma97] completed aborted factor 2 before a solve: neg=6"])
+        self.assertFalse(self.gate()["models"]["a"]["identical"])
+
+    def test_trace_entries_ignore_time(self):
+        e = trace_entries("\n".join([trace(1, 0, 4, t=0.1), "noise", trace(2, 1, 4, t=0.2)]))
+        self.assertEqual([x["k"] for x in e], [1, 2])
+        self.assertEqual(e[0]["key"].replace("factor 1", ""), e[1]["key"].replace("corr=1", "corr=0"))
+        self.assertEqual(e[0]["fields"]["abort"], "0")
+        self.assertEqual(e[1]["fields"]["neg"], "4")
+
+
+class TestAbortSolverId(unittest.TestCase):
+    def test_smf_abort_is_smf_with_the_abort_on(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_abort"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_abort"), {"SMF_PLUGIN_STATS": "2", "SMF_IPM_ABORT": "1"})
+        self.assertNotIn("SMF_IPM_ABORT", ipopt_kkt.solver_env("smf"))
 
 
 if __name__ == "__main__":
