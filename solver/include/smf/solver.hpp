@@ -52,7 +52,9 @@ public:
   /// @param ctrl   solver control
   /// @param info   output: updated with factor statistics
   /// @param fkeep  output: factorization result
-  /// @returns FactorStatus::Success, NotPositiveDefinite, or Singular
+  /// @returns FactorStatus::Success, NotPositiveDefinite, or Singular;
+  ///          InertiaExceeded when ctrl.max_negative_pivots was exceeded
+  ///          (the factor is then unusable and solve() refuses it)
   FactorStatus factor(const AnalysisKeep &ak, const Control &ctrl, Info &info,
                       FactorKeep &fkeep) const;
 

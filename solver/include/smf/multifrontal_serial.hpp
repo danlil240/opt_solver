@@ -17,6 +17,8 @@ struct SerialFactorStats {
   int parallel_subtrees = 0;
   double flops = 0.0;
   int max_front = 0;
+  // ErrorCode::InertiaExceeded: predicted flops of the fronts not factored.
+  double aborted_flops_skipped = 0.0;
 };
 
 /// Lean serial multifrontal factorization shared by the SPD and indefinite
@@ -36,6 +38,11 @@ struct SerialFactorStats {
 /// factor (fkeep.is_posdef layout) and a non-positive pivot returns
 /// ErrorCode::NotPositiveDefinite. Otherwise threshold 1x1/2x2 pivoting with
 /// delayed pivots produces unit L plus fkeep.diag_entries.
+///
+/// Indefinite with ctrl.max_negative_pivots >= 0: as soon as the negative
+/// pivots accepted so far exceed it, the remaining fronts are skipped and
+/// ErrorCode::InertiaExceeded is returned, `st.inertia` holding the partial
+/// counts and `st.aborted_flops_skipped` the skipped fronts' predicted flops.
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,

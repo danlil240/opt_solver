@@ -68,7 +68,10 @@ enum class FactorStatus {
     Success             = 0,
     NotPositiveDefinite = 1,
     Singular            = 2,
-    MaxPivotDelays      = 3
+    MaxPivotDelays      = 3,
+    // More negative pivots than Control::max_negative_pivots: the
+    // factorization stopped early and the factor is unusable.
+    InertiaExceeded     = 4
 };
 
 enum class SolveJob {

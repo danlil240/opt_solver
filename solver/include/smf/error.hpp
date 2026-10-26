@@ -13,6 +13,7 @@ enum class ErrorCode : int32_t {
     MaxIterations       =  -6,
     OrderingFailed      =  -7,
     FeatureNotAvailable =  -8,
+    InertiaExceeded     =  -9,  // see FactorStatus::InertiaExceeded
     InternalError       = -99
 };
 

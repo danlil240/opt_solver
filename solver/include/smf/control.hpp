@@ -31,6 +31,12 @@ struct Control {
 
     // Factorization behaviour
     bool           continue_on_singular = false;
+    // Indefinite only (ignored for SPD), -1 = off. Once more negative
+    // pivots than this have been accepted the factorization stops with
+    // FactorStatus::InertiaExceeded: an interior-point method that expects
+    // this many negatives would reject the factor anyway. A factorization
+    // that stays within the limit is bit-identical to an unarmed one.
+    int            max_negative_pivots = -1;
     double         factor_memory_multiplier = 1.1;
     int            expected_refactors = 1;
 

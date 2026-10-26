@@ -34,6 +34,9 @@ struct Info {
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
     int          parallel_subtrees      = 0;  ///< subtrees factored concurrently (0 = serial)
+    /// After FactorStatus::InertiaExceeded: predicted flops (sum of p f^2,
+    /// as predicted_flops) of the fronts that were not factored.
+    double       aborted_flops_skipped  = 0.0;
 
     // Assembly tree stats
     int          max_front_size         = 0;

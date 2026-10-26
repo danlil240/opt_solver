@@ -387,6 +387,14 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.max_front = std::max(to.max_front, from.max_front);
 }
 
+// Predicted flops of supernode si's front, the term Info::predicted_flops
+// sums (assembly_tree.cpp): p f^2 for the symbolic pivot count and size.
+double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
+  const double f = static_cast<double>(keep.fronts[si].front_size());
+  const double p = static_cast<double>(keep.supernodes[si].width());
+  return p * f * f;
+}
+
 // Below this much front work (sum of f^2 p) thread start-up is not repaid.
 constexpr double kTreeParallelMinWork = 2e7;
 
@@ -465,6 +473,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   prm.nb = std::max(2, ctrl.indef_panel_size);
   prm.posdef = posdef;
   prm.static_pivot = posdef ? 0.0 : static_pivot;
+
+  // Early abort once the negative pivots exceed the limit (indefinite only).
+  // Pivots are only ever added, so a run whose final count is within the
+  // limit never trips it and does exactly the work of an unarmed run.
+  const int neg_limit = posdef ? -1 : ctrl.max_negative_pivots;
+  const bool armed = neg_limit >= 0;
 
   // Symbolic plan: largest front, factor size, and the peak of the
   // contribution stack when no pivot is delayed.
@@ -565,10 +579,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (threads <= 1) {
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr};
-    for (const Int s : keep.postorder) {
-      status = process_front(cx, main, 0, s, true);
+    std::size_t k = 0;
+    for (; k < keep.postorder.size(); ++k) {
+      status = process_front(cx, main, 0, keep.postorder[k], true);
+      if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
+        status = ErrorCode::InertiaExceeded;
       if (status != ErrorCode::Success) break;
     }
+    if (status == ErrorCode::InertiaExceeded)
+      for (std::size_t r = k + 1; r < keep.postorder.size(); ++r)
+        st.aborted_flops_skipped +=
+            predicted_front_flops(keep, static_cast<std::size_t>(keep.postorder[r]));
   } else {
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
     auto &tb = ws.tree_par->threads;
@@ -596,7 +617,19 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     node_blocks.resize(ns);
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool};
+    // `failed` doubles as the stop flag: every thread polls it before each
+    // front. With the limit armed, the threads add each front's negative
+    // pivots to one shared count; the add that takes it past the limit
+    // raises InertiaExceeded (unless another error came first).
     std::atomic<int> failed{static_cast<int>(ErrorCode::Success)};
+    std::atomic<int> negatives{0};
+    const auto count_negatives = [&](int added) {
+      if (added <= 0 || negatives.fetch_add(added, std::memory_order_relaxed) + added <= neg_limit)
+        return;
+      int ok = static_cast<int>(ErrorCode::Success);
+      failed.compare_exchange_strong(ok, static_cast<int>(ErrorCode::InertiaExceeded),
+                                     std::memory_order_relaxed);
+    };
     const auto run_pool = [threads](const auto &fn) {
       std::vector<std::thread> pool;
       pool.reserve(static_cast<std::size_t>(threads) - 1);
@@ -622,11 +655,15 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         const auto [lo, hi] = subtrees[i];
         const std::size_t first_step = P.steps->size();
         for (std::size_t k = lo; k <= hi; ++k) {
+          if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
+            break;
+          const int neg0 = P.st.inertia.negative;
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
             break;
           }
+          if (armed) count_negatives(P.st.inertia.negative - neg0);
         }
         subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
       }
@@ -681,6 +718,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             free_threads -= blas_threads;
           }
           ErrorCode e;
+          const int neg0 = P.st.inertia.negative;
           {
             BlasThreadGuard blas(blas_threads);
             e = process_front(cx, P, 1 + tid, s, false);
@@ -688,6 +726,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           std::lock_guard<std::mutex> lk(mtx);
           free_threads += blas_threads;
           --remaining;
+          // Under the mutex, so a waiter cannot miss the stop.
+          if (e == ErrorCode::Success && armed) count_negatives(P.st.inertia.negative - neg0);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e));
           } else {
@@ -704,7 +744,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     status = static_cast<ErrorCode>(failed.load());
     st.parallel_subtrees = static_cast<int>(subtrees.size());
 
-    if (status == ErrorCode::Success) {
+    if (status != ErrorCode::Success) {
+      // Partial counts (the threads are joined). A front never started
+      // still has front_pass 0: the threads' passes are numbered from 1.
+      for (int t = 0; t < threads; ++t) add_stats(st, tpass[static_cast<std::size_t>(t)].st);
+      if (status == ErrorCode::InertiaExceeded)
+        for (std::size_t si = 0; si < ns; ++si)
+          if (front_pass[si] == 0) st.aborted_flops_skipped += predicted_front_flops(keep, si);
+    } else {
       // Phase 3: concatenate the per-thread factors (copied in parallel) and
       // relocate offsets. Solve order: every subtree (each complete and
       // independent), then the top in completion order, which is

@@ -295,6 +295,19 @@ if(WIN32)
 endif()
 add_test(NAME TreeParallel COMMAND test_tree_parallel)
 
+# --- IPM mode: engine hooks (max_negative_pivots) ---
+
+add_executable(test_ipm_hooks
+    test_ipm_hooks.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_ipm_hooks PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_hooks PRIVATE psapi)
+endif()
+add_test(NAME IpmHooks COMMAND test_ipm_hooks)
+set_tests_properties(IpmHooks PROPERTIES TIMEOUT 30)
+
 # --- Task 6: Benchmark adapters tests ---
 
 add_executable(test_benchmark_adapters

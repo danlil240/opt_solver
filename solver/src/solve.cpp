@@ -67,6 +67,11 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     return static_cast<int>(ErrorCode::IllegalValue);
   }
 
+  // An aborted factorization is incomplete: never solve with it.
+  if (fkeep.status == FactorStatus::InertiaExceeded) {
+    info.status = ErrorCode::InertiaExceeded;
+    return static_cast<int>(ErrorCode::InertiaExceeded);
+  }
   if (fkeep.status != FactorStatus::Success && !ctrl.continue_on_singular) {
     info.status = (fkeep.status == FactorStatus::NotPositiveDefinite)
                       ? ErrorCode::NotPositiveDefinite

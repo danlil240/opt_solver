@@ -342,6 +342,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
   info.delayed_pivots = 0;
+  info.aborted_flops_skipped = 0.0;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
 
@@ -481,6 +482,25 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
         eff_small, static_pivot, /*posdef=*/false, fkeep, ws, st);
     blas_threads.reset();
+    if (err == ErrorCode::InertiaExceeded) {
+      // Too many negative pivots: stopped early, the factor is unusable.
+      std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
+      fkeep.factor_values.clear();
+      info.status = err;
+      info.factor_status = FactorStatus::InertiaExceeded;
+      fkeep.status = FactorStatus::InertiaExceeded;
+      info.delayed_pivots = st.delayed;
+      info.static_pivots = st.static_pivots;
+      info.parallel_subtrees = st.parallel_subtrees;
+      info.num_positive = st.inertia.positive;
+      info.num_negative = st.inertia.negative;
+      info.num_zero = st.inertia.zero;
+      info.actual_flops = st.flops;
+      info.aborted_flops_skipped = st.aborted_flops_skipped;
+      info.factor_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      return FactorStatus::InertiaExceeded;
+    }
     if (err != ErrorCode::Success) {
       std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
       fkeep.factor_values.clear();
@@ -580,6 +600,16 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.num_negative = total_inertia.negative;
   info.num_zero = total_inertia.zero;
   info.numerical_rank = static_cast<int>(keep.n) - total_inertia.zero;
+
+  // The task-parallel engine has no early stop: the limit is checked on the
+  // finished factor (nothing skipped), so the status means the same.
+  if (ctrl.max_negative_pivots >= 0 && total_inertia.negative > ctrl.max_negative_pivots) {
+    fkeep.factor_values.clear();
+    info.status = ErrorCode::InertiaExceeded;
+    info.factor_status = FactorStatus::InertiaExceeded;
+    fkeep.status = FactorStatus::InertiaExceeded;
+    return FactorStatus::InertiaExceeded;
+  }
   info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
   info.arena_peak_bytes = static_cast<long>(
       ws.front_scratch.capacity() * sizeof(double) + ws.peak_pool_bytes);
