@@ -108,6 +108,8 @@ static bool env_flag(const char* name, bool fallback)
 //                        default off; IpmControl's default thresholds.
 //   SMF_IPM_STATIC=off|fallback  static mode (Feature 3), default off; an
 //                        unknown value is off.
+//   SMF_IPM_STATIC_ZERO=1  static pivots count as zero eigenvalues instead of
+//                        by their sign (IpmControl::static_as_zero), default 0.
 static smf::StaticMode env_static_mode()
 {
     const char* v = std::getenv("SMF_IPM_STATIC");
@@ -121,11 +123,13 @@ static smf::IpmControl plugin_ipm_control()
     static const bool abort_on = env_flag("SMF_IPM_ABORT", false);
     static const bool reanalyse_on = env_flag("SMF_IPM_REANALYSE", false);
     static const smf::StaticMode static_mode = env_static_mode();
+    static const bool static_zero = env_flag("SMF_IPM_STATIC_ZERO", false);
     smf::IpmControl ipm;
     ipm.learn_inertia = abort_on;
     ipm.abort_on_wrong_inertia = abort_on;
     ipm.reanalyse = reanalyse_on;
     ipm.static_mode = static_mode;
+    ipm.static_as_zero = static_zero;
     return ipm;
 }
 

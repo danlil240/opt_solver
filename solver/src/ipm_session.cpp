@@ -121,12 +121,12 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
     user_scale_once_ = false;
   }
   // Feature 3: the static mode. Fallback static-pivots only a root front or
-  // one over its delay budget, and reports every raised pivot as a zero
-  // eigenvalue, so the caller sees a singular matrix rather than a guessed
-  // sign.
+  // one over its delay budget. A raised pivot counts by its kept sign, or,
+  // with IpmControl::static_as_zero, as a zero eigenvalue (the caller then
+  // sees a singular matrix).
   if (ipm_.static_mode == StaticMode::Fallback) {
     factor_ctrl_.fallback_static_pivot_tol = 1e-8;
-    factor_ctrl_.static_pivots_as_zero = true;
+    factor_ctrl_.static_pivots_as_zero = ipm_.static_as_zero;
   }
 
   if (!ak_ && run_analysis() != ErrorCode::Success) return IpmFactorStatus::Error;

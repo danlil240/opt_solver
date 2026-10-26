@@ -943,31 +943,68 @@ TEST(IpmSession, ProbationIgnoresAFactorThatNeverRan) {
 
 namespace {
 
-IpmControl fallback_mode() {
+IpmControl fallback_mode(bool as_zero = false) {
     IpmControl ipm = features_off();
     ipm.static_mode = StaticMode::Fallback;
+    ipm.static_as_zero = as_zero;
     return ipm;
+}
+
+struct FactorCounts {
+    IpmFactorStatus status;
+    InertiaCounts in;
+    int static_pivots;
+    long stats_static;
+};
+
+FactorCounts factor_once(const CscLower &A, const IpmControl &ipm) {
+    IpmSession s;
+    EXPECT_EQ(s.analyse(A, {}, ipopt_control(), ipm), ErrorCode::Success);
+    const IpmFactorStatus st = s.factor(A.values);
+    return {st, s.inertia(), s.info().static_pivots, s.stats().static_pivots};
 }
 
 } // namespace
 
-TEST(IpmSession, FallbackModeTurnsStaticPivotsIntoZeros) {
+TEST(IpmSession, StaticAsZeroDefaultsOff) {
+    EXPECT_FALSE(IpmControl{}.static_as_zero);
+}
+
+TEST(IpmSession, FallbackStaticPivotAccounting) {
     // singular_kkt: the zeroed constraint row reaches the root unpivoted.
-    // Off: a zero pivot. Fallback: a static pivot, counted as a zero, so the
-    // inertia IPOPT sees is the same.
+    // Off: a zero pivot (37, 17, 1). Fallback: a static pivot instead (d = 0
+    // raised to +1e-8 max|A|), counted by its kept sign by default, or as a
+    // zero eigenvalue with IpmControl::static_as_zero.
     const CscLower S = singular_kkt();
-    const Control ctrl = ipopt_control();
-    for (const bool fallback : {false, true}) {
-        IpmSession s;
-        ASSERT_EQ(s.analyse(S, {}, ctrl, fallback ? fallback_mode() : features_off()), ErrorCode::Success);
-        EXPECT_EQ(s.factor(S.values), IpmFactorStatus::Singular) << "fallback " << fallback;
-        const InertiaCounts in = s.inertia();
-        EXPECT_EQ(in.positive, 37) << "fallback " << fallback;
-        EXPECT_EQ(in.negative, 17) << "fallback " << fallback;
-        EXPECT_EQ(in.zero, 1) << "fallback " << fallback;
-        EXPECT_EQ(s.info().static_pivots, fallback ? 1 : 0);
-        EXPECT_EQ(s.stats().static_pivots, fallback ? 1 : 0);
-    }
+    const int n = static_cast<int>(S.n);
+    const auto sum = [](const InertiaCounts &c) { return c.positive + c.negative + c.zero; };
+
+    const FactorCounts off = factor_once(S, features_off());
+    EXPECT_EQ(off.status, IpmFactorStatus::Singular);
+    EXPECT_EQ(off.static_pivots, 0);
+    EXPECT_EQ(off.in.positive, 37);
+    EXPECT_EQ(off.in.negative, 17);
+    EXPECT_EQ(off.in.zero, 1);
+
+    // Sign accounting: the static pivot is not a zero.
+    const FactorCounts sign = factor_once(S, fallback_mode());
+    EXPECT_EQ(sign.static_pivots, 1);
+    EXPECT_EQ(sign.stats_static, 1);
+    EXPECT_EQ(sum(sign.in), n);
+    EXPECT_EQ(sign.in.zero, off.in.zero - sign.static_pivots);  // zero excludes static pivots
+    EXPECT_EQ(sign.in.positive, 38);
+    EXPECT_EQ(sign.in.negative, 17);
+    EXPECT_EQ(sign.status, IpmFactorStatus::Ok);
+
+    // Zero accounting: zero grows by exactly static_pivots.
+    const FactorCounts zero = factor_once(S, fallback_mode(true));
+    EXPECT_EQ(zero.static_pivots, 1);
+    EXPECT_EQ(zero.stats_static, 1);
+    EXPECT_EQ(sum(zero.in), n);
+    EXPECT_EQ(zero.in.zero, sign.in.zero + zero.static_pivots);
+    EXPECT_EQ(zero.in.positive, 37);
+    EXPECT_EQ(zero.in.negative, 17);
+    EXPECT_EQ(zero.status, IpmFactorStatus::Singular);
 }
 
 TEST(IpmSession, FallbackModeLeavesANonsingularKktAlone) {

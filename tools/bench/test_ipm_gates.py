@@ -239,6 +239,13 @@ class TestReanalyseSolverId(unittest.TestCase):
         self.assertEqual(ipopt_kkt.solver_env("smf_fallback"),
                          {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "fallback"})
         self.assertNotIn("SMF_IPM_STATIC", ipopt_kkt.solver_env("smf"))
+        self.assertNotIn("SMF_IPM_STATIC_ZERO", ipopt_kkt.solver_env("smf_fallback"))
+
+    def test_smf_fallback_zero_adds_zero_accounting(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_fallback_zero"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_fallback_zero"),
+                         {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "fallback", "SMF_IPM_STATIC_ZERO": "1"})
 
 
 if __name__ == "__main__":
