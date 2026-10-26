@@ -16,6 +16,10 @@ struct LdltKernelParams {
     bool posdef = false;        ///< no pivoting: accept a(k,k) > 0 in order, stop otherwise
     double static_pivot = 0.0;  ///< > 0: never stop; force a 1x1 with |d| >= static_pivot
     bool static_pivots_as_zero = false; ///< a forced pivot whose |d| was raised counts in inertia.zero
+    /// Hybrid accounting: a forced pivot raised from an exact zero (original
+    /// |d| < eff_small or not finite) counts in inertia.zero; one raised from
+    /// a nonzero |d| keeps its sign. Set on fallback fronts.
+    bool static_zero_stays_zero = false;
 };
 
 struct LdltKernelResult {

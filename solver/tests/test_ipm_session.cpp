@@ -973,8 +973,12 @@ TEST(IpmSession, StaticAsZeroDefaultsOff) {
 TEST(IpmSession, FallbackStaticPivotAccounting) {
     // singular_kkt: the zeroed constraint row reaches the root unpivoted.
     // Off: a zero pivot (37, 17, 1). Fallback: a static pivot instead (d = 0
-    // raised to +1e-8 max|A|), counted by its kept sign by default, or as a
-    // zero eigenvalue with IpmControl::static_as_zero.
+    // raised to +1e-8 max|A|). Its original d is an exact zero, so the
+    // default (hybrid) accounting still counts it as a zero and the factor
+    // stays singular, as with Off: IPOPT sees the rank deficiency and
+    // applies delta_c. Zero accounting (static_as_zero) counts it the same.
+    // (A static pivot raised from a nonzero d keeps its sign by default:
+    // IpmHooks.FallbackHybridAccounting.)
     const CscLower S = singular_kkt();
     const int n = static_cast<int>(S.n);
     const auto sum = [](const InertiaCounts &c) { return c.positive + c.negative + c.zero; };
@@ -986,25 +990,17 @@ TEST(IpmSession, FallbackStaticPivotAccounting) {
     EXPECT_EQ(off.in.negative, 17);
     EXPECT_EQ(off.in.zero, 1);
 
-    // Sign accounting: the static pivot is not a zero.
-    const FactorCounts sign = factor_once(S, fallback_mode());
-    EXPECT_EQ(sign.static_pivots, 1);
-    EXPECT_EQ(sign.stats_static, 1);
-    EXPECT_EQ(sum(sign.in), n);
-    EXPECT_EQ(sign.in.zero, off.in.zero - sign.static_pivots);  // zero excludes static pivots
-    EXPECT_EQ(sign.in.positive, 38);
-    EXPECT_EQ(sign.in.negative, 17);
-    EXPECT_EQ(sign.status, IpmFactorStatus::Ok);
-
-    // Zero accounting: zero grows by exactly static_pivots.
-    const FactorCounts zero = factor_once(S, fallback_mode(true));
-    EXPECT_EQ(zero.static_pivots, 1);
-    EXPECT_EQ(zero.stats_static, 1);
-    EXPECT_EQ(sum(zero.in), n);
-    EXPECT_EQ(zero.in.zero, sign.in.zero + zero.static_pivots);
-    EXPECT_EQ(zero.in.positive, 37);
-    EXPECT_EQ(zero.in.negative, 17);
-    EXPECT_EQ(zero.status, IpmFactorStatus::Singular);
+    for (const bool as_zero : {false, true}) {
+        const FactorCounts fb = factor_once(S, fallback_mode(as_zero));
+        EXPECT_EQ(fb.status, IpmFactorStatus::Singular) << "as_zero " << as_zero;
+        EXPECT_EQ(fb.static_pivots, 1) << "as_zero " << as_zero;
+        EXPECT_EQ(fb.stats_static, 1) << "as_zero " << as_zero;
+        EXPECT_GE(fb.in.zero, 1) << "as_zero " << as_zero;
+        EXPECT_EQ(sum(fb.in), n);
+        EXPECT_EQ(fb.in.positive, 37) << "as_zero " << as_zero;
+        EXPECT_EQ(fb.in.negative, 17) << "as_zero " << as_zero;
+        EXPECT_EQ(fb.in.zero, 1) << "as_zero " << as_zero;
+    }
 }
 
 TEST(IpmSession, FallbackModeLeavesANonsingularKktAlone) {

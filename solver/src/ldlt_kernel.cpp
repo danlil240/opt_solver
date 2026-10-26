@@ -130,9 +130,12 @@ PivotChoice select_pivot(const double *F, int f, int k, int num_elig, int limit,
 // columns current): take the column whose diagonal is largest relative to
 // its column as a 1x1 pivot, so the growth in L stays as small as it can,
 // and lift |d| to prm.static_pivot (keeping its sign) if it is smaller.
+// `raised`: 0 = taken as it is, 1 = |d| raised from a nonzero value, 2 =
+// raised from an exact zero (original |d| below prm.eff_small, or not
+// finite: what inertia_1x1 would have counted as zero).
 PivotChoice force_static_pivot(double *F, int f, int k, int num_elig,
                                const LdltKernelParams &prm,
-                               LdltKernelResult &res) noexcept {
+                               LdltKernelResult &res, int &raised) noexcept {
     const std::size_t sf = static_cast<std::size_t>(f);
     int best = k;
     double best_ratio = -1.0;
@@ -150,11 +153,21 @@ PivotChoice force_static_pivot(double *F, int f, int k, int num_elig,
         }
     }
     double &d = F[static_cast<std::size_t>(best) * sf + best];
+    raised = 0;
     if (!(std::abs(d) >= prm.static_pivot)) {
+        raised = (is_finite_fast(d) && std::abs(d) >= prm.eff_small) ? 1 : 2;
         d = (d < 0.0) ? -prm.static_pivot : prm.static_pivot;
         ++res.static_pivots;
     }
     return {1, best, -1};
+}
+
+// Whether a forced pivot (force_static_pivot's `raised`) counts as a zero
+// eigenvalue: every raised one with prm.static_pivots_as_zero, else only one
+// raised from an exact zero with prm.static_zero_stays_zero.
+inline bool static_counts_as_zero(int raised, const LdltKernelParams &prm) noexcept {
+    if (raised == 0) return false;
+    return prm.static_pivots_as_zero || (raised == 2 && prm.static_zero_stays_zero);
 }
 
 // Symmetric swap of positions p < q in the lower-stored front. Columns
@@ -241,8 +254,8 @@ inline void inertia_1x1(double d, double small, InertiaCounts &out) noexcept {
 }
 
 // Accept the chosen pivot at position k: swap it into place, record its
-// tag / inertia, and eliminate it. `as_zero` (a 1x1 static pivot whose |d|
-// was raised, with prm.static_pivots_as_zero) counts it as a zero eigenvalue.
+// tag / inertia, and eliminate it. `as_zero` (a 1x1 static pivot, see
+// static_counts_as_zero) counts it as a zero eigenvalue.
 void apply_pivot(const PivotChoice &pc, double *F, int f, int &k, Int *rows,
                  int8_t *tags, double *W, int w_cols, int ucol_end,
                  const LdltKernelParams &prm, LdltKernelResult &res,
@@ -333,9 +346,9 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             bool as_zero = false;
             if (pc.kind == 0) {
                 if (!(prm.static_pivot > 0.0)) break;
-                const int raised = res.static_pivots;
-                pc = force_static_pivot(F, f, k, num_elig, prm, res);
-                as_zero = prm.static_pivots_as_zero && res.static_pivots != raised;
+                int raised = 0;
+                pc = force_static_pivot(F, f, k, num_elig, prm, res, raised);
+                as_zero = static_counts_as_zero(raised, prm);
             }
             apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res, as_zero);
         }
@@ -369,9 +382,9 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             bool as_zero = false;
             if (pc.kind == 0) {
                 if (!(prm.static_pivot > 0.0)) break;
-                const int raised = res.static_pivots;
-                pc = force_static_pivot(F, f, k, num_elig, prm, res);
-                as_zero = prm.static_pivots_as_zero && res.static_pivots != raised;
+                int raised = 0;
+                pc = force_static_pivot(F, f, k, num_elig, prm, res, raised);
+                as_zero = static_counts_as_zero(raised, prm);
             }
             apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res, as_zero);
             deferred_update(F, f, ss, k, k, num_elig, W);

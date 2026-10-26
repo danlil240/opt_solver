@@ -23,6 +23,7 @@
 #include <cstring>
 #include <numeric>
 #include <random>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -838,6 +839,73 @@ Control fallback_on(Control c) {
 
 int inertia_sum(const Info &info) { return info.num_positive + info.num_negative + info.num_zero; }
 
+// Fallback with the default (hybrid) accounting.
+Control fallback_hybrid(Control c) {
+    c.fallback_static_pivot_tol = 1e-8;
+    return c;
+}
+
+// Lower CSC from (row, col, value) triplets, row >= col.
+CscLower from_triplets(Int n, std::vector<std::tuple<Int, Int, double>> t) {
+    std::sort(t.begin(), t.end(), [](const auto &x, const auto &y) {
+        return std::get<1>(x) != std::get<1>(y) ? std::get<1>(x) < std::get<1>(y)
+                                                : std::get<0>(x) < std::get<0>(y);
+    });
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (const auto &[i, j, v] : t) {
+        ++A.col_ptr[static_cast<std::size_t>(j) + 1];
+        A.row_idx.push_back(i);
+        A.values.push_back(v);
+    }
+    for (std::size_t j = 0; j < static_cast<std::size_t>(n); ++j) A.col_ptr[j + 1] += A.col_ptr[j];
+    return A;
+}
+
+// Two-level tree, natural order: leaves a = 0 and b = 1 (diagonal d, so
+// they cannot pivot on their own) under a non-root parent supernode P, which
+// sits under the root r next to an unrelated leaf q. Both leaves delay into
+// P: P receives nd = 2. With `wide`, P = {p, p'} has width 2 (nd == width);
+// otherwise P = {p}, width 1 (nd == width + 1). In P, after the 2x2 pivot on
+// a and p, b's diagonal is d + O(d) and its only coupling is to the root row
+// r: it has no pivot in P and is delayed to the root, or, where the fallback
+// applies, forced as a static pivot there.
+CscLower budget_tree(bool wide, double d) {
+    if (wide) {  // 0 a, 1 b, 2 p, 3 p', 4 q, 5 r
+        return from_triplets(6, {{0, 0, d}, {2, 0, 1.0}, {5, 0, 1.0}, {1, 1, d}, {2, 1, 1.0},
+                                 {2, 2, 2.0}, {3, 2, 1.0}, {5, 2, 1.0}, {3, 3, 2.0}, {5, 3, 1.0},
+                                 {4, 4, 1.0}, {5, 4, 1.0}, {5, 5, 3.0}});
+    }
+    // 0 a, 1 b, 2 p, 3 q, 4 r
+    return from_triplets(5, {{0, 0, d}, {2, 0, 1.0}, {4, 0, 1.0}, {1, 1, d}, {2, 1, 1.0},
+                             {2, 2, 2.0}, {4, 2, 1.0}, {3, 3, 1.0}, {4, 3, 1.0}, {4, 4, 3.0}});
+}
+
+Control budget_ctrl(const std::vector<Int> &perm) {
+    Control c = indef_ctrl();
+    c.ordering = OrderingMethod::UserSupplied;
+    c.user_perm = perm.data();
+    c.scaling = ScalingMethod::None;
+    c.nemin = 1;
+    return c;
+}
+
+std::vector<Int> identity_perm(Int n) {
+    std::vector<Int> p(static_cast<std::size_t>(n));
+    std::iota(p.begin(), p.end(), 0);
+    return p;
+}
+
+// The supernode holding original column 2 (p).
+const Supernode &parent_front(const AnalysisKeep &ak) {
+    const Int p = ak.iperm[2];
+    for (const Supernode &s : ak.supernodes)
+        if (s.col_start <= p && p < s.col_end) return s;
+    ADD_FAILURE() << "no supernode holds column 2";
+    return ak.supernodes.front();
+}
+
 } // namespace
 
 TEST(IpmHooks, StaticControlsDefaultOff) {
@@ -917,11 +985,12 @@ TEST(IpmHooks, FallbackBudgetCapsDelays) {
         EXPECT_EQ(off.info.static_pivots, 0);
 
         Harness on(grid_kkt(110, 7), fallback_on(c));
-        on.factor(-1);
+        ASSERT_EQ(on.factor(-1), FactorStatus::Success) << "threads " << threads;
         if (threads > 1) EXPECT_GE(on.info.parallel_subtrees, 2) << "parallel path not taken";
         EXPECT_LT(on.info.delayed_pivots, off.info.delayed_pivots) << "threads " << threads;
         EXPECT_EQ(inertia_sum(on.info), static_cast<int>(on.A.n));
-        EXPECT_GE(on.info.num_zero, on.info.static_pivots);
+        // Forced, never raised: even zero accounting adds no zero.
+        EXPECT_EQ(on.info.static_pivots, 0) << "threads " << threads;
         // Measured: 2980 -> 2881 delays, no pivot raised, same inertia.
         EXPECT_EQ(on.info.num_positive, off.info.num_positive);
         EXPECT_EQ(on.info.num_negative, off.info.num_negative);
@@ -955,4 +1024,88 @@ TEST(IpmHooks, StaticAsZeroCounts) {
     EXPECT_EQ(inertia_sum(zero.info), 3);
     // Only the counting differs, not the factor.
     EXPECT_TRUE(bit_equal(signed_.fk.factor_values, zero.fk.factor_values));
+}
+
+TEST(IpmHooks, FallbackBudgetBoundary) {
+    // nd == width: P is within budget, so the fallback leaves it alone (b is
+    // delayed to the root exactly as without it). nd == width + 1: P is over
+    // budget and b is forced there instead of being delayed.
+    for (const bool wide : {true, false}) {
+        const CscLower A = budget_tree(wide, 0.0);
+        const std::vector<Int> perm = identity_perm(A.n);
+        Harness off(A, budget_ctrl(perm));
+        ASSERT_NE(off.ak.get(), nullptr);
+        const Supernode &P = parent_front(*off.ak);
+        ASSERT_NE(P.parent, -1) << "P must not be a root";
+        ASSERT_EQ(P.width(), wide ? 2 : 1);
+        ASSERT_EQ(P.children.size(), 2u);
+        off.factor(-1);
+        EXPECT_EQ(off.info.static_pivots, 0);
+        EXPECT_GT(off.info.delayed_pivots, 2) << "b must be delayed past P";
+
+        Harness on(A, fallback_hybrid(budget_ctrl(perm)));
+        ASSERT_NE(on.ak.get(), nullptr);
+        on.factor(-1);
+        EXPECT_EQ(inertia_sum(on.info), static_cast<int>(A.n));
+        if (wide) {
+            EXPECT_EQ(on.info.static_pivots, 0);
+            EXPECT_EQ(on.info.delayed_pivots, off.info.delayed_pivots);
+            EXPECT_EQ(on.info.num_positive, off.info.num_positive);
+            EXPECT_EQ(on.info.num_negative, off.info.num_negative);
+            EXPECT_EQ(on.info.num_zero, off.info.num_zero);
+        } else {
+            EXPECT_EQ(on.info.static_pivots, 1);
+            EXPECT_EQ(on.info.delayed_pivots, off.info.delayed_pivots - 1);
+        }
+    }
+}
+
+TEST(IpmHooks, FallbackHybridAccounting) {
+    // Over-budget P forces b (see budget_tree), and the hybrid accounting
+    // counts it by its ORIGINAL diagonal. An exact zero stays a zero pivot
+    // (the factor is reported singular); a tiny nonzero one (d = 1e-12: above
+    // the zero threshold, below 1e-8 max|A|) keeps its sign, + here. Zero
+    // accounting counts either as a zero.
+    const std::vector<Int> perm = identity_perm(5);
+    for (const double d : {0.0, 1e-12}) {
+        const CscLower A = budget_tree(false, d);
+        Harness hy(A, fallback_hybrid(budget_ctrl(perm)));
+        ASSERT_NE(hy.ak.get(), nullptr);
+        const FactorStatus st = hy.factor(-1);
+        ASSERT_EQ(hy.info.static_pivots, 1) << "d " << d;
+        EXPECT_EQ(inertia_sum(hy.info), 5);
+
+        Harness zero(A, fallback_on(budget_ctrl(perm)));
+        ASSERT_NE(zero.ak.get(), nullptr);
+        EXPECT_EQ(zero.factor(-1), FactorStatus::Singular);
+        EXPECT_EQ(zero.info.static_pivots, 1);
+        EXPECT_EQ(zero.info.num_zero, 1);
+        EXPECT_EQ(inertia_sum(zero.info), 5);
+        EXPECT_TRUE(bit_equal(hy.fk.factor_values, zero.fk.factor_values));
+
+        if (d == 0.0) {
+            EXPECT_EQ(st, FactorStatus::Singular);
+            EXPECT_EQ(hy.info.num_zero, 1);
+            EXPECT_EQ(hy.info.num_positive, zero.info.num_positive);
+        } else {
+            EXPECT_EQ(st, FactorStatus::Success);
+            EXPECT_EQ(hy.info.num_zero, 0);
+            EXPECT_EQ(hy.info.num_positive, zero.info.num_positive + 1);
+        }
+        EXPECT_EQ(hy.info.num_negative, zero.info.num_negative);
+    }
+}
+
+TEST(IpmHooks, FallbackRootExactZeroStaysZero) {
+    // diag(0, 1, 2) with the default (hybrid) accounting: the root's static
+    // pivot was an exact zero, so the inertia is Off's (2, 0, 1), singular.
+    Control c = indef_ctrl();
+    c.nemin = 1;
+    c.scaling = ScalingMethod::None;
+    Harness h(zero_root(), fallback_hybrid(c));
+    ASSERT_NE(h.ak.get(), nullptr);
+    EXPECT_EQ(h.factor(-1), FactorStatus::Singular);
+    EXPECT_EQ(h.info.static_pivots, 1);
+    EXPECT_EQ(h.info.num_zero, 1);
+    EXPECT_EQ(h.info.num_positive, 2);
 }

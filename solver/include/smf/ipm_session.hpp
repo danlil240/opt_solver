@@ -28,10 +28,12 @@ struct IpmControl {
   double     reanalyse_flops_ratio  = 1.0;   // adopt only if predicted flops <= ratio * last actual
   int        reanalyse_min_gap      = 5;     // factorizations between re-analysis attempts
   StaticMode static_mode            = StaticMode::Off;
-  // Static modes: a pivot raised by static pivoting counts as a zero
-  // eigenvalue (Control::static_pivots_as_zero) instead of by its kept sign.
-  // Off by default: with zeros, IPOPT's delta_c cannot lift pivots raised
-  // relative to a max|A| that grows with delta_x (cops_elec_200 fails).
+  // Static modes: every pivot raised by static pivoting counts as a zero
+  // eigenvalue (Control::static_pivots_as_zero). Off by default, where only
+  // a pivot raised from an exact zero counts as zero and one raised from a
+  // nonzero value keeps its sign: with all of them zero, IPOPT's delta_c
+  // cannot lift pivots raised relative to a max|A| that grows with delta_x
+  // (cops_elec_200 fails).
   bool       static_as_zero         = false;
   double     reg_rho                = 1e-8;  // Regularized: rho relative to max|A| after scaling
 };

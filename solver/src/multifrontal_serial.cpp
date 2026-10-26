@@ -261,12 +261,16 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // Fallback static pivoting: only where delaying fails. A root has no
   // parent to delay to (its unaccepted columns would be zero pivots), and a
   // front that receives more delayed columns than its own width is over its
-  // delay budget. Every other front pivots with delays as usual.
+  // delay budget. Every other front pivots with delays as usual. A pivot
+  // forced there from an exact zero stays a zero eigenvalue (hybrid
+  // accounting), so a singular matrix is still reported singular; one raised
+  // from a nonzero value keeps its sign unless ctrl.static_pivots_as_zero.
   const LdltKernelParams *prm = &cx.prm;
   LdltKernelParams fallback_prm;
   if (cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym)) {
     fallback_prm = cx.prm;
     fallback_prm.static_pivot = cx.fallback_static;
+    fallback_prm.static_zero_stays_zero = true;
     prm = &fallback_prm;
   }
 

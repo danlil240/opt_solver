@@ -45,11 +45,16 @@ struct Control {
     // supernode width: there a column with no acceptable pivot is static
     // pivoted, |d| raised to fallback_static_pivot_tol * max|A|, instead of
     // becoming a zero pivot (root) or being delayed again. Such a front uses
-    // this tolerance in place of static_pivot_tol.
+    // this tolerance in place of static_pivot_tol. Its inertia is hybrid: a
+    // pivot raised from an exact zero (|d| below the zero-pivot threshold)
+    // still counts as a zero eigenvalue; one raised from a nonzero |d|
+    // counts by its kept sign.
     double         fallback_static_pivot_tol = 0.0;
-    // A pivot whose |d| static pivoting raised (static_pivot_tol or the
+    // Every pivot whose |d| static pivoting raised (static_pivot_tol or the
     // fallback; Info::static_pivots) counts as a zero eigenvalue
     // (Info::num_zero, so the factor reports Singular) instead of by its sign.
+    // Without it, static_pivot_tol fronts count raised pivots by sign
+    // (exact zeros as +), fallback fronts as above.
     bool           static_pivots_as_zero = false;
     int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
