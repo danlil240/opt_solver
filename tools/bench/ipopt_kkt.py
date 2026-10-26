@@ -249,7 +249,7 @@ def ipopt_env(threads: int) -> dict:
 
 
 def solver_options(solver: str) -> list[str]:
-    if solver in ("smf", "smf_abort", "smf_reanalyse"):
+    if solver in ("smf", "smf_abort", "smf_reanalyse", "smf_fallback"):
         return ["linear_solver ma97", f"hsllib {BUILD_REL / 'smf_ma97.dll'}"]
     if solver == "smf_noscale":
         # IPOPT's MA97 interface defaults to MC64 scaling, which the plugin
@@ -272,6 +272,8 @@ def solver_env(solver: str) -> dict:
 
     smf_abort = smf with the IPM early abort on wrong inertia (SMF_IPM_ABORT=1).
     smf_reanalyse = smf with re-analysis from the realized pivot order (SMF_IPM_REANALYSE=1).
+    smf_fallback = smf with fallback static pivoting, static pivots reported as zero
+    eigenvalues (SMF_IPM_STATIC=fallback).
     """
     env = {}
     if solver.startswith("smf"):
@@ -280,6 +282,8 @@ def solver_env(solver: str) -> dict:
         env["SMF_IPM_ABORT"] = "1"
     if solver == "smf_reanalyse":
         env["SMF_IPM_REANALYSE"] = "1"
+    if solver == "smf_fallback":
+        env["SMF_IPM_STATIC"] = "fallback"
     return env
 
 

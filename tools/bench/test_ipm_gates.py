@@ -233,6 +233,13 @@ class TestReanalyseSolverId(unittest.TestCase):
                          {"SMF_PLUGIN_STATS": "2", "SMF_IPM_REANALYSE": "1"})
         self.assertNotIn("SMF_IPM_REANALYSE", ipopt_kkt.solver_env("smf"))
 
+    def test_smf_fallback_is_smf_with_fallback_static_pivoting(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_fallback"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_fallback"),
+                         {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "fallback"})
+        self.assertNotIn("SMF_IPM_STATIC", ipopt_kkt.solver_env("smf"))
+
 
 if __name__ == "__main__":
     unittest.main()

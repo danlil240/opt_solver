@@ -241,14 +241,17 @@ inline void inertia_1x1(double d, double small, InertiaCounts &out) noexcept {
 }
 
 // Accept the chosen pivot at position k: swap it into place, record its
-// tag / inertia, and eliminate it.
+// tag / inertia, and eliminate it. `as_zero` (a 1x1 static pivot whose |d|
+// was raised, with prm.static_pivots_as_zero) counts it as a zero eigenvalue.
 void apply_pivot(const PivotChoice &pc, double *F, int f, int &k, Int *rows,
                  int8_t *tags, double *W, int w_cols, int ucol_end,
-                 const LdltKernelParams &prm, LdltKernelResult &res) noexcept {
+                 const LdltKernelParams &prm, LdltKernelResult &res,
+                 bool as_zero = false) noexcept {
     const std::size_t sf = static_cast<std::size_t>(f);
     if (pc.kind == 1) {
         sym_swap(F, f, k, pc.a, rows, W, w_cols);
-        inertia_1x1(F[k * sf + k], prm.eff_small, res.inertia);
+        if (as_zero) ++res.inertia.zero;
+        else inertia_1x1(F[k * sf + k], prm.eff_small, res.inertia);
         tags[k] = 1;
         eliminate_1x1(F, f, k, ucol_end, W, w_cols);
         const double rem = static_cast<double>(f - (k + 1));
@@ -327,11 +330,14 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
         // triangle. No BLAS calls; fronts this small live in L1/L2.
         while (k < num_elig) {
             PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
+            bool as_zero = false;
             if (pc.kind == 0) {
                 if (!(prm.static_pivot > 0.0)) break;
+                const int raised = res.static_pivots;
                 pc = force_static_pivot(F, f, k, num_elig, prm, res);
+                as_zero = prm.static_pivots_as_zero && res.static_pivots != raised;
             }
-            apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res);
+            apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res, as_zero);
         }
         res.num_accepted = k;
         return res;
@@ -360,11 +366,14 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             // remaining eligible column (handles cross-panel 2x2 pivots).
             const int ss = k;
             PivotChoice pc = select_pivot(F, f, k, num_elig, num_elig, prm);
+            bool as_zero = false;
             if (pc.kind == 0) {
                 if (!(prm.static_pivot > 0.0)) break;
+                const int raised = res.static_pivots;
                 pc = force_static_pivot(F, f, k, num_elig, prm, res);
+                as_zero = prm.static_pivots_as_zero && res.static_pivots != raised;
             }
-            apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res);
+            apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res, as_zero);
             deferred_update(F, f, ss, k, k, num_elig, W);
         }
     }

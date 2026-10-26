@@ -478,9 +478,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     SerialFactorStats st;
     const double static_pivot =
         ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;
+    const double fallback_static_pivot =
+        ctrl.fallback_static_pivot_tol > 0.0 ? ctrl.fallback_static_pivot_tol * matrix_max_abs : 0.0;
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-        eff_small, static_pivot, /*posdef=*/false, fkeep, ws, st);
+        eff_small, static_pivot, fallback_static_pivot, /*posdef=*/false, fkeep, ws, st);
     blas_threads.reset();
     if (err == ErrorCode::InertiaExceeded) {
       // Too many negative pivots: stopped early, the factor is unusable.

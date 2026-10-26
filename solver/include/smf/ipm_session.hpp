@@ -36,7 +36,7 @@ enum class IpmFactorStatus { Ok, WrongInertia, Singular, Error };
 struct IpmStats {
   int factorizations = 0, accepted = 0, aborted = 0;
   int reanalyses_tried = 0, reanalyses_adopted = 0, reanalyses_reverted = 0;
-  long static_pivots = 0;
+  long static_pivots = 0;  // Info::static_pivots summed over the complete factorizations
   double flops_avoided = 0.0;  // predicted flops of the fronts skipped by aborts
   double reanalyse_seconds = 0.0;  // wall time of the re-analyses (inside factor())
 };

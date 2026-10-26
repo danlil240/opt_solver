@@ -15,6 +15,7 @@ struct LdltKernelParams {
     int blocked_min_front = 96; ///< fronts smaller than this use the unblocked path
     bool posdef = false;        ///< no pivoting: accept a(k,k) > 0 in order, stop otherwise
     double static_pivot = 0.0;  ///< > 0: never stop; force a 1x1 with |d| >= static_pivot
+    bool static_pivots_as_zero = false; ///< a forced pivot whose |d| was raised counts in inertia.zero
 };
 
 struct LdltKernelResult {

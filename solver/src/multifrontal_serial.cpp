@@ -108,6 +108,9 @@ struct FactorContext {
   // stacks are not popped in order, so that no reader's block can move.
   std::vector<NodeBlock> *node_blocks;
   TreeParallelBuffers::BlockPool *pool;
+  // Fallback static pivot (absolute; 0 = off): replaces prm.static_pivot in
+  // a root front and in a front receiving more delays than its width.
+  double fallback_static = 0.0;
 };
 
 // Size-as-high-water-mark growth: only the excess beyond the previous size
@@ -255,9 +258,21 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     }
   }
 
+  // Fallback static pivoting: only where delaying fails. A root has no
+  // parent to delay to (its unaccepted columns would be zero pivots), and a
+  // front that receives more delayed columns than its own width is over its
+  // delay budget. Every other front pivots with delays as usual.
+  const LdltKernelParams *prm = &cx.prm;
+  LdltKernelParams fallback_prm;
+  if (cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym)) {
+    fallback_prm = cx.prm;
+    fallback_prm.static_pivot = cx.fallback_static;
+    prm = &fallback_prm;
+  }
+
   int8_t *tags = P.tags->data();
   const LdltKernelResult kr =
-      ldlt_factor_front(F, f, num_elig, rows, cx.prm, tags, P.work->data());
+      ldlt_factor_front(F, f, num_elig, rows, *prm, tags, P.work->data());
   const int p = kr.num_accepted;
   SerialFactorStats &st = P.st;
   st.inertia.positive += kr.inertia.positive;
@@ -272,7 +287,11 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     return ErrorCode::NotPositiveDefinite;
   }
 
-  // A root has no parent to delay to: unaccepted columns are zero pivots.
+  // A root has no parent to delay to: unaccepted columns are zero pivots
+  // (marked was_zero below). With a static pivot the kernel accepts every
+  // column, so a static pivot is never one of them: it is a real 1x1 pivot
+  // (tag 1, d raised) that the solve divides by and realized_pivot_order
+  // keeps in place.
   const bool is_root = (sn.parent == -1);
   int p_store = p;
   if (is_root && p < num_elig) {
@@ -458,8 +477,8 @@ partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
-                                     double static_pivot, bool posdef,
-                                     FactorKeep &fkeep,
+                                     double static_pivot, double fallback_static_pivot,
+                                     bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st) {
   const std::size_t n = static_cast<std::size_t>(keep.n);
   const std::size_t ns = keep.supernodes.size();
@@ -476,6 +495,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   prm.nb = std::max(2, ctrl.indef_panel_size);
   prm.posdef = posdef;
   prm.static_pivot = posdef ? 0.0 : static_pivot;
+  prm.static_pivots_as_zero = ctrl.static_pivots_as_zero;
+  const double fallback_static = posdef ? 0.0 : fallback_static_pivot;
 
   // Early abort once the negative pivots exceed the limit (indefinite only).
   // Pivots are only ever added, so a run whose final count is within the
@@ -581,7 +602,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
 
   if (threads <= 1) {
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
-                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr};
+                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
+                           fallback_static};
     std::size_t k = 0;
     for (; k < keep.postorder.size(); ++k) {
       status = process_front(cx, main, 0, keep.postorder[k], true);
@@ -619,7 +641,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     }
     node_blocks.resize(ns);
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
-                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool};
+                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
+                           fallback_static};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

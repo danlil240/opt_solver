@@ -120,6 +120,14 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
     ctrl_.user_scale = nullptr;
     user_scale_once_ = false;
   }
+  // Feature 3: the static mode. Fallback static-pivots only a root front or
+  // one over its delay budget, and reports every raised pivot as a zero
+  // eigenvalue, so the caller sees a singular matrix rather than a guessed
+  // sign.
+  if (ipm_.static_mode == StaticMode::Fallback) {
+    factor_ctrl_.fallback_static_pivot_tol = 1e-8;
+    factor_ctrl_.static_pivots_as_zero = true;
+  }
 
   if (!ak_ && run_analysis() != ErrorCode::Success) return IpmFactorStatus::Error;
   prepare_analysis();
@@ -176,6 +184,7 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
   // matching scaling finds no matching: Singular with SingularMatrix) leaves
   // fk_ as it was, pointing at the previous analysis, with no factor values.
   const bool ran = fk_.analysis == ak_.get() && !fk_.factor_values.empty();
+  if (solvable_ && ran) stats_.static_pivots += info_.static_pivots;
   if (probation_ && solvable_ && ran) {
     probation_ = false;
     if (info_.delayed_pivots > probation_delays_) {

@@ -937,3 +937,51 @@ TEST(IpmSession, ProbationIgnoresAFactorThatNeverRan) {
     EXPECT_EQ(s.stats().reanalyses_reverted, 0);
     expect_factor_points_at_a_live_analysis(s);
 }
+
+// ---------------------------------------------------------------------------
+// Feature 3a: StaticMode::Fallback.
+
+namespace {
+
+IpmControl fallback_mode() {
+    IpmControl ipm = features_off();
+    ipm.static_mode = StaticMode::Fallback;
+    return ipm;
+}
+
+} // namespace
+
+TEST(IpmSession, FallbackModeTurnsStaticPivotsIntoZeros) {
+    // singular_kkt: the zeroed constraint row reaches the root unpivoted.
+    // Off: a zero pivot. Fallback: a static pivot, counted as a zero, so the
+    // inertia IPOPT sees is the same.
+    const CscLower S = singular_kkt();
+    const Control ctrl = ipopt_control();
+    for (const bool fallback : {false, true}) {
+        IpmSession s;
+        ASSERT_EQ(s.analyse(S, {}, ctrl, fallback ? fallback_mode() : features_off()), ErrorCode::Success);
+        EXPECT_EQ(s.factor(S.values), IpmFactorStatus::Singular) << "fallback " << fallback;
+        const InertiaCounts in = s.inertia();
+        EXPECT_EQ(in.positive, 37) << "fallback " << fallback;
+        EXPECT_EQ(in.negative, 17) << "fallback " << fallback;
+        EXPECT_EQ(in.zero, 1) << "fallback " << fallback;
+        EXPECT_EQ(s.info().static_pivots, fallback ? 1 : 0);
+        EXPECT_EQ(s.stats().static_pivots, fallback ? 1 : 0);
+    }
+}
+
+TEST(IpmSession, FallbackModeLeavesANonsingularKktAlone) {
+    const CscLower A = small_kkt();
+    const Control ctrl = ipopt_control();
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, ctrl, fallback_mode()), ErrorCode::Success);
+    ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+    const InertiaCounts in = s.inertia();
+    EXPECT_EQ(in.positive, 37);
+    EXPECT_EQ(in.negative, 18);
+    EXPECT_EQ(in.zero, 0);
+    EXPECT_EQ(s.info().static_pivots, 0);
+    std::vector<double> x = rhs(A.n);
+    ASSERT_EQ(s.solve(x.data(), static_cast<int>(A.n), 1), 0);
+    EXPECT_LE(eta(A, rhs(A.n), x), 1e-10);
+}

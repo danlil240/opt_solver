@@ -430,7 +430,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-      0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
+      0.0, 0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
   blas_threads.reset();
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);

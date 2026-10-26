@@ -43,11 +43,17 @@ struct SerialFactorStats {
 /// pivots accepted so far exceed it, the remaining fronts are skipped and
 /// ErrorCode::InertiaExceeded is returned, `st.inertia` holding the partial
 /// counts and `st.aborted_flops_skipped` the skipped fronts' predicted flops.
+///
+/// Indefinite with `static_pivot` > 0: every front static-pivots (no
+/// delays). `fallback_static_pivot` > 0 (Control::fallback_static_pivot_tol,
+/// absolute): only a root front, or a front receiving more delayed columns
+/// than its supernode width, static-pivots, with this value in place of
+/// `static_pivot`. ctrl.static_pivots_as_zero counts raised pivots as zeros.
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
-                                     double static_pivot, bool posdef,
-                                     FactorKeep &fkeep,
+                                     double static_pivot, double fallback_static_pivot,
+                                     bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st);
 
 } // namespace smf

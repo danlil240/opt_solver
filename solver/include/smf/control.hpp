@@ -39,6 +39,18 @@ struct Control {
     // pivot, its |d| raised to static_pivot_tol * max|A| if smaller. The
     // factor is then of a perturbed matrix: solve with iterative refinement.
     double         static_pivot_tol = 0.0;
+    // Fallback static pivoting, off at 0. Threshold pivoting with delays as
+    // usual, except in a root front (no parent to delay to) and in a front
+    // that receives more delayed columns from its children than its own
+    // supernode width: there a column with no acceptable pivot is static
+    // pivoted, |d| raised to fallback_static_pivot_tol * max|A|, instead of
+    // becoming a zero pivot (root) or being delayed again. Such a front uses
+    // this tolerance in place of static_pivot_tol.
+    double         fallback_static_pivot_tol = 0.0;
+    // A pivot whose |d| static pivoting raised (static_pivot_tol or the
+    // fallback; Info::static_pivots) counts as a zero eigenvalue
+    // (Info::num_zero, so the factor reports Singular) instead of by its sign.
+    bool           static_pivots_as_zero = false;
     int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
 

@@ -793,3 +793,166 @@ TEST(IpmHooks, TreeParallelRealizedOrderIsTopologicalAndStable) {
         EXPECT_GT(checked, 0);
     }
 }
+
+// --- Fallback static pivoting and static-as-zero inertia (Feature 3a) ---
+
+namespace {
+
+// DelayedPivots.CrossFrontNonsingular: A(0,0) = 0, column 0 is delayed from
+// its leaf front into the parent, where A(2,0) = 1 makes it pivotable.
+CscLower cross_front() {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 2, 4, 5};
+    A.row_idx = {0, 2, 1, 2, 2};
+    A.values = {0.0, 1.0, 4.0, 1.0, 2.0};
+    return A;
+}
+
+// diag(0, 1, 2): column 0 is a root with an exactly zero row and column.
+CscLower zero_root() {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 1, 2, 3};
+    A.row_idx = {0, 1, 2};
+    A.values = {0.0, 1.0, 2.0};
+    return A;
+}
+
+// StaticPivoting.ForcedPivotsAreCountedAndRefined: [[0, 0, 1], [0, 4, 1],
+// [1, 1, 0]]; with static pivoting the leaf's zero column is forced.
+CscLower forced_static() {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 2, 4, 5};
+    A.row_idx = {0, 2, 1, 2, 2};
+    A.values = {0.0, 1.0, 4.0, 1.0, 0.0};
+    return A;
+}
+
+Control fallback_on(Control c) {
+    c.fallback_static_pivot_tol = 1e-8;
+    c.static_pivots_as_zero = true;
+    return c;
+}
+
+int inertia_sum(const Info &info) { return info.num_positive + info.num_negative + info.num_zero; }
+
+} // namespace
+
+TEST(IpmHooks, StaticControlsDefaultOff) {
+    EXPECT_EQ(Control{}.fallback_static_pivot_tol, 0.0);
+    EXPECT_FALSE(Control{}.static_pivots_as_zero);
+}
+
+TEST(IpmHooks, FallbackOnlyAtRootOrBudget) {
+    // The leaf front is neither a root nor over budget (it receives no
+    // delays), so it still delays its zero column instead of forcing it.
+    Control c = indef_ctrl();
+    c.nemin = 1;
+    c.pivot_u = 0.01;
+    for (const bool fallback : {false, true}) {
+        Harness h(cross_front(), fallback ? fallback_on(c) : c);
+        ASSERT_NE(h.ak.get(), nullptr);
+        ASSERT_EQ(h.factor(-1), FactorStatus::Success) << "fallback " << fallback;
+        EXPECT_GT(h.info.delayed_pivots, 0) << "fallback " << fallback;
+        EXPECT_EQ(h.info.static_pivots, 0) << "fallback " << fallback;
+        EXPECT_EQ(h.info.num_positive, 2);
+        EXPECT_EQ(h.info.num_negative, 1);
+        EXPECT_EQ(h.info.num_zero, 0);
+        std::vector<double> x;
+        ASSERT_EQ(h.solve(x), 0);
+        EXPECT_LT(h.eta(x), 1e-12);
+    }
+}
+
+TEST(IpmHooks, FallbackReplacesRootZeroPivot) {
+    Control c = indef_ctrl();
+    c.nemin = 1;
+    c.scaling = ScalingMethod::None;
+
+    Harness off(zero_root(), c);
+    ASSERT_NE(off.ak.get(), nullptr);
+    EXPECT_EQ(off.factor(-1), FactorStatus::Singular);
+    EXPECT_EQ(off.info.num_zero, 1);
+    EXPECT_EQ(off.info.static_pivots, 0);
+    EXPECT_EQ(realized_pivot_order(*off.ak, off.fk).zero_pivots, 1);
+
+    Harness on(zero_root(), fallback_on(c));
+    ASSERT_NE(on.ak.get(), nullptr);
+    // A static pivot counts as a zero eigenvalue: still reported singular.
+    EXPECT_EQ(on.factor(-1), FactorStatus::Singular);
+    EXPECT_EQ(on.info.static_pivots, 1);
+    EXPECT_EQ(on.info.num_zero, 1);
+    EXPECT_EQ(on.info.num_positive, 2);
+    EXPECT_EQ(on.info.num_negative, 0);
+    // The static pivot is a real pivot (d = 1e-8 max|A|), not a zero pivot.
+    const RealizedOrder ro = realized_pivot_order(*on.ak, on.fk);
+    ASSERT_TRUE(is_permutation_of_n(ro.perm, 3));
+    EXPECT_EQ(ro.zero_pivots, 0);
+    bool found = false;
+    for (const DiagSolveEntry &e : on.fk.diag_entries) {
+        if (on.ak->perm[static_cast<std::size_t>(e.row0)] != 0) continue;
+        found = true;
+        EXPECT_EQ(e.was_zero, 0);
+        EXPECT_EQ(e.tag, 1);
+        EXPECT_DOUBLE_EQ(e.d00, 1e-8 * 2.0);
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST(IpmHooks, FallbackBudgetCapsDelays) {
+    // A front that receives more delayed columns than its own width pivots
+    // statically: the heavy-delay grid KKT delays fewer columns with the
+    // fallback (root static pivots never count as delays, so only the
+    // budget can lower the count). Serial and tree-parallel alike. A forced
+    // pivot whose |d| is already above the tolerance is taken as it is
+    // (not raised, not a static pivot): here every forced pivot is.
+    for (const int threads : {1, 4}) {
+        Control c = delay_ctrl();
+        c.num_threads = threads;
+        Harness off(grid_kkt(110, 7), c);
+        ASSERT_EQ(off.factor(-1), FactorStatus::Success);
+        ASSERT_GT(off.info.delayed_pivots, 0);
+        EXPECT_EQ(off.info.static_pivots, 0);
+
+        Harness on(grid_kkt(110, 7), fallback_on(c));
+        on.factor(-1);
+        if (threads > 1) EXPECT_GE(on.info.parallel_subtrees, 2) << "parallel path not taken";
+        EXPECT_LT(on.info.delayed_pivots, off.info.delayed_pivots) << "threads " << threads;
+        EXPECT_EQ(inertia_sum(on.info), static_cast<int>(on.A.n));
+        EXPECT_GE(on.info.num_zero, on.info.static_pivots);
+        // Measured: 2980 -> 2881 delays, no pivot raised, same inertia.
+        EXPECT_EQ(on.info.num_positive, off.info.num_positive);
+        EXPECT_EQ(on.info.num_negative, off.info.num_negative);
+        EXPECT_EQ(on.info.num_zero, off.info.num_zero);
+        std::vector<double> x;
+        ASSERT_EQ(on.solve(x), 0);
+        EXPECT_LT(on.eta(x), 1e-12);
+    }
+}
+
+TEST(IpmHooks, StaticAsZeroCounts) {
+    Control c = indef_ctrl();
+    c.ordering = OrderingMethod::AMD;
+    c.scaling = ScalingMethod::None;
+    c.nemin = 1;
+    c.static_pivot_tol = 1e-8;
+
+    Harness signed_(forced_static(), c);
+    ASSERT_NE(signed_.ak.get(), nullptr);
+    ASSERT_EQ(signed_.factor(-1), FactorStatus::Success);
+    ASSERT_GT(signed_.info.static_pivots, 0);
+    EXPECT_EQ(inertia_sum(signed_.info), 3);
+
+    Control cz = c;
+    cz.static_pivots_as_zero = true;
+    Harness zero(forced_static(), cz);
+    ASSERT_NE(zero.ak.get(), nullptr);
+    zero.factor(-1);
+    EXPECT_EQ(zero.info.static_pivots, signed_.info.static_pivots);
+    EXPECT_EQ(zero.info.num_zero - signed_.info.num_zero, signed_.info.static_pivots);
+    EXPECT_EQ(inertia_sum(zero.info), 3);
+    // Only the counting differs, not the factor.
+    EXPECT_TRUE(bit_equal(signed_.fk.factor_values, zero.fk.factor_values));
+}
