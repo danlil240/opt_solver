@@ -33,5 +33,23 @@ class TestPglib(unittest.TestCase):
         self.assertEqual(len([n for n in hard_models.MODELS if n.startswith("pglib_")]), 8)
 
 
+class TestDefaultSelection(unittest.TestCase):
+    ORIGINAL = ["pde_control_120", "pde_control_250", "robot_arm_8k", "obstacle_surface_200",
+                "acopf_grid_80", "acopf_grid_160", "portfolio_20k"]
+
+    def test_default_is_original_seven(self):
+        import ipopt_kkt
+
+        names = ipopt_kkt.selected_models("")
+        self.assertEqual(names, self.ORIGINAL)
+        self.assertFalse([n for n in names if n.startswith("pglib_")])
+
+    def test_hard_models_addressable_by_name(self):
+        import ipopt_kkt
+
+        self.assertEqual(ipopt_kkt.selected_models("pglib_opf_case118_ieee"), ["pglib_opf_case118_ieee"])
+        self.assertIn("pglib_opf_case118_ieee", ipopt_kkt.MODELS)
+
+
 if __name__ == "__main__":
     unittest.main()

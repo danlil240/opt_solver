@@ -215,8 +215,16 @@ MODELS = {
     "acopf_grid_160": (acopf_grid, 160),
     "portfolio_20k": (portfolio_qp, 20000),
 }
+# Models run by capture/e2e when --models is empty. Hard models stay out of it.
+DEFAULT_MODELS = list(MODELS)
 # Hard nonconvex corpus (PGLib-OPF via Egret, ...): arg may be a case-name string.
+# Addressable by name via --models only.
 MODELS.update(hard_models.MODELS)
+
+
+def selected_models(models_arg: str) -> list[str]:
+    """Model names for capture/e2e: the --models list, or DEFAULT_MODELS when empty."""
+    return models_arg.split(",") if models_arg else list(DEFAULT_MODELS)
 
 
 # ------------------------------------------------------------------ ipopt --
@@ -312,7 +320,7 @@ def build_nl(name: str, scale: float) -> pathlib.Path:
 
 
 def capture(args) -> int:
-    names = args.models.split(",") if args.models else list(MODELS)
+    names = selected_models(args.models)
     fixtures = REPO / "benchmarks" / "fixtures" / "ipopt_kkt"
     cases = []
     for name in names:
@@ -378,7 +386,7 @@ def capture(args) -> int:
 
 
 def e2e(args) -> int:
-    names = args.models.split(",") if args.models else list(MODELS)
+    names = selected_models(args.models)
     solvers = args.solvers.split(",")
     threads = [int(t) for t in args.threads.split(",")]
     results = []
