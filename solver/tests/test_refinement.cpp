@@ -131,6 +131,8 @@ TEST(Refinement, StagnationIsNotSuccess) {
         de.d10 = 0.0;
         de.d11 = 1e20;
     }
+    // The lean engine keeps D inline in the factor too (FactorKeep::inline_d).
+    for (double &v : fk_bad.factor_values) v *= 1e20;
     Control ctrl_iters = ctrl;
     ctrl_iters.refinement_max_iters = 5;
     RefinementResult rr_stag = refine(A, fk_bad, ctrl_iters, b, x_corrupted, 1, sws);
@@ -264,6 +266,25 @@ TEST(Matching, StructurallySingular) {
 
     std::vector<double> scale;
     EXPECT_EQ(compute_matching_scale(A, scale, 0), ErrorCode::SingularMatrix);
+}
+
+TEST(Matching, ExplicitZerosKeepLaterEntries) {
+    // [[0 1 0] [1 0 1] [0 1 1]] with explicit zeros at (0,0) and (2,0), as
+    // IPOPT passes them. Dropping column 0's zeros used to leave stale slots
+    // that made (2,1) and (2,2) look like duplicates, so the nonsingular
+    // matrix was reported structurally singular (robot_arm KKT: 40k columns).
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 3, 4, 5};
+    A.row_idx = {0, 1, 2, 2, 2};
+    A.values = {0.0, 1.0, 0.0, 1.0, 1.0};
+
+    MatchingResult mr = compute_symmetric_matching(A);
+    ASSERT_EQ(mr.status, ErrorCode::Success);
+    EXPECT_EQ(mr.matched_rank, 3);
+    EXPECT_EQ(mr.col_to_row[0], 1);
+    EXPECT_EQ(mr.col_to_row[1], 0);
+    EXPECT_EQ(mr.col_to_row[2], 2);
 }
 
 TEST(Matching, ScaledKktSequenceWithDelayedPivots) {

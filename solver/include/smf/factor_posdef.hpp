@@ -3,6 +3,7 @@
 #include "smf/control.hpp"
 #include "smf/info.hpp"
 #include "smf/types.hpp"
+#include <utility>
 #include <vector>
 
 namespace smf {
@@ -44,10 +45,26 @@ struct FactorKeep {
   std::vector<DiagSolveEntry> diag_entries; ///< flattened D blocks for solve_diag
   std::vector<SolveStep> solve_steps; ///< flattened front traversal for triangular solves
   std::vector<Int> solve_row_indices; ///< row indices referenced by solve_steps
+  // Tree-parallel factorizations also leave the solve its parallel layout:
+  // solve_steps[0, solve_top_begin) is a sequence of complete, independent
+  // subtrees (solve_subtrees, [begin, end) step ranges), the rest the top of
+  // the tree. solve_top_rows lists the top part's pivot rows and
+  // solve_top_slot maps a row to its index there (-1 for subtree rows).
+  // solve_top_parent[i] is the top step (relative to solve_top_begin) of
+  // top step i's parent front, -1 at a root.
+  std::vector<std::pair<LongInt, LongInt>> solve_subtrees;
+  LongInt solve_top_begin = 0;
+  std::vector<Int> solve_top_rows;
+  std::vector<Int> solve_top_slot;
+  std::vector<Int> solve_top_parent;
   std::vector<double> solve_tmp; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_loc; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_ext; ///< legacy scratch (not mutated by const solve)
   bool is_posdef = false;          ///< true if factorization used SPD path (D = I)
+  /// Indefinite factor whose unit-L fronts keep D in their diagonal slots
+  /// (a 2x2 block's off-diagonal at (c, c + 1)): the backward solve applies
+  /// D^-1 front by front instead of a separate pass over diag_entries.
+  bool inline_d = false;
   bool use_banded_spd = false;     ///< true when SPD factor stored in banded LAPACK form
   int band_n = 0;                  ///< order for banded SPD factor
   int band_kd = 0;                 ///< lower half-bandwidth for banded SPD factor

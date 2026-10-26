@@ -1,4 +1,5 @@
 #include "smf/workspace.hpp"
+#include "smf/solve_pool.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,16 @@ void SolveWorkspace::ensure_capacity(int n, int max_p, int max_q, int nrhs) {
     if (loc.size() < p_sz) loc.resize(p_sz);
     if (ext.size() < q_sz) ext.resize(q_sz);
     if (rhs_perm.size() < n_sz * nrhs_sz) rhs_perm.resize(n_sz * nrhs_sz);
+}
+
+SolvePool &SolveWorkspace::ensure_pool(int nthreads) {
+    if (!pool || pool->size() != nthreads) {
+        pool.reset();
+        pool = std::make_shared<SolvePool>(nthreads);
+    }
+    if (threads.size() < static_cast<std::size_t>(nthreads))
+        threads.resize(static_cast<std::size_t>(nthreads));
+    return *pool;
 }
 
 void NumericWorkspace::prepare_for_analysis(const AnalysisKeep &ak) {

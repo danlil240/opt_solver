@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -94,6 +95,28 @@ struct SmfFkeep
     int capture_id = 0;
     bool rhs_captured = false;
 };
+
+// Call statistics for benchmarking (SMF_PLUGIN_STATS=1): counts and time of
+// factorizations and solves, printed to stderr when the plugin unloads.
+struct PluginStats
+{
+    bool enabled = std::getenv("SMF_PLUGIN_STATS") != nullptr;
+    bool trace = std::getenv("SMF_PLUGIN_STATS") != nullptr && std::atoi(std::getenv("SMF_PLUGIN_STATS")) > 1;
+    long factors = 0;
+    long solves = 0;
+    long rhs = 0;
+    double factor_s = 0.0;
+    double solve_s = 0.0;
+    ~PluginStats()
+    {
+        if (enabled)
+            std::fprintf(stderr,
+                         "[smf_ma97] factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
+                         factors, factor_s, solves, rhs, solve_s,
+                         solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
+    }
+};
+static PluginStats g_stats;
 
 // KKT capture for benchmarking (SMF_KKT_DUMP_DIR): the first factorization of
 // each analysis writes <dir>/kkt_s<id>.mtx (cleaned lower triangle, entries in
@@ -428,7 +451,13 @@ extern "C"
             fw = new SmfFkeep();
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
+        const auto t_factor = std::chrono::steady_clock::now();
         const smf::FactorStatus fs = ak->solver.factor(*ak->ak, ak->mat, ak->ctrl, ak->info, fw->fk, ak->nws);
+        if (g_stats.enabled)
+        {
+            ++g_stats.factors;
+            g_stats.factor_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count();
+        }
         ak->ctrl.user_scale = nullptr;
         fw->ctrl.user_scale = nullptr;
 
@@ -494,6 +523,14 @@ extern "C"
             return;
         }
 
+        if (g_stats.trace)
+            std::fprintf(stderr,
+                         "[smf_ma97] factor %ld: scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d "
+                         "L=%lld delays=%d neg=%d two=%d\n",
+                         g_stats.factors, ctrl->scaling, computed_scaling ? "out" : (scale ? "in" : "-"), ctrl->u,
+                         ak->info.ordering_used, ctrl->ordering, ak->ctrl.nemin,
+                         static_cast<long long>(ak->info.actual_factor_entries), ak->info.delayed_pivots,
+                         fw->num_neg, fw->num_two);
         info->flag = 0;
         *fkeep = fw;
     }
@@ -557,6 +594,7 @@ extern "C"
         const smf::SolveJob sjob = static_cast<smf::SolveJob>(job);
         int rc = 0;
 
+        const auto t_solve = std::chrono::steady_clock::now();
         if (ldx == n)
         {
             rc = fw->solver.solve(fw->fk, fw->ctrl, fw->info, x, n, nrhs, fw->sws, sjob);
@@ -578,6 +616,12 @@ extern "C"
             }
         }
 
+        if (g_stats.enabled)
+        {
+            ++g_stats.solves;
+            g_stats.rhs += nrhs;
+            g_stats.solve_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_solve).count();
+        }
         info->flag = (rc == 0) ? 0 : -5;
         info->num_neg = fw->num_neg;
         info->num_two = fw->num_two;

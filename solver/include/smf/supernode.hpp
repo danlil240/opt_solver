@@ -53,7 +53,8 @@ std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
 /// `parent` and `colcount` describe the elimination tree of a postordered
 /// column numbering (children before parents, subtrees contiguous). A child
 /// merges into its parent when both have fewer than `nemin` eliminated
-/// columns (counting columns merged so far). Because merged groups are no
+/// columns (counting columns merged so far) and the merge adds few stored
+/// zeros: at most 16, or the merged node stays at most 30% zeros. Because merged groups are no
 /// longer contiguous in the input numbering, a new column order is returned
 /// in `order` (order[new] = old index of the input numbering); it is a
 /// topological order of the same elimination tree, so the factor's fill is

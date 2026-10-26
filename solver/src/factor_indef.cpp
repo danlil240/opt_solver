@@ -252,6 +252,7 @@ bool finalize_factor_from_front_results(
   }
 
   fkeep.diag_entries.clear();
+  fkeep.inline_d = false;
   fkeep.diag_entries.reserve(static_cast<std::size_t>(n));
   for (int s = 0; s < ns; ++s) {
     for (const auto &db : node_results[static_cast<std::size_t>(s)].d_blocks) {
@@ -272,6 +273,7 @@ bool finalize_factor_from_front_results(
 
   fkeep.solve_steps.clear();
   fkeep.solve_row_indices.clear();
+  fkeep.solve_subtrees.clear();
   std::vector<Int> fallback_order;
   const std::vector<Int> *order_ptr = &keep.solve_postorder;
   if (order_ptr->empty()) {

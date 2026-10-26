@@ -8,7 +8,7 @@
 //
 // Usage: bench_profile [--manifest path] [--solvers smf,ma27] [--repeats R]
 //                      [--case substring] [-v] [--nemin k] [--ordering m]
-//                      [--scaling s] [--threads t]
+//                      [--scaling s] [--threads t] [--u pivot_u]
 //        bench_profile --sample analyse|factor|solve|all --case substring
 //                      [--seconds S] [--lines]
 //
@@ -19,6 +19,7 @@
 #include "adapters/adapter.hpp"
 #include "smf/control.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
 #include "common/sampler.hpp"
 
@@ -79,6 +80,7 @@ struct Timing {
     double analyse = 0, factor = 0, solve = 0, wall = 0;
     bool ok = false;
     double eta = 0;
+    double omega = 0;
     int delayed = 0;
     long long fent = 0;
     double flops = 0;
@@ -119,6 +121,7 @@ Timing run_once(smf::bench::SolverAdapter &ad, const smf::CscLower &A,
     const auto v = smf::bench::validate(Al, b, x, 1);
     t.ok = smf::bench::is_qualified_validation(v);
     t.eta = v.eta_inf;
+    t.omega = v.omega;
     if (!t.ok) {
         char buf[96];
         std::snprintf(buf, sizeof buf, "eta=%.2e omega=%.2e", v.eta_inf, v.omega);
@@ -139,6 +142,7 @@ int main(int argc, char **argv) {
     int repeats = 7;
     bool verbose = false;
     int nemin = -1, ordering = -1, scaling = -1, threads = 1;
+    double pivot_u = -1.0;
     std::string sample_phase;
     double sample_seconds = 3.0;
     bool sample_lines = false;
@@ -149,6 +153,7 @@ int main(int argc, char **argv) {
         else if (a == "--ordering" && i + 1 < argc) ordering = std::atoi(argv[++i]);
         else if (a == "--scaling" && i + 1 < argc) scaling = std::atoi(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) threads = std::atoi(argv[++i]);
+        else if (a == "--u" && i + 1 < argc) pivot_u = std::atof(argv[++i]);
         else if (a == "--sample" && i + 1 < argc) sample_phase = argv[++i];
         else if (a == "--seconds" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--lines") sample_lines = true;
@@ -180,6 +185,8 @@ int main(int argc, char **argv) {
                                      : smf::MatrixType::RealSymmetricIndefinite;
             if (nemin > 0) ctrl.nemin = nemin;
             if (ordering >= 0) ctrl.ordering = static_cast<smf::OrderingMethod>(ordering);
+            if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
+            if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;
             ctrl.num_threads = threads;
             auto ad = smf::bench::make_solver_adapter("smf");
             ad->configure(ctrl, "recommended");
@@ -248,6 +255,7 @@ int main(int argc, char **argv) {
         ctrl.num_threads = threads;
         if (ordering >= 0) ctrl.ordering = static_cast<smf::OrderingMethod>(ordering);
         if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
+        if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;
         int nsn = 0;
         {
             smf::Solver s;
@@ -277,6 +285,11 @@ int main(int argc, char **argv) {
                             "sum_qc*f=%lld pred_flops=%.3g\n",
                             c.id.c_str(), info.ordering_used, max_f, max_p, max_ch, sum_f2,
                             sum_pf, sum_assembly, info.predicted_flops);
+                if (!c.spd) {
+                    const auto mr = smf::compute_symmetric_matching(A);
+                    std::printf("  [%s] matching status=%d matched_rank=%d of %d\n", c.id.c_str(),
+                                static_cast<int>(mr.status), mr.matched_rank, static_cast<int>(A.n));
+                }
             }
         }
 
@@ -303,13 +316,14 @@ int main(int argc, char **argv) {
             }
             if (!last.ok) {
                 std::printf(" | %-6s %7s %7s %6s %7s %4d %3s", sv.c_str(), "FAIL", "", "", "", last.delayed, "no");
-                if (verbose) std::printf(" [%s]", last.why.c_str());
+                if (verbose) std::printf(" [%s L=%lld fac=%.1f sol=%.2f]", last.why.c_str(), last.fent, last.factor, last.solve);
                 walls.push_back(std::numeric_limits<double>::quiet_NaN());
                 continue;
             }
             std::printf(" | %-6s %7.3f %7.3f %6.3f %7.3f %4d %3s", sv.c_str(), best.analyse,
                         best.factor, best.solve, best.wall, best.delayed, "ok");
-            if (verbose) std::printf(" [L=%lld fl=%.3g]", best.fent, best.flops);
+            if (verbose) std::printf(" [L=%lld fl=%.3g eta=%.1e omega=%.1e]", best.fent, best.flops,
+                                     best.eta, best.omega);
             walls.push_back(best.wall);
         }
         if (walls.size() >= 2 && std::isfinite(walls[0]) && std::isfinite(walls[1])) {

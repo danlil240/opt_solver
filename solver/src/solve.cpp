@@ -132,35 +132,71 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     return 0;
   }
 
+  // Subtree-parallel triangular solves once the factor is big enough to
+  // repay waking the pool (needs a tree-parallel factorization's layout).
+  const int threads =
+      (ctrl.num_threads > 1 &&
+       static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)
+          ? ctrl.num_threads
+          : 1;
+
+  // D then L^T: with D inline the backward pass applies it front by front.
+  const auto diag_back = [&](double *y, bool permute) {
+    const bool fused = backward_applies_diag(fkeep);
+    if (!fused)
+      for (int j = 0; j < nrhs; ++j)
+        solve_diag(fkeep, y + j * n, n);
+    solve_backward(fkeep, y, n, nrhs, ws, threads, fused, permute);
+  };
+
   switch (job) {
-  case SolveJob::Full:
-    if (has_scale)
-      apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
-    solve_forward(fkeep, b, n, nrhs, ws);
-    for (int j = 0; j < nrhs; ++j)
-      solve_diag(fkeep, b + j * n, n);
-    solve_backward(fkeep, b, n, nrhs, ws);
-    if (has_scale)
-      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
+  case SolveJob::Full: {
+    // One gather (P^T S b) into the work vector and one scatter (S P y) at
+    // the end, instead of a scaling pass, a permute-and-copy pass in each
+    // triangular solve and a scaling pass again.
+    double *w = ws.rhs_perm.data();
+    const int *perm = fkeep.perm.data();
+    const double *s = has_scale ? fkeep.scale.data() : nullptr;
+    for (int r = 0; r < nrhs; ++r) {
+      const double *src = b + static_cast<std::ptrdiff_t>(r) * n;
+      double *dst = w + static_cast<std::ptrdiff_t>(r) * n;
+      if (s)
+        for (int i = 0; i < n; ++i)
+          dst[i] = src[perm[i]] * s[perm[i]];
+      else
+        for (int i = 0; i < n; ++i)
+          dst[i] = src[perm[i]];
+    }
+    solve_forward(fkeep, w, n, nrhs, ws, threads, /*permute=*/false);
+    diag_back(w, /*permute=*/false);
+    for (int r = 0; r < nrhs; ++r) {
+      const double *src = w + static_cast<std::ptrdiff_t>(r) * n;
+      double *dst = b + static_cast<std::ptrdiff_t>(r) * n;
+      if (s)
+        for (int i = 0; i < n; ++i)
+          dst[perm[i]] = src[i] * s[perm[i]];
+      else
+        for (int i = 0; i < n; ++i)
+          dst[perm[i]] = src[i];
+    }
     break;
+  }
   case SolveJob::Forward:
     if (has_scale)
       apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
-    solve_forward(fkeep, b, n, nrhs, ws);
+    solve_forward(fkeep, b, n, nrhs, ws, threads);
     break;
   case SolveJob::DiagOnly:
     for (int j = 0; j < nrhs; ++j)
       solve_diag(fkeep, b + j * n, n);
     break;
   case SolveJob::Backward:
-    solve_backward(fkeep, b, n, nrhs, ws);
+    solve_backward(fkeep, b, n, nrhs, ws, threads);
     if (has_scale)
       apply_scale_to_solution(b, n, nrhs, fkeep.scale);
     break;
   case SolveJob::DiagBack:
-    for (int j = 0; j < nrhs; ++j)
-      solve_diag(fkeep, b + j * n, n);
-    solve_backward(fkeep, b, n, nrhs, ws);
+    diag_back(b, /*permute=*/true);
     if (has_scale)
       apply_scale_to_solution(b, n, nrhs, fkeep.scale);
     break;

@@ -441,6 +441,7 @@ add_library(smf STATIC
     src/parallel/task_tree.cpp
     src/parallel/blas_thread_guard.cpp
     src/parallel/determinism.cpp
+    src/parallel/solve_pool.cpp
     src/coo_to_csc.cpp
     src/solve_sparse_fwd.cpp
     src/matrix_market.cpp

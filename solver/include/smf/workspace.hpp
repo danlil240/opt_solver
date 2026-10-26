@@ -14,6 +14,8 @@
 
 namespace smf {
 
+class SolvePool;
+
 struct SolveWorkspace {
     std::vector<double> tmp;
     std::vector<double> loc;
@@ -23,7 +25,19 @@ struct SolveWorkspace {
     std::vector<double> refine_dx;
     std::vector<double> refine_best_x;
 
+    // Parallel solves: the worker pool (kept between solves) and each
+    // thread's front scratch plus its buffer of updates to top-part rows.
+    struct ThreadScratch {
+        std::vector<double> loc;
+        std::vector<double> ext;
+        std::vector<double> top;
+    };
+    std::shared_ptr<SolvePool> pool;
+    std::vector<ThreadScratch> threads;
+
     void ensure_capacity(int n, int max_p, int max_q, int nrhs = 1);
+    /// The pool with `nthreads` threads (re-created when the count changes).
+    SolvePool &ensure_pool(int nthreads);
 };
 
 struct TreeParallelBuffers; // multifrontal_serial.cpp

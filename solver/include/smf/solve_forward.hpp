@@ -13,7 +13,10 @@ namespace smf {
 /// @param nrhs  number of RHS columns (x is n × nrhs, column-major, ldx=n)
 void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs = 1);
 
+/// num_threads > 1 solves the independent subtrees of a tree-parallel
+/// factorization concurrently (serial when the factor has no such layout).
+/// permute = false: x is already in permuted order (P^T applied).
 void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
-                   SolveWorkspace &ws);
+                   SolveWorkspace &ws, int num_threads = 1, bool permute = true);
 
 } // namespace smf

@@ -141,4 +141,4 @@ optim20 against MA27 is unchanged at 1.49x.
 - The hardest QP KKT cases (cvxqp3, ncvxqp3) need static pivoting and are still slower than MUMPS. The matching ordering's fill is the cost.
 - Serial METIS dominates analysis on bmwcra_1-like matrices. A parallel nested dissection would fix it: order the two halves of the top separator concurrently.
 - Chains of thin top fronts, with p of 2–30 pivots on f ≈ 1,800 (helm3d01, copter2), each move a whole contribution block. Fill-tolerant amalgamation, as in CHOLMOD's relaxed supernodes, would merge them.
-- The solve phase is serial (PARDISO's scales 2–3x), and inside IPOPT smf's backsolve is still ~1.8x MA27's (robot_arm 0.36 s vs 0.20 s).
+- ~~The solve phase is serial (PARDISO's scales 2–3x), and inside IPOPT smf's backsolve is still ~1.8x MA27's (robot_arm 0.36 s vs 0.20 s).~~ Done: [2026-10-26-solve-phase.md](2026-10-26-solve-phase.md). The backsolve is at or below MA27's on all 7 IPOPT models (the robot_arm gap was a matching bug), and the solve is tree-parallel (1.4–2.9x at 8 threads).

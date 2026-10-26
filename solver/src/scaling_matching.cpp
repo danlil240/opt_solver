@@ -60,21 +60,26 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     }
 
     // Merge duplicates per column (summing them, like the factorization
-    // does) with a last-seen marker, then drop zeros.
+    // does) with a last-seen-column marker, then drop zeros. The marker is
+    // the column, not the output slot: dropping a column's zeros moves `out`
+    // back, so slots left by the previous column can lie past the next
+    // column's start and would swallow its entries as false duplicates.
     g.ptr.assign(static_cast<std::size_t>(n) + 1, 0);
     g.row.resize(nnz);
     g.cost.resize(nnz);
     g.col_max.assign(static_cast<std::size_t>(n), 0.0);
+    std::vector<int> seen_in(static_cast<std::size_t>(n), -1);
     std::vector<Int> slot_of(static_cast<std::size_t>(n), -1);
     Int out = 0;
     for (int j = 0; j < n; ++j) {
         const Int begin = out;
         for (Int q = count[static_cast<std::size_t>(j)]; q < count[static_cast<std::size_t>(j) + 1]; ++q) {
             const int i = raw_row[static_cast<std::size_t>(q)];
-            const Int s = slot_of[static_cast<std::size_t>(i)];
-            if (s >= begin) {
-                g.cost[static_cast<std::size_t>(s)] += raw_val[static_cast<std::size_t>(q)];
+            if (seen_in[static_cast<std::size_t>(i)] == j) {
+                g.cost[static_cast<std::size_t>(slot_of[static_cast<std::size_t>(i)])] +=
+                    raw_val[static_cast<std::size_t>(q)];
             } else {
+                seen_in[static_cast<std::size_t>(i)] = j;
                 slot_of[static_cast<std::size_t>(i)] = out;
                 g.row[static_cast<std::size_t>(out)] = i;
                 g.cost[static_cast<std::size_t>(out)] = raw_val[static_cast<std::size_t>(q)];

@@ -60,7 +60,10 @@ void check_factor_identity(const CscLower& A, const FactorKeep& fk) {
     const double norm_A_fro = std::max(1.0, std::sqrt(norm_A_fro_sq));
 
     // Reconstruct unit lower-triangular L from solve_steps and factor_values
+    // (strictly below the diagonal; the diagonal slots hold D when inline_d,
+    // checked against diag_entries below).
     std::vector<double> L(static_cast<std::size_t>(n * n), 0.0);
+    std::vector<double> D_inline(static_cast<std::size_t>(n * n), 0.0);
     for (int i = 0; i < n; ++i) {
         L[static_cast<std::size_t>(i * n + i)] = 1.0;
     }
@@ -73,7 +76,16 @@ void check_factor_identity(const CscLower& A, const FactorKeep& fk) {
             const int gcol = static_cast<int>(rows[c]);
             ASSERT_GE(gcol, 0);
             ASSERT_LT(gcol, n);
-            for (int r = c; r < f; ++r) {
+            if (fk.inline_d) {
+                D_inline[static_cast<std::size_t>(gcol * n + gcol)] = fdata[static_cast<std::size_t>(c * f + c)];
+                if (c + 1 < p && fdata[static_cast<std::size_t>((c + 1) * f + c)] != 0.0) {
+                    const int g1 = static_cast<int>(rows[c + 1]);
+                    const double d10 = fdata[static_cast<std::size_t>((c + 1) * f + c)];
+                    D_inline[static_cast<std::size_t>(gcol * n + g1)] = d10;
+                    D_inline[static_cast<std::size_t>(g1 * n + gcol)] = d10;
+                }
+            }
+            for (int r = c + 1; r < f; ++r) {
                 const int grow = static_cast<int>(rows[r]);
                 ASSERT_GE(grow, 0);
                 ASSERT_LT(grow, n);
@@ -100,6 +112,11 @@ void check_factor_identity(const CscLower& A, const FactorKeep& fk) {
             EXPECT_DOUBLE_EQ(L[static_cast<std::size_t>(de.row1 * n + de.row0)], 0.0);
             EXPECT_DOUBLE_EQ(L[static_cast<std::size_t>(de.row1 * n + de.row1)], 1.0);
         }
+    }
+
+    if (fk.inline_d) {
+        for (int idx = 0; idx < n * n; ++idx)
+            EXPECT_EQ(D_inline[static_cast<std::size_t>(idx)], D[static_cast<std::size_t>(idx)]) << idx;
     }
 
     // Compute L * D * L^T

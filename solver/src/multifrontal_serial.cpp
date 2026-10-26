@@ -293,24 +293,30 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       for (int i = c + 1; i < f; ++i) Lc[i] *= sd;
     }
   } else {
+    // L is unit lower, so its diagonal slots keep D (FactorKeep::inline_d):
+    // d on the diagonal, a 2x2 block's off-diagonal in the strictly upper
+    // slot (c, c + 1), which no triangular kernel reads.
+    double d10 = 0.0;
     for (int c = 0; c < p_store; ++c) {
       double *Lc = F + static_cast<std::size_t>(c) * sf;
       const int8_t tag = tags[c];
       if (tag == 0) {
         P.diag->push_back(DiagSolveEntry{1, rows[c], 0, 0.0, 0.0, 0.0});
         std::fill_n(Lc + c + 1, f - c - 1, 0.0);
+        Lc[c] = 0.0;
       } else if (tag == 2) {
         P.diag->push_back(DiagSolveEntry{
             2, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
         finite_d = finite_d && is_finite_fast(Lc[c]) && is_finite_fast(Lc[c + 1]) &&
                    is_finite_fast(Lc[sf + c + 1]);
+        d10 = Lc[c + 1];
         Lc[c + 1] = 0.0;
       } else if (tag == 1) {
         P.diag->push_back(DiagSolveEntry{1, rows[c], 0, Lc[c], 0.0, 0.0});
         finite_d = finite_d && is_finite_fast(Lc[c]);
       }
       std::fill_n(Lc, c, 0.0);
-      Lc[c] = 1.0;
+      if (tag == -1) Lc[c - 1] = d10;
     }
     fkeep.pivot_types[si].assign(tags, tags + p_store);
   }
@@ -518,6 +524,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
   fkeep.solve_steps.reserve(ns);
+  fkeep.solve_subtrees.clear();
+  fkeep.inline_d = !posdef;
+  fkeep.solve_top_begin = 0;
+  fkeep.solve_top_rows.clear();
+  fkeep.solve_top_parent.clear();
   fkeep.diag_entries.clear();
   if (!posdef) fkeep.diag_entries.reserve(n);
 
@@ -595,7 +606,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     };
 
     // Phase 1: subtrees, heaviest first, one thread each on serial BLAS.
+    // Each thread's step ranges per subtree become the solve's parallel
+    // layout.
     std::atomic<std::size_t> next{0};
+    std::vector<std::vector<std::pair<std::size_t, std::size_t>>> subtree_steps(
+        static_cast<std::size_t>(threads));
     run_pool([&](int tid) {
       BlasSerialGuard serial_blas;
       FrontPass &P = tpass[static_cast<std::size_t>(tid)];
@@ -605,6 +620,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
           break;
         const auto [lo, hi] = subtrees[i];
+        const std::size_t first_step = P.steps->size();
         for (std::size_t k = lo; k <= hi; ++k) {
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true);
           if (e != ErrorCode::Success) {
@@ -612,6 +628,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             break;
           }
         }
+        subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
       }
     });
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
@@ -638,6 +655,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     struct Done {
       int pass = 0;
       std::size_t step = 0;
+      Int node = -1;
     };
     std::vector<Done> done_order;
     done_order.reserve(remaining);
@@ -673,7 +691,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e));
           } else {
-            done_order.push_back({tid, P.steps->size() - 1});
+            done_order.push_back({tid, P.steps->size() - 1, s});
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
             if (parent >= 0 && top[static_cast<std::size_t>(parent)] &&
                 --pending[static_cast<std::size_t>(parent)] == 0)
@@ -718,6 +736,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       for (int t = 0; t < threads; ++t) {
         const std::size_t ti = static_cast<std::size_t>(t);
         const auto &steps = *tpass[ti].steps;
+        const auto base = static_cast<LongInt>(fkeep.solve_steps.size());
+        for (const auto &[b, e] : subtree_steps[ti])
+          fkeep.solve_subtrees.emplace_back(base + static_cast<LongInt>(b),
+                                            base + static_cast<LongInt>(e));
         for (std::size_t k = 0; k < phase1_steps[ti]; ++k)
           fkeep.solve_steps.push_back(relocated(t, steps[k]));
         fkeep.diag_entries.insert(fkeep.diag_entries.end(), tpass[ti].diag->begin(),
@@ -725,9 +747,38 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         add_stats(st, tpass[ti].st);
         main.growths += tpass[ti].growths;
       }
+      fkeep.solve_top_begin = static_cast<LongInt>(fkeep.solve_steps.size());
+      // The solve takes subtrees in this order: heaviest (stored entries)
+      // first, so the last ones to start are small.
+      {
+        std::vector<std::pair<double, std::pair<LongInt, LongInt>>> by_work;
+        by_work.reserve(fkeep.solve_subtrees.size());
+        for (const auto &r : fkeep.solve_subtrees) {
+          double w = 0.0;
+          for (LongInt k = r.first; k < r.second; ++k) {
+            const SolveStep &step = fkeep.solve_steps[static_cast<std::size_t>(k)];
+            w += static_cast<double>(step.p) * step.f;
+          }
+          by_work.push_back({w, r});
+        }
+        std::sort(by_work.begin(), by_work.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (std::size_t i = 0; i < by_work.size(); ++i) fkeep.solve_subtrees[i] = by_work[i].second;
+      }
       for (const Done &d : done_order)
         fkeep.solve_steps.push_back(
             relocated(d.pass, (*tpass[static_cast<std::size_t>(d.pass)].steps)[d.step]));
+      // Top-part tree over solve steps (parents are top nodes too).
+      {
+        std::vector<Int> top_pos(ns, -1);
+        for (std::size_t i = 0; i < done_order.size(); ++i)
+          top_pos[static_cast<std::size_t>(done_order[i].node)] = static_cast<Int>(i);
+        fkeep.solve_top_parent.resize(done_order.size());
+        for (std::size_t i = 0; i < done_order.size(); ++i) {
+          const Int par = keep.supernodes[static_cast<std::size_t>(done_order[i].node)].parent;
+          fkeep.solve_top_parent[i] = par >= 0 ? top_pos[static_cast<std::size_t>(par)] : -1;
+        }
+      }
       for (std::size_t si = 0; si < ns; ++si)
         fkeep.factor_col_ptr[si] +=
             static_cast<LongInt>(fbase[static_cast<std::size_t>(front_pass[si] - 1)]);
@@ -740,6 +791,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
 
   // Leave the stack bookkeeping consistent for the next planning pass.
   if (status != ErrorCode::Success) {
+    fkeep.solve_subtrees.clear();
     std::fill(ws.cb_size.begin(), ws.cb_size.end(), Int{0});
     std::fill(ws.cb_delayed.begin(), ws.cb_delayed.end(), Int{0});
     return status;
@@ -747,6 +799,23 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   fkeep.factor_col_ptr[ns] = static_cast<LongInt>(main.fo);
   fv.resize(main.fo);
   sri.resize(main.ro);
+  if (!fkeep.solve_subtrees.empty()) {
+    // Pivot rows of the top part (delayed subtree pivots included): the
+    // parallel forward solve sends subtree updates to them through
+    // per-thread buffers.
+    if (fkeep.solve_top_slot.size() != n) fkeep.solve_top_slot.assign(n, -1);
+    else std::fill(fkeep.solve_top_slot.begin(), fkeep.solve_top_slot.end(), Int{-1});
+    for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin);
+         k < fkeep.solve_steps.size(); ++k) {
+      const SolveStep &step = fkeep.solve_steps[k];
+      const Int *rows = sri.data() + step.row_offset;
+      for (int i = 0; i < step.p; ++i) {
+        fkeep.solve_top_slot[static_cast<std::size_t>(rows[i])] =
+            static_cast<Int>(fkeep.solve_top_rows.size());
+        fkeep.solve_top_rows.push_back(rows[i]);
+      }
+    }
+  }
   return ErrorCode::Success;
 }
 

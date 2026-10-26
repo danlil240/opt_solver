@@ -167,6 +167,37 @@ TEST(Supernode, AmalgamationNemin1NoChange) {
     EXPECT_EQ(static_cast<Int>(amalg.size()), before);
 }
 
+// Relaxed amalgamation bounds the zeros a merge stores. Leaf column 0
+// (rows 0, 1) hangs off column 1, whose structure is rows 1, 3..41; column
+// 2 is a leaf of the dense chain 3..41. Merging {0} into {1} would store
+// 2 x 41 values for 42 nonzeros: 40 added zeros, 49% of the node, so it is
+// refused although both nodes are narrower than nemin. With column 1's
+// structure only rows 1, 3, the same merge adds 2 zeros and is taken.
+TEST(Supernode, RelaxedAmalgamationBoundsZeros) {
+    const Int n = 42;
+    std::vector<Int> parent(static_cast<std::size_t>(n)), colcount(static_cast<std::size_t>(n));
+    parent[0] = 1;
+    parent[1] = 3;
+    parent[2] = 3;
+    colcount[0] = 2;
+    colcount[2] = 2;
+    for (Int j = 3; j < n; ++j) {
+        parent[static_cast<std::size_t>(j)] = (j + 1 < n) ? j + 1 : -1;
+        colcount[static_cast<std::size_t>(j)] = n - j;
+    }
+
+    std::vector<Int> order;
+    std::vector<Supernode> snodes;
+    colcount[1] = 40;  // rows 1, 3..41
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, snodes);
+    EXPECT_EQ(snodes.size(), 4u);
+
+    colcount[1] = 2;   // rows 1, 3
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, snodes);
+    ASSERT_EQ(snodes.size(), 3u);
+    EXPECT_EQ(snodes[0].width(), 2);
+}
+
 } // namespace smf
 
 #include <random>

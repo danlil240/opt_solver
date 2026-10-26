@@ -69,6 +69,7 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
 static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_steps.clear();
   fkeep.solve_row_indices.clear();
+  fkeep.solve_subtrees.clear();
   fkeep.solve_steps.reserve(keep.solve_postorder.size());
 
   std::size_t row_count = 0;

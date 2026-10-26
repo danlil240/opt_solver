@@ -138,3 +138,73 @@ TEST(TreeParallel, IndefiniteMatchesSerial) {
     EXPECT_EQ(par.info.delayed_pivots, serial.info.delayed_pivots);
     EXPECT_LT(max_rel_diff(serial.x, par.x), 1e-10);
 }
+
+namespace {
+
+// Factor A on 4 threads (tree-parallel), then solve the same factor with
+// 1 and with 4 solve threads: 3 right-hand sides, the full solve and the
+// split Forward + DiagBack jobs, on one reused workspace (pool kept, then
+// re-created at a different size).
+void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = false) {
+    ctrl.num_threads = 4;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    if (expect_delays) ASSERT_GT(info.delayed_pivots, 0);
+    ASSERT_GE(fk.solve_subtrees.size(), 2u) << "no parallel solve layout";
+    ASSERT_FALSE(fk.solve_top_rows.empty());
+
+    const int n = static_cast<int>(A.n), nrhs = 3;
+    std::vector<double> b(static_cast<std::size_t>(n) * nrhs);
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.017 * static_cast<double>(i)) + 0.3;
+
+    Control serial = ctrl;
+    serial.num_threads = 1;
+    SolveWorkspace sws1;
+    std::vector<double> x1 = b;
+    ASSERT_EQ(solver.solve(fk, serial, info, x1.data(), n, nrhs, sws1), 0);
+
+    Control par = ctrl;
+    par.solve_parallel_min_entries = 0;
+    SolveWorkspace sws;
+    for (const int threads : {4, 4, 3}) {
+        par.num_threads = threads;
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk, par, info, x.data(), n, nrhs, sws), 0);
+        EXPECT_LT(max_rel_diff(x1, x), 1e-12) << threads << " threads";
+
+        std::vector<double> y = b;
+        ASSERT_EQ(solver.solve(fk, par, info, y.data(), n, nrhs, sws, SolveJob::Forward), 0);
+        ASSERT_EQ(solver.solve(fk, par, info, y.data(), n, nrhs, sws, SolveJob::DiagBack), 0);
+        EXPECT_LT(max_rel_diff(x1, y), 1e-12) << threads << " threads, split jobs";
+    }
+    for (int r = 0; r < nrhs; ++r) {
+        const std::vector<double> br(b.begin() + r * n, b.begin() + (r + 1) * n);
+        const std::vector<double> xr(x1.begin() + r * n, x1.begin() + (r + 1) * n);
+        EXPECT_LT(smf::bench::validate(A, br, xr, 1).eta_inf, 1e-12);
+    }
+}
+
+} // namespace
+
+TEST(TreeParallel, ParallelSolveSpd) {
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    check_parallel_solve(laplacian_2d(120), ctrl);
+}
+
+TEST(TreeParallel, ParallelSolveIndefiniteWithDelays) {
+    // Unscaled saddle point with a strict threshold: pivots are delayed,
+    // some out of the subtrees into the top part.
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.pivot_u = 0.5;
+    check_parallel_solve(grid_kkt(110, 7), ctrl, /*expect_delays=*/true);
+}

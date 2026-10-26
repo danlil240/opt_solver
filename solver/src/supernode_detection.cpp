@@ -4,6 +4,14 @@
 namespace smf
 {
 
+    // Relaxed amalgamation bound: a merge is taken when it adds at most
+    // kAmalgamateFreeZeros stored zeros, or when the merged node stays at
+    // most kAmalgamateMaxZeroShare zeros. Tuned on optim20 (one-shot solves,
+    // where merging tiny nodes saves per-node overhead) against the IPOPT
+    // KKT sequences (factor -14%, solve -19% vs unbounded merging).
+    static constexpr LongInt kAmalgamateFreeZeros = 16;
+    static constexpr double kAmalgamateMaxZeroShare = 0.3;
+
     // Column counts by Gilbert, Ng & Peyton (1994), as CSparse's cs_counts:
     // each row subtree contributes only through its skeleton (leaves) and
     // least common ancestors, found with path-compressed union-find, so the
@@ -349,21 +357,48 @@ namespace smf
 
         // Merge bottom-up (children have smaller indices). group[s] is the
         // supernode s was merged into; survivors point to themselves.
+        //
+        // Both must have fewer than nemin columns (MA97's rule), and, as in
+        // CHOLMOD's relaxed supernodes, the merged node may carry only a
+        // bounded share of explicit zeros. Its rows are its columns plus the
+        // rows below the parent's last column (a child's structure is inside
+        // the parent's), so for k columns and q such rows the front stores
+        // k (k + q) values (column-major, the pivot block's upper triangle
+        // included), of which the column counts are true fill. Without the
+        // bound, KKT trees of tiny supernodes doubled the factor with zeros
+        // (pde_control_120: 2.46M stored values vs 1.27M), which every solve
+        // then streams through.
         for (Int s = 0; s < nsn; ++s)
             group[static_cast<std::size_t>(s)] = s;
         if (nemin > 1)
         {
+            std::vector<LongInt> fill(nsz, 0);
+            for (Int j = 0; j < n; ++j)
+                fill[static_cast<std::size_t>(snode_of[static_cast<std::size_t>(j)])] +=
+                    colcount[static_cast<std::size_t>(j)];
             for (Int s = 0; s < nsn; ++s)
             {
-                const Int p = sparent[static_cast<std::size_t>(s)];
+                const auto si = static_cast<std::size_t>(s);
+                const Int p = sparent[si];
                 if (p < 0)
                     continue;
-                if (nelim[static_cast<std::size_t>(s)] < nemin &&
-                    nelim[static_cast<std::size_t>(p)] < nemin)
-                {
-                    group[static_cast<std::size_t>(s)] = p;
-                    nelim[static_cast<std::size_t>(p)] += nelim[static_cast<std::size_t>(s)];
-                }
+                const auto pi = static_cast<std::size_t>(p);
+                if (nelim[si] >= nemin || nelim[pi] >= nemin)
+                    continue;
+                const auto stored = [&](std::size_t g, LongInt cols) {
+                    const LongInt q = colcount[static_cast<std::size_t>(first[g + 1]) - 1] - 1;
+                    return cols * (cols + q);
+                };
+                const LongInt k = nelim[si] + nelim[pi];
+                const LongInt entries = stored(pi, k);
+                const LongInt zeros = entries - fill[si] - fill[pi];
+                const LongInt added = entries - stored(si, nelim[si]) - stored(pi, nelim[pi]);
+                if (added > kAmalgamateFreeZeros &&
+                    static_cast<double>(zeros) > kAmalgamateMaxZeroShare * static_cast<double>(entries))
+                    continue;
+                group[si] = p;
+                nelim[pi] += nelim[si];
+                fill[pi] += fill[si];
             }
         }
         // Resolve to survivors: a target always has a larger index than the
