@@ -601,7 +601,7 @@ TEST(IpmHooks, RealizedOrderIsPermutation) {
     ASSERT_GT(h.info.delayed_pivots, 0);
 
     const RealizedOrder ro = realized_pivot_order(*h.ak, h.fk);
-    EXPECT_TRUE(is_permutation_of_n(ro.perm, 3));
+    ASSERT_TRUE(is_permutation_of_n(ro.perm, 3));
     EXPECT_NE(ro.perm[0], 0);
     EXPECT_EQ(ro.zero_pivots, 0);
     // Every 2x2 pair is adjacent in perm.
@@ -722,5 +722,74 @@ TEST(IpmHooks, ReanalysisKeepsTwoByTwoPivots) {
         EXPECT_GT(r.pairs, 0) << "threads " << threads;
         EXPECT_GT(r.first_delays, 0) << "threads " << threads;
         EXPECT_EQ(r.second_delays, 0) << "threads " << threads;
+    }
+}
+
+TEST(IpmHooks, TreeParallelRealizedOrderIsTopologicalAndStable) {
+    // Subtrees go to threads and the top fronts finish in a run-dependent
+    // order, yet the realized order is fixed.
+    // (a) With delays: identical across repeated runs and equal to the serial
+    //     factor's order. (A child's columns cannot be checked against its
+    //     parent's here: a column delayed out of a child is eliminated in an
+    //     ancestor, after some of that ancestor's own.)
+    // (b) Re-analysed from that order (no delays left): every child
+    //     supernode's pivot columns precede its parent's, in every run.
+    const CscLower A = grid_kkt(110, 7);
+    Harness serial(A, delay_ctrl());
+    ASSERT_NE(serial.ak.get(), nullptr);
+    ASSERT_EQ(serial.factor(-1), FactorStatus::Success);
+    ASSERT_GT(serial.info.delayed_pivots, 0);
+    const RealizedOrder ro_serial = realized_pivot_order(*serial.ak, serial.fk);
+    ASSERT_TRUE(is_permutation_of_n(ro_serial.perm, A.n));
+
+    Control c4 = delay_ctrl();
+    c4.num_threads = 4;
+    Harness h(A, c4);
+    ASSERT_NE(h.ak.get(), nullptr);
+    for (int rep = 0; rep < 5; ++rep) {
+        ASSERT_EQ(h.factor(-1), FactorStatus::Success);
+        ASSERT_GE(h.info.parallel_subtrees, 2) << "parallel path not taken";
+        ASSERT_GT(h.info.delayed_pivots, 0);
+        const RealizedOrder ro = realized_pivot_order(*h.ak, h.fk);
+        ASSERT_TRUE(is_permutation_of_n(ro.perm, A.n));
+        EXPECT_EQ(ro.perm, ro_serial.perm) << "rep " << rep;
+        EXPECT_EQ(ro.pairs, ro_serial.pairs) << "rep " << rep;
+    }
+
+    Control c4b = delay_ctrl(&ro_serial.perm);
+    c4b.num_threads = 4;
+    c4b.user_pair_first = ro_serial.pairs.empty() ? nullptr : ro_serial.pairs.data();
+    c4b.user_num_pairs = static_cast<Int>(ro_serial.pairs.size() / 2);
+    Harness g(A, c4b);
+    ASSERT_NE(g.ak.get(), nullptr);
+    std::vector<Int> first;
+    for (int rep = 0; rep < 5; ++rep) {
+        ASSERT_EQ(g.factor(-1), FactorStatus::Success);
+        ASSERT_GE(g.info.parallel_subtrees, 2) << "parallel path not taken";
+        EXPECT_EQ(g.info.delayed_pivots, 0);
+        const RealizedOrder ro = realized_pivot_order(*g.ak, g.fk);
+        ASSERT_TRUE(is_permutation_of_n(ro.perm, A.n));
+        if (rep == 0) first = ro.perm;
+        EXPECT_EQ(ro.perm, first) << "rep " << rep;
+
+        std::vector<Int> pos(static_cast<std::size_t>(A.n));
+        for (std::size_t k = 0; k < ro.perm.size(); ++k) pos[static_cast<std::size_t>(ro.perm[k])] = static_cast<Int>(k);
+        const auto &sn = g.ak->supernodes;
+        const auto range = [&](const Supernode &s) {
+            Int lo = A.n, hi = -1;
+            for (Int c = s.col_start; c < s.col_end; ++c) {
+                const Int p = pos[static_cast<std::size_t>(g.ak->perm[static_cast<std::size_t>(c)])];
+                lo = std::min(lo, p);
+                hi = std::max(hi, p);
+            }
+            return std::make_pair(lo, hi);
+        };
+        int checked = 0;
+        for (const Supernode &s : sn) {
+            if (s.parent < 0) continue;
+            EXPECT_LT(range(s).second, range(sn[static_cast<std::size_t>(s.parent)]).first) << "rep " << rep;
+            ++checked;
+        }
+        EXPECT_GT(checked, 0);
     }
 }

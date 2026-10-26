@@ -72,6 +72,9 @@ struct FrontPass {
   std::vector<Int> *sri;     // solve row indices
   std::vector<SolveStep> *steps;
   std::vector<DiagSolveEntry> *diag;
+  // Tree-parallel only: (front, end offset in *diag) after each front this
+  // pass factored, so the passes' D entries can be merged in elimination order.
+  std::vector<std::pair<Int, std::size_t>> diag_marks;
   std::vector<double> *cbv;  // contribution stack: packed lower blocks
   std::vector<Int> *cbr;     // contribution stack: row ids
   std::vector<Int> *rows;
@@ -663,6 +666,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
             break;
           }
+          P.diag_marks.emplace_back(keep.postorder[k], P.diag->size());
           if (armed) count_negatives(P.st.inertia.negative - neg0);
         }
         subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
@@ -732,6 +736,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             failed.store(static_cast<int>(e));
           } else {
             done_order.push_back({tid, P.steps->size() - 1, s});
+            P.diag_marks.emplace_back(s, P.diag->size());
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
             if (parent >= 0 && top[static_cast<std::size_t>(parent)] &&
                 --pending[static_cast<std::size_t>(parent)] == 0)
@@ -789,10 +794,38 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                             base + static_cast<LongInt>(e));
         for (std::size_t k = 0; k < phase1_steps[ti]; ++k)
           fkeep.solve_steps.push_back(relocated(t, steps[k]));
-        fkeep.diag_entries.insert(fkeep.diag_entries.end(), tpass[ti].diag->begin(),
-                                  tpass[ti].diag->end());
         add_stats(st, tpass[ti].st);
         main.growths += tpass[ti].growths;
+      }
+      // D entries in elimination order: fronts by their position in the
+      // postorder (children before parents), each front's entries in pivot
+      // order. Thread assignment and the top phase's completion order vary
+      // run to run; this order does not, and only the solve of a non-inline
+      // factor reads it (entry by entry, in any order).
+      {
+        struct Chunk {
+          std::size_t post;
+          int pass;
+          std::size_t b, e;
+        };
+        std::vector<std::size_t> post_pos(ns, 0);
+        for (std::size_t k = 0; k < keep.postorder.size(); ++k)
+          post_pos[static_cast<std::size_t>(keep.postorder[k])] = k;
+        std::vector<Chunk> chunks;
+        for (int t = 0; t < threads; ++t) {
+          std::size_t b = 0;
+          for (const auto &[node, end] : tpass[static_cast<std::size_t>(t)].diag_marks) {
+            if (end > b) chunks.push_back({post_pos[static_cast<std::size_t>(node)], t, b, end});
+            b = end;
+          }
+        }
+        std::sort(chunks.begin(), chunks.end(),
+                  [](const Chunk &a, const Chunk &b) { return a.post < b.post; });
+        for (const Chunk &c : chunks) {
+          const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
+          fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
+                                    d.begin() + static_cast<std::ptrdiff_t>(c.e));
+        }
       }
       fkeep.solve_top_begin = static_cast<LongInt>(fkeep.solve_steps.size());
       // The solve takes subtrees in this order: heaviest (stored entries)

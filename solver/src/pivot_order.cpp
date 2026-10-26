@@ -11,7 +11,12 @@ RealizedOrder realized_pivot_order(const AnalysisKeep &ak, const FactorKeep &fk)
   }
   out.perm.reserve(n);
   std::vector<Int> zeros;
+  bool bad = false;
   const auto orig = [&](Int sym) -> Int {
+    if (sym < 0 || static_cast<std::size_t>(sym) >= ak.perm.size()) {
+      bad = true;
+      return 0;
+    }
     return ak.perm[static_cast<std::size_t>(sym)];
   };
   for (const DiagSolveEntry &e : fk.diag_entries) {
@@ -26,10 +31,11 @@ RealizedOrder realized_pivot_order(const AnalysisKeep &ak, const FactorKeep &fk)
     } else {
       out.perm.push_back(orig(e.row0));
     }
+    if (bad) break;
   }
   out.zero_pivots = static_cast<Int>(zeros.size());
   out.perm.insert(out.perm.end(), zeros.begin(), zeros.end());
-  if (out.perm.size() != n) {
+  if (bad || out.perm.size() != n) {
     out.perm.clear();
     out.pairs.clear();
     out.zero_pivots = 0;
