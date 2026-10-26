@@ -525,7 +525,11 @@ namespace smf
         keep->fronts = std::move(fronts);
         keep->postorder = sn_postorder;
         keep->solve_postorder = std::move(sn_postorder);
-        keep->matching_scale = std::move(matching_stats.scale);
+        // The matching's scaling only pays off with the matching ordering
+        // (its 2x2 pairs kept adjacent); with AMD or METIS kept it makes the
+        // factor less accurate, so ScalingMethod::Auto then applies none.
+        if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
+            keep->matching_scale = std::move(matching_stats.scale);
 
         return keep;
     }

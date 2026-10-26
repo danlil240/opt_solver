@@ -592,8 +592,10 @@ TEST(Matching, KktScalingBoundsEntries) {
 
 TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
     // Default Control (auto ordering, ScalingMethod::Auto): a KKT matrix
-    // (zero diagonals) gets the analysis' matching scaling in its factor; a
-    // matrix with a full nonzero diagonal gets no scaling.
+    // (zero diagonals) gets the analysis' matching scaling in its factor when
+    // the matching ordering is adopted, and no scaling when AMD is kept (the
+    // scaling without its 2x2-pair ordering degrades accuracy); a matrix with
+    // a full nonzero diagonal gets no scaling.
     const auto solve_accurately = [](const CscLower &A, const Control &ctrl, FactorKeep &fk,
                                      std::unique_ptr<AnalysisKeep> &ak) {
         Solver solver;
@@ -615,12 +617,14 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     // The auto policy starts at n = 10000.
     {
+        // This KKT's matching ordering costs more than the auto policy
+        // allows, so AMD is kept and the matching scaling is not applied.
         CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
         FactorKeep fk;
         std::unique_ptr<AnalysisKeep> ak;
         solve_accurately(kkt, ctrl, fk, ak);
-        ASSERT_FALSE(ak->matching_scale.empty());
-        EXPECT_EQ(fk.scale, ak->matching_scale);
+        EXPECT_TRUE(ak->matching_scale.empty());
+        EXPECT_TRUE(fk.scale.empty());
     }
     {
         // Indefinite tridiagonal with a dominant diagonal of alternating sign.
@@ -655,6 +659,9 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         FactorKeep fk;
         std::unique_ptr<AnalysisKeep> ak2;
         solve_accurately(kkt, mc, fk, ak2);
+        // With its ordering, the matching's scaling is kept and applied.
+        ASSERT_FALSE(ak2->matching_scale.empty());
+        EXPECT_EQ(fk.scale, ak2->matching_scale);
     }
 }
 
