@@ -11,6 +11,7 @@
 #include "smf/csc_matrix.hpp"
 #include "smf/error.hpp"
 #include "smf/info.hpp"
+#include "smf/pivot_order.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
@@ -553,4 +554,173 @@ TEST(IpmHooks, TaskParallelEngineReportsSameStatus) {
     EXPECT_GT(h.info.num_negative, 15);
     ASSERT_EQ(h.factor(18), FactorStatus::Success);
     EXPECT_EQ(h.info.num_negative, 18);
+}
+
+// --- realized_pivot_order ---
+
+namespace {
+
+bool is_permutation_of_n(const std::vector<Int> &p, Int n) {
+    std::vector<char> seen(static_cast<std::size_t>(n), 0);
+    if (p.size() != static_cast<std::size_t>(n)) return false;
+    for (Int v : p) {
+        if (v < 0 || v >= n || seen[static_cast<std::size_t>(v)]) return false;
+        seen[static_cast<std::size_t>(v)] = 1;
+    }
+    return true;
+}
+
+// Delay-prone setting probed for ReanalysisRemovesDelays.
+Control delay_ctrl(const std::vector<Int> *perm = nullptr) {
+    Control c = grid_ctrl(1);
+    c.nemin = 1;
+    c.pivot_u = 0.5;
+    if (perm) {
+        c.ordering = OrderingMethod::UserSupplied;
+        c.user_perm = perm->data();
+    }
+    return c;
+}
+
+} // namespace
+
+TEST(IpmHooks, RealizedOrderIsPermutation) {
+    // CrossFrontNonsingular (test_delayed_pivots.cpp): A(0,0) = 0, so column
+    // 0 is delayed from its leaf front into the parent and eliminated later.
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 2, 4, 5};
+    A.row_idx = {0, 2, 1, 2, 2};
+    A.values = {0.0, 1.0, 4.0, 1.0, 2.0};
+    Control c = indef_ctrl();
+    c.nemin = 1;
+    c.pivot_u = 0.01;
+    Harness h(A, c);
+    ASSERT_NE(h.ak.get(), nullptr);
+    ASSERT_EQ(h.factor(-1), FactorStatus::Success);
+    ASSERT_GT(h.info.delayed_pivots, 0);
+
+    const RealizedOrder ro = realized_pivot_order(*h.ak, h.fk);
+    EXPECT_TRUE(is_permutation_of_n(ro.perm, 3));
+    EXPECT_NE(ro.perm[0], 0);
+    EXPECT_EQ(ro.zero_pivots, 0);
+    // Every 2x2 pair is adjacent in perm.
+    for (std::size_t k = 0; k < ro.pairs.size(); k += 2) {
+        const auto it = std::find(ro.perm.begin(), ro.perm.end(), ro.pairs[k]);
+        ASSERT_NE(it, ro.perm.end());
+        ASSERT_NE(it + 1, ro.perm.end());
+        EXPECT_EQ(*(it + 1), ro.pairs[k + 1]);
+    }
+}
+
+TEST(IpmHooks, RealizedOrderPutsZeroPivotsLast) {
+    // diag(0, 1, 2): column 0 is a root with a zero diagonal and no coupling.
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 1, 2, 3};
+    A.row_idx = {0, 1, 2};
+    A.values = {0.0, 1.0, 2.0};
+    Control c = indef_ctrl();
+    c.nemin = 1;
+    c.scaling = ScalingMethod::None;
+    Harness h(A, c);
+    ASSERT_NE(h.ak.get(), nullptr);
+    h.factor(-1);
+    ASSERT_EQ(h.info.num_zero, 1);
+    const RealizedOrder ro = realized_pivot_order(*h.ak, h.fk);
+    ASSERT_TRUE(is_permutation_of_n(ro.perm, 3));
+    EXPECT_EQ(ro.zero_pivots, 1);
+    EXPECT_EQ(ro.perm[2], 0);
+    EXPECT_TRUE(ro.pairs.empty());
+}
+
+namespace {
+
+// Factor A with delays, re-analyse from its realized order, factor again.
+// Returns the delays left; fills the first run's counts.
+struct ReanalysisResult {
+    int first_delays = 0, second_delays = 0, pairs = 0, parallel_subtrees = 0;
+};
+
+ReanalysisResult reanalyse_and_check(const CscLower &A, int threads) {
+    ReanalysisResult r;
+    Control c = delay_ctrl();
+    c.num_threads = threads;
+    Harness first(A, c);
+    EXPECT_NE(first.ak.get(), nullptr);
+    if (!first.ak) return r;
+    EXPECT_EQ(first.factor(-1), FactorStatus::Success);
+    r.first_delays = first.info.delayed_pivots;
+    r.parallel_subtrees = first.info.parallel_subtrees;
+    std::vector<double> x1;
+    EXPECT_EQ(first.solve(x1), 0);
+
+    const RealizedOrder ro = realized_pivot_order(*first.ak, first.fk);
+    EXPECT_TRUE(is_permutation_of_n(ro.perm, A.n));
+    if (ro.perm.empty()) return r;
+    r.pairs = static_cast<int>(ro.pairs.size() / 2);
+
+    Control c2 = delay_ctrl(&ro.perm);
+    c2.num_threads = threads;
+    c2.user_pair_first = ro.pairs.empty() ? nullptr : ro.pairs.data();
+    c2.user_num_pairs = static_cast<Int>(ro.pairs.size() / 2);
+    Harness second(A, c2);
+    EXPECT_NE(second.ak.get(), nullptr);
+    if (!second.ak) return r;
+    EXPECT_EQ(second.info.pairs_split, 0);
+    EXPECT_EQ(second.factor(-1), FactorStatus::Success);
+    r.second_delays = second.info.delayed_pivots;
+    std::vector<double> x2;
+    EXPECT_EQ(second.solve(x2), 0);
+    EXPECT_LT(max_rel_diff(x1, x2), 1e-10);
+    EXPECT_LT(second.eta(x2), 1e-10);
+    return r;
+}
+
+} // namespace
+
+TEST(IpmHooks, ReanalysisRemovesDelays) {
+    // grid_kkt(40, 7) with u = 0.5, nemin = 1 delays heavily (the Task 6 KKT
+    // does not: its AMD order already puts each constraint after its primal).
+    const ReanalysisResult serial = reanalyse_and_check(grid_kkt(40, 7), 1);
+    EXPECT_GT(serial.first_delays, 0);
+    EXPECT_EQ(serial.second_delays, 0);
+}
+
+TEST(IpmHooks, ReanalysisRemovesDelaysTreeParallel) {
+    // Delayed columns that cross the subtree/top boundary of the tree-parallel
+    // engine: diag_entries is the concatenation of passes.
+    const ReanalysisResult par = reanalyse_and_check(grid_kkt(110, 7), 4);
+    ASSERT_GE(par.parallel_subtrees, 2) << "parallel path not taken";
+    EXPECT_GT(par.first_delays, 0);
+    EXPECT_EQ(par.second_delays, 0);
+}
+
+namespace {
+// Zero-diagonal grid adjacency (bipartite, values 1 + small variation): all
+// pivots must be 2x2 or delayed.
+CscLower zero_diag_grid(int m) {
+    CscLower A;
+    A.n = m * m;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < A.n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(j % 11 == 0 ? 0.3 : 0.0);
+        if ((j % m) + 1 < m) { A.row_idx.push_back(j + 1); A.values.push_back(1.0 + 0.01 * (j % 7)); }
+        if (j + m < A.n) { A.row_idx.push_back(j + m); A.values.push_back(-1.0 - 0.02 * (j % 5)); }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+}
+
+TEST(IpmHooks, ReanalysisKeepsTwoByTwoPivots) {
+    // Zero-diagonal matrix: pivots are 2x2 blocks (and delays). The realized
+    // order's pairs are passed back, none is split, and no delay remains.
+    for (int threads : {1, 4}) {
+        const ReanalysisResult r = reanalyse_and_check(zero_diag_grid(30), threads);
+        EXPECT_GT(r.pairs, 0) << "threads " << threads;
+        EXPECT_GT(r.first_delays, 0) << "threads " << threads;
+        EXPECT_EQ(r.second_delays, 0) << "threads " << threads;
+    }
 }

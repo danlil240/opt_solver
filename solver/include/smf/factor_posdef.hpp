@@ -10,6 +10,10 @@ namespace smf {
 
 struct DiagSolveEntry {
   int8_t tag = 0;
+  /// 1 for a column the kernel left unaccepted at a root and the factor turned
+  /// into a zero pivot (tag 1, d00 = 0). Lets realized_pivot_order tell it from
+  /// a genuine 1x1 pivot without relying on d00 == 0. Fits in the padding.
+  int8_t was_zero = 0;
   Int row0 = 0;
   Int row1 = 0;
   double d00 = 0.0;

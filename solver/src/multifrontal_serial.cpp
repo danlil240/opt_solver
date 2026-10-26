@@ -301,18 +301,18 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       double *Lc = F + static_cast<std::size_t>(c) * sf;
       const int8_t tag = tags[c];
       if (tag == 0) {
-        P.diag->push_back(DiagSolveEntry{1, rows[c], 0, 0.0, 0.0, 0.0});
+        P.diag->push_back(DiagSolveEntry{1, 1, rows[c], 0, 0.0, 0.0, 0.0});
         std::fill_n(Lc + c + 1, f - c - 1, 0.0);
         Lc[c] = 0.0;
       } else if (tag == 2) {
         P.diag->push_back(DiagSolveEntry{
-            2, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
+            2, 0, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
         finite_d = finite_d && is_finite_fast(Lc[c]) && is_finite_fast(Lc[c + 1]) &&
                    is_finite_fast(Lc[sf + c + 1]);
         d10 = Lc[c + 1];
         Lc[c + 1] = 0.0;
       } else if (tag == 1) {
-        P.diag->push_back(DiagSolveEntry{1, rows[c], 0, Lc[c], 0.0, 0.0});
+        P.diag->push_back(DiagSolveEntry{1, 0, rows[c], 0, Lc[c], 0.0, 0.0});
         finite_d = finite_d && is_finite_fast(Lc[c]);
       }
       std::fill_n(Lc, c, 0.0);
