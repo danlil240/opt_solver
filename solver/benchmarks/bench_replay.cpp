@@ -1,4 +1,5 @@
 #include "adapters/adapter.hpp"
+#include "common/replay_refine.hpp"
 #include "common/result.hpp"
 #include "common/validation.hpp"
 #include "smf/control.hpp"
@@ -53,59 +54,6 @@ bool load_bin_cache(const std::string &mtx_path, smf::CscLower &A) {
     in.read(reinterpret_cast<char *>(A.row_idx.data()), static_cast<std::streamsize>(A.row_idx.size() * sizeof(smf::Int)));
     in.read(reinterpret_cast<char *>(A.values.data()), static_cast<std::streamsize>(A.values.size() * sizeof(double)));
     return static_cast<bool>(in);
-}
-
-// y = A x for a symmetric matrix stored as lower CSC (values from `vals`).
-void sym_matvec(const smf::CscLower &A, const std::vector<double> &vals,
-                const double *x, double *y) {
-    std::fill(y, y + A.n, 0.0);
-    for (smf::Int j = 0; j < A.n; ++j) {
-        for (smf::Int k = A.col_ptr[static_cast<std::size_t>(j)];
-             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
-            const smf::Int i = A.row_idx[static_cast<std::size_t>(k)];
-            const double a = vals[static_cast<std::size_t>(k)];
-            y[i] += a * x[j];
-            if (i != j) y[j] += a * x[i];
-        }
-    }
-}
-
-// Iterative refinement around a factorization (single right-hand side), the
-// way IPOPT wraps every linear solve: correct x with A dx = b - A x until
-// the normwise backward error stops improving or reaches 1e-14, at most
-// `max_steps` solves. Applied identically to every solver.
-void refine_solution(smf::bench::SolverAdapter &adapter, const smf::CscLower &A,
-                     const std::vector<double> &vals, const std::vector<double> &b,
-                     std::vector<double> &x, int max_steps) {
-    const std::size_t n = static_cast<std::size_t>(A.n);
-    std::vector<double> ax(n), r(n), rowsum(n, 0.0);
-    for (smf::Int j = 0; j < A.n; ++j) {
-        for (smf::Int k = A.col_ptr[static_cast<std::size_t>(j)];
-             k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
-            const smf::Int i = A.row_idx[static_cast<std::size_t>(k)];
-            const double a = std::abs(vals[static_cast<std::size_t>(k)]);
-            rowsum[static_cast<std::size_t>(i)] += a;
-            if (i != j) rowsum[static_cast<std::size_t>(j)] += a;
-        }
-    }
-    const double anorm = *std::max_element(rowsum.begin(), rowsum.end());
-    double bnorm = 0.0;
-    for (double v : b) bnorm = std::max(bnorm, std::abs(v));
-    double prev = std::numeric_limits<double>::infinity();
-    for (int it = 0; it <= max_steps; ++it) {
-        sym_matvec(A, vals, x.data(), ax.data());
-        double rnorm = 0.0, xnorm = 0.0;
-        for (std::size_t i = 0; i < n; ++i) {
-            r[i] = b[i] - ax[i];
-            rnorm = std::max(rnorm, std::abs(r[i]));
-            xnorm = std::max(xnorm, std::abs(x[i]));
-        }
-        const double eta = rnorm / (anorm * xnorm + bnorm);
-        if (it == max_steps || eta <= 1e-14 || eta >= 0.5 * prev) break;
-        prev = eta;
-        if (adapter.solve(r, 1) != smf::bench::Outcome::Success) break;
-        for (std::size_t i = 0; i < n; ++i) x[i] += r[i];
-    }
 }
 
 void save_bin_cache(const std::string &mtx_path, const smf::CscLower &A) {
@@ -372,6 +320,13 @@ int main(int argc, char **argv) {
     int nrhs = 1;
     int threads = 1;
     bool is_warmup = false;
+    // Control overrides for bisecting an accuracy failure (applied after the
+    // track defaults): --pivot-u X, --scaling none|equil|matching|auto,
+    // --ordering auto|amd|metis|matching, --refine-steps N (harness refinement).
+    double pivot_u_override = -1.0;
+    std::string scaling_override;
+    std::string ordering_override;
+    int refine_steps = 3;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -389,6 +344,10 @@ int main(int argc, char **argv) {
         else if (arg == "--mtype" && i + 1 < argc) mtype = argv[++i];
         else if (arg == "--seq-values" && i + 1 < argc) seq_values_path = argv[++i];
         else if (arg == "--JsonlOut" && i + 1 < argc) jsonl_out = argv[++i];
+        else if (arg == "--pivot-u" && i + 1 < argc) pivot_u_override = std::atof(argv[++i]);
+        else if (arg == "--scaling" && i + 1 < argc) scaling_override = argv[++i];
+        else if (arg == "--ordering" && i + 1 < argc) ordering_override = argv[++i];
+        else if (arg == "--refine-steps" && i + 1 < argc) refine_steps = std::max(0, std::atoi(argv[++i]));
         else if (arg == "--warmup") is_warmup = true;
     }
 
@@ -491,6 +450,15 @@ int main(int argc, char **argv) {
     // (ma27_pivtol / ma57_pivtol / ma97_u default 1e-8), so KKT sequences
     // captured from IPOPT are factorized the way IPOPT factorizes them.
     if (track == "ipopt") ctrl.pivot_u = 1e-8;
+    if (pivot_u_override >= 0.0) ctrl.pivot_u = pivot_u_override;
+    if (scaling_override == "none") ctrl.scaling = smf::ScalingMethod::None;
+    else if (scaling_override == "equil") ctrl.scaling = smf::ScalingMethod::Equilibration;
+    else if (scaling_override == "matching") ctrl.scaling = smf::ScalingMethod::Matching;
+    else if (scaling_override == "auto") ctrl.scaling = smf::ScalingMethod::Auto;
+    if (ordering_override == "amd") ctrl.ordering = smf::OrderingMethod::AMD;
+    else if (ordering_override == "metis") ctrl.ordering = smf::OrderingMethod::METIS;
+    else if (ordering_override == "matching") ctrl.ordering = smf::OrderingMethod::Matching;
+    else if (ordering_override == "auto") ctrl.ordering = smf::OrderingMethod::AutoSerial;
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =
@@ -576,8 +544,12 @@ int main(int argc, char **argv) {
                 if (out_s != smf::bench::Outcome::Success) break;
                 if (refine) {
                     const auto tr0 = std::chrono::steady_clock::now();
-                    refine_solution(*adapter, A, seq_values[static_cast<std::size_t>(step)], b,
-                                    step_solutions[static_cast<std::size_t>(step)], 3);
+                    smf::bench::refine_solution(
+                        [&adapter](std::vector<double> &r) {
+                            return adapter->solve(r, 1) == smf::bench::Outcome::Success;
+                        },
+                        A, seq_values[static_cast<std::size_t>(step)], b,
+                        step_solutions[static_cast<std::size_t>(step)], refine_steps);
                     total_refine_ms += std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - tr0).count();
                 }

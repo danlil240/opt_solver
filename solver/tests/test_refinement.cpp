@@ -1,8 +1,10 @@
+#include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/validation.hpp"
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
+#include "smf/matrix_market.hpp"
 #include "smf/refinement.hpp"
 #include "smf/scaling.hpp"
 #include "smf/scaling_matching.hpp"
@@ -13,6 +15,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -766,4 +770,67 @@ TEST(Scaling, UserSuppliedScaleIsApplied) {
     bad[2] = 0.0;
     ctrl.user_scale = bad.data();
     EXPECT_NE(solver.factor(*ak, A, ctrl, info, fk_bad, nws), FactorStatus::Success);
+}
+
+// acopf_grid_160 (recorded IPOPT KKT sequence, max|A| ~ 3e11 on the last
+// step): the replay harness's refinement stopped on a normwise criterion
+// (eta <= 1e-14) that is met with a huge margin by ||A|| alone, so it never
+// corrected a componentwise backward error of ~1e-6 in rows whose own entries
+// are small. One more refinement sweep brings omega to ~1e-15.
+TEST(Refinement, Acopf160) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
+                         "fixtures" / "ipopt_kkt" / "acopf_grid_160";
+    const fs::path mtx = dir / "acopf_grid_160.mtx";
+    const fs::path vals = dir / "acopf_grid_160.mtx.vals";
+    std::error_code ec;
+    if (!fs::exists(mtx, ec) || !fs::exists(vals, ec)) {
+        GTEST_SKIP() << "fixture not present: " << mtx.string();
+    }
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok) << mm.error_message;
+    CscLower A = std::move(mm.matrix);
+
+    // Last recorded factorization's values.
+    const std::size_t step_bytes = A.values.size() * sizeof(double);
+    std::ifstream in(vals, std::ios::binary | std::ios::ate);
+    ASSERT_TRUE(in.good());
+    const std::size_t nsteps = static_cast<std::size_t>(in.tellg()) / step_bytes;
+    ASSERT_GE(nsteps, 1u);
+    std::vector<double> last(A.values.size());
+    in.seekg(static_cast<std::streamoff>((nsteps - 1) * step_bytes));
+    in.read(reinterpret_cast<char *>(last.data()), static_cast<std::streamsize>(step_bytes));
+    ASSERT_TRUE(in.good());
+
+    // IPOPT track: u = 1e-8, single thread, auto ordering/scaling.
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.num_threads = 1;
+    ctrl.pivot_u = 1e-8;
+    Info info;
+    Solver solver;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    ASSERT_EQ(solver.factor(*ak, last, ctrl, info, fk, nws), FactorStatus::Success);
+
+    const int n = static_cast<int>(A.n);
+    const std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), n, 1, sws), 0);
+
+    // The harness's refinement: up to 3 correction solves.
+    bench::refine_solution(
+        [&](std::vector<double> &r) {
+            return solver.solve(fk, ctrl, info, r.data(), n, 1, sws) == 0;
+        },
+        A, last, b, x, 3);
+
+    CscLower A_last = A;
+    A_last.values = last;
+    const auto v = bench::validate(A_last, b, x, 1);
+    EXPECT_TRUE(bench::is_qualified_validation(v))
+        << "eta_inf=" << v.eta_inf << " omega=" << v.omega;
 }
