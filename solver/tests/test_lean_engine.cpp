@@ -12,6 +12,7 @@
 ///   - LeanEngine.RefactorReusesWorkspace : value-only refactorizations on a
 ///     warmed NumericWorkspace stay accurate and allocate nothing new.
 
+#include "smf/ldlt_kernel.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -20,6 +21,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <random>
 #include <utility>
 #include <vector>
@@ -247,4 +249,121 @@ TEST(LeanEngine, RefactorReusesWorkspace) {
         EXPECT_LT(backward_error(A, x, b), 1e-13) << "iter " << it;
         EXPECT_EQ(finfo.num_negative, 50);
     }
+}
+
+namespace {
+
+// Largest |L| entry of a lean indefinite factor: each front stores p columns
+// of height f; below the diagonal is unit-L (D sits on the diagonal and a 2x2
+// off-diagonal in the strictly upper slot, which this scan never reads).
+double max_abs_l(const FactorKeep &fk) {
+    double m = 0.0;
+    for (const SolveStep &st : fk.solve_steps) {
+        const double *F = fk.factor_values.data() + st.factor_offset;
+        const std::size_t sf = static_cast<std::size_t>(st.f);
+        for (int c = 0; c < st.p; ++c)
+            for (int i = c + 1; i < st.f; ++i) m = std::max(m, std::abs(F[static_cast<std::size_t>(c) * sf + i]));
+    }
+    return m;
+}
+
+// Componentwise backward error max_i |b - Ax|_i / (|A||x| + |b|)_i.
+double componentwise_error(const CscLower &A, const std::vector<double> &x, const std::vector<double> &b) {
+    const auto Ax = sym_matvec(A, x);
+    std::vector<double> ax(static_cast<std::size_t>(A.n), 0.0);
+    for (Int j = 0; j < A.n; ++j) {
+        for (Int k = A.col_ptr[static_cast<std::size_t>(j)]; k < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++k) {
+            const Int i = A.row_idx[static_cast<std::size_t>(k)];
+            const double a = std::abs(A.values[static_cast<std::size_t>(k)]);
+            ax[static_cast<std::size_t>(i)] += a * std::abs(x[static_cast<std::size_t>(j)]);
+            if (i != j) ax[static_cast<std::size_t>(j)] += a * std::abs(x[static_cast<std::size_t>(i)]);
+        }
+    }
+    double w = 0.0;
+    for (Int i = 0; i < A.n; ++i) {
+        const auto si = static_cast<std::size_t>(i);
+        const double den = ax[si] + std::abs(b[si]);
+        if (den > 0.0) w = std::max(w, std::abs(b[si] - Ax[si]) / den);
+    }
+    return w;
+}
+
+} // namespace
+
+// IPOPT runs at u = 1e-8. When column k (a constraint, zero diagonal) fails,
+// its partner r (a primal with tiny curvature) also passes a 1x1 test at that
+// threshold. Taking it puts L = J / h ~ 1e8 into the factor; the stable 2x2
+// (k, r) must be tried first (MA27's order). pglib case9241 failed the replay
+// accuracy gate on 72 of 73 steps through this.
+TEST(LeanEngine, TinyUPrefers2x2OverNearNullPartner) {
+    // Kernel level: one 3x3 front, unblocked path.
+    {
+        const int f = 3;
+        std::vector<double> F = {0.0, 1.0, 0.0,  0.0, 2e-6, 100.0,  0.0, 0.0, 1.0};
+        std::vector<Int> rows = {0, 1, 2};
+        std::vector<int8_t> tags(3, 0);
+        LdltKernelParams prm;
+        prm.u = 1e-8;
+        prm.eff_small = 1e-20;
+        prm.small_pivot = 1e-20;
+        std::vector<double> work(ldlt_work_size(f, prm));
+        const LdltKernelResult r = ldlt_factor_front(F.data(), f, f, rows.data(), prm, tags.data(), work.data());
+        ASSERT_EQ(r.num_accepted, 3);
+        EXPECT_EQ(tags[0], 2);
+        EXPECT_EQ(tags[1], -1);
+        double lmax = 0.0;
+        for (int c = 0; c < f; ++c)
+            for (int i = c + 1; i < f; ++i) {
+                if (tags[c] == 2 && i == c + 1) continue; // 2x2 off-diagonal of D
+                lmax = std::max(lmax, std::abs(F[static_cast<std::size_t>(c) * f + i]));
+            }
+        EXPECT_LE(lmax, 1e3);
+        EXPECT_EQ(r.inertia.positive, 2);
+        EXPECT_EQ(r.inertia.negative, 1);
+        EXPECT_EQ(r.inertia.zero, 0);
+    }
+
+    // End to end: 500 independent (c, p, q, b) blocks ordered as given, so
+    // each constraint c is eliminated ahead of its primal partner p.
+    const int nb = 500;
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    std::map<std::pair<int, int>, double> e;
+    for (int t = 0; t < nb; ++t) {
+        const int c = 4 * t, p = c + 1, q = c + 2, b = c + 3;
+        e[{c, c}] = 0.0;
+        e[{p, c}] = 1.0 + u01(rng);
+        e[{p, p}] = std::pow(10.0, -7.0 + 2.0 * u01(rng));
+        e[{q, p}] = std::pow(10.0, 3.0 * u01(rng));
+        e[{q, q}] = 1.0 + u01(rng);
+        e[{b, q}] = std::pow(10.0, 2.0 * u01(rng));
+        e[{b, b}] = 1e10 * (1.0 + u01(rng));
+    }
+    const CscLower A = to_lower_csc(4 * nb, e);
+    std::vector<Int> ident(static_cast<std::size_t>(A.n));
+    std::iota(ident.begin(), ident.end(), Int{0});
+
+    Control ctrl;
+    ctrl.pivot_u = 1e-8;
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.ordering = OrderingMethod::UserSupplied;
+    ctrl.user_perm = ident.data();
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak, nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.num_positive, 3 * nb);
+    EXPECT_EQ(info.num_negative, nb);
+    EXPECT_EQ(info.num_zero, 0);
+    EXPECT_LE(max_abs_l(fk), 1e4);
+
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (auto &v : b) v = u01(rng) - 0.5;
+    std::vector<double> x = b;
+    Info sinfo;
+    ASSERT_EQ(solver.solve(fk, ctrl, sinfo, x.data(), static_cast<int>(A.n)), 0);
+    EXPECT_LE(componentwise_error(A, x, b), 1e-12);
 }

@@ -208,38 +208,6 @@ FrontResult factor_front_reference(NumericFront& front,
                     }
                     const double a_r = std::abs(front.at(r_best, r_best));
 
-                    // Secondary 1x1 test on `r_best`
-                    if (a_r >= eff_small &&
-                        (omega2 == 0.0 || a_r >= ctrl.pivot_u * omega2)) {
-                        if (r_best != k) {
-                            front.sym_swap(k, r_best);
-                        }
-                        const double d00 = front.at(k, k);
-                        add_inertia_1x1(d00, eff_small, res.inertia);
-                        res.pivot_tags.push_back(int8_t{1});
-                        res.d_blocks.push_back(FrontDiagBlock{
-                            1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
-
-                        const double inv_d = 1.0 / d00;
-                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
-                        for (int i = k + 1; i < f; ++i) {
-                            col_k[i] *= inv_d;
-                        }
-                        for (int j = k + 1; j < f; ++j) {
-                            const double w_jk = d00 * col_k[j];
-                            if (w_jk == 0.0) continue;
-                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
-                            for (int i = j; i < f; ++i) {
-                                col_j[i] -= col_k[i] * w_jk;
-                            }
-                        }
-                        const double rem = static_cast<double>(f - (k + 1));
-                        res.flops += rem + rem * (rem + 1.0);
-                        ++k;
-                        accepted_step = true;
-                        break;
-                    }
-
                     // 2x2 test on (cand, r_best)
                     const double d00_cand = front.at(cand, cand);
                     const double d10_cand = elem(r_best, cand);
@@ -323,6 +291,40 @@ FrontResult factor_front_reference(NumericFront& front,
                             accepted_step = true;
                             break;
                         }
+                    }
+
+                    // Secondary 1x1 on `r_best`, only once the 2x2 is rejected
+                    // (MA27's order): at a tiny u a near-null partner diagonal
+                    // passes this test and puts up to 1/u into L.
+                    if (a_r >= eff_small &&
+                        (omega2 == 0.0 || a_r >= ctrl.pivot_u * omega2)) {
+                        if (r_best != k) {
+                            front.sym_swap(k, r_best);
+                        }
+                        const double d00 = front.at(k, k);
+                        add_inertia_1x1(d00, eff_small, res.inertia);
+                        res.pivot_tags.push_back(int8_t{1});
+                        res.d_blocks.push_back(FrontDiagBlock{
+                            1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
+
+                        const double inv_d = 1.0 / d00;
+                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                        for (int i = k + 1; i < f; ++i) {
+                            col_k[i] *= inv_d;
+                        }
+                        for (int j = k + 1; j < f; ++j) {
+                            const double w_jk = d00 * col_k[j];
+                            if (w_jk == 0.0) continue;
+                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
+                            for (int i = j; i < f; ++i) {
+                                col_j[i] -= col_k[i] * w_jk;
+                            }
+                        }
+                        const double rem = static_cast<double>(f - (k + 1));
+                        res.flops += rem + rem * (rem + 1.0);
+                        ++k;
+                        accepted_step = true;
+                        break;
                     }
                 }
             }

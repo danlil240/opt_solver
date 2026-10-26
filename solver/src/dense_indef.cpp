@@ -160,8 +160,16 @@ FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
                 if (v > omega2) omega2 = v;
             }
 
+            // The 2x2 (k, r) is preferred to a 1x1 on the partner r (MA27's
+            // order): at a tiny u a near-null A(r,r) passes the 1x1 test and
+            // puts up to 1/u into L. The partner 1x1 is only taken when the
+            // 2x2 is numerically singular.
+            double s2r = 0.0;
+            const double det_r = scaled_det_2x2(A[k + k * lda], A[r + k * lda],
+                                                A[r + r * lda], s2r);
+            const bool two_ok = s2r >= eff_small && std::abs(det_r) > small;
             const double arr = std::abs(A[r + r * lda]);
-            if (arr >= eff_small && arr >= u * omega2) {
+            if (!two_ok && arr >= eff_small && arr >= u * omega2) {
                 sym_swap(k, r);
                 const double d = A[k + k * lda];
                 add_inertia_1x1(d, eff_small, inertia);

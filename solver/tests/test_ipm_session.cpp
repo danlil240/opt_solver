@@ -630,6 +630,11 @@ IpmControl reanalyse_eager() {
     ipm.reanalyse = true;
     ipm.reanalyse_delay_frac = 0.0;
     ipm.reanalyse_min_gap = 1;
+    // These tests drive the probation state machine, not the flops policy
+    // (ReanalysisRejectedOnFlops covers that). Since the kernel tries the 2x2
+    // before a near-null partner 1x1, grid_kkt's delaying factor is no longer
+    // dearer than the delay-free one, so a ratio of 1 would reject them all.
+    ipm.reanalyse_flops_ratio = 2.0;
     return ipm;
 }
 
@@ -905,7 +910,9 @@ TEST(IpmSession, ReanalysisPredictsTheKernelFlops) {
     factor_and_solve(s, A);
     ASSERT_EQ(s.stats().reanalyses_adopted, 1);
     ASSERT_EQ(s.info().delayed_pivots, 0);
-    EXPECT_NEAR(kernel_flops(*s.analysis_keep()), s.info().actual_flops, 1e-9 * s.info().actual_flops);
+    // kernel_flops counts every pivot as a 1x1; the factor's 2x2 pivots cost
+    // slightly more (0.34% here), so the units agree to within 1%.
+    EXPECT_NEAR(kernel_flops(*s.analysis_keep()), s.info().actual_flops, 1e-2 * s.info().actual_flops);
 }
 
 TEST(IpmSession, ProbationIgnoresAFactorThatNeverRan) {

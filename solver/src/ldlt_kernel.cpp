@@ -23,6 +23,35 @@ inline double sym_at(const double *F, int f, int i, int j) noexcept {
                     : F[static_cast<std::size_t>(i) * f + j];
 }
 
+// Threshold test of the 2x2 pivot (cand, r): a scaled determinant above
+// small_pivot and the growth bound u * max(|D^-1| * off-diagonal maxima) <=
+// |det|. m2 is the largest eligible entry of column cand other than r, off1
+// the largest entry of column r other than cand, and rows from ext0 on are
+// the non-eligible rows of column cand.
+bool two_by_two_ok(const double *F, int f, int cand, int r, const double *col,
+                   const double *col_r, double m2, double off1, int ext0,
+                   const LdltKernelParams &prm) noexcept {
+    const double d00 = col[cand];
+    const double d10 = sym_at(F, f, r, cand);
+    const double d11 = col_r[r];
+    const double s2 = std::max({std::abs(d00), std::abs(d10), std::abs(d11)});
+    if (!(s2 >= prm.eff_small) || !is_finite_fast(s2)) return false;
+    const double a = d00 / s2;
+    const double b = d10 / s2;
+    const double c = d11 / s2;
+    const double det_s = a * c - b * b;
+    if (!(std::abs(det_s) > prm.small_pivot)) return false;
+
+    double off0 = m2;
+    for (int i = ext0; i < f; ++i) off0 = std::max(off0, std::abs(col[i]));
+    if (off0 > 0.0 || off1 > 0.0) {
+        const double bound0 = (std::abs(c) * off0 + std::abs(b) * off1) / s2;
+        const double bound1 = (std::abs(b) * off0 + std::abs(a) * off1) / s2;
+        if (prm.u * std::max(bound0, bound1) > std::abs(det_s)) return false;
+    }
+    return true;
+}
+
 // Threshold pivot selection over candidates [k, limit). Partners for the
 // secondary 1x1 / 2x2 tests must also lie in [k, limit) so that every column
 // touched by the chosen pivot is up to date.
@@ -102,32 +131,17 @@ PivotChoice select_pivot(const double *F, int f, int k, int num_elig, int limit,
             om2 = std::max(om2, v);
             if (i != cand) off1 = std::max(off1, v);
         }
+        // The 2x2 (cand, r_best) is tried before a 1x1 on the partner, as in
+        // MA27: at a tiny u (IPOPT's 1e-8) a near-null partner diagonal passes
+        // the 1x1 test and puts entries up to 1/u into L, where the 2x2 would
+        // have been stable.
+        if (k + 1 < limit && two_by_two_ok(F, f, cand, r_best, col, col_r, m2, off1, ext0, prm))
+            return {2, cand, r_best};
+
         const double a_r = std::abs(col_r[r_best]);
         if (a_r >= prm.eff_small && (om2 == 0.0 || a_r >= prm.u * om2)) {
             return {1, r_best, -1};
         }
-
-        if (k + 1 >= limit) continue;
-
-        const double d00 = col[cand];
-        const double d10 = sym_at(F, f, r_best, cand);
-        const double d11 = col_r[r_best];
-        const double s2 = std::max({std::abs(d00), std::abs(d10), std::abs(d11)});
-        if (!(s2 >= prm.eff_small) || !is_finite_fast(s2)) continue;
-        const double a = d00 / s2;
-        const double b = d10 / s2;
-        const double c = d11 / s2;
-        const double det_s = a * c - b * b;
-        if (!(std::abs(det_s) > prm.small_pivot)) continue;
-
-        double off0 = m2;
-        for (int i = ext0; i < f; ++i) off0 = std::max(off0, std::abs(col[i]));
-        if (off0 > 0.0 || off1 > 0.0) {
-            const double bound0 = (std::abs(c) * off0 + std::abs(b) * off1) / s2;
-            const double bound1 = (std::abs(b) * off0 + std::abs(a) * off1) / s2;
-            if (prm.u * std::max(bound0, bound1) > std::abs(det_s)) continue;
-        }
-        return {2, cand, r_best};
     }
     return {};
 }

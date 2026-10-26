@@ -176,39 +176,6 @@ FrontResult factor_front_blocked(NumericFront &front,
                     }
                     const double a_r = std::abs(front.at(r_best, r_best));
 
-                    if (a_r >= eff_small &&
-                        (omega2 == 0.0 || a_r >= ctrl.pivot_u * omega2)) {
-                        swap_front_and_w(k, r_best, jb_active);
-                        const double d00 = front.at(k, k);
-                        add_inertia_1x1(d00, eff_small, res.inertia);
-                        res.pivot_tags.push_back(int8_t{1});
-                        res.d_blocks.push_back(FrontDiagBlock{
-                            1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
-
-                        const int p_col = k - panel_start;
-                        const double inv_d = 1.0 / d00;
-                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
-                        double *w_p = W_ptr + static_cast<std::size_t>(p_col) * f;
-                        for (int i = k + 1; i < f; ++i) {
-                            const double w_ik = col_k[i];
-                            w_p[i] = w_ik;
-                            col_k[i] = w_ik * inv_d;
-                        }
-                        for (int j = k + 1; j < update_col_limit; ++j) {
-                            const double w_jk = w_p[j];
-                            if (w_jk == 0.0) continue;
-                            const double *col_k2 = col_k;
-                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
-                            for (int i = j; i < f; ++i) {
-                                col_j[i] -= col_k2[i] * w_jk;
-                            }
-                        }
-                        const double rem = static_cast<double>(f - (k + 1));
-                        res.flops += rem + rem * (rem + 1.0);
-                        ++k;
-                        return true;
-                    }
-
                     // 2x2 test on (cand, r_best): requires k + 1 < search_limit
                     if (k + 1 < search_limit) {
                         const double d00_cand = front.at(cand, cand);
@@ -296,6 +263,42 @@ FrontResult factor_front_blocked(NumericFront &front,
                                 return true;
                             }
                         }
+                    }
+
+                    // Secondary 1x1 on `r_best`, only once the 2x2 is rejected
+                    // (MA27's order): at a tiny u a near-null partner diagonal
+                    // passes this test and puts up to 1/u into L.
+                    if (a_r >= eff_small &&
+                        (omega2 == 0.0 || a_r >= ctrl.pivot_u * omega2)) {
+                        swap_front_and_w(k, r_best, jb_active);
+                        const double d00 = front.at(k, k);
+                        add_inertia_1x1(d00, eff_small, res.inertia);
+                        res.pivot_tags.push_back(int8_t{1});
+                        res.d_blocks.push_back(FrontDiagBlock{
+                            1, front.row_ids()[static_cast<std::size_t>(k)], 0, d00, 0.0, 0.0});
+
+                        const int p_col = k - panel_start;
+                        const double inv_d = 1.0 / d00;
+                        double *col_k = front.data() + static_cast<std::size_t>(k) * f;
+                        double *w_p = W_ptr + static_cast<std::size_t>(p_col) * f;
+                        for (int i = k + 1; i < f; ++i) {
+                            const double w_ik = col_k[i];
+                            w_p[i] = w_ik;
+                            col_k[i] = w_ik * inv_d;
+                        }
+                        for (int j = k + 1; j < update_col_limit; ++j) {
+                            const double w_jk = w_p[j];
+                            if (w_jk == 0.0) continue;
+                            const double *col_k2 = col_k;
+                            double *col_j = front.data() + static_cast<std::size_t>(j) * f;
+                            for (int i = j; i < f; ++i) {
+                                col_j[i] -= col_k2[i] * w_jk;
+                            }
+                        }
+                        const double rem = static_cast<double>(f - (k + 1));
+                        res.flops += rem + rem * (rem + 1.0);
+                        ++k;
+                        return true;
                     }
                 }
             }

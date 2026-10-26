@@ -153,46 +153,53 @@ PivotResult choose_pivot(FrontalMatrix &F, int k, int num_fs, double u,
       omega2 = v;
   }
 
+  // 2×2 pivot test at (k, r) using scaled determinant and threshold stability
+  // bound. It comes before the secondary 1×1 on r (MA27's order): at a tiny u
+  // a near-null F(r,r) passes the 1×1 test and puts up to 1/u into L, where
+  // the 2×2 would have been stable.
+  const auto two_by_two_ok = [&]() {
+    const double d00 = F.at(k, k);
+    const double d10 = F.at(r, k);
+    const double d11 = F.at(r, r);
+    double s2 = 0.0;
+    const double det_s = scaled_det_2x2(d00, d10, d11, s2);
+    if (s2 < eff_small || std::abs(det_s) <= small)
+      return false;
+
+    double off_k = 0.0;
+    double off_r = 0.0;
+    for (int i = k; i < f; ++i) {
+      if (i == k || i == r)
+        continue;
+      const double vk = (i < num_fs)
+                            ? ((i < k) ? std::abs(F.at(k, i)) : std::abs(F.at(i, k)))
+                            : std::abs(F.at(i, k));
+      const double vr = (i < num_fs)
+                            ? ((i < r) ? std::abs(F.at(r, i)) : std::abs(F.at(i, r)))
+                            : std::abs(F.at(i, r));
+      if (vk > off_k) off_k = vk;
+      if (vr > off_r) off_r = vr;
+    }
+    if (off_k > 0.0 || off_r > 0.0) {
+      const double a = std::abs(d00) / s2;
+      const double b = std::abs(d10) / s2;
+      const double c = std::abs(d11) / s2;
+      const double bound0 = (c * off_k + b * off_r) / s2;
+      const double bound1 = (b * off_k + a * off_r) / s2;
+      if (u * std::max(bound0, bound1) > std::abs(det_s))
+        return false;
+    }
+    return true;
+  };
+  if (two_by_two_ok())
+    return {PivotDecision::Accept2x2, k, r};
+
   // Secondary 1×1 test: check candidate diagonal at r (|F(r,r)| >= u * omega2)
   const double arr = std::abs(F.at(r, r));
   if (arr >= eff_small && arr >= u * omega2)
     return {PivotDecision::Accept1x1, r, -1};
 
-  // 2×2 pivot test at (k, r) using scaled determinant and threshold stability bound
-  const double d00 = F.at(k, k);
-  const double d10 = F.at(r, k);
-  const double d11 = F.at(r, r);
-  double s2 = 0.0;
-  const double det_s = scaled_det_2x2(d00, d10, d11, s2);
-  if (s2 < eff_small || std::abs(det_s) <= small)
-    return {PivotDecision::Reject, -1, -1};
-
-  double off_k = 0.0;
-  double off_r = 0.0;
-  for (int i = k; i < f; ++i) {
-    if (i == k || i == r)
-      continue;
-    const double vk = (i < num_fs)
-                          ? ((i < k) ? std::abs(F.at(k, i)) : std::abs(F.at(i, k)))
-                          : std::abs(F.at(i, k));
-    const double vr = (i < num_fs)
-                          ? ((i < r) ? std::abs(F.at(r, i)) : std::abs(F.at(i, r)))
-                          : std::abs(F.at(i, r));
-    if (vk > off_k) off_k = vk;
-    if (vr > off_r) off_r = vr;
-  }
-  if (off_k > 0.0 || off_r > 0.0) {
-    const double a = std::abs(d00) / s2;
-    const double b = std::abs(d10) / s2;
-    const double c = std::abs(d11) / s2;
-    const double bound0 = (c * off_k + b * off_r) / s2;
-    const double bound1 = (b * off_k + a * off_r) / s2;
-    if (u * std::max(bound0, bound1) > std::abs(det_s)) {
-      return {PivotDecision::Reject, -1, -1};
-    }
-  }
-
-  return {PivotDecision::Accept2x2, k, r};
+  return {PivotDecision::Reject, -1, -1};
 }
 
 // ---------------------------------------------------------------------------

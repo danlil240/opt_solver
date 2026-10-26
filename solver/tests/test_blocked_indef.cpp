@@ -247,3 +247,36 @@ TEST(BlockedIndef, PanelSizeSweepAndSolverEndToEnd) {
             << "panel_size=" << panel_size << " eta_inf=" << val.eta_inf << " omega=" << val.omega;
     }
 }
+
+// Tiny threshold (IPOPT's u = 1e-8): both front kernels must take the stable
+// 2x2 on (0, 1) instead of a 1x1 on the near-null partner diagonal 2e-6,
+// which passes 1e-8 * 100 but would put L = 5e7 into the factor.
+TEST(BlockedIndef, TinyUPrefers2x2OverNearNullPartner) {
+    std::vector<Int> rows = {0, 1, 2};
+    NumericFront base(rows, 3);
+    base.at(0, 0) = 0.0;
+    base.at(1, 0) = 1.0;
+    base.at(1, 1) = 2e-6;
+    base.at(2, 1) = 100.0;
+    base.at(2, 2) = 1.0;
+
+    Control ctrl;
+    ctrl.pivot_u = 1e-8;
+    ctrl.small_pivot = 1e-20;
+    ctrl.indef_panel_size = 2;
+
+    NumericFront f_ref = base;
+    NumericFront f_blk = base;
+    NumericWorkspace ws;
+    const FrontResult r_ref = factor_front_reference(f_ref, ctrl, ctrl.small_pivot, false);
+    const FrontResult r_blk = factor_front_blocked(f_blk, ctrl, ws, ctrl.small_pivot, false);
+    for (const FrontResult *r : {&r_ref, &r_blk}) {
+        ASSERT_EQ(r->status, ErrorCode::Success);
+        ASSERT_GE(r->pivot_tags.size(), 2u);
+        EXPECT_EQ(r->pivot_tags[0], 2);
+        EXPECT_EQ(r->pivot_tags[1], -1);
+        EXPECT_EQ(r->inertia.positive, 2);
+        EXPECT_EQ(r->inertia.negative, 1);
+        EXPECT_EQ(r->inertia.zero, 0);
+    }
+}
