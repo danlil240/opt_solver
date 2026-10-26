@@ -68,11 +68,15 @@ struct ma97_info_d
     double rspare[10];
 };
 
+// A new IpmSession whose statistics are added to the unload summary when the
+// last of akeep / fkeep frees it.
+static std::shared_ptr<smf::IpmSession> make_session();
+
 // The IpmSession owns the analysis, the factor and the workspaces. akeep and
 // fkeep share it: MA97 callers may free akeep and still solve with fkeep.
 struct SmfAkeep
 {
-    std::shared_ptr<smf::IpmSession> session = std::make_shared<smf::IpmSession>();
+    std::shared_ptr<smf::IpmSession> session = make_session();
     smf::Control ctrl;          // factor control, updated from every MA97 control block
     smf::CscLower mat;          // pattern + this factorization's values (CSC order)
     std::vector<int> sort_perm; // CSC entry -> caller's entry
@@ -99,13 +103,17 @@ static bool env_flag(const char* name, bool fallback)
 
 // The IPM features are read from the environment until their defaults are
 // decided (the MA97 interface has no slots for them):
-//   SMF_IPM_ABORT=1  inertia learning and early abort (Feature 1), default off.
+//   SMF_IPM_ABORT=1      inertia learning and early abort (Feature 1), default off.
+//   SMF_IPM_REANALYSE=1  re-analysis from the realized pivot order (Feature 2),
+//                        default off; IpmControl's default thresholds.
 static smf::IpmControl plugin_ipm_control()
 {
     static const bool abort_on = env_flag("SMF_IPM_ABORT", false);
+    static const bool reanalyse_on = env_flag("SMF_IPM_REANALYSE", false);
     smf::IpmControl ipm;
     ipm.learn_inertia = abort_on;
     ipm.abort_on_wrong_inertia = abort_on;
+    ipm.reanalyse = reanalyse_on;
     ipm.static_mode = smf::StaticMode::Off;
     return ipm;
 }
@@ -122,16 +130,48 @@ struct PluginStats
     long rhs = 0;
     double factor_s = 0.0;
     double solve_s = 0.0;
+    // IpmSession statistics of the sessions freed so far (one per analysis).
+    long sessions = 0;
+    smf::IpmStats ipm;
+    void add_session(const smf::IpmStats& st)
+    {
+        ++sessions;
+        ipm.factorizations += st.factorizations;
+        ipm.accepted += st.accepted;
+        ipm.aborted += st.aborted;
+        ipm.reanalyses_tried += st.reanalyses_tried;
+        ipm.reanalyses_adopted += st.reanalyses_adopted;
+        ipm.reanalyses_reverted += st.reanalyses_reverted;
+        ipm.static_pivots += st.static_pivots;
+        ipm.flops_avoided += st.flops_avoided;
+        ipm.reanalyse_seconds += st.reanalyse_seconds;
+    }
     ~PluginStats()
     {
-        if (enabled)
-            std::fprintf(stderr,
-                         "[smf_ma97] factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
-                         factors, factor_s, solves, rhs, solve_s,
-                         solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
+        if (!enabled)
+            return;
+        std::fprintf(stderr,
+                     "[smf_ma97] factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
+                     factors, factor_s, solves, rhs, solve_s,
+                     solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
+        std::fprintf(stderr,
+                     "[smf_ma97] ipm: sessions=%ld factorizations=%d accepted=%d aborted=%d "
+                     "reanalyses_tried=%d reanalyses_adopted=%d reanalyses_reverted=%d reanalyse_s=%.6f "
+                     "flops_avoided=%.6e\n",
+                     sessions, ipm.factorizations, ipm.accepted, ipm.aborted, ipm.reanalyses_tried,
+                     ipm.reanalyses_adopted, ipm.reanalyses_reverted, ipm.reanalyse_seconds, ipm.flops_avoided);
     }
 };
 static PluginStats g_stats;
+
+static std::shared_ptr<smf::IpmSession> make_session()
+{
+    return std::shared_ptr<smf::IpmSession>(new smf::IpmSession(), [](smf::IpmSession* s) {
+        if (g_stats.enabled)
+            g_stats.add_session(s->stats());
+        delete s;
+    });
+}
 
 // KKT capture for benchmarking (SMF_KKT_DUMP_DIR): the first factorization of
 // each analysis writes <dir>/kkt_s<id>.mtx (cleaned lower triangle, entries in
@@ -486,12 +526,15 @@ extern "C"
         // plugin call was also a factorization (IPOPT inertia correction).
         // abort=1: stopped on wrong inertia (partial counts); skipped = the
         // predicted flops of the fronts it did not factor; flops = actual.
+        // ra=tried/adopted/reverted: the session's re-analysis counts so far
+        // (adopted > reverted: this factor ran on a re-analysed order).
         if (g_stats.trace)
         {
+            const smf::IpmStats& ist = session.stats();
             std::fprintf(stderr,
                          "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
                          "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d abort=%d flops=%.6e "
-                         "skipped=%.6e\n",
+                         "skipped=%.6e ra=%d/%d/%d\n",
                          g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, si.delayed_pivots,
                          si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
                          pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
@@ -500,7 +543,8 @@ extern "C"
                          ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
                          static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
                                                         [](const auto& de) { return de.tag == 2; })),
-                         aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0);
+                         aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
+                         ist.reanalyses_tried, ist.reanalyses_adopted, ist.reanalyses_reverted);
         }
         g_stats.last_call_was_factor = true;
 

@@ -1,6 +1,7 @@
 // IpmSession with every IPM feature off: a pass-through to Solver that must
 // reproduce it exactly on recorded IPOPT KKT sequences. Then Feature 1:
-// inertia learning and early abort.
+// inertia learning and early abort; Feature 2: re-analysis from the realized
+// pivot order.
 
 #include "../benchmarks/common/validation.hpp"
 #include "smf/control.hpp"
@@ -20,6 +21,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <span>
 #include <string>
 #include <utility>
@@ -80,6 +82,7 @@ IpmControl features_off() {
     IpmControl ipm;
     ipm.learn_inertia = false;
     ipm.abort_on_wrong_inertia = false;
+    ipm.reanalyse = false;
     ipm.static_mode = StaticMode::Off;
     return ipm;
 }
@@ -522,4 +525,338 @@ TEST(IpmSession, SingularStillReportsZeros) {
         EXPECT_GE(h.session.inertia().zero, 1);
         EXPECT_EQ(h.session.stats().aborted, 0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 2: re-analysis from the realized pivot order.
+
+namespace {
+
+// 5-point Laplacian on an m x m grid (SPD), lower CSC.
+CscLower laplacian_2d(int m) {
+    CscLower A;
+    A.n = m * m;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < A.n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(4.0);
+        if ((j % m) + 1 < m) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(-1.0);
+        }
+        if (j + m < A.n) {
+            A.row_idx.push_back(j + m);
+            A.values.push_back(-1.0);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// Saddle point [L B^T; B 0] (the Task 8 matrix of test_ipm_hooks.cpp): L a
+// 2D Laplacian on m x m; constraint r couples primal v = r * stride (b1) and
+// v + 1 (-b2), b1, b2 in [0.5, 2). With u = 0.5 and nemin = 1 its AMD order
+// delays heavily, as robot_arm's KKT does under IPOPT.
+CscLower grid_kkt(int m, int stride) {
+    const int nv = m * m;
+    const int nc = nv / stride;
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(nv + nc));
+    const CscLower L = laplacian_2d(m);
+    for (int j = 0; j < nv; ++j)
+        for (Int p = L.col_ptr[static_cast<std::size_t>(j)]; p < L.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            cols[static_cast<std::size_t>(j)].push_back(
+                {L.row_idx[static_cast<std::size_t>(p)], L.values[static_cast<std::size_t>(p)]});
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<double> unif(0.5, 2.0);
+    for (int r = 0; r < nc; ++r) {
+        const int v = r * stride;
+        cols[static_cast<std::size_t>(v)].push_back({nv + r, unif(rng)});
+        if (v + 1 < nv) cols[static_cast<std::size_t>(v + 1)].push_back({nv + r, -unif(rng)});
+    }
+    CscLower A;
+    A.n = nv + nc;
+    A.col_ptr.push_back(0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (const auto &[i, x] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(x);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// A later KKT on grid_kkt's pattern for which A1's realized order is bad:
+// each constraint's coupling to its first primal v (the one it was
+// eliminated after on A1) is 100x weaker and H is 10x smaller (Sigma -> 0).
+// Under A1's realized order it delays more than A1 did (and more than AMD).
+CscLower shifted_kkt(const CscLower &A1, int nv, int stride) {
+    CscLower A2 = A1;
+    for (Int j = 0; j < A2.n; ++j)
+        for (Int p = A2.col_ptr[static_cast<std::size_t>(j)]; p < A2.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const Int i = A2.row_idx[static_cast<std::size_t>(p)];
+            double &v = A2.values[static_cast<std::size_t>(p)];
+            if (i >= nv && j < nv && j % stride == 0) v *= 0.01;
+            if (i == j && j < nv) v *= 0.1;
+        }
+    return A2;
+}
+
+// The delay-prone setting of Task 8 (AMD, u = 0.5, nemin = 1, no scaling).
+Control delay_ctrl() {
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AMD;
+    c.scaling = ScalingMethod::None;
+    c.num_threads = 1;
+    c.nemin = 1;
+    c.pivot_u = 0.5;
+    return c;
+}
+
+// Feature 2 alone, triggered by any delay at every factorization.
+IpmControl reanalyse_eager() {
+    IpmControl ipm = features_off();
+    ipm.reanalyse = true;
+    ipm.reanalyse_delay_frac = 0.0;
+    ipm.reanalyse_min_gap = 1;
+    return ipm;
+}
+
+// factor() then solve() (the IPM accepts the factor); checks the solution.
+void factor_and_solve(IpmSession &s, const CscLower &A) {
+    ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+    const std::vector<double> b = rhs(A.n);
+    std::vector<double> x = b;
+    ASSERT_EQ(s.solve(x.data(), static_cast<int>(A.n), 1), 0);
+    EXPECT_LE(eta(A, b, x), 1e-10);
+}
+
+} // namespace
+
+TEST(IpmSession, ReanalysisAdoptedRemovesDelays) {
+    const CscLower A = grid_kkt(40, 7);
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+
+    factor_and_solve(s, A);
+    const AnalysisKeep *first = s.analysis_keep();
+    ASSERT_NE(first, nullptr);
+    const int first_delays = s.info().delayed_pivots;
+    EXPECT_GT(first_delays, 0);
+    EXPECT_EQ(s.stats().reanalyses_tried, 0);
+
+    // The accepted factor delayed: the next factor() re-analyses from its
+    // realized order, adopts it and factors without delays.
+    factor_and_solve(s, A);
+    EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+    EXPECT_EQ(s.info().delayed_pivots, 0);
+    EXPECT_NE(s.analysis_keep(), first);
+    EXPECT_EQ(s.info().ordering_used, static_cast<int>(OrderingMethod::UserSupplied));
+    EXPECT_EQ(s.factor_keep().analysis, s.analysis_keep());
+    EXPECT_GT(s.stats().reanalyse_seconds, 0.0);
+
+    // Probation passed; no delays left, so nothing more is tried.
+    const AnalysisKeep *adopted = s.analysis_keep();
+    for (int k = 0; k < 3; ++k) factor_and_solve(s, A);
+    EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+    EXPECT_EQ(s.analysis_keep(), adopted);
+    EXPECT_EQ(s.info().delayed_pivots, 0);
+}
+
+TEST(IpmSession, ReanalysisRevertsWhenDelaysGrow) {
+    // A2 weakens the couplings A1's realized order relied on (shifted_kkt).
+    const CscLower A1 = grid_kkt(40, 7);
+    const CscLower A2 = shifted_kkt(A1, 40 * 40, 7);
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A1, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+    factor_and_solve(s, A1);
+    const AnalysisKeep *original = s.analysis_keep();
+    const int a1_delays = s.info().delayed_pivots;
+    ASSERT_GT(a1_delays, 0);
+
+    // Probation factor: re-analysed from A1's order, it delays more on A2.
+    factor_and_solve(s, A2); // the probation factor stays solvable
+    EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_GT(s.info().delayed_pivots, a1_delays);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 1);
+    EXPECT_NE(s.analysis_keep(), original);
+    // A second solve with the probation factor (its analysis is still alive).
+    {
+        const std::vector<double> b = rhs(A2.n);
+        std::vector<double> x = b;
+        ASSERT_EQ(s.solve(x.data(), static_cast<int>(A2.n), 1), 0);
+        EXPECT_LE(eta(A2, b, x), 1e-10);
+    }
+
+    // Reverted: the next factor runs on the original analysis, and this
+    // pattern is never re-analysed again although every factor delays.
+    for (int k = 0; k < 4; ++k) {
+        factor_and_solve(s, k % 2 ? A2 : A1);
+        EXPECT_EQ(s.analysis_keep(), original);
+        EXPECT_EQ(s.factor_keep().analysis, original);
+        EXPECT_GT(s.info().delayed_pivots, 0);
+    }
+    EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 1);
+}
+
+TEST(IpmSession, ReanalysisRejectedOnFlops) {
+    const CscLower A = grid_kkt(40, 7);
+    IpmControl ipm = reanalyse_eager();
+    ipm.reanalyse_flops_ratio = 0.0;
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+    factor_and_solve(s, A);
+    const AnalysisKeep *first = s.analysis_keep();
+    const int first_delays = s.info().delayed_pivots;
+    ASSERT_GT(first_delays, 0);
+
+    factor_and_solve(s, A);
+    EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 0);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+    EXPECT_EQ(s.analysis_keep(), first);
+    EXPECT_EQ(s.info().delayed_pivots, first_delays);
+}
+
+TEST(IpmSession, ReanalysisWaitsForTheGap) {
+    // reanalyse_min_gap = 3 after a rejected attempt at factorization 2: the
+    // next attempt is at factorization 5, then 8.
+    const CscLower A = grid_kkt(40, 7);
+    IpmControl ipm = reanalyse_eager();
+    ipm.reanalyse_flops_ratio = 0.0;
+    ipm.reanalyse_min_gap = 3;
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+    const int want_tried[] = {0, 1, 1, 1, 2, 2, 2, 3};
+    for (int k = 0; k < 8; ++k) {
+        factor_and_solve(s, A);
+        EXPECT_EQ(s.stats().reanalyses_tried, want_tried[k]) << "factorization " << k + 1;
+    }
+}
+
+TEST(IpmSession, ReanalysisNeedsAnAcceptedFactorAndEnoughDelays) {
+    const CscLower A = grid_kkt(40, 7);
+    {
+        // Factors that are never solved with do not trigger.
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+        for (int k = 0; k < 3; ++k) ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+        EXPECT_EQ(s.stats().reanalyses_tried, 0);
+    }
+    {
+        // Delays at or below reanalyse_delay_frac * n do not trigger.
+        IpmSession s;
+        IpmControl ipm = reanalyse_eager();
+        ipm.reanalyse_delay_frac = 10.0;
+        ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+        for (int k = 0; k < 3; ++k) factor_and_solve(s, A);
+        EXPECT_EQ(s.stats().reanalyses_tried, 0);
+    }
+    {
+        // Feature off: the analysis never changes.
+        IpmSession s;
+        IpmControl ipm = reanalyse_eager();
+        ipm.reanalyse = false;
+        ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+        factor_and_solve(s, A);
+        const AnalysisKeep *first = s.analysis_keep();
+        const int d = s.info().delayed_pivots;
+        for (int k = 0; k < 3; ++k) factor_and_solve(s, A);
+        EXPECT_EQ(s.stats().reanalyses_tried, 0);
+        EXPECT_EQ(s.analysis_keep(), first);
+        EXPECT_EQ(s.info().delayed_pivots, d);
+    }
+}
+
+TEST(IpmSession, NewPatternRestartsReanalysis) {
+    // A revert stops re-analysis for that pattern only: analyse() starts over.
+    const CscLower A1 = grid_kkt(40, 7);
+    const CscLower A2 = shifted_kkt(A1, 40 * 40, 7);
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A1, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+    factor_and_solve(s, A1);
+    factor_and_solve(s, A2);
+    ASSERT_EQ(s.stats().reanalyses_reverted, 1);
+    ASSERT_EQ(s.analyse(A1, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+    EXPECT_EQ(s.stats().reanalyses_tried, 0);
+    factor_and_solve(s, A1);
+    factor_and_solve(s, A1);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_EQ(s.info().delayed_pivots, 0);
+}
+
+TEST(IpmSession, ReanalysisProbationWaitsForACompleteFactor) {
+    // The adopted analysis' first factor stops early (wrong inertia): it is
+    // not judged. The completion inside solve() is, on the same analysis.
+    const CscLower A = grid_kkt(40, 7);
+    const CscLower A2 = shifted_kkt(A, 40 * 40, 7);
+    IpmControl ipm = reanalyse_eager();
+    ipm.abort_on_wrong_inertia = true;
+    {
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+        factor_and_solve(s, A);
+        const AnalysisKeep *first = s.analysis_keep();
+        ASSERT_EQ(s.factor(A.values, 10), IpmFactorStatus::WrongInertia);
+        EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+        const AnalysisKeep *adopted = s.analysis_keep();
+        EXPECT_NE(adopted, first);
+        const std::vector<double> b = rhs(A.n);
+        std::vector<double> x = b;
+        ASSERT_EQ(s.solve(x.data(), static_cast<int>(A.n), 1), 0); // completes, then judged
+        EXPECT_LE(eta(A, b, x), 1e-10);
+        EXPECT_EQ(s.info().delayed_pivots, 0);
+        EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+        factor_and_solve(s, A);
+        EXPECT_EQ(s.analysis_keep(), adopted);
+    }
+    {
+        // Aborted, then refactored (IPOPT's next delta) with more delays: the
+        // refactor is the judged one, and it reverts.
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), ipm), ErrorCode::Success);
+        factor_and_solve(s, A);
+        const AnalysisKeep *first = s.analysis_keep();
+        ASSERT_EQ(s.factor(A.values, 10), IpmFactorStatus::WrongInertia);
+        EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+        ASSERT_EQ(s.factor(A2.values), IpmFactorStatus::Ok);
+        EXPECT_EQ(s.stats().reanalyses_reverted, 1);
+        const std::vector<double> b = rhs(A2.n);
+        std::vector<double> x = b;
+        ASSERT_EQ(s.solve(x.data(), static_cast<int>(A2.n), 1), 0);
+        EXPECT_LE(eta(A2, b, x), 1e-10);
+        factor_and_solve(s, A);
+        EXPECT_EQ(s.analysis_keep(), first);
+        EXPECT_EQ(s.stats().reanalyses_tried, 1);
+    }
+}
+
+TEST(IpmSession, ReanalysisKeepsTheMatchingScale) {
+    // The matching ordering's scaling (applied by ScalingMethod::Auto) is
+    // carried over: a user-supplied order computes none. (shifted_kkt delays
+    // under the matching ordering; grid_kkt does not.)
+    const CscLower A = shifted_kkt(grid_kkt(40, 7), 40 * 40, 7);
+    Control c = delay_ctrl();
+    c.ordering = OrderingMethod::Matching;
+    c.scaling = ScalingMethod::Auto;
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, A.values, c, reanalyse_eager()), ErrorCode::Success);
+    const std::vector<double> scale0 = s.analysis_keep()->matching_scale;
+    ASSERT_FALSE(scale0.empty());
+    factor_and_solve(s, A);
+    ASSERT_GT(s.info().delayed_pivots, 0);
+    const std::vector<double> fscale0 = s.factor_keep().scale;
+    factor_and_solve(s, A);
+    ASSERT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_EQ(s.analysis_keep()->matching_scale, scale0);
+    EXPECT_EQ(s.factor_keep().scale, fscale0);
+    EXPECT_EQ(s.info().delayed_pivots, 0);
 }

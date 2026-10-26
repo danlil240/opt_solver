@@ -1,9 +1,31 @@
 #include "smf/ipm_session.hpp"
 
+#include "smf/pivot_order.hpp"
+
 #include <algorithm>
 #include <chrono>
 
 namespace smf {
+
+namespace {
+
+// Flops of a factorization of `ak` without delays, counted as the kernel
+// counts Info::actual_flops: a pivot with r rows below it in its front costs
+// r + r (r + 1) (2x2 pivots count about the same per column).
+double kernel_flops(const AnalysisKeep &ak) {
+  double total = 0.0;
+  for (std::size_t s = 0; s < ak.supernodes.size(); ++s) {
+    const double f = static_cast<double>(ak.fronts[s].front_size());
+    const Int p = ak.supernodes[s].width();
+    for (Int k = 0; k < p; ++k) {
+      const double r = f - static_cast<double>(k) - 1.0;
+      total += r + r * (r + 1.0);
+    }
+  }
+  return total;
+}
+
+} // namespace
 
 ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> values,
                               const Control& ctrl, const IpmControl& ipm) {
@@ -25,6 +47,18 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   aborted_ = false;
   pending_accept_ = false;
   last_spd_ok_ = false;
+  prev_ak_.reset();
+  prev_info_ = Info{};
+  order_perm_.clear();
+  order_pairs_.clear();
+  reanalyse_armed_ = false;
+  trigger_delays_ = 0;
+  trigger_flops_ = 0.0;
+  last_attempt_ = -1;
+  probation_ = false;
+  probation_delays_ = 0;
+  revert_pending_ = false;
+  reanalyse_stopped_ = false;
 
   mat_.n = pattern.n;
   mat_.col_ptr = pattern.col_ptr;
@@ -86,6 +120,7 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
   }
 
   if (!ak_ && run_analysis() != ErrorCode::Success) return IpmFactorStatus::Error;
+  prepare_analysis();
 
   // Early abort: armed with an expectation (explicit, else learned) on an
   // indefinite matrix. Negative pivots only accumulate, so exceeding the
@@ -132,7 +167,93 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
   pending_accept_ = solvable_;
   last_spd_ok_ = factor_ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
                  fs == FactorStatus::Success;
+
+  // Probation: judged on the adopted analysis' first complete factorization
+  // (an aborted one is judged when solve() completes it).
+  if (probation_ && solvable_) {
+    probation_ = false;
+    if (info_.delayed_pivots > probation_delays_) {
+      // Worse than the old analysis. fk_ points at the adopted analysis and
+      // may still be solved with, so the switch back waits for factor().
+      ++stats_.reanalyses_reverted;
+      revert_pending_ = true;
+      reanalyse_stopped_ = true;
+    } else {
+      prev_ak_.reset();  // nothing points at it any more
+      prev_info_ = Info{};
+    }
+  }
   return result;
+}
+
+void IpmSession::consider_reanalysis() {
+  if (!ipm_.reanalyse || reanalyse_stopped_ || probation_ || revert_pending_ || !ak_) return;
+  if (factor_ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite) return;
+  if (!(static_cast<double>(info_.delayed_pivots) > ipm_.reanalyse_delay_frac * static_cast<double>(mat_.n)))
+    return;
+  // The attempt would run in the next factorization.
+  if (last_attempt_ >= 0 && stats_.factorizations + 1 - last_attempt_ < ipm_.reanalyse_min_gap) return;
+  // fk_ is overwritten by the next factor(): read its order now.
+  RealizedOrder ro = realized_pivot_order(*ak_, fk_);
+  order_perm_ = std::move(ro.perm);
+  order_pairs_ = std::move(ro.pairs);
+  trigger_delays_ = info_.delayed_pivots;
+  trigger_flops_ = info_.actual_flops;
+  reanalyse_armed_ = true;
+}
+
+void IpmSession::prepare_analysis() {
+  if (revert_pending_) {
+    // fk_ is about to be overwritten; until then it must not point at the
+    // analysis being freed.
+    revert_pending_ = false;
+    fk_.analysis = nullptr;
+    ak_ = std::move(prev_ak_);
+    info_ = prev_info_;
+    prev_info_ = Info{};
+    return;
+  }
+  if (!reanalyse_armed_) return;
+  reanalyse_armed_ = false;
+  last_attempt_ = stats_.factorizations + 1;
+  ++stats_.reanalyses_tried;
+  std::vector<Int> perm = std::move(order_perm_);
+  std::vector<Int> pairs = std::move(order_pairs_);
+  order_perm_.clear();
+  order_pairs_.clear();
+  if (perm.size() != static_cast<std::size_t>(mat_.n)) return;  // cannot re-analyse: rejected
+
+  Control actrl = factor_ctrl_;
+  actrl.ordering = OrderingMethod::UserSupplied;
+  actrl.user_perm = perm.data();
+  actrl.user_pair_first = pairs.empty() ? nullptr : pairs.data();
+  actrl.user_num_pairs = static_cast<Int>(pairs.size() / 2);
+  Info ainfo;
+  const auto t0 = std::chrono::steady_clock::now();
+  std::unique_ptr<AnalysisKeep> nak = solver_.analyse(mat_, actrl, ainfo);
+  const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  stats_.reanalyse_seconds += secs;
+  if (!nak || ainfo.status != ErrorCode::Success) return;
+  if (kernel_flops(*nak) > ipm_.reanalyse_flops_ratio * trigger_flops_) return;
+  // A user-supplied order computes no matching scaling. Keep the current
+  // analysis' (ScalingMethod::Auto applies it; Matching reuses it only for
+  // the values it was computed from), so the scaling does not change.
+  if (nak->matching_scale.empty() && !ak_->matching_scale.empty() &&
+      nak->cleaned.values.size() == ak_->cleaned.values.size()) {
+    nak->matching_scale = ak_->matching_scale;
+    nak->cleaned.values = ak_->cleaned.values;
+  }
+
+  // Adopt. The old analysis stays alive for the probation (and fk_, the
+  // accepted factor, still points at it until run_factor replaces it).
+  ainfo.analyse_seconds = secs;
+  prev_ak_ = std::move(ak_);
+  prev_info_ = info_;
+  ak_ = std::move(nak);
+  info_ = ainfo;
+  ++stats_.reanalyses_adopted;
+  probation_ = true;
+  probation_delays_ = trigger_delays_;
 }
 
 int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
@@ -148,6 +269,7 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
     ++stats_.accepted;
     pending_accept_ = false;
     if (ipm_.learn_inertia && !last_spd_ok_) expected_neg_ = info_.num_negative;
+    consider_reanalysis();
   }
   return rc;
 }

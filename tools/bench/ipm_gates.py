@@ -10,6 +10,11 @@ lines, is ignored.
 gate_abort(...) is the Feature 1 (early abort) gate: identical IPOPT runs
 with and without the abort, and the IPOPT factorization time it saves.
 
+gate_outcome(...) is the outcome gate of Features 2 and 3 (re-analysis,
+static mode), which may change IPOPT's path: iterations within +-5%
+(geometric mean), no new failures, wall time not worse (geometric mean over
+the models whose base run takes at least 1 s).
+
 Usage (from the repo root):
   <smfbench>/python.exe tools/bench/ipm_gates.py identical <log_a> <log_b> [...]
     compares pairs (log_a, log_b), (log_c, log_d), ...; exit 1 if any differ.
@@ -17,12 +22,16 @@ Usage (from the repo root):
     [--base-solver smf] [--feat-solver smf_abort]
     e2e results (ipopt_kkt.py e2e) of both solver ids, possibly one file;
     prints the per-model table and the overall pass; exit 1 on FAIL.
+  <smfbench>/python.exe tools/bench/ipm_gates.py outcome --base X.json --feat Y.json [--models a,b]
+    [--base-solver smf] [--feat-solver smf_reanalyse]
+    the outcome gate; prints the per-model table and the overall pass; exit 1 on FAIL.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import pathlib
 import re
 import sys
@@ -174,6 +183,113 @@ def gate_abort(base: list[dict], feat: list[dict], logs_base: dict, logs_feat: d
             "pass": all_identical and saves}
 
 
+# ---------------------------------------------------------- outcome gate --
+SUCCESS_STATUSES = ("Optimal Solution Found", "Solved To Acceptable Level")
+
+
+def succeeded(status: str | None) -> bool:
+    return bool(status) and status.startswith(SUCCESS_STATUSES)
+
+
+def _geomean(xs: list[float]) -> float | None:
+    xs = [x for x in xs if x is not None and x > 0]
+    return math.exp(sum(math.log(x) for x in xs) / len(xs)) if xs else None
+
+
+def _ratio(a, b):
+    return a / b if a is not None and b else None
+
+
+def gate_outcome(base: list[dict], feat: list[dict], models=None, wall_floor: float = 1.0,
+                 iter_band: tuple[float, float] = (0.95, 1.05)) -> dict:
+    """Outcome gate (Features 2 and 3): the feature may change IPOPT's path, not its outcome.
+
+    base / feat: e2e result rows (ipopt_kkt.py) without / with the feature;
+    models: names to judge (None = every base model). Per model: `iter_ratio`
+    and `wall_ratio` (feat / base iterations and IPOPT wall time),
+    `failed_new` (base succeeded, feat did not or has no row) and
+    `in_wall_mean` (base wall >= wall_floor s; shorter runs are noise).
+    `pass`: geometric-mean iteration ratio (every model) within iter_band, no
+    failed_new, and geometric-mean wall ratio (models in the wall mean) <= 1
+    (vacuous when no model is long enough).
+    """
+    base_by = {r["model"]: r for r in base}
+    feat_by = {r["model"]: r for r in feat}
+    names = [m for m in (models if models is not None else base_by) if m in base_by]
+    per_model = {}
+    for m in names:
+        b, f = base_by[m], feat_by.get(m)
+        if f is None:
+            per_model[m] = {"iter_ratio": None, "wall_ratio": None, "fact_ratio": None,
+                            "failed_new": succeeded(b.get("status")), "in_wall_mean": False,
+                            "base": b, "feat": None}
+            continue
+        bw = b.get("ipopt_wall_s")
+        per_model[m] = {
+            "iter_ratio": _ratio(f.get("iterations"), b.get("iterations")),
+            "wall_ratio": _ratio(f.get("ipopt_wall_s"), bw),
+            "fact_ratio": _ratio(f.get("linear_system_factorization_s"), b.get("linear_system_factorization_s")),
+            "failed_new": succeeded(b.get("status")) and not succeeded(f.get("status")),
+            "in_wall_mean": bw is not None and bw >= wall_floor,
+            "base": b,
+            "feat": f,
+        }
+    iter_mean = _geomean([r["iter_ratio"] for r in per_model.values()])
+    wall_mean = _geomean([r["wall_ratio"] for r in per_model.values() if r["in_wall_mean"]])
+    iter_ok = iter_mean is not None and iter_band[0] <= iter_mean <= iter_band[1]
+    no_new_failure = not any(r["failed_new"] for r in per_model.values())
+    wall_ok = wall_mean is None or wall_mean <= 1.0
+    return {"models": per_model, "iter_geomean": iter_mean, "wall_geomean": wall_mean,
+            "iter_ok": iter_ok, "no_new_failure": no_new_failure, "wall_ok": wall_ok,
+            "pass": bool(per_model) and iter_ok and no_new_failure and wall_ok}
+
+
+def _per_fact(total, n):
+    return total / n if total is not None and n else None
+
+
+def outcome_main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="ipm_gates.py outcome", description=gate_outcome.__doc__)
+    ap.add_argument("--base", required=True, help="e2e JSON with the base solver's rows")
+    ap.add_argument("--feat", required=True, help="e2e JSON with the feature solver's rows (may be --base)")
+    ap.add_argument("--base-solver", default="smf")
+    ap.add_argument("--feat-solver", default="smf_reanalyse")
+    ap.add_argument("--models", default="", help="comma-separated model names ('' = every base model)")
+    ap.add_argument("--wall-floor", type=float, default=1.0)
+    args = ap.parse_args(argv)
+    base = _load_rows(pathlib.Path(args.base), args.base_solver)
+    feat = _load_rows(pathlib.Path(args.feat), args.feat_solver)
+    res = gate_outcome(base, feat, args.models.split(",") if args.models else None, args.wall_floor)
+
+    def fmt(x, spec):
+        return format(x, spec) if x is not None else "-"
+
+    print(f"{'model':28s} {'status base -> feat':40s} {'iters':>11s} {'iter_r':>6s} {'wall_s':>17s} "
+          f"{'wall_r':>6s} {'fact_s':>17s} {'d/f base':>9s} {'d/f feat':>9s} {'d/f re':>8s} {'t/a/r':>7s}")
+    for m, r in res["models"].items():
+        b, f = r["base"], r["feat"] or {}
+        st = f"{(b.get('status') or '-')[:18]} -> {(f.get('status') or '-')[:18]}"
+        tar = (f"{f.get('reanalyses_tried')}/{f.get('reanalyses_adopted')}/{f.get('reanalyses_reverted')}"
+               if f.get("reanalyses_tried") is not None else "-")
+        print(f"{m:28s} {st:40s} {fmt(b.get('iterations'), 'd'):>5s}/{fmt(f.get('iterations'), 'd'):>5s} "
+              f"{fmt(r['iter_ratio'], '.3f'):>6s} "
+              f"{fmt(b.get('ipopt_wall_s'), '.2f'):>8s}/{fmt(f.get('ipopt_wall_s'), '.2f'):>8s} "
+              f"{fmt(r['wall_ratio'], '.3f'):>6s}{'' if r['in_wall_mean'] else '*'}"
+              f"{fmt(b.get('linear_system_factorization_s'), '.2f'):>8s}/"
+              f"{fmt(f.get('linear_system_factorization_s'), '.2f'):>8s} "
+              f"{fmt(_per_fact(b.get('delays_total'), b.get('factorizations')), '.0f'):>9s} "
+              f"{fmt(_per_fact(f.get('delays_total'), f.get('factorizations')), '.0f'):>9s} "
+              f"{fmt(_per_fact(f.get('delays_reanalysed'), f.get('factorizations_reanalysed')), '.0f'):>8s} "
+              f"{tar:>7s}" + ("  NEW FAILURE" if r["failed_new"] else ""))
+    print("(* = base wall < floor, not in the wall mean; d/f = delays per factorization; "
+          "d/f re = on re-analysed orders; t/a/r = re-analyses tried/adopted/reverted)")
+    print(f"iteration geomean {fmt(res['iter_geomean'], '.4f')} (ok: {res['iter_ok']}); "
+          f"no new failure: {res['no_new_failure']}; "
+          f"wall geomean {fmt(res['wall_geomean'], '.4f')} (ok: {res['wall_ok']})")
+    print("PASS" if res["pass"] else "FAIL")
+    return 0 if res["pass"] else 1
+
+
 def _load_rows(path: pathlib.Path, solver: str) -> list[dict]:
     rows = json.loads(path.read_text(encoding="utf-8"))
     return [r for r in rows if r.get("solver") == solver]
@@ -224,6 +340,8 @@ def abort_main(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "abort":
         return abort_main(argv[1:])
+    if argv and argv[0] == "outcome":
+        return outcome_main(argv[1:])
     if len(argv) < 3 or argv[0] != "identical" or len(argv[1:]) % 2:
         print(__doc__)
         return 2

@@ -249,7 +249,7 @@ def ipopt_env(threads: int) -> dict:
 
 
 def solver_options(solver: str) -> list[str]:
-    if solver in ("smf", "smf_abort"):
+    if solver in ("smf", "smf_abort", "smf_reanalyse"):
         return ["linear_solver ma97", f"hsllib {BUILD_REL / 'smf_ma97.dll'}"]
     if solver == "smf_noscale":
         # IPOPT's MA97 interface defaults to MC64 scaling, which the plugin
@@ -271,12 +271,15 @@ def solver_env(solver: str) -> dict:
     """Extra environment variables per solver id (smf* always traces factorizations).
 
     smf_abort = smf with the IPM early abort on wrong inertia (SMF_IPM_ABORT=1).
+    smf_reanalyse = smf with re-analysis from the realized pivot order (SMF_IPM_REANALYSE=1).
     """
     env = {}
     if solver.startswith("smf"):
         env["SMF_PLUGIN_STATS"] = "2"
     if solver == "smf_abort":
         env["SMF_IPM_ABORT"] = "1"
+    if solver == "smf_reanalyse":
+        env["SMF_IPM_REANALYSE"] = "1"
     return env
 
 
@@ -306,7 +309,9 @@ def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
         return cast(mm.group(1)) if mm else None
 
     trace = parse_trace(out + err) if solver.startswith("smf") else {
-        k: None for k in ("factorizations", "inertia_corrections", "delays_total", "static_total", "factor_s")}
+        k: None for k in ("factorizations", "inertia_corrections", "delays_total", "static_total", "factor_s",
+                          "reanalyses_tried", "reanalyses_adopted", "reanalyses_reverted", "reanalyse_s",
+                          "factorizations_reanalysed", "delays_reanalysed")}
     return {
         **trace,
         "solver": solver,

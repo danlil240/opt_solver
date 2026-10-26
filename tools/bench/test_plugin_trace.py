@@ -29,6 +29,29 @@ class TestParse(unittest.TestCase):
         self.assertEqual(r["factorizations"], 0)
         self.assertEqual(r["inertia_corrections"], 0)
 
+    def test_reanalysis_counts(self):
+        # ra=tried/adopted/reverted of the factor's session: adopted > reverted
+        # means the factor ran on a re-analysed order.
+        text = "\n".join([
+            LINE.format(k=1, c=0, d=40, s=0, t=0.5) + " ra=0/0/0",
+            LINE.format(k=2, c=0, d=2, s=0, t=0.5) + " ra=1/1/0",
+            LINE.format(k=3, c=1, d=4, s=0, t=0.5) + " ra=1/1/0",
+            "[smf_ma97] ipm: sessions=1 factorizations=3 accepted=2 aborted=0 reanalyses_tried=1 "
+            "reanalyses_adopted=1 reanalyses_reverted=0 reanalyse_s=0.125",
+        ])
+        r = parse_trace(text)
+        self.assertEqual(r["reanalyses_tried"], 1)
+        self.assertEqual(r["reanalyses_adopted"], 1)
+        self.assertEqual(r["reanalyses_reverted"], 0)
+        self.assertAlmostEqual(r["reanalyse_s"], 0.125)
+        self.assertEqual(r["factorizations_reanalysed"], 2)
+        self.assertEqual(r["delays_reanalysed"], 6)
+
+    def test_no_ipm_summary(self):
+        r = parse_trace(LINE.format(k=1, c=0, d=4, s=0, t=0.5))
+        self.assertIsNone(r["reanalyses_tried"])
+        self.assertEqual(r["factorizations_reanalysed"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

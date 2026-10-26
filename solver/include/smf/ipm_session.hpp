@@ -23,6 +23,7 @@ enum class StaticMode { Off, Fallback, Regularized };
 struct IpmControl {
   bool       learn_inertia          = true;  // infer the expected #neg from accepted factors
   bool       abort_on_wrong_inertia = true;  // stop once #neg exceeds the expectation
+  bool       reanalyse              = true;  // Feature 2: re-analysis from the realized order
   double     reanalyse_delay_frac   = 0.01;  // delays > frac * n -> try realized-order re-analysis
   double     reanalyse_flops_ratio  = 1.0;   // adopt only if predicted flops <= ratio * last actual
   int        reanalyse_min_gap      = 5;     // factorizations between re-analysis attempts
@@ -37,6 +38,7 @@ struct IpmStats {
   int reanalyses_tried = 0, reanalyses_adopted = 0, reanalyses_reverted = 0;
   long static_pivots = 0;
   double flops_avoided = 0.0;  // predicted flops of the fronts skipped by aborts
+  double reanalyse_seconds = 0.0;  // wall time of the re-analyses (inside factor())
 };
 
 /// One KKT pattern factorized repeatedly by an interior-point method.
@@ -51,8 +53,26 @@ struct IpmStats {
 /// factor()'s `expected_negatives`) and stops a later factorization as soon
 /// as it has more negative pivots (IpmFactorStatus::WrongInertia). A solve
 /// after such an abort first completes the factorization, so a wrong
-/// expectation costs time, never correctness. The other features are not
-/// implemented yet.
+/// expectation costs time, never correctness.
+///
+/// Feature 2, re-analysis from the realized pivot order (IpmControl::
+/// reanalyse): when an accepted factor (one followed by a successful solve)
+/// delayed more than reanalyse_delay_frac * n pivots (Info::delayed_pivots)
+/// and at least reanalyse_min_gap factorizations separate this attempt from
+/// the last one, the next factor() first analyses the pattern again from
+/// that factor's realized elimination order and 2x2 pairs
+/// (realized_pivot_order, OrderingMethod::UserSupplied). It adopts the new
+/// analysis only if its predicted flops, counted as the factorization kernel
+/// counts Info::actual_flops (sum over the fronts' pivots of r^2 + 2r, r the
+/// rows below the pivot; not Info::predicted_flops' p f^2), are at most
+/// reanalyse_flops_ratio x the accepted factor's actual flops. An empty
+/// realized order or a failed analysis is a rejected attempt. The previous
+/// analysis is kept while the adopted one is on probation: its first
+/// complete factorization. If that delays more pivots than the accepted
+/// factor did, the session reverts to the previous analysis at the next
+/// factor() (the probation factor, which points at the new analysis, stays
+/// usable for solves until then) and never re-analyses this pattern again.
+/// analyse() starts a new history.
 class IpmSession {
  public:
   /// Store the pattern (lower CSC; its own values are ignored) and start a
@@ -116,9 +136,28 @@ class IpmSession {
  private:
   ErrorCode run_analysis();  // analyse mat_ with ctrl_; times it in info_.analyse_seconds
   // One engine factorization of mat_ with factor_ctrl_ and the given
-  // negative-pivot limit (-1 off); sets the factor state and returns the
-  // IpmFactorStatus.
+  // negative-pivot limit (-1 off); sets the factor state, settles a
+  // probation and returns the IpmFactorStatus.
   IpmFactorStatus run_factor(int max_negative_pivots);
+  // Feature 2. After an accepted factor: arm a re-analysis for the next
+  // factor() if this one delayed enough and the gap allows it.
+  void consider_reanalysis();
+  // At the start of factor(): carry out a pending revert or re-analysis.
+  void prepare_analysis();
+
+  // Feature 2 state.
+  std::unique_ptr<AnalysisKeep> prev_ak_;  // the analysis before an adoption (probation)
+  Info prev_info_;                         // info_ when prev_ak_ was the current analysis
+  std::vector<Int> order_perm_;            // realized order armed for the next factor()
+  std::vector<Int> order_pairs_;
+  bool reanalyse_armed_ = false;
+  int trigger_delays_ = 0;        // delays of the accepted factor that armed it
+  double trigger_flops_ = 0.0;    // its actual flops
+  int last_attempt_ = -1;         // stats_.factorizations index of the last attempt
+  bool probation_ = false;        // adopted analysis not yet judged
+  int probation_delays_ = 0;      // the delays it must not exceed
+  bool revert_pending_ = false;   // switch back to prev_ak_ at the next factor()
+  bool reanalyse_stopped_ = false;  // reverted once: never again for this pattern
 
   Solver solver_;
   Control ctrl_;         // current Control: next factor, and every solve's options

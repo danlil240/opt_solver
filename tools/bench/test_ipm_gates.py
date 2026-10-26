@@ -1,6 +1,6 @@
 import unittest
 
-from ipm_gates import gate_abort, identical_iterations, iteration_lines, trace_entries
+from ipm_gates import gate_abort, gate_outcome, identical_iterations, iteration_lines, trace_entries
 
 HEADER = "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls"
 ITERS = [
@@ -158,6 +158,80 @@ class TestAbortSolverId(unittest.TestCase):
         self.assertEqual(ipopt_kkt.solver_options("smf_abort"), ipopt_kkt.solver_options("smf"))
         self.assertEqual(ipopt_kkt.solver_env("smf_abort"), {"SMF_PLUGIN_STATS": "2", "SMF_IPM_ABORT": "1"})
         self.assertNotIn("SMF_IPM_ABORT", ipopt_kkt.solver_env("smf"))
+
+
+def orow(model, solver, iters, wall, status="Optimal Solution Found."):
+    return {"model": model, "solver": solver, "status": status, "iterations": iters, "ipopt_wall_s": wall,
+            "linear_system_factorization_s": wall / 2}
+
+
+class TestOutcomeGate(unittest.TestCase):
+    """Feature 2/3 gate: iterations within +-5% (geomean), no new failure,
+    wall time not worse (geomean over models with base wall >= 1 s)."""
+
+    def setUp(self):
+        self.base = [orow("a", "smf", 100, 10.0), orow("b", "smf", 50, 4.0), orow("c", "smf", 20, 0.1)]
+
+    def feat(self, iters=(100, 50, 20), walls=(9.0, 3.6, 0.09), statuses=None):
+        statuses = statuses or ["Optimal Solution Found."] * 3
+        return [orow(m, "smf_reanalyse", i, w, st) for m, i, w, st in zip("abc", iters, walls, statuses)]
+
+    def test_iteration_ratio_1_06_fails(self):
+        res = gate_outcome(self.base, self.feat(iters=(106, 53, 21.2)), None)
+        self.assertAlmostEqual(res["models"]["a"]["iter_ratio"], 1.06)
+        self.assertAlmostEqual(res["iter_geomean"], 1.06)
+        self.assertFalse(res["pass"])
+
+    def test_new_failure_fails(self):
+        res = gate_outcome(self.base, self.feat(statuses=["Optimal Solution Found.",
+                                                          "Maximum Number of Iterations Exceeded.",
+                                                          "Optimal Solution Found."]), None)
+        self.assertTrue(res["models"]["b"]["failed_new"])
+        self.assertFalse(res["models"]["a"]["failed_new"])
+        self.assertFalse(res["pass"])
+
+    def test_same_iterations_faster_passes(self):
+        res = gate_outcome(self.base, self.feat(), None)
+        self.assertAlmostEqual(res["models"]["a"]["iter_ratio"], 1.0)
+        self.assertAlmostEqual(res["models"]["a"]["wall_ratio"], 0.9)
+        self.assertAlmostEqual(res["wall_geomean"], 0.9)
+        self.assertTrue(res["pass"])
+
+    def test_wall_mean_skips_models_under_one_second(self):
+        res = gate_outcome(self.base, self.feat(walls=(9.0, 3.6, 0.5)), None)
+        self.assertAlmostEqual(res["models"]["c"]["wall_ratio"], 5.0)
+        self.assertFalse(res["models"]["c"]["in_wall_mean"])
+        self.assertAlmostEqual(res["wall_geomean"], 0.9)
+        self.assertTrue(res["pass"])
+
+    def test_slower_fails(self):
+        res = gate_outcome(self.base, self.feat(walls=(11.0, 4.4, 0.1)), None)
+        self.assertAlmostEqual(res["wall_geomean"], 1.1)
+        self.assertFalse(res["pass"])
+
+    def test_old_failure_is_not_new(self):
+        self.base[0]["status"] = "Maximum Number of Iterations Exceeded."
+        res = gate_outcome(self.base, self.feat(statuses=["Maximum Number of Iterations Exceeded."] +
+                                                ["Optimal Solution Found."] * 2), None)
+        self.assertFalse(res["models"]["a"]["failed_new"])
+        self.assertTrue(res["pass"])
+
+    def test_models_selects_and_missing_feature_run_fails(self):
+        res = gate_outcome(self.base, self.feat()[:2], ["a", "b"])
+        self.assertEqual(sorted(res["models"]), ["a", "b"])
+        self.assertTrue(res["pass"])
+        res = gate_outcome(self.base, self.feat()[:2], ["a", "c"])
+        self.assertTrue(res["models"]["c"]["failed_new"])
+        self.assertFalse(res["pass"])
+
+
+class TestReanalyseSolverId(unittest.TestCase):
+    def test_smf_reanalyse_is_smf_with_reanalysis_on(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_reanalyse"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_reanalyse"),
+                         {"SMF_PLUGIN_STATS": "2", "SMF_IPM_REANALYSE": "1"})
+        self.assertNotIn("SMF_IPM_REANALYSE", ipopt_kkt.solver_env("smf"))
 
 
 if __name__ == "__main__":
