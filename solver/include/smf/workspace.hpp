@@ -26,6 +26,8 @@ struct SolveWorkspace {
     void ensure_capacity(int n, int max_p, int max_q, int nrhs = 1);
 };
 
+struct TreeParallelBuffers; // multifrontal_serial.cpp
+
 struct NumericWorkspace {
     std::vector<double> clean_values;
     std::vector<double> perm_values;
@@ -49,6 +51,8 @@ struct NumericWorkspace {
     std::vector<LongInt> cb_row_off;   ///< per-supernode offset into cb_rows
     std::vector<Int> cb_size;          ///< per-supernode contribution order q
     std::vector<Int> cb_delayed;       ///< per-supernode delayed columns (leading rows of its block)
+    std::vector<int> cb_owner;         ///< per-supernode pass whose stack holds its block (0 = serial)
+    std::shared_ptr<TreeParallelBuffers> tree_par; ///< per-thread buffers of the tree-parallel factorization
 
     int warmup_calls = 0;
     int64_t front_heap_allocations_last_call = 0;
@@ -59,6 +63,26 @@ struct NumericWorkspace {
     std::vector<double> acquire_contrib(std::size_t elems, bool &allocated_new);
     void release_contrib(std::vector<double> &&buf);
 };
+
+/// Values to factor, in the entry order of the matrix given to analyse()
+/// (`original_layout`) or of its cleaned pattern.
+struct FactorValues {
+    const double *data = nullptr;
+    std::size_t size = 0;
+    bool original_layout = true;
+};
+
+/// The layout of `updated` (its pattern compared with the analysis'); false
+/// when it matches neither.
+bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
+                           FactorValues &out);
+
+/// Scatter values into ws.perm_values (permuted pattern) and, when
+/// `need_clean`, ws.clean_values. Rejects non-finite values and a size that
+/// does not fit the layout; `max_abs` (optional) receives max |value|.
+ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
+                                 NumericWorkspace &ws, bool need_clean = true,
+                                 double *max_abs = nullptr);
 
 /// Scatter `updated` values (original or cleaned pattern) into
 /// ws.perm_values (permuted pattern) and, when `need_clean`, ws.clean_values.

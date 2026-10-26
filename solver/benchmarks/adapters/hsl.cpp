@@ -289,7 +289,8 @@ public:
 
     Outcome analyse(const CscLower &A) override {
         stats_ = AdapterStats{};
-        base_matrix_ = A;
+        // The caller keeps A (and each factor()'s values) alive: no copy.
+        pattern_ = &A;
         Info info;
         const auto t0 = Clock::now();
         ak_ = solver_.analyse(A, ctrl_, info);
@@ -310,16 +311,16 @@ public:
             stats_.reason = "factor called before analyse";
             return stats_.outcome;
         }
-        if (values.size() != base_matrix_.values.size()) {
+        if (values.size() != pattern_->values.size()) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "values size mismatch";
             return stats_.outcome;
         }
-        base_matrix_.values.assign(values.begin(), values.end());
+        values_ = values;
 
         Info info;
         const auto t0 = Clock::now();
-        const FactorStatus fs = solver_.factor(*ak_, base_matrix_, ctrl_, info, fk_, nws_);
+        const FactorStatus fs = solver_.factor(*ak_, values, ctrl_, info, fk_, nws_);
         const auto t1 = Clock::now();
         stats_.factor_ms = ms_since(t0, t1);
         stats_.inertia_pos = info.num_positive;
@@ -332,7 +333,7 @@ public:
 
         if (fs == FactorStatus::Success) {
             if (ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
-                stats_.inertia_pos = static_cast<int>(base_matrix_.n);
+                stats_.inertia_pos = static_cast<int>(pattern_->n);
                 stats_.inertia_neg = 0;
                 stats_.inertia_zero = 0;
             }
@@ -360,7 +361,7 @@ public:
             stats_.reason = "solve called without valid factor";
             return stats_.outcome;
         }
-        const int n = static_cast<int>(base_matrix_.n);
+        const int n = static_cast<int>(pattern_->n);
         if (nrhs <= 0 || b_and_x.size() < static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs)) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "solve buffer too small";
@@ -372,8 +373,11 @@ public:
         // against the true one, as PARDISO does after perturbations.
         if (static_pivots_ > 0) rhs_copy_.assign(b_and_x.begin(), b_and_x.begin() + static_cast<std::ptrdiff_t>(n) * nrhs);
         int rc = solver_.solve(fk_, ctrl_, info, b_and_x.data(), n, nrhs, sws_);
-        if (rc == 0 && static_pivots_ > 0)
-            refine(base_matrix_, fk_, ctrl_, rhs_copy_, b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
+        if (rc == 0 && static_pivots_ > 0) {
+            CscLower current = *pattern_;
+            current.values.assign(values_.begin(), values_.end());
+            refine(current, fk_, ctrl_, rhs_copy_, b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
+        }
         const auto t1 = Clock::now();
         stats_.solve_ms = ms_since(t0, t1);
         if (rc != 0) {
@@ -391,7 +395,8 @@ private:
     Control ctrl_{};
     std::string track_ = "recommended";
     Solver solver_;
-    CscLower base_matrix_;
+    const CscLower *pattern_ = nullptr;
+    std::span<const double> values_;
     std::unique_ptr<AnalysisKeep> ak_;
     FactorKeep fk_;
     NumericWorkspace nws_;

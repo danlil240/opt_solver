@@ -272,13 +272,46 @@ void apply_pivot(const PivotChoice &pc, double *F, int f, int &k, Int *rows,
     k += 2;
 }
 
-// F[c0:f, c0:f] -= L[c0:f, p0:p1] * W[c0:f, 0:(p1-p0)]^T (lower triangle).
-void deferred_update(double *F, int f, int p0, int p1, int c0, const double *W) {
+// Panel update of the eligible columns only: F[c0:f, c0:e] -= L[c0:f, p0:p1]
+// * W[c0:e, 0:(p1-p0)]^T (lower part), as a lower GEMM on the [c0, e)
+// square and a GEMM for the rows below it. Pivot selection reads only these
+// columns; the trailing block [e, f) gets one rank-p update at the end
+// (schur_update) instead of streaming through memory once per panel.
+void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const double *W) {
     const int jb = p1 - p0;
-    const int m = f - c0;
+    const int m = e - c0;
     if (jb <= 0 || m <= 0) return;
     const std::size_t sf = static_cast<std::size_t>(f);
     smf_dgemmt_lower_nt_sub(F + c0 * sf + c0, m, jb, F + p0 * sf + c0, f, W + c0, f, f);
+    const int r = f - e;
+    if (r > 0)
+        smf_dgemm_nt(F + c0 * sf + e, r, m, jb, F + p0 * sf + e, f, W + c0, f, f, -1.0, 1.0);
+}
+
+// Schur complement of the rows below the eligible block, once and at rank
+// p: F[e:f, e:f] -= L[e:f, 0:p] D L[e:f, 0:p]^T (lower). L D is formed in
+// the front's unused strict upper triangle, F[0:p, e:f], as its transpose.
+void schur_update(double *F, int f, int p, int e, const int8_t *tags) {
+    const int q = f - e;
+    if (p <= 0 || q <= 0) return;
+    const std::size_t sf = static_cast<std::size_t>(f);
+    for (int c = 0; c < p; ++c) {
+        const double *Lc = F + static_cast<std::size_t>(c) * sf;
+        if (tags[c] == 2) {
+            const double *Lc1 = Lc + sf;
+            const double d00 = Lc[c], d10 = Lc[c + 1], d11 = Lc1[c + 1];
+            for (int i = e; i < f; ++i) {
+                double *row = F + static_cast<std::size_t>(i) * sf;
+                row[c] = Lc[i] * d00 + Lc1[i] * d10;
+                row[c + 1] = Lc[i] * d10 + Lc1[i] * d11;
+            }
+            ++c;
+        } else {
+            const double d = Lc[c];
+            for (int i = e; i < f; ++i) F[static_cast<std::size_t>(i) * sf + c] = Lc[i] * d;
+        }
+    }
+    smf_dgemmt_lower_nn_sub(F + e * sf + e, q, p, F + e, f, F + e * sf, f, f);
 }
 
 } // namespace
@@ -320,7 +353,7 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             }
             apply_pivot(pc, F, f, k, rows, tags, W, k - ps, pl, prm, res);
         }
-        deferred_update(F, f, ps, k, pl, W);
+        deferred_update(F, f, ps, k, pl, num_elig, W);
 
         if (stalled && k < num_elig) {
             // The whole trailing matrix is current now: search every
@@ -332,9 +365,10 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                 pc = force_static_pivot(F, f, k, num_elig, prm, res);
             }
             apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res);
-            deferred_update(F, f, ss, k, k, W);
+            deferred_update(F, f, ss, k, k, num_elig, W);
         }
     }
+    schur_update(F, f, k, num_elig, tags);
     res.num_accepted = k;
     return res;
 }

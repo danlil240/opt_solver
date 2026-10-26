@@ -35,10 +35,10 @@ struct Control {
     int            expected_refactors = 1;
 
     // Parallelism
-    // num_threads > 1 runs the serial multifrontal engine with num_threads
-    // BLAS threads inside each front. tree_parallel opts into the older
-    // task-parallel tree traversal (serial BLAS per task), which measured
-    // slower than the serial engine on every large-benchmark case so far.
+    // num_threads > 1: independent subtrees of the assembly tree are
+    // factored concurrently (serial BLAS each), then the top of the tree
+    // with num_threads BLAS threads. tree_parallel opts into the older
+    // task-parallel engine instead, which measured slower everywhere.
     int            num_threads   = 1;
     bool           tree_parallel = false;
     bool           deterministic = false;

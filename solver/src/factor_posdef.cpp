@@ -306,8 +306,16 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 }
 
 FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
-                           const Control &ctrl, Info &info,
-                           FactorKeep &fkeep, NumericWorkspace &ws) {
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws) {
+  FactorValues values;
+  if (!resolve_factor_values(keep, updated, values)) values.data = nullptr;
+  return factor_posdef(keep, values, ctrl, info, fkeep, ws);
+}
+
+FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws) {
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
   ws.front_heap_allocations_last_call = 0;
@@ -326,8 +334,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
   // ScalingMethod::Auto: the analysis computes no matching for SPD matrices.
   const ScalingMethod scaling =
       ctrl.scaling == ScalingMethod::Auto ? ScalingMethod::None : ctrl.scaling;
-  const ErrorCode err = map_updated_values_to_permuted(
-      keep, updated, ws, scaling != ScalingMethod::None);
+  const ErrorCode err = map_values_to_permuted(
+      keep, values, ws, scaling != ScalingMethod::None);
   if (err != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, err);
 
@@ -427,6 +435,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
     return fail(FactorStatus::NotPositiveDefinite, serr);
 
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+  info.parallel_subtrees = st.parallel_subtrees;
   info.actual_flops = st.flops;
   info.max_front_size = std::max(info.max_front_size, st.max_front);
   info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);

@@ -4,30 +4,86 @@
 namespace smf
 {
 
+    // Column counts by Gilbert, Ng & Peyton (1994), as CSparse's cs_counts:
+    // each row subtree contributes only through its skeleton (leaves) and
+    // least common ancestors, found with path-compressed union-find, so the
+    // cost is O(nnz(A) alpha(n)) instead of one step per entry of L (the
+    // row-subtree walk this replaces cost 20% of analysis on bmwcra_1).
+    // Needs parent[j] > j, true for the etree of a permuted matrix.
     std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
                                                     const Int *row_cols,
                                                     const EliminationTree &etree)
     {
         const auto sn = static_cast<std::size_t>(n);
-        std::vector<Int> count(sn, 1); // +1 for the diagonal entry
-        std::vector<Int> mark(sn, -1);
         const Int *parent = etree.parent.data();
-        // For each row i: every k in row i contributes i to all vertices on
-        // the etree path k -> i (excluding i itself, the diagonal slot).
+        const Int *post = etree.postorder.data();
+
+        // Column form of the strict lower triangle: rows i > j of column j.
+        std::vector<Int> cp(sn + 1, 0);
         for (Int i = 0; i < n; ++i)
-        {
             for (Int p = row_ptr[i]; p < row_ptr[i + 1]; ++p)
-            {
-                Int w = row_cols[p];
-                while (w >= 0 && w != i && mark[static_cast<std::size_t>(w)] != i)
-                {
-                    mark[static_cast<std::size_t>(w)] = i;
-                    ++count[static_cast<std::size_t>(w)];
-                    w = parent[w];
-                }
-            }
+                if (row_cols[p] < i)
+                    ++cp[static_cast<std::size_t>(row_cols[p]) + 1];
+        for (std::size_t j = 0; j < sn; ++j)
+            cp[j + 1] += cp[j];
+        std::vector<Int> ci(static_cast<std::size_t>(cp[sn]));
+        {
+            std::vector<Int> next(cp.begin(), cp.end() - 1);
+            for (Int i = 0; i < n; ++i)
+                for (Int p = row_ptr[i]; p < row_ptr[i + 1]; ++p)
+                    if (row_cols[p] < i)
+                        ci[static_cast<std::size_t>(next[static_cast<std::size_t>(row_cols[p])]++)] = i;
         }
-        return count;
+
+        std::vector<Int> w(4 * sn, -1);
+        Int *ancestor = w.data();
+        Int *maxfirst = ancestor + sn;
+        Int *prevleaf = maxfirst + sn;
+        Int *first = prevleaf + sn;
+        std::vector<Int> delta(sn);
+        for (Int k = 0; k < n; ++k)
+        {
+            Int j = post[k];
+            delta[static_cast<std::size_t>(j)] = (first[j] == -1) ? 1 : 0; // leaf
+            for (; j != -1 && first[j] == -1; j = parent[j])
+                first[j] = k;
+        }
+        for (Int i = 0; i < n; ++i)
+            ancestor[i] = i;
+        for (Int k = 0; k < n; ++k)
+        {
+            const Int j = post[k];
+            if (parent[j] != -1)
+                --delta[static_cast<std::size_t>(parent[j])];
+            for (Int p = cp[static_cast<std::size_t>(j)]; p < cp[static_cast<std::size_t>(j) + 1]; ++p)
+            {
+                const Int i = ci[static_cast<std::size_t>(p)];
+                if (first[j] <= maxfirst[i])
+                    continue; // j is not a leaf of row subtree i
+                maxfirst[i] = first[j];
+                const Int jprev = prevleaf[i];
+                prevleaf[i] = j;
+                ++delta[static_cast<std::size_t>(j)]; // A(i, j) is in the skeleton
+                if (jprev == -1)
+                    continue; // first leaf of row subtree i
+                Int q = jprev;
+                while (q != ancestor[q])
+                    q = ancestor[q];
+                for (Int s = jprev; s != q;)
+                {
+                    const Int sparent = ancestor[s];
+                    ancestor[s] = q;
+                    s = sparent;
+                }
+                --delta[static_cast<std::size_t>(q)]; // q = lca(jprev, j) was counted twice
+            }
+            if (parent[j] != -1)
+                ancestor[j] = parent[j];
+        }
+        for (Int j = 0; j < n; ++j)
+            if (parent[j] != -1)
+                delta[static_cast<std::size_t>(parent[j])] += delta[static_cast<std::size_t>(j)];
+        return delta;
     }
 
     // Compute exact simplicial column counts |L_{*w}| of the Cholesky factor.

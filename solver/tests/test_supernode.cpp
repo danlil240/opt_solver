@@ -168,3 +168,45 @@ TEST(Supernode, AmalgamationNemin1NoChange) {
 }
 
 } // namespace smf
+
+#include <random>
+
+// Exact column counts (Gilbert-Ng-Peyton) against a brute-force symbolic
+// Cholesky on random sparse patterns, including disconnected forests.
+TEST(ColumnCounts, MatchBruteForceSymbolicFactor) {
+    for (unsigned seed = 1; seed <= 25; ++seed) {
+        std::mt19937 rng(seed);
+        const int n = 20 + static_cast<int>(seed * 7 % 140);
+        const double density = (seed % 3 == 0) ? 0.01 : 0.05;
+        std::uniform_real_distribution<double> unif(0.0, 1.0);
+        std::vector<std::vector<char>> L(static_cast<std::size_t>(n), std::vector<char>(static_cast<std::size_t>(n), 0));
+        std::vector<smf::Int> row_ptr{0}, row_cols;
+        for (int i = 0; i < n; ++i) {
+            for (int k = 0; k < i; ++k) {
+                if (unif(rng) < density) {
+                    row_cols.push_back(k);
+                    L[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] = 1;
+                }
+            }
+            row_cols.push_back(i);  // diagonal (ignored by the algorithms)
+            row_ptr.push_back(static_cast<smf::Int>(row_cols.size()));
+        }
+        // Symbolic elimination: struct(L_j) rows fill every later column in it.
+        for (int j = 0; j < n; ++j)
+            for (int i = j + 1; i < n; ++i)
+                if (L[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)])
+                    for (int k = j + 1; k < i; ++k)
+                        if (L[static_cast<std::size_t>(k)][static_cast<std::size_t>(j)])
+                            L[static_cast<std::size_t>(i)][static_cast<std::size_t>(k)] = 1;
+        const smf::EliminationTree et =
+            smf::build_elimination_tree_from_rows(n, row_ptr.data(), row_cols.data());
+        const std::vector<smf::Int> got =
+            smf::filled_column_counts_from_rows(n, row_ptr.data(), row_cols.data(), et);
+        ASSERT_EQ(got.size(), static_cast<std::size_t>(n));
+        for (int j = 0; j < n; ++j) {
+            int expect = 1;
+            for (int i = j + 1; i < n; ++i) expect += L[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)];
+            ASSERT_EQ(got[static_cast<std::size_t>(j)], expect) << "seed=" << seed << " col=" << j;
+        }
+    }
+}

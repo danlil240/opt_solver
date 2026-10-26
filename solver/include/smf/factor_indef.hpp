@@ -18,4 +18,9 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
                           const Control &ctrl, Info &info,
                           FactorKeep &fkeep, NumericWorkspace &ws);
 
+/// Same, with values in the analysed matrix's entry order.
+FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws);
+
 } // namespace smf

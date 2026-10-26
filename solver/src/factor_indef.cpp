@@ -328,6 +328,14 @@ bool finalize_factor_from_front_results(
 FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
                           const Control &ctrl, Info &info,
                           FactorKeep &fkeep, NumericWorkspace &ws) {
+  FactorValues values;
+  if (!resolve_factor_values(keep, updated, values)) values.data = nullptr;
+  return factor_indef(keep, values, ctrl, info, fkeep, ws);
+}
+
+FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws) {
   const auto t0 = std::chrono::steady_clock::now();
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
@@ -362,8 +370,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     user_scale = keep.matching_scale.data();
   }
   double matrix_max_abs = 0.0;
-  const ErrorCode map_err = map_updated_values_to_permuted(
-      keep, updated, ws, scaling != ScalingMethod::None, &matrix_max_abs);
+  const ErrorCode map_err = map_values_to_permuted(
+      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs);
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
     fkeep.status = FactorStatus::Singular;
@@ -481,6 +489,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
     }
     info.delayed_pivots = st.delayed;
     info.static_pivots = st.static_pivots;
+    info.parallel_subtrees = st.parallel_subtrees;
     info.num_positive = st.inertia.positive;
     info.num_negative = st.inertia.negative;
     info.num_zero = st.inertia.zero;

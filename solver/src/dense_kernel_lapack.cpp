@@ -183,6 +183,21 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
   }
 }
 
+void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
+                             const double *B, int ldb, int ldc) {
+  for (int j = 0; j < m; ++j) {
+    double *c_j = C + static_cast<std::size_t>(j) * ldc;
+    for (int p = 0; p < k; ++p) {
+      const double b_pj = B[static_cast<std::size_t>(j) * ldb + p];
+      if (b_pj == 0.0) continue;
+      const double *a_p = A + static_cast<std::size_t>(p) * lda;
+      for (int i = j; i < m; ++i) {
+        c_j[i] -= a_p[i] * b_pj;
+      }
+    }
+  }
+}
+
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
   if (beta == 0.0) {
@@ -481,6 +496,29 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
     const int nc = std::min(kBlock, m - j0);
     cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m - j0, nc, k, -1.0,
                 A + j0, lda, B + j0, ldb, 1.0,
+                C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
+  }
+#endif
+}
+
+void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
+                             const double *B, int ldb, int ldc) {
+  if (m <= 0 || k <= 0) return;
+#if defined(SMF_USE_MKL) && (SMF_USE_MKL)
+#if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
+  cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasNoTrans, m, k, -1.0,
+                A, lda, B, ldb, 1.0, C, ldc);
+#else
+  cblas_dgemmt(CblasColMajor, CblasLower, CblasNoTrans, CblasNoTrans, m, k, -1.0,
+               A, lda, B, ldb, 1.0, C, ldc);
+#endif
+#else
+  // Column-blocked GEMM: only the upper half of each diagonal block is wasted.
+  constexpr int kBlock = 64;
+  for (int j0 = 0; j0 < m; j0 += kBlock) {
+    const int nc = std::min(kBlock, m - j0);
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m - j0, nc, k, -1.0,
+                A + j0, lda, B + static_cast<std::size_t>(j0) * ldb, ldb, 1.0,
                 C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
   }
 #endif

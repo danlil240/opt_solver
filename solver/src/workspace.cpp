@@ -93,15 +93,23 @@ void NumericWorkspace::release_contrib(std::vector<double> &&buf) {
     contrib_pool.push_back(std::move(buf));
 }
 
-ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
-                                         const CscLower &updated,
-                                         NumericWorkspace &ws,
-                                         bool need_clean,
-                                         double *max_abs) {
+bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
+                           FactorValues &out) {
+    out = FactorValues{updated.values.data(), updated.values.size(), true};
+    if (updated.n != ak.n) return false;
+    if (!ak.orig_col_ptr.empty() && updated.col_ptr == ak.orig_col_ptr &&
+        updated.row_idx == ak.orig_row_idx &&
+        updated.values.size() == ak.orig_row_idx.size())
+        return true;
+    out.original_layout = false;
+    return updated.col_ptr == ak.cleaned.col_ptr && updated.row_idx == ak.cleaned.row_idx &&
+           updated.values.size() == ak.cleaned.row_idx.size();
+}
+
+ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
+                                 NumericWorkspace &ws, bool need_clean, double *max_abs) {
     if (max_abs != nullptr) *max_abs = 0.0;
-    if (updated.n != ak.n || updated.n < 0) {
-        return ErrorCode::IllegalValue;
-    }
+    if (ak.n < 0) return ErrorCode::IllegalValue;
     if (ak.n == 0) {
         ws.clean_values.clear();
         ws.perm_values.clear();
@@ -112,47 +120,36 @@ ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
     const std::size_t perm_nnz = ak.perm_col_ptr.empty()
                                      ? clean_nnz
                                      : static_cast<std::size_t>(ak.perm_col_ptr.back());
-
-    // Check if `updated` matches the original input pattern (`orig_col_ptr` / `orig_row_idx`)
-    const bool matches_orig =
-        !ak.orig_col_ptr.empty() &&
-        updated.col_ptr == ak.orig_col_ptr &&
-        updated.row_idx == ak.orig_row_idx &&
-        updated.values.size() == ak.orig_row_idx.size();
-
-    // Check if `updated` matches the cleaned canonical pattern (`cleaned.col_ptr` / `cleaned.row_idx`)
-    const bool matches_clean =
-        !matches_orig &&
-        updated.col_ptr == ak.cleaned.col_ptr &&
-        updated.row_idx == ak.cleaned.row_idx &&
-        updated.values.size() == clean_nnz;
-
-    if (!matches_orig && !matches_clean) {
+    // Original-layout values go through the cleaning map unless the
+    // original needed none (then it is the cleaned layout).
+    const bool via_orig = values.original_layout && !ak.orig_to_clean_idx.empty();
+    const std::size_t expect = via_orig ? ak.orig_row_idx.size() : clean_nnz;
+    if (values.data == nullptr || values.size != expect) {
         return ErrorCode::IllegalValue;
     }
 
     // Finiteness and max |a| in one pass. Entries dropped by cleaning (out of
     // range) are included, as before.
+    const std::size_t nv = values.size;
+    const double *uv = values.data;
     double vmax = 0.0;
     bool all_finite = true;
-    for (double v : updated.values) {
-        all_finite = all_finite && is_finite_fast(v);
-        vmax = std::max(vmax, std::abs(v));
+    for (std::size_t k = 0; k < nv; ++k) {
+        all_finite = all_finite && is_finite_fast(uv[k]);
+        vmax = std::max(vmax, std::abs(uv[k]));
     }
     if (!all_finite) {
         return ErrorCode::IllegalValue;
     }
     if (max_abs != nullptr) *max_abs = vmax;
 
-    const std::size_t nv = updated.values.size();
-    const double *uv = updated.values.data();
     if (need_clean) {
         ws.clean_values.assign(clean_nnz, 0.0);
     }
     ws.perm_values.assign(perm_nnz, 0.0);
     double *pv = ws.perm_values.data();
 
-    if (matches_orig && !ak.orig_to_clean_idx.empty()) {
+    if (via_orig) {
         const Int *to_perm = ak.orig_to_perm_direct.data();
         for (std::size_t k = 0; k < nv; ++k) {
             const Int p_slot = to_perm[k];
@@ -167,8 +164,6 @@ ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
             }
         }
     } else {
-        // Pattern equals the cleaned one (directly, or an original that
-        // needed no cleaning map).
         if (need_clean) ws.clean_values.assign(uv, uv + nv);
         if (ak.orig_to_perm_idx.empty()) {
             std::copy(uv, uv + nv, pv);
@@ -179,6 +174,17 @@ ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
     }
 
     return ErrorCode::Success;
+}
+
+ErrorCode map_updated_values_to_permuted(const AnalysisKeep &ak,
+                                         const CscLower &updated,
+                                         NumericWorkspace &ws,
+                                         bool need_clean,
+                                         double *max_abs) {
+    if (max_abs != nullptr) *max_abs = 0.0;
+    FactorValues values;
+    if (!resolve_factor_values(ak, updated, values)) return ErrorCode::IllegalValue;
+    return map_values_to_permuted(ak, values, ws, need_clean, max_abs);
 }
 
 } // namespace smf

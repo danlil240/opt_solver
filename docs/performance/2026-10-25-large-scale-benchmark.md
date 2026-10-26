@@ -97,8 +97,48 @@ optim20 against MA27 is unchanged (1.49x geomean). The auto policy starts at n =
 - **d_pretok and turon_m are singular**, most likely through the pressure null space typical of these flow problems: with b = 1, smf, PARDISO and MUMPS all reach ω = 1 (smf has the smallest η, 1.7e-16). They do not belong in an accuracy comparison.
 - **On the largest SPD matrices smf's factorization is fastest** (G3_circuit 1.4 s vs CHOLMOD 6.6 s, PARDISO 2.5 s), but its METIS analysis is not (5.7–7 s vs 0.75 s and 3.4 s). The new METIS rule picks AMD where that wins a one-off solve: G3_circuit 7.0 s vs 8.2 s, apache2 7.4 s vs 9.6 s.
 
+### Round 2 (2026-10-26): threads and IPOPT
+
+**Threads.** 7 representative matrices, smf rebuilt, baselines from the
+earlier run, 3 trials each, `benchmarks/results/threads_v6/report.md`; all 63
+smf runs accurate:
+
+| threads | smf faster than every baseline | geomean best-baseline / smf |
+|---:|---:|---:|
+| 1 | 7 of 7 | 1.27x |
+| 8 | 6 of 7 | 1.23x |
+| 16 | 6 of 7 | 1.28x |
+
+Before this round smf got *slower* with threads. The remaining loss is bmwcra_1. Its analysis is dominated by serial METIS (~0.6 of 0.85 s), while PARDISO's ordering is parallel.
+
+**IPOPT end to end** (IPOPT's default MA97 options, 1 thread):
+
+| model | MA27 | MUMPS | smf before | smf now |
+|---|---:|---:|---:|---:|
+| pde_control_120 | 0.54 s | 1.28 s | 0.85 s | **0.53 s** |
+| pde_control_250 | 4.86 s | 6.31 s | 32.2 s | **3.29 s** |
+| robot_arm_8k | 8.38 s | 9.22 s | timeout | **2.58 s** |
+| obstacle_surface_200 | 11.93 s | 19.43 s | 11.86 s | **9.37 s** |
+| acopf_grid_80 | 3.88 s | 4.11 s | 3.18 s | **2.19 s** |
+| acopf_grid_160 | 25.72 s | 19.45 s | 22.36 s | **11.12 s** |
+| portfolio_20k | 7.65 s | 1.52 s | 0.42 s | **0.39 s** |
+
+optim20 against MA27 is unchanged at 1.49x.
+
+**Changes:**
+- Tree-parallel factorization for `num_threads > 1` (`multifrontal_serial.cpp`), in three phases:
+  - independent subtrees of bounded work on worker threads, with serial BLAS;
+  - the top of the tree as a task DAG, under a budget of `num_threads` BLAS threads in total, since oversubscribing MKL's spinning teams was ruinous;
+  - a parallel concatenation of the per-thread factors.
+  It uses `std::thread`, not OpenMP: MSVC's OpenMP runtime aborts next to the ones MKL and CHOLMOD load. Top-of-tree contribution blocks come from a pool of reusable, uninitialised buffers; fresh zero-filled multi-MB buffers per front cost more than the fronts. `Info::parallel_subtrees` reports when it runs.
+- Front kernel: panels update only the pivot-candidate columns, and the trailing Schur complement gets one rank-p update at the end, `L21 D L21ᵀ`, formed in the front's unused upper triangle.
+- Column counts by Gilbert–Ng–Peyton (as CSparse's `cs_counts`): nearly O(nnz(A)) instead of O(nnz(L)). Analysis is 1.1–1.8x faster on large matrices.
+- `smf_ma97` plugin: the analysis is deferred to the first factorization when IPOPT passes no values, so the KKT matching policy applies inside IPOPT (ACOPF: 117k delays per factorization before). It also sets `expected_refactors = 10`.
+- `Solver::factor(ak, span<const double> values, …)`: refactor from values alone, with no `CscLower` copy or pattern comparison. The benchmark adapter no longer copies the matrix; about 290 ms of af_shell7's wall time was the adapter's own copies.
+
 ### Still open
 
 - The hardest QP KKT cases (cvxqp3, ncvxqp3) need static pivoting and are still slower than MUMPS. The matching ordering's fill is the cost.
-- The thread sweep (the new BLAS-threaded serial engine) and the IPOPT end-to-end runs (new plugin, fast MC64) need re-measuring.
-- Backsolve is ~2x MA27's on IPOPT KKT systems.
+- Serial METIS dominates analysis on bmwcra_1-like matrices. A parallel nested dissection would fix it: order the two halves of the top separator concurrently.
+- Chains of thin top fronts, with p of 2–30 pivots on f ≈ 1,800 (helm3d01, copter2), each move a whole contribution block. Fill-tolerant amalgamation, as in CHOLMOD's relaxed supernodes, would merge them.
+- The solve phase is serial (PARDISO's scales 2–3x), and inside IPOPT smf's backsolve is still ~1.8x MA27's (robot_arm 0.36 s vs 0.20 s).

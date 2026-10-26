@@ -33,6 +33,7 @@ struct Info {
     double       actual_flops           = 0.0;
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
+    int          parallel_subtrees      = 0;  ///< subtrees factored concurrently (0 = serial)
 
     // Assembly tree stats
     int          max_front_size         = 0;

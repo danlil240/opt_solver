@@ -212,6 +212,9 @@ static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctr
     out_ctrl.solve_multifrontal_forward = (ctrl->solve_mf != 0);
     out_ctrl.continue_on_singular = (ctrl->action == 0);
     out_ctrl.print_level = ctrl->print_level;
+    // MA97 callers (IPOPT) refactor one pattern every iteration, which pays
+    // for a costlier ordering.
+    out_ctrl.expected_refactors = 10;
 
     switch (ctrl->ordering)
     {
@@ -327,28 +330,37 @@ extern "C"
             return;
         }
 
+        // smf's analysis needs values to recognise saddle-point matrices
+        // (their matching ordering keeps 2x2 pivots together; AMD alone
+        // delays ~1 pivot per row on ACOPF KKT systems). IPOPT analyses the
+        // pattern only, so without values the analysis is deferred to the
+        // first factorization.
         if (val)
-            fill_values(ak, val);
-
-        ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
-        if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
         {
-            info->flag = -3;
-            delete ak;
-            *akeep = nullptr;
-            return;
+            fill_values(ak, val);
+            ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
+            if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
+            {
+                info->flag = -3;
+                delete ak;
+                *akeep = nullptr;
+                return;
+            }
         }
 
         info->flag = 0;
-        info->matrix_dup = ak->info.matrix_duplicates;
-        info->matrix_outrange = ak->info.matrix_out_of_range;
-        info->matrix_missing_diag = ak->info.matrix_missing_diag;
         info->matrix_rank = n;
-        info->num_sup = static_cast<int>(ak->ak->supernodes.size());
-        info->maxdepth = ak->info.max_tree_depth;
-        info->maxfront = ak->info.max_front_size;
-        info->maxsupernode = ak->info.max_supernode_size;
-        info->ordering = ak->info.ordering_used;
+        if (ak->ak)
+        {
+            info->matrix_dup = ak->info.matrix_duplicates;
+            info->matrix_outrange = ak->info.matrix_out_of_range;
+            info->matrix_missing_diag = ak->info.matrix_missing_diag;
+            info->num_sup = static_cast<int>(ak->ak->supernodes.size());
+            info->maxdepth = ak->info.max_tree_depth;
+            info->maxfront = ak->info.max_front_size;
+            info->maxsupernode = ak->info.max_supernode_size;
+            info->ordering = ak->info.ordering_used;
+        }
         *akeep = ak;
     }
 
@@ -372,12 +384,6 @@ extern "C"
         }
 
         auto* ak = static_cast<SmfAkeep*>(*akeep);
-        if (!ak->ak)
-        {
-            info->flag = -5;
-            return;
-        }
-
         ak->ctrl.matrix_type = (matrix_type == static_cast<int>(smf::MatrixType::RealSymmetricPositiveDefinite))
                                    ? smf::MatrixType::RealSymmetricPositiveDefinite
                                    : smf::MatrixType::RealSymmetricIndefinite;
@@ -398,6 +404,16 @@ extern "C"
 
         fill_values(ak, val);
         dump_kkt(ak);
+        if (!ak->ak)
+        {
+            ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
+            if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
+            {
+                ak->ak.reset();
+                info->flag = -3;
+                return;
+            }
+        }
 
         // Refactorizations reuse the previous factor object so its storage
         // (factor values, solve layout) is not reallocated every iteration.

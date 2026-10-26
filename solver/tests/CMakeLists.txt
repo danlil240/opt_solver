@@ -285,6 +285,16 @@ add_test(NAME Matching COMMAND test_refinement --gtest_filter=Matching.*)
 add_test(NAME Scaling COMMAND test_refinement --gtest_filter=Scaling.*)
 add_test(NAME StaticPivoting COMMAND test_refinement --gtest_filter=StaticPivoting.*)
 
+add_executable(test_tree_parallel
+    test_tree_parallel.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_tree_parallel PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_tree_parallel PRIVATE psapi)
+endif()
+add_test(NAME TreeParallel COMMAND test_tree_parallel)
+
 # --- Task 6: Benchmark adapters tests ---
 
 add_executable(test_benchmark_adapters

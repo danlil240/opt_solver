@@ -27,6 +27,16 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   return factor_indef(ak, updated, ctrl, info, fkeep, ws);
 }
 
+FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> values,
+                            const Control &ctrl, Info &info,
+                            FactorKeep &fkeep, NumericWorkspace &ws) const {
+  const FactorValues fv{values.data(), values.size(), true};
+  if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
+    return factor_posdef(ak, fv, ctrl, info, fkeep, ws);
+  }
+  return factor_indef(ak, fv, ctrl, info, fkeep, ws);
+}
+
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
                   double *b, int n, int nrhs, SolveWorkspace &ws,
                   SolveJob job) const {

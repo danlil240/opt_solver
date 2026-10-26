@@ -47,6 +47,8 @@ public:
     virtual ~SolverAdapter() = default;
     virtual AdapterIdentity identity() const = 0;
     virtual void configure(const Control &ctrl, const std::string &track = "recommended") = 0;
+    // A, and the values of the latest factor(), must stay alive while the
+    // adapter uses them: adapters may reference rather than copy them.
     virtual Outcome analyse(const CscLower &A) = 0;
     virtual Outcome factor(std::span<const double> values) = 0;
     virtual Outcome solve(std::span<double> b_and_x, int nrhs = 1) = 0;

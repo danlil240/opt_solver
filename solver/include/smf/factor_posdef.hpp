@@ -24,6 +24,7 @@ struct SolveStep {
 };
 
 struct NumericWorkspace;
+struct FactorValues;
 struct SolveWorkspace;
 
 /// Result of SPD or indefinite multifrontal factorization.
@@ -64,5 +65,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const Control &ctrl,
 FactorStatus factor_posdef(const AnalysisKeep &keep, const CscLower &updated,
                            const Control &ctrl, Info &info,
                            FactorKeep &fkeep, NumericWorkspace &ws);
+
+/// Same, with values in the analysed matrix's entry order.
+FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws);
 
 } // namespace smf

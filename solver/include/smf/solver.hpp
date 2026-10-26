@@ -7,6 +7,7 @@
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
 #include <memory>
+#include <span>
 
 namespace smf {
 
@@ -56,6 +57,13 @@ public:
                       FactorKeep &fkeep) const;
 
   FactorStatus factor(const AnalysisKeep &ak, const CscLower &updated,
+                      const Control &ctrl, Info &info, FactorKeep &fkeep,
+                      NumericWorkspace &ws) const;
+
+  /// Refactor with new values in the entry order of the matrix passed to
+  /// analyse() (same pattern): nothing to copy into a CscLower, and no
+  /// pattern comparison.
+  FactorStatus factor(const AnalysisKeep &ak, std::span<const double> values,
                       const Control &ctrl, Info &info, FactorKeep &fkeep,
                       NumericWorkspace &ws) const;
 
