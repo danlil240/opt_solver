@@ -235,7 +235,9 @@ TEST(Ma97PluginRuntime, ScalingComputedThenReused) {
     };
     solve_and_check("mc64");
 
-    // Reuse a (perturbed) user scale: applied as given, never overwritten.
+    // Reuse a (perturbed) user scale: applied as given, not overwritten (a
+    // reused scale is only replaced when it makes the factor singular, see
+    // StaleReusedScaleIsRefreshedOnSpuriousSingularity).
     ctrl.scaling = 0;
     scale[1] *= 2.0;
     const double kept = scale[1];
@@ -539,4 +541,63 @@ TEST(Ma97PluginRuntime, StaleFkeepFromSameAkeepIsRefused) {
     sym.finalise(&akeep, &fkeep1);
     EXPECT_EQ(fkeep2, nullptr);
     EXPECT_EQ(fkeep1, nullptr);
+}
+
+TEST(Ma97PluginRuntime, StaleReusedScaleIsRefreshedOnSpuriousSingularity) {
+    // IPOPT's reuse strategy passes back a scale computed at an earlier
+    // iterate. One computed on a blown-up iterate (cops_chain_800: x-scales
+    // 1e-14) shrinks the x-pivots of a later, nonsingular KKT below `small`:
+    // the factor reports zero pivots, flag 7, and IPOPT never rescales after
+    // a singular factor. The plugin refactors once with a fresh matching
+    // scaling and hands that scale back.
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 0;
+    ctrl.u = 1e-8;
+    ctrl.small = 1e-20;
+    ctrl.scaling = 0;
+
+    // [delta_w I, J^T; J, -delta_c] with J = [1, -1]: inertia (2, 1, 0).
+    const int n = 3;
+    const int ptr[4] = {0, 2, 4, 5};
+    const int row[5] = {0, 2, 1, 2, 2};
+    const double val[5] = {1e7, 1.0, 1e7, -1.0, -2e-7};
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, ptr, row, nullptr, &akeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+
+    double scale[3] = {1e-14, 1e-14, 5e4};
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, scale);
+    EXPECT_EQ(info.flag, 0);
+    EXPECT_EQ(info.num_neg, 1);
+    EXPECT_EQ(info.matrix_rank, 3);
+    EXPECT_NE(scale[0], 1e-14);
+    for (double s : scale) EXPECT_TRUE(std::isfinite(s) && s > 0.0) << s;
+
+    const double b[3] = {1.0, 2.0, 3.0};
+    double x[3] = {b[0], b[1], b[2]};
+    sym.solve(0, 1, x, n, &akeep, &fkeep, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+    const double r[3] = {b[0] - (1e7 * x[0] + x[2]), b[1] - (1e7 * x[1] - x[2]),
+                         b[2] - (x[0] - x[1] - 2e-7 * x[2])};
+    for (double ri : r) EXPECT_LT(std::abs(ri), 1e-12 * 1e7 * (std::abs(x[0]) + std::abs(x[1]) + std::abs(x[2])));
+
+    // The refreshed scale is reused as is: nonsingular again, not replaced.
+    const double refreshed[3] = {scale[0], scale[1], scale[2]};
+    sym.factor(4, ptr, row, val, &akeep, &fkeep, &ctrl, &info, scale);
+    EXPECT_EQ(info.flag, 0);
+    for (int i = 0; i < n; ++i) EXPECT_EQ(scale[i], refreshed[i]);
+
+    // A genuinely singular KKT (W = 0, delta_c = 0, rank 2) stays singular.
+    const double sing[5] = {0.0, 1.0, 0.0, -1.0, 0.0};
+    double stale[3] = {1e-14, 1e-14, 5e4};
+    sym.factor(4, ptr, row, sing, &akeep, &fkeep, &ctrl, &info, stale);
+    EXPECT_EQ(info.flag, 7);
+    EXPECT_EQ(info.matrix_rank, 2);
+
+    sym.finalise(&akeep, &fkeep);
 }

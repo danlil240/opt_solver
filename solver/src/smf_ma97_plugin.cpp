@@ -506,7 +506,7 @@ extern "C"
         // IPOPT's "reuse" scaling strategies compute MC64 scaling once
         // (scaling = 1, returned in `scale`) and pass it back with
         // scaling = 0 on later factorizations.
-        const bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
+        bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
         const bool reuse_scaling = !computed_scaling && scale;
         if (reuse_scaling)
             ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
@@ -525,7 +525,37 @@ extern "C"
         // decided at its end does not change the analysis it ran on).
         const int reverted_before = session.stats().reanalyses_reverted;
         const auto t_factor = std::chrono::steady_clock::now();
-        const smf::IpmFactorStatus status = session.factor(ak->mat.values);
+        smf::IpmFactorStatus status = session.factor(ak->mat.values);
+        // A reused scale that makes the factor singular is presumed stale: one
+        // computed at a blown-up iterate (entries ~1e23 on cops_chain_800)
+        // shrinks pivots of later, nonsingular KKT matrices below `small`.
+        // IPOPT never rescales after a singular factor (it returns before its
+        // high-delay check), so refactor once with a fresh matching scaling
+        // and hand that scale back for its later reuses. If the fresh scaling
+        // cannot be computed, the stale-scale result stands.
+        static const bool stale_retry = env_flag("SMF_STALE_SCALE_RETRY", true);
+        if (stale_retry && reuse_scaling && status == smf::IpmFactorStatus::Singular)
+        {
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] factor %ld: singular with a reused scale (zero=%d): rescaling\n",
+                             g_stats.factors + 1, session.info().num_zero);
+            smf::Control fresh = ak->ctrl;
+            fresh.scaling = smf::ScalingMethod::Matching;
+            session.set_control(fresh);
+            const smf::IpmFactorStatus retried = session.factor(ak->mat.values);
+            if (retried == smf::IpmFactorStatus::Ok || retried == smf::IpmFactorStatus::Singular)
+            {
+                status = retried;
+                ak->ctrl = fresh;
+                computed_scaling = true;
+            }
+            else
+            {
+                session.set_control(ak->ctrl);
+                session.set_user_scale(scale);
+                status = session.factor(ak->mat.values);
+            }
+        }
         const bool aborted = status == smf::IpmFactorStatus::WrongInertia;
         const smf::Info& si = session.info();
         if (session.analysis_keep() == nullptr)
