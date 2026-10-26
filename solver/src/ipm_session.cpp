@@ -3,6 +3,7 @@
 #include "smf/pivot_order.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 
 namespace smf {
@@ -29,9 +30,10 @@ double kernel_flops(const AnalysisKeep &ak) {
 
 ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> values,
                               const Control& ctrl, const IpmControl& ipm) {
-  // A new pattern starts a new history.
-  ak_.reset();
+  // A new pattern starts a new history (the factor before the analyses it
+  // points at).
   fk_ = FactorKeep{};
+  ak_.reset();
   nws_ = NumericWorkspace{};
   sws_ = SolveWorkspace{};
   info_ = Info{};
@@ -169,8 +171,12 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
                  fs == FactorStatus::Success;
 
   // Probation: judged on the adopted analysis' first complete factorization
-  // (an aborted one is judged when solve() completes it).
-  if (probation_ && solvable_) {
+  // (an aborted one is judged when solve() completes it). Only a factor the
+  // engine actually ran counts: a failure before it starts (e.g. the
+  // matching scaling finds no matching: Singular with SingularMatrix) leaves
+  // fk_ as it was, pointing at the previous analysis, with no factor values.
+  const bool ran = fk_.analysis == ak_.get() && !fk_.factor_values.empty();
+  if (probation_ && solvable_ && ran) {
     probation_ = false;
     if (info_.delayed_pivots > probation_delays_) {
       // Worse than the old analysis. fk_ points at the adopted analysis and
@@ -179,11 +185,18 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
       revert_pending_ = true;
       reanalyse_stopped_ = true;
     } else {
-      prev_ak_.reset();  // nothing points at it any more
-      prev_info_ = Info{};
+      drop_previous_analysis();
     }
   }
   return result;
+}
+
+void IpmSession::drop_previous_analysis() {
+  // Never free an analysis the factor still points at.
+  assert(fk_.analysis == nullptr || fk_.analysis != prev_ak_.get());
+  if (fk_.analysis != nullptr && fk_.analysis == prev_ak_.get()) return;
+  prev_ak_.reset();
+  prev_info_ = Info{};
 }
 
 void IpmSession::consider_reanalysis() {
@@ -247,6 +260,7 @@ void IpmSession::prepare_analysis() {
   // Adopt. The old analysis stays alive for the probation (and fk_, the
   // accepted factor, still points at it until run_factor replaces it).
   ainfo.analyse_seconds = secs;
+  assert(!prev_ak_);  // no probation is open here
   prev_ak_ = std::move(ak_);
   prev_info_ = info_;
   ak_ = std::move(nak);

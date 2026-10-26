@@ -490,6 +490,9 @@ extern "C"
         // The first factorization also runs the deferred analysis; that time
         // is not counted as factorization time.
         const bool analysed_before = session.analysis_keep() != nullptr;
+        // ra= trace: reverts decided before this factorization (a revert
+        // decided at its end does not change the analysis it ran on).
+        const int reverted_before = session.stats().reanalyses_reverted;
         const auto t_factor = std::chrono::steady_clock::now();
         const smf::IpmFactorStatus status = session.factor(ak->mat.values);
         const bool aborted = status == smf::IpmFactorStatus::WrongInertia;
@@ -526,8 +529,10 @@ extern "C"
         // plugin call was also a factorization (IPOPT inertia correction).
         // abort=1: stopped on wrong inertia (partial counts); skipped = the
         // predicted flops of the fronts it did not factor; flops = actual.
-        // ra=tried/adopted/reverted: the session's re-analysis counts so far
-        // (adopted > reverted: this factor ran on a re-analysed order).
+        // ra=tried/adopted/reverted: the session's re-analysis counts, tried
+        // and adopted including this factorization, reverted as of its start,
+        // so adopted > reverted exactly when it ran on a re-analysed order
+        // (a probation factor that is then reverted included).
         if (g_stats.trace)
         {
             const smf::IpmStats& ist = session.stats();
@@ -544,7 +549,7 @@ extern "C"
                          static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
                                                         [](const auto& de) { return de.tag == 2; })),
                          aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
-                         ist.reanalyses_tried, ist.reanalyses_adopted, ist.reanalyses_reverted);
+                         ist.reanalyses_tried, ist.reanalyses_adopted, reverted_before);
         }
         g_stats.last_call_was_factor = true;
 

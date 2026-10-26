@@ -132,6 +132,10 @@ class IpmSession {
   const FactorKeep& factor_keep() const { return fk_; }
   /// The current analysis; null before it has run or after it failed.
   const AnalysisKeep* analysis_keep() const { return ak_.get(); }
+  /// Feature 2: the analysis kept while an adopted one is on probation, or
+  /// until a revert takes effect; null otherwise. factor_keep().analysis is
+  /// always analysis_keep(), this one, or null.
+  const AnalysisKeep* previous_analysis_keep() const { return prev_ak_.get(); }
 
  private:
   ErrorCode run_analysis();  // analyse mat_ with ctrl_; times it in info_.analyse_seconds
@@ -144,6 +148,8 @@ class IpmSession {
   void consider_reanalysis();
   // At the start of factor(): carry out a pending revert or re-analysis.
   void prepare_analysis();
+  // Free prev_ak_ after a passed probation (kept if fk_ still points at it).
+  void drop_previous_analysis();
 
   // Feature 2 state.
   std::unique_ptr<AnalysisKeep> prev_ak_;  // the analysis before an adoption (probation)

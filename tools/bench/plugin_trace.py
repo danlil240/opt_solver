@@ -4,7 +4,8 @@ Trace line, one per factorization, on stderr:
   [smf_ma97] factor <k>: corr=<0|1> delays=<d> static=<s> pos=<p> neg=<q> zero=<z> L=<entries> t=<seconds>
 corr=1 means the previous plugin call was also a factorization (no solve in
 between), i.e. IPOPT re-factorized to correct the inertia. A trailing
-ra=<tried>/<adopted>/<reverted> gives the session's re-analysis counts so far;
+ra=<tried>/<adopted>/<reverted> gives the session's re-analysis counts (tried
+and adopted including this factorization, reverted as of its start), so
 adopted > reverted means the factorization ran on a re-analysed order.
 
 At unload the plugin prints the IpmSession totals:
@@ -52,6 +53,11 @@ def parse_trace(text: str) -> dict:
         "reanalyses_adopted": ipm_field("reanalyses_adopted", int),
         "reanalyses_reverted": ipm_field("reanalyses_reverted", int),
         "reanalyse_s": ipm_field("reanalyse_s", float),
+        "ipm_sessions": ipm_field("sessions", int),
+        "ipm_factorizations": ipm_field("factorizations", int),
+        "ipm_accepted": ipm_field("accepted", int),
+        "ipm_aborted": ipm_field("aborted", int),
+        "flops_avoided": ipm_field("flops_avoided", float),
         "factorizations_reanalysed": n_re,
         "delays_reanalysed": delays_re,
     }

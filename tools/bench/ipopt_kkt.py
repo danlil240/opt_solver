@@ -311,6 +311,7 @@ def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
     trace = parse_trace(out + err) if solver.startswith("smf") else {
         k: None for k in ("factorizations", "inertia_corrections", "delays_total", "static_total", "factor_s",
                           "reanalyses_tried", "reanalyses_adopted", "reanalyses_reverted", "reanalyse_s",
+                          "ipm_sessions", "ipm_factorizations", "ipm_accepted", "ipm_aborted", "flops_avoided",
                           "factorizations_reanalysed", "delays_reanalysed")}
     return {
         **trace,

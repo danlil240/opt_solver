@@ -860,3 +860,80 @@ TEST(IpmSession, ReanalysisKeepsTheMatchingScale) {
     EXPECT_EQ(s.factor_keep().scale, fscale0);
     EXPECT_EQ(s.info().delayed_pivots, 0);
 }
+
+namespace {
+
+// Flops of a delay-free factor of ak in Info::actual_flops units (the kernel
+// count IpmSession's adoption test predicts with).
+double kernel_flops(const AnalysisKeep &ak) {
+    double t = 0.0;
+    for (std::size_t s = 0; s < ak.supernodes.size(); ++s) {
+        const double f = static_cast<double>(ak.fronts[s].front_size());
+        for (Int k = 0; k < ak.supernodes[s].width(); ++k) {
+            const double r = f - static_cast<double>(k) - 1.0;
+            t += r + r * (r + 1.0);
+        }
+    }
+    return t;
+}
+
+// factor_keep().analysis is one of the live analyses (or null).
+void expect_factor_points_at_a_live_analysis(const IpmSession &s) {
+    const AnalysisKeep *a = s.factor_keep().analysis;
+    EXPECT_TRUE(a == nullptr || a == s.analysis_keep() || a == s.previous_analysis_keep())
+        << "factor_keep().analysis points at a freed analysis";
+}
+
+} // namespace
+
+TEST(IpmSession, ReanalysisPredictsTheKernelFlops) {
+    // The adoption test's units: a delay-free factor's actual flops equal
+    // the kernel-count prediction of its analysis.
+    const CscLower A = grid_kkt(40, 7);
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, delay_ctrl(), reanalyse_eager()), ErrorCode::Success);
+    factor_and_solve(s, A);
+    factor_and_solve(s, A);
+    ASSERT_EQ(s.stats().reanalyses_adopted, 1);
+    ASSERT_EQ(s.info().delayed_pivots, 0);
+    EXPECT_NEAR(kernel_flops(*s.analysis_keep()), s.info().actual_flops, 1e-9 * s.info().actual_flops);
+}
+
+TEST(IpmSession, ProbationIgnoresAFactorThatNeverRan) {
+    // The probation factor fails in the matching scaling (a zero row has no
+    // matching), before the engine runs: Singular with SingularMatrix, but
+    // fk_ is still the accepted factor of the previous analysis. It must not
+    // be judged, and that analysis must stay alive.
+    const CscLower A = grid_kkt(40, 7);
+    CscLower Z = A;
+    const Int r = A.n - 1; // the last constraint row: zero its couplings
+    for (Int j = 0; j < Z.n; ++j)
+        for (Int p = Z.col_ptr[static_cast<std::size_t>(j)]; p < Z.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (Z.row_idx[static_cast<std::size_t>(p)] == r) Z.values[static_cast<std::size_t>(p)] = 0.0;
+    Control none = delay_ctrl();
+    Control matching = none;
+    matching.scaling = ScalingMethod::Matching;
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, none, reanalyse_eager()), ErrorCode::Success);
+    factor_and_solve(s, A);
+    const AnalysisKeep *original = s.analysis_keep();
+
+    s.set_control(matching);
+    const IpmFactorStatus st = s.factor(Z.values);
+    ASSERT_EQ(s.info().status, ErrorCode::SingularMatrix);
+    EXPECT_EQ(st, IpmFactorStatus::Singular);
+    EXPECT_EQ(s.stats().reanalyses_adopted, 1);
+    EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+    EXPECT_EQ(s.previous_analysis_keep(), original); // probation still open
+    EXPECT_EQ(s.factor_keep().analysis, original);
+    expect_factor_points_at_a_live_analysis(s);
+
+    // The next factor that runs is the judged one (no delays: pass).
+    s.set_control(none);
+    factor_and_solve(s, A);
+    EXPECT_EQ(s.info().delayed_pivots, 0);
+    EXPECT_EQ(s.previous_analysis_keep(), nullptr);
+    EXPECT_EQ(s.factor_keep().analysis, s.analysis_keep());
+    EXPECT_EQ(s.stats().reanalyses_reverted, 0);
+    expect_factor_points_at_a_live_analysis(s);
+}
