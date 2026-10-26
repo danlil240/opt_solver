@@ -1,4 +1,5 @@
 #include "../benchmarks/adapters/adapter.hpp"
+#include "../benchmarks/common/replay_steps.hpp"
 #include "../benchmarks/common/validation.hpp"
 
 #include <gtest/gtest.h>
@@ -135,5 +136,119 @@ TEST(BenchmarkAdapters, SmfAdapterAndAllRegisteredAdapters) {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// bench_replay's IPM option: the smf adapter routed through smf::IpmSession
+// with a static mode (--ipm-static off|fallback|regularized,
+// --ipm-static-zero), and the replayed steps of a recorded sequence
+// (--seq-steps N|all).
+
+namespace {
+
+// diag(1, d, 0.5) with no scaling: max|A| = 1, so Regularized's rho = 1e-8.
+CscLower make_tiny_diag(double d) {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 1, 2, 3};
+    A.row_idx = {0, 1, 2};
+    A.values = {1.0, d, 0.5};
+    return A;
+}
+
+Control replay_control() {
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.pivot_u = 1e-8;
+    return ctrl;
+}
+
+} // namespace
+
+TEST(BenchmarkAdapters, ParseIpmStatic) {
+    EXPECT_EQ(parse_ipm_static("off"), StaticMode::Off);
+    EXPECT_EQ(parse_ipm_static("fallback"), StaticMode::Fallback);
+    EXPECT_EQ(parse_ipm_static("regularized"), StaticMode::Regularized);
+    EXPECT_FALSE(parse_ipm_static("").has_value());
+    EXPECT_FALSE(parse_ipm_static("reg").has_value());
+}
+
+TEST(BenchmarkAdapters, ReplayStepPicks) {
+    // 5 evenly spaced steps (the default), first to last.
+    EXPECT_EQ(replay_step_picks(9, 5), (std::vector<std::size_t>{0, 2, 4, 6, 8}));
+    EXPECT_EQ(replay_step_picks(1, 5), (std::vector<std::size_t>{0, 0, 0, 0, 0}));
+    // Every stored step.
+    EXPECT_EQ(replay_step_picks(4, -1), (std::vector<std::size_t>{0, 1, 2, 3}));
+    EXPECT_TRUE(replay_step_picks(0, -1).empty());
+    EXPECT_TRUE(replay_step_picks(0, 5).empty());
+}
+
+TEST(BenchmarkAdapters, SmfIpmAdapterOffMatchesPlainSmf) {
+    auto ipm = make_smf_ipm_adapter(StaticMode::Off, false);
+    ASSERT_NE(ipm.get(), nullptr);
+    EXPECT_EQ(ipm->identity().solver_id, "smf");
+    ipm->configure(replay_control(), "ipopt");
+    CscLower E2 = make_exchange_2x2_indef();
+    ASSERT_EQ(ipm->analyse(E2), Outcome::Success);
+    ASSERT_EQ(ipm->factor(E2.values), Outcome::Success);
+    std::vector<double> x = {1.0, 2.0};
+    ASSERT_EQ(ipm->solve(x, 1), Outcome::Success);
+    EXPECT_NEAR(x[0], 2.0, 1e-12);
+    EXPECT_NEAR(x[1], 1.0, 1e-12);
+    EXPECT_EQ(ipm->stats().inertia_pos, 1);
+    EXPECT_EQ(ipm->stats().inertia_neg, 1);
+    EXPECT_EQ(ipm->stats().static_pivots, 0);
+}
+
+TEST(BenchmarkAdapters, SmfIpmAdapterRegularizedRaisesTinyPivot) {
+    // A primal row with diagonal -rho/2: regularized to +rho/2 < rho, raised
+    // to rho (one static pivot). Hybrid accounting keeps its sign; with
+    // static-zero it is a zero eigenvalue (singular factor).
+    const CscLower T = make_tiny_diag(-0.5e-8);
+
+    auto plain = make_smf_adapter();
+    plain->configure(replay_control(), "ipopt");
+    ASSERT_EQ(plain->analyse(T), Outcome::Success);
+    ASSERT_EQ(plain->factor(T.values), Outcome::Success);
+    EXPECT_EQ(plain->stats().static_pivots, 0);
+    EXPECT_EQ(plain->stats().inertia_neg, 1);
+
+    auto hybrid = make_smf_ipm_adapter(StaticMode::Regularized, false);
+    hybrid->configure(replay_control(), "ipopt");
+    ASSERT_EQ(hybrid->analyse(T), Outcome::Success);
+    ASSERT_EQ(hybrid->factor(T.values), Outcome::Success);
+    EXPECT_EQ(hybrid->stats().static_pivots, 1);
+    EXPECT_EQ(hybrid->stats().inertia_pos, 3);
+    EXPECT_EQ(hybrid->stats().inertia_neg, 0);
+    EXPECT_EQ(hybrid->stats().inertia_zero, 0);
+
+    auto zero = make_smf_ipm_adapter(StaticMode::Regularized, true);
+    zero->configure(replay_control(), "ipopt");
+    ASSERT_EQ(zero->analyse(T), Outcome::Success);
+    EXPECT_EQ(zero->factor(T.values), Outcome::Singular);
+    EXPECT_EQ(zero->stats().static_pivots, 1);
+    EXPECT_EQ(zero->stats().inertia_zero, 1);
+}
+
+TEST(BenchmarkAdapters, SmfIpmAdapterRegularizedSolveIsRefined) {
+    // An indefinite KKT-like matrix (zero constraint diagonal): the factor is
+    // of the regularized matrix, the solve is refined against the original.
+    CscLower K;
+    K.n = 3;
+    K.col_ptr = {0, 3, 5, 6};
+    K.row_idx = {0, 1, 2, 1, 2, 2};
+    K.values = {4.0, 1.0, 1.0, 3.0, 1.0, 0.0};
+    auto reg = make_smf_ipm_adapter(StaticMode::Regularized, false);
+    reg->configure(replay_control(), "ipopt");
+    ASSERT_EQ(reg->analyse(K), Outcome::Success);
+    for (int f = 0; f < 2; ++f) {
+        ASSERT_EQ(reg->factor(K.values), Outcome::Success);
+        const std::vector<double> b = {1.0, -2.0, 0.5};
+        std::vector<double> x = b;
+        ASSERT_EQ(reg->solve(x, 1), Outcome::Success);
+        EXPECT_TRUE(is_qualified_validation(validate(K, b, x, 1))) << "factor " << f;
+        EXPECT_EQ(reg->stats().inertia_neg, 1);
     }
 }

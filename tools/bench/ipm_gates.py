@@ -244,6 +244,52 @@ def gate_outcome(base: list[dict], feat: list[dict], models=None, wall_floor: fl
             "pass": bool(per_model) and iter_ok and no_new_failure and wall_ok}
 
 
+def objective_differs(a, b, rel: float = 1e-6) -> bool:
+    """True when two final objectives differ by more than `rel` relative
+    (to max(|a|, |b|, 1e-3)): the runs converged to different points, e.g.
+    another local optimum. Missing objectives are not flagged."""
+    if a is None or b is None:
+        return False
+    return abs(a - b) > rel * max(abs(a), abs(b), 1e-3)
+
+
+# Timings that merge_repeats replaces by their median over the repetitions.
+REPEAT_TIMINGS = ("ipopt_wall_s", "linear_system_factorization_s", "linear_system_backsolve_s")
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    k = len(xs) // 2
+    return xs[k] if len(xs) % 2 else 0.5 * (xs[k - 1] + xs[k])
+
+
+def merge_repeats(runs: list[list[dict]]) -> list[dict]:
+    """One row per (model, solver) from repeated e2e runs (lists of rows).
+
+    The first run's row is kept, with each REPEAT_TIMINGS field replaced by
+    its median over the runs (the per-run values kept as <field>_runs);
+    `repeats` = the number of runs of that pair and `repeats_consistent` =
+    every run had the same status, iterations and objective."""
+    groups: dict[tuple, list[dict]] = {}
+    for rows in runs:
+        for r in rows:
+            groups.setdefault((r["model"], r["solver"]), []).append(r)
+    merged = []
+    for rows in groups.values():
+        m = dict(rows[0])
+        for f in REPEAT_TIMINGS:
+            m[f + "_runs"] = [r.get(f) for r in rows]
+            m[f] = _median(m[f + "_runs"])
+        m["repeats"] = len(rows)
+        m["repeats_consistent"] = all(
+            (r.get("status"), r.get("iterations"), r.get("objective")) ==
+            (rows[0].get("status"), rows[0].get("iterations"), rows[0].get("objective")) for r in rows)
+        merged.append(m)
+    return merged
+
+
 def _per_fact(total, n):
     return total / n if total is not None and n else None
 

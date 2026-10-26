@@ -1,6 +1,7 @@
 import unittest
 
-from ipm_gates import gate_abort, gate_outcome, identical_iterations, iteration_lines, trace_entries
+from ipm_gates import (gate_abort, gate_outcome, identical_iterations, iteration_lines, merge_repeats,
+                       objective_differs, trace_entries)
 
 HEADER = "iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls"
 ITERS = [
@@ -262,3 +263,52 @@ class TestReanalyseSolverId(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMergeRepeats(unittest.TestCase):
+    @staticmethod
+    def row(model, solver, wall, fact, iters=10, obj=1.0, status="Optimal Solution Found."):
+        return {"model": model, "solver": solver, "ipopt_wall_s": wall, "linear_system_factorization_s": fact,
+                "linear_system_backsolve_s": fact / 10, "iterations": iters, "objective": obj, "status": status}
+
+    def test_median_of_three_and_runs_kept(self):
+        runs = [[self.row("a", "smf", 3.0, 1.0)], [self.row("a", "smf", 1.0, 3.0)], [self.row("a", "smf", 2.0, 2.0)]]
+        (m,) = merge_repeats(runs)
+        self.assertEqual(m["ipopt_wall_s"], 2.0)
+        self.assertEqual(m["linear_system_factorization_s"], 2.0)
+        self.assertEqual(m["ipopt_wall_s_runs"], [3.0, 1.0, 2.0])
+        self.assertEqual(m["repeats"], 3)
+        self.assertTrue(m["repeats_consistent"])
+
+    def test_single_run_rows_pass_through(self):
+        (m,) = merge_repeats([[self.row("a", "ma27", 1.5, 0.5)]])
+        self.assertEqual(m["ipopt_wall_s"], 1.5)
+        self.assertEqual(m["repeats"], 1)
+
+    def test_differing_iterations_are_inconsistent(self):
+        runs = [[self.row("a", "smf", 1.0, 1.0, iters=10)], [self.row("a", "smf", 1.0, 1.0, iters=11)]]
+        (m,) = merge_repeats(runs)
+        self.assertFalse(m["repeats_consistent"])
+
+    def test_rows_grouped_by_model_and_solver_in_first_seen_order(self):
+        runs = [[self.row("a", "smf", 1.0, 1.0), self.row("a", "smf_reg", 4.0, 1.0)],
+                [self.row("a", "smf", 3.0, 1.0), self.row("a", "smf_reg", 2.0, 1.0)]]
+        merged = merge_repeats(runs)
+        self.assertEqual([(r["model"], r["solver"]) for r in merged], [("a", "smf"), ("a", "smf_reg")])
+        self.assertEqual(merged[0]["ipopt_wall_s"], 2.0)  # median of two = mean
+        self.assertEqual(merged[1]["ipopt_wall_s"], 3.0)
+
+
+class TestObjectiveDiffers(unittest.TestCase):
+    def test_relative_tolerance(self):
+        self.assertFalse(objective_differs(18438.9617, 18438.9617 * (1 + 5e-7)))
+        self.assertTrue(objective_differs(18438.9617, 18439.0937))
+        self.assertTrue(objective_differs(-5072.80, -17.85))
+
+    def test_missing_objective_is_not_flagged(self):
+        self.assertFalse(objective_differs(None, 1.0))
+        self.assertFalse(objective_differs(1.0, None))
+
+    def test_zero_objective_uses_absolute_floor(self):
+        self.assertFalse(objective_differs(0.0, 1e-9))
+        self.assertTrue(objective_differs(0.0, 1e-3))

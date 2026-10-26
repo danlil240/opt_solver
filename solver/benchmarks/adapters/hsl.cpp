@@ -1,4 +1,5 @@
 #include "adapter.hpp"
+#include "smf/ipm_session.hpp"
 #include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -328,6 +329,7 @@ public:
         stats_.inertia_zero = info.num_zero;
         stats_.delayed_pivots = info.delayed_pivots;
         static_pivots_ = info.static_pivots;
+        stats_.static_pivots = info.static_pivots;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
 
@@ -406,6 +408,138 @@ private:
     std::vector<double> rhs_copy_;
 };
 
+/// smf through IpmSession (make_smf_ipm_adapter): the MA97 plugin's path
+/// inside IPOPT with only the static mode on.
+class SmfIpmSessionAdapter final : public SolverAdapter {
+public:
+    SmfIpmSessionAdapter(StaticMode mode, bool static_zero) {
+        ipm_.learn_inertia = false;
+        ipm_.abort_on_wrong_inertia = false;
+        ipm_.reanalyse = false;
+        ipm_.static_mode = mode;
+        ipm_.static_as_zero = static_zero;
+    }
+
+    AdapterIdentity identity() const override {
+        AdapterIdentity id;
+        id.solver_id = "smf";
+        id.version = "0.1.0";
+        id.library_path = "in-tree:libsmf (IpmSession)";
+        id.integer_abi = "int32_offsets64";
+        id.available = true;
+        id.supports_spd = true;
+        id.supports_indefinite = true;
+        id.is_external_memory = false;
+        return id;
+    }
+
+    // The plugin's IPOPT settings on top of the caller's Control: a singular
+    // factor is still returned (MA97 action = 0) and the pattern is refactored
+    // many times.
+    void configure(const Control &ctrl, const std::string &) override {
+        ctrl_ = ctrl;
+        ctrl_.continue_on_singular = true;
+        ctrl_.expected_refactors = 10;
+    }
+
+    Outcome analyse(const CscLower &A) override {
+        stats_ = AdapterStats{};
+        pattern_ = &A;
+        const auto t0 = Clock::now();
+        // Deferred to the first factor(), which has values (as in the plugin).
+        const ErrorCode ec = session_.analyse(A, {}, ctrl_, ipm_);
+        stats_.analyse_ms = ms_since(t0, Clock::now());
+        analysed_ = false;
+        if (ec != ErrorCode::Success) {
+            stats_.outcome = Outcome::InvalidInput;
+            stats_.reason = "smf::IpmSession::analyse failed";
+            return stats_.outcome;
+        }
+        stats_.outcome = Outcome::Success;
+        return Outcome::Success;
+    }
+
+    Outcome factor(std::span<const double> values) override {
+        if (!pattern_) {
+            stats_.outcome = Outcome::InvalidInput;
+            stats_.reason = "factor called before analyse";
+            return stats_.outcome;
+        }
+        if (values.size() != pattern_->values.size()) {
+            stats_.outcome = Outcome::InvalidInput;
+            stats_.reason = "values size mismatch";
+            return stats_.outcome;
+        }
+        session_.set_control(ctrl_);
+        const auto t0 = Clock::now();
+        const IpmFactorStatus st = session_.factor(values);
+        const double ms = ms_since(t0, Clock::now());
+        const Info &info = session_.info();
+        // The first factor() runs the deferred analysis: count it as analysis.
+        const double analyse_ms = analysed_ ? 0.0 : 1e3 * info.analyse_seconds;
+        analysed_ = analysed_ || session_.analysis_keep() != nullptr;
+        stats_.analyse_ms += analyse_ms;
+        stats_.factor_ms = ms - analyse_ms;
+        const InertiaCounts in = session_.inertia();
+        stats_.inertia_pos = in.positive;
+        stats_.inertia_neg = in.negative;
+        stats_.inertia_zero = in.zero;
+        stats_.delayed_pivots = info.delayed_pivots;
+        stats_.static_pivots = info.static_pivots;
+        stats_.factor_entries = info.actual_factor_entries;
+        stats_.flops = info.actual_flops;
+        switch (st) {
+        case IpmFactorStatus::Ok:
+            stats_.outcome = Outcome::Success;
+            stats_.reason.clear();
+            break;
+        case IpmFactorStatus::Singular:
+            stats_.outcome = Outcome::Singular;
+            stats_.reason = "singular factor (zero pivots)";
+            break;
+        default:
+            stats_.outcome = info.status == ErrorCode::AllocationError ? Outcome::OutOfMemory : Outcome::Failed;
+            stats_.reason = "smf::IpmSession::factor failed";
+            break;
+        }
+        return stats_.outcome;
+    }
+
+    Outcome solve(std::span<double> b_and_x, int nrhs) override {
+        if (!pattern_) {
+            stats_.outcome = Outcome::Failed;
+            stats_.reason = "solve called without valid factor";
+            return stats_.outcome;
+        }
+        const int n = static_cast<int>(pattern_->n);
+        if (nrhs <= 0 || b_and_x.size() < static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs)) {
+            stats_.outcome = Outcome::InvalidInput;
+            stats_.reason = "solve buffer too small";
+            return stats_.outcome;
+        }
+        const auto t0 = Clock::now();
+        const int rc = session_.solve(b_and_x.data(), n, nrhs);
+        stats_.solve_ms = ms_since(t0, Clock::now());
+        if (rc != 0) {
+            stats_.outcome = Outcome::Failed;
+            stats_.reason = "smf::IpmSession::solve failed";
+            return stats_.outcome;
+        }
+        stats_.outcome = Outcome::Success;
+        return Outcome::Success;
+    }
+
+    AdapterStats stats() const override { return stats_; }
+
+private:
+    Control ctrl_{};
+    IpmControl ipm_{};
+    IpmSession session_;
+    const CscLower *pattern_ = nullptr;
+    bool analysed_ = false;
+    AdapterStats stats_{};
+};
+
 class UnavailableOrExternalHslAdapter final : public SolverAdapter {
 public:
     explicit UnavailableOrExternalHslAdapter(std::string hsl_id)
@@ -455,6 +589,17 @@ private:
 
 std::unique_ptr<SolverAdapter> make_smf_adapter() {
     return std::make_unique<SmfSolverAdapter>();
+}
+
+std::unique_ptr<SolverAdapter> make_smf_ipm_adapter(StaticMode mode, bool static_zero) {
+    return std::make_unique<SmfIpmSessionAdapter>(mode, static_zero);
+}
+
+std::optional<StaticMode> parse_ipm_static(const std::string &name) {
+    if (name == "off") return StaticMode::Off;
+    if (name == "fallback") return StaticMode::Fallback;
+    if (name == "regularized") return StaticMode::Regularized;
+    return std::nullopt;
 }
 
 std::unique_ptr<SolverAdapter> make_hsl_adapter(const std::string &hsl_id) {

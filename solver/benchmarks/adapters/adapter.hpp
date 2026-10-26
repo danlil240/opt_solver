@@ -5,12 +5,15 @@
 #if __has_include("smf/control.hpp")
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/ipm_session.hpp"
 #else
 #include "../../include/smf/control.hpp"
 #include "../../include/smf/csc_matrix.hpp"
+#include "../../include/smf/ipm_session.hpp"
 #endif
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -40,6 +43,7 @@ struct AdapterStats {
     int delayed_pivots = 0;
     int64_t factor_entries = 0;
     double flops = 0.0;
+    int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
 };
 
 class SolverAdapter {
@@ -56,6 +60,14 @@ public:
 };
 
 std::unique_ptr<SolverAdapter> make_smf_adapter();
+/// smf through smf::IpmSession, as the MA97 plugin runs it inside IPOPT, with
+/// only the static mode on (no inertia learning, abort or re-analysis):
+/// `mode` = IpmControl::static_mode, `static_zero` = IpmControl::
+/// static_as_zero. analyse() defers the analysis to the first factor(), as
+/// the plugin does; a Singular session factor is Outcome::Singular.
+std::unique_ptr<SolverAdapter> make_smf_ipm_adapter(StaticMode mode, bool static_zero);
+/// bench_replay's --ipm-static value: off | fallback | regularized.
+std::optional<StaticMode> parse_ipm_static(const std::string &name);
 std::unique_ptr<SolverAdapter> make_hsl_adapter(const std::string &hsl_id);
 /// MA97 / MA57 loaded at runtime from the library named by SMF_HSL_LIBRARY.
 std::unique_ptr<SolverAdapter> make_hsl_ma97_adapter();

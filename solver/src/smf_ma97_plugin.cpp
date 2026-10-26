@@ -101,15 +101,21 @@ static bool env_flag(const char* name, bool fallback)
     return (v == nullptr || *v == '\0') ? fallback : std::atoi(v) != 0;
 }
 
-// The IPM features are read from the environment until their defaults are
-// decided (the MA97 interface has no slots for them):
-//   SMF_IPM_ABORT=1      inertia learning and early abort (Feature 1), default off.
+// The IPM features are opt-in through the environment (the MA97 interface
+// has no slots for them). Their defaults were decided on the held-out IPOPT
+// models (docs/performance/2026-10-26-ipm-mode.md): every feature failed its
+// gate there, so every default is off and the plugin behaves as plain smf.
+//   SMF_IPM_ABORT=1      inertia learning and early abort (Feature 1), default
+//                        off: identical logs, but saves < 5% (the excess
+//                        negatives appear in the root front); tuning gate failed too.
 //   SMF_IPM_REANALYSE=1  re-analysis from the realized pivot order (Feature 2),
-//                        default off; IpmControl's default thresholds.
+//                        default off; IpmControl's default thresholds. Held-out
+//                        wall geomean 1.017 > 1; tuning failed the iteration band.
 //   SMF_IPM_STATIC=off|fallback|regularized  static mode (Feature 3), default
-//                        off; an unknown value is off.
+//                        off; an unknown value is off. Both static modes fail
+//                        the held-out outcome gate (new failures, iterations).
 //   SMF_IPM_STATIC_ZERO=1  static pivots count as zero eigenvalues instead of
-//                        by their sign (IpmControl::static_as_zero), default 0.
+//                        by the hybrid rule (IpmControl::static_as_zero), default 0.
 static smf::StaticMode env_static_mode()
 {
     const char* v = std::getenv("SMF_IPM_STATIC");

@@ -1,5 +1,6 @@
 #include "adapters/adapter.hpp"
 #include "common/replay_refine.hpp"
+#include "common/replay_steps.hpp"
 #include "common/result.hpp"
 #include "common/validation.hpp"
 #include "smf/control.hpp"
@@ -322,11 +323,20 @@ int main(int argc, char **argv) {
     bool is_warmup = false;
     // Control overrides for bisecting an accuracy failure (applied after the
     // track defaults): --pivot-u X, --scaling none|equil|matching|auto,
-    // --ordering auto|amd|metis|matching, --refine-steps N (harness refinement).
+    // --ordering auto|auto_parallel|amd|metis|matching, --refine-steps N
+    // (harness refinement).
     double pivot_u_override = -1.0;
     std::string scaling_override;
     std::string ordering_override;
     int refine_steps = 3;
+    // --ipm-static off|fallback|regularized [--ipm-static-zero]: the smf
+    // solver runs through smf::IpmSession with that static mode, as the MA97
+    // plugin does inside IPOPT (make_smf_ipm_adapter); per-step lines go to
+    // stderr. --seq-steps N|all: warm_sequence replays N evenly spaced
+    // recorded factorizations (default 5) or every one.
+    std::string ipm_static;
+    bool ipm_static_zero = false;
+    int seq_steps = 5;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -348,6 +358,12 @@ int main(int argc, char **argv) {
         else if (arg == "--scaling" && i + 1 < argc) scaling_override = argv[++i];
         else if (arg == "--ordering" && i + 1 < argc) ordering_override = argv[++i];
         else if (arg == "--refine-steps" && i + 1 < argc) refine_steps = std::max(0, std::atoi(argv[++i]));
+        else if (arg == "--ipm-static" && i + 1 < argc) ipm_static = argv[++i];
+        else if (arg == "--ipm-static-zero") ipm_static_zero = true;
+        else if (arg == "--seq-steps" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            seq_steps = (v == "all") ? -1 : std::max(1, std::atoi(v.c_str()));
+        }
         else if (arg == "--warmup") is_warmup = true;
     }
 
@@ -365,7 +381,17 @@ int main(int argc, char **argv) {
     if (sequence_id.empty()) sequence_id = case_id;
     if (family_id.empty()) family_id = sequence_id;
 
-    auto adapter = smf::bench::make_solver_adapter(solver_id);
+    std::unique_ptr<smf::bench::SolverAdapter> adapter;
+    if (!ipm_static.empty()) {
+        const auto ipm_mode = smf::bench::parse_ipm_static(ipm_static);
+        if (!ipm_mode || solver_id != "smf") {
+            std::fprintf(stderr, "--ipm-static needs --solver smf and off|fallback|regularized\n");
+            return 2;
+        }
+        adapter = smf::bench::make_smf_ipm_adapter(*ipm_mode, ipm_static_zero);
+    } else {
+        adapter = smf::bench::make_solver_adapter(solver_id);
+    }
     smf::bench::RunRecord rec;
     rec.schema_version = 1;
     rec.matrix_id = case_id;
@@ -459,6 +485,7 @@ int main(int argc, char **argv) {
     else if (ordering_override == "metis") ctrl.ordering = smf::OrderingMethod::METIS;
     else if (ordering_override == "matching") ctrl.ordering = smf::OrderingMethod::Matching;
     else if (ordering_override == "auto") ctrl.ordering = smf::OrderingMethod::AutoSerial;
+    else if (ordering_override == "auto_parallel") ctrl.ordering = smf::OrderingMethod::AutoParallel;
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =
@@ -481,20 +508,15 @@ int main(int argc, char **argv) {
     smf::bench::Outcome out_s = smf::bench::Outcome::Success;
 
     if (mode == "warm_sequence") {
-        constexpr int kSeqSteps = 5;
-        rec.batch_count = kSeqSteps;
-        rec.per_update_validation.clear();
-        rec.per_update_validation.reserve(kSeqSteps);
-
-        // Pre-build the 5 numeric value updates outside the timed region:
-        // a recorded sequence (e.g. IPOPT iterations) when given, otherwise
-        // synthetic diagonal perturbations.
-        std::vector<std::vector<double>> seq_values(kSeqSteps, A.values);
-        bool recorded = false;
+        // Recorded sequences replay --seq-steps of their factorizations;
+        // synthetic ones always 5.
+        int kSeqSteps = 5;
+        std::vector<std::size_t> picks;
+        const std::size_t step_bytes = A.values.size() * sizeof(double);
+        std::ifstream in;
         if (!seq_values_path.empty()) {
-            std::ifstream in(seq_values_path, std::ios::binary | std::ios::ate);
+            in.open(seq_values_path, std::ios::binary | std::ios::ate);
             const std::size_t bytes = in ? static_cast<std::size_t>(in.tellg()) : 0;
-            const std::size_t step_bytes = A.values.size() * sizeof(double);
             const std::size_t nsteps = step_bytes ? bytes / step_bytes : 0;
             if (nsteps == 0) {
                 rec.outcome = smf::bench::Outcome::InvalidInput;
@@ -502,9 +524,21 @@ int main(int argc, char **argv) {
                 if (!jsonl_out.empty()) smf::bench::append_run_record_jsonl(jsonl_out, rec);
                 return 1;
             }
+            picks = smf::bench::replay_step_picks(nsteps, seq_steps);
+            kSeqSteps = static_cast<int>(picks.size());
+        }
+        rec.batch_count = kSeqSteps;
+        rec.per_update_validation.clear();
+        rec.per_update_validation.reserve(static_cast<std::size_t>(kSeqSteps));
+
+        // Pre-build the numeric value updates outside the timed region:
+        // a recorded sequence (e.g. IPOPT iterations) when given, otherwise
+        // synthetic diagonal perturbations.
+        std::vector<std::vector<double>> seq_values(static_cast<std::size_t>(kSeqSteps), A.values);
+        bool recorded = false;
+        if (!seq_values_path.empty()) {
             for (int step = 0; step < kSeqSteps; ++step) {
-                const std::size_t pick = (nsteps == 1) ? 0
-                                         : static_cast<std::size_t>(step) * (nsteps - 1) / (kSeqSteps - 1);
+                const std::size_t pick = picks[static_cast<std::size_t>(step)];
                 in.seekg(static_cast<std::streamoff>(pick * step_bytes));
                 in.read(reinterpret_cast<char *>(seq_values[static_cast<std::size_t>(step)].data()),
                         static_cast<std::streamsize>(step_bytes));
@@ -525,11 +559,15 @@ int main(int argc, char **argv) {
             }
         }
 
-        std::vector<std::vector<double>> step_solutions(kSeqSteps, b);
+        std::vector<std::vector<double>> step_solutions(static_cast<std::size_t>(kSeqSteps), b);
         double total_factor_ms = 0.0;
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
         const bool refine = (track == "ipopt" && nrhs == 1);
+        // --ipm-static: a singular factor (zero pivots) is one IPOPT rejects and
+        // refactors with delta_c; it is never solved with, so the replay skips
+        // its solve and its validation instead of stopping.
+        std::vector<char> skipped(static_cast<std::size_t>(kSeqSteps), 0);
 
         const auto t0 = std::chrono::steady_clock::now();
         out_a = adapter->analyse(A);
@@ -538,7 +576,21 @@ int main(int argc, char **argv) {
             for (int step = 0; step < kSeqSteps; ++step) {
                 out_f = adapter->factor(seq_values[step]);
                 total_factor_ms += adapter->stats().factor_ms;
-                if (out_f != smf::bench::Outcome::Success) break;
+                if (!ipm_static.empty() && out_f == smf::bench::Outcome::Singular) {
+                    const auto fst = adapter->stats();
+                    skipped[static_cast<std::size_t>(step)] = 1;
+                    out_f = smf::bench::Outcome::Success;
+                    std::fprintf(stderr, "step %d (stored %zu): singular, skipped: static=%d inertia=%d/%d/%d\n",
+                                 step, recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
+                                 fst.static_pivots, fst.inertia_pos, fst.inertia_neg, fst.inertia_zero);
+                    continue;
+                }
+                // A failed factor fails the replay (out_s would otherwise stay Success
+                // and the untouched right-hand sides would be validated).
+                if (out_f != smf::bench::Outcome::Success) {
+                    out_s = out_f;
+                    break;
+                }
                 out_s = adapter->solve(step_solutions[step], nrhs);
                 total_solve_ms += adapter->stats().solve_ms;
                 if (out_s != smf::bench::Outcome::Success) break;
@@ -553,6 +605,20 @@ int main(int argc, char **argv) {
                     total_refine_ms += std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - tr0).count();
                 }
+                if (!ipm_static.empty()) {
+                    const auto fst = adapter->stats();
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d inertia=%d/%d/%d\n", step,
+                                 recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
+                                 fst.static_pivots, fst.delayed_pivots, fst.inertia_pos, fst.inertia_neg,
+                                 fst.inertia_zero);
+                }
+            }
+            if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {
+                const auto fst = adapter->stats();
+                std::fprintf(stderr, "stopped: factor %s, solve %s (%s); static=%d inertia=%d/%d/%d\n",
+                             smf::bench::outcome_to_string(out_f), smf::bench::outcome_to_string(out_s),
+                             fst.reason.c_str(), fst.static_pivots, fst.inertia_pos, fst.inertia_neg,
+                             fst.inertia_zero);
             }
         } else {
             out_f = out_a;
@@ -574,16 +640,23 @@ int main(int argc, char **argv) {
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
 
+        int last_solved = kSeqSteps - 1;
+        while (last_solved > 0 && skipped[static_cast<std::size_t>(last_solved)]) --last_solved;
+        if (out_s == smf::bench::Outcome::Success && skipped[static_cast<std::size_t>(last_solved)]) {
+            out_s = smf::bench::Outcome::Singular;  // every step singular: nothing was solved
+            rec.reason = "every replayed factor was singular";
+        }
         if (out_s == smf::bench::Outcome::Success) {
             for (int step = 0; step < kSeqSteps; ++step) {
+                if (skipped[static_cast<std::size_t>(step)]) continue;
                 smf::CscLower A_step = A;
                 A_step.values = seq_values[step];
                 rec.per_update_validation.push_back(
                     smf::bench::validate(A_step, b, step_solutions[step], nrhs));
             }
             smf::CscLower A_last = A;
-            A_last.values = seq_values.back();
-            x = step_solutions.back();
+            A_last.values = seq_values[static_cast<std::size_t>(last_solved)];
+            x = step_solutions[static_cast<std::size_t>(last_solved)];
             rec.per_rhs_validation = smf::bench::validate_per_rhs(A_last, b, x, nrhs);
             rec.validation = smf::bench::validate(A_last, b, x, nrhs);
             rec.outcome = smf::bench::qualify_outcome(out_s, rec.validation);
