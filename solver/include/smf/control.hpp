@@ -11,6 +11,19 @@ struct Control {
     // Ordering
     OrderingMethod ordering      = OrderingMethod::AutoSerial;
     int            nemin         = 8;       // min columns for supernode amalgamation
+    // OrderingMethod::UserSupplied: user_perm[new] = old, length n, in
+    // original index order; read by analyse() (null or not a permutation
+    // gives ErrorCode::IllegalValue). It is used as given: no identity-band
+    // detection, matching or METIS, and no matching scaling is computed.
+    const Int*     user_perm     = nullptr;
+    // UserSupplied only: 2x2 pivot pairs (user_pair_first[2k],
+    // user_pair_first[2k+1]) in original indices, k < user_num_pairs. The
+    // two of a pair must be adjacent in user_perm (else IllegalValue); they
+    // are kept in one supernode when the later one is the etree parent of
+    // the earlier, i.e. L(second, first) is structurally nonzero. Other
+    // pairs cannot be forced together and are counted in Info::pairs_split.
+    const Int*     user_pair_first = nullptr;
+    Int            user_num_pairs  = 0;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;

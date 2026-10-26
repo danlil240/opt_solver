@@ -33,8 +33,13 @@ public:
   ///   AutoParallel → METIS if n >= 5000 and SMF_HAS_METIS, else AMD
   ///   AMD          → AMD (regardless of n)
   ///   METIS        → METIS (fallback to AMD if SMF_HAS_METIS not compiled in)
-  ///   UserSupplied → perm in control.user_perm (NOT IMPLEMENTED — returns
-  ///   ErrorCode::FeatureNotAvailable)
+  ///   UserSupplied → control.user_perm (perm[new] = old) used as given; no
+  ///   matching, METIS or identity-band detection, no matching scaling.
+  ///   Null or not a permutation → ErrorCode::IllegalValue. Optional 2x2
+  ///   pairs (control.user_pair_first / user_num_pairs) must be adjacent
+  ///   in it (else IllegalValue) and are kept in one supernode when the
+  ///   later is the etree parent of the earlier; the rest are counted in
+  ///   info.pairs_split.
   ///
   /// On success: fills info, returns a valid AnalysisHandle.
   /// On failure: sets info.status and returns nullptr.

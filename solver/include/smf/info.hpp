@@ -20,6 +20,9 @@ struct Info {
 
     // Ordering used (value matches OrderingMethod enum)
     int          ordering_used       = 0;
+    /// OrderingMethod::UserSupplied: user pairs that could not be kept in
+    /// one supernode because the second is not the etree parent of the first.
+    int          pairs_split         = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues

@@ -1,6 +1,7 @@
 #pragma once
 #include "smf/types.hpp"
 #include "smf/etree.hpp"
+#include <cstdint>
 #include <vector>
 
 namespace smf {
@@ -60,8 +61,14 @@ std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
 /// topological order of the same elimination tree, so the factor's fill is
 /// unchanged. `snodes` receives the amalgamated supernodes in that order,
 /// numbered in postorder with children lists in increasing index.
+///
+/// `keep_with_parent` (optional, length n, same numbering): a column flagged
+/// 1 always ends up in its etree parent's supernode, regardless of `nemin`
+/// and the zero-fill bound (2x2 pivot pairs). A null pointer gives exactly
+/// the unflagged result.
 void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
-                        std::vector<Int> &order, std::vector<Supernode> &snodes);
+                        std::vector<Int> &order, std::vector<Supernode> &snodes,
+                        const std::uint8_t *keep_with_parent = nullptr);
 
 /// Amalgamate supernodes using the nemin threshold.
 ///

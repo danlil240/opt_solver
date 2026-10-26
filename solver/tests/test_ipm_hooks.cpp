@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
 #include <random>
 #include <utility>
 #include <vector>
@@ -350,6 +351,193 @@ TEST(IpmHooks, SerialGridArmedIsBitIdentical) {
     std::vector<double> x;
     ASSERT_EQ(h.solve(x), 0);
     EXPECT_TRUE(bit_equal(x_base, x));
+}
+
+// --- Control::user_perm / user pairs (OrderingMethod::UserSupplied) ---
+
+namespace {
+
+Control user_ctrl(const std::vector<Int> &perm) {
+    Control c = indef_ctrl();
+    c.ordering = OrderingMethod::UserSupplied;
+    c.user_perm = perm.data();
+    return c;
+}
+
+std::vector<Int> amd_perm(const CscLower &A) {
+    Control c = indef_ctrl();
+    c.ordering = OrderingMethod::AMD;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    return ak ? ak->perm : std::vector<Int>{};
+}
+
+// The AMD order of small_kkt with each constraint row kN + i moved to just
+// after its primal column 3 + i (coupled by A(kN + i, 3 + i) = 1 + 0.1 i).
+std::vector<Int> paired_order(std::vector<Int> &pairs) {
+    const std::vector<Int> amd = amd_perm(small_kkt());
+    std::vector<Int> perm;
+    pairs.clear();
+    for (Int old : amd) {
+        if (old >= kN)
+            continue;
+        perm.push_back(old);
+        if (old >= 3 && old < 3 + kM) {
+            perm.push_back(kN + old - 3);
+            pairs.push_back(old);
+            pairs.push_back(kN + old - 3);
+        }
+    }
+    return perm;
+}
+
+} // namespace
+
+TEST(IpmHooks, UserPermMatchesAmdFactor) {
+    // AMD's final order fed back in gives the same elimination tree and
+    // fill. Relaxed amalgamation is greedy and sees the tree in a new
+    // postorder, so its stored zeros can differ slightly: exact on the
+    // small KKT, within 5% on the grid KKT (measured 6095 vs 6175).
+    bool exact = true;
+    for (const CscLower &A : {small_kkt(), grid_kkt(40, 7)}) {
+        Control amd = indef_ctrl();
+        amd.ordering = OrderingMethod::AMD;
+        Harness ref(A, amd);
+        ASSERT_NE(ref.ak.get(), nullptr);
+        const std::vector<Int> perm = ref.ak->perm;
+        const LongInt ref_entries = ref.info.predicted_factor_entries;
+
+        Harness h(A, user_ctrl(perm));
+        ASSERT_NE(h.ak.get(), nullptr);
+        EXPECT_EQ(h.info.status, ErrorCode::Success);
+        EXPECT_EQ(h.info.ordering_used, static_cast<int>(OrderingMethod::UserSupplied));
+        if (exact)
+            EXPECT_EQ(h.info.predicted_factor_entries, ref_entries);
+        else
+            EXPECT_LE(std::abs(static_cast<double>(h.info.predicted_factor_entries - ref_entries)),
+                      0.05 * static_cast<double>(ref_entries));
+        exact = false;
+        EXPECT_TRUE(h.ak->matching_scale.empty());
+
+        ASSERT_EQ(ref.factor(-1), FactorStatus::Success);
+        ASSERT_EQ(h.factor(-1), FactorStatus::Success);
+        std::vector<double> x_ref, x;
+        ASSERT_EQ(ref.solve(x_ref), 0);
+        ASSERT_EQ(h.solve(x), 0);
+        EXPECT_LT(max_rel_diff(x_ref, x), 1e-12);
+    }
+}
+
+TEST(IpmHooks, UserPermIsUsedAsGiven) {
+    // A shuffled order fills far more than AMD: proves the perm is read,
+    // not recomputed. The factor is still correct.
+    const CscLower A = grid_kkt(40, 7);
+    Control amd = indef_ctrl();
+    amd.ordering = OrderingMethod::AMD;
+    Harness ref(A, amd);
+    ASSERT_NE(ref.ak.get(), nullptr);
+
+    std::vector<Int> perm(static_cast<std::size_t>(A.n));
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), std::mt19937(11));
+    Harness h(A, user_ctrl(perm));
+    ASSERT_NE(h.ak.get(), nullptr);
+    EXPECT_GT(h.info.predicted_factor_entries, 2 * ref.info.predicted_factor_entries);
+    ASSERT_EQ(h.factor(-1), FactorStatus::Success);
+    std::vector<double> x;
+    ASSERT_EQ(h.solve(x), 0);
+    EXPECT_LT(h.eta(x), 1e-12);
+}
+
+TEST(IpmHooks, PairsStayInOneSupernode) {
+    std::vector<Int> pairs;
+    const std::vector<Int> perm = paired_order(pairs);
+    ASSERT_EQ(perm.size(), static_cast<std::size_t>(kN + kM));
+    ASSERT_EQ(pairs.size(), static_cast<std::size_t>(2 * kM));
+    // nemin 1 turns amalgamation off: only the pair rule can merge them.
+    for (int nemin : {1, 8}) {
+        Control c = user_ctrl(perm);
+        c.nemin = nemin;
+        c.user_pair_first = pairs.data();
+        c.user_num_pairs = kM;
+        Harness h(small_kkt(), c);
+        ASSERT_NE(h.ak.get(), nullptr) << "nemin " << nemin;
+        EXPECT_EQ(h.info.status, ErrorCode::Success);
+        EXPECT_EQ(h.info.ordering_used, static_cast<int>(OrderingMethod::UserSupplied));
+        EXPECT_EQ(h.info.pairs_split, 0);
+        const auto &sn = h.ak->supernodes;
+        for (int k = 0; k < kM; ++k) {
+            const Int pa = h.ak->iperm[static_cast<std::size_t>(pairs[2 * k])];
+            const Int pb = h.ak->iperm[static_cast<std::size_t>(pairs[2 * k + 1])];
+            const auto in = [&](const Supernode &s, Int p) { return s.col_start <= p && p < s.col_end; };
+            const auto it = std::find_if(sn.begin(), sn.end(), [&](const Supernode &s) { return in(s, pa); });
+            ASSERT_NE(it, sn.end());
+            EXPECT_TRUE(in(*it, pb)) << "nemin " << nemin << " pair " << k;
+        }
+        ASSERT_EQ(h.factor(-1), FactorStatus::Success);
+        EXPECT_EQ(h.info.num_positive, 37);
+        EXPECT_EQ(h.info.num_negative, 18);
+        std::vector<double> x;
+        ASSERT_EQ(h.solve(x), 0);
+        EXPECT_LT(h.eta(x), 1e-12);
+    }
+}
+
+TEST(IpmHooks, UncoupledPairIsSplit) {
+    // Primal columns 0 and 1 are adjacent but share no entry, so 1 is not
+    // the etree parent of 0 and the pair cannot be forced together.
+    std::vector<Int> perm(static_cast<std::size_t>(kN + kM));
+    std::iota(perm.begin(), perm.end(), 0);
+    const std::vector<Int> pairs = {1, 0};
+    Control c = user_ctrl(perm);
+    c.nemin = 1;
+    c.user_pair_first = pairs.data();
+    c.user_num_pairs = 1;
+    Harness h(small_kkt(), c);
+    ASSERT_NE(h.ak.get(), nullptr);
+    EXPECT_EQ(h.info.status, ErrorCode::Success);
+    EXPECT_EQ(h.info.pairs_split, 1);
+}
+
+TEST(IpmHooks, UserPermNullIsError) {
+    Control c = indef_ctrl();
+    c.ordering = OrderingMethod::UserSupplied;
+    Solver s;
+    Info info;
+    EXPECT_EQ(s.analyse(small_kkt(), c, info), nullptr);
+    EXPECT_EQ(info.status, ErrorCode::IllegalValue);
+}
+
+TEST(IpmHooks, UserPermInvalidIsError) {
+    const CscLower A = small_kkt();
+    std::vector<Int> perm(static_cast<std::size_t>(A.n));
+    std::iota(perm.begin(), perm.end(), 0);
+    Solver s;
+    Info info;
+
+    std::vector<Int> dup = perm;
+    dup[5] = 4;
+    EXPECT_EQ(s.analyse(A, user_ctrl(dup), info), nullptr);
+    EXPECT_EQ(info.status, ErrorCode::IllegalValue);
+
+    std::vector<Int> out = perm;
+    out[5] = A.n;
+    EXPECT_EQ(s.analyse(A, user_ctrl(out), info), nullptr);
+    EXPECT_EQ(info.status, ErrorCode::IllegalValue);
+
+    // A pair must be adjacent in the order.
+    const std::vector<Int> far = {3, kN};
+    Control c = user_ctrl(perm);
+    c.user_pair_first = far.data();
+    c.user_num_pairs = 1;
+    EXPECT_EQ(s.analyse(A, c, info), nullptr);
+    EXPECT_EQ(info.status, ErrorCode::IllegalValue);
+
+    // Pairs without their array.
+    c.user_pair_first = nullptr;
+    EXPECT_EQ(s.analyse(A, c, info), nullptr);
+    EXPECT_EQ(info.status, ErrorCode::IllegalValue);
 }
 
 TEST(IpmHooks, TaskParallelEngineReportsSameStatus) {

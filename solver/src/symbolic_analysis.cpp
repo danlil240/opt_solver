@@ -124,6 +124,41 @@ namespace smf
         auto cleaned = clean_lower_csc(A, info);
         const Int n = cleaned.clean.n;
 
+        // UserSupplied: user_perm must be a permutation of 0..n-1 and each
+        // pair's two columns adjacent in it. user_iperm[old] = position.
+        const bool user_order = control.ordering == OrderingMethod::UserSupplied;
+        std::vector<Int> user_iperm;
+        if (user_order)
+        {
+            const Int np = control.user_num_pairs;
+            const Int *pf = control.user_pair_first;
+            bool ok = control.user_perm != nullptr && np >= 0 && (np == 0 || pf != nullptr);
+            if (ok)
+            {
+                user_iperm.assign(static_cast<std::size_t>(n), -1);
+                for (Int k = 0; ok && k < n; ++k)
+                {
+                    const Int old = control.user_perm[k];
+                    ok = old >= 0 && old < n && user_iperm[static_cast<std::size_t>(old)] < 0;
+                    if (ok)
+                        user_iperm[static_cast<std::size_t>(old)] = k;
+                }
+            }
+            for (Int k = 0; ok && k < np; ++k)
+            {
+                const Int a = pf[2 * static_cast<std::size_t>(k)];
+                const Int b = pf[2 * static_cast<std::size_t>(k) + 1];
+                ok = a >= 0 && a < n && b >= 0 && b < n &&
+                     std::abs(user_iperm[static_cast<std::size_t>(a)] -
+                              user_iperm[static_cast<std::size_t>(b)]) == 1;
+            }
+            if (!ok)
+            {
+                info.status = ErrorCode::IllegalValue;
+                return nullptr;
+            }
+        }
+
         if (n == 0)
         {
             // Trivially empty analysis
@@ -199,7 +234,15 @@ namespace smf
             auto_matching = matching_order_lower_csc(C, kMatchingPairTol, matching_perm,
                                                      analyse_scratch_, &matching_stats);
 
-        if (use_identity_ordering)
+        if (user_order)
+        {
+            // Used as given (validated above). Not an auto ordering, so the
+            // identity-band test, auto matching (and its scaling) and the
+            // METIS trial below are all skipped.
+            perm.assign(control.user_perm, control.user_perm + n);
+            info.ordering_used = static_cast<int>(OrderingMethod::UserSupplied);
+        }
+        else if (use_identity_ordering)
         {
             std::iota(perm.begin(), perm.end(), 0);
             info.ordering_used = static_cast<int>(OrderingMethod::UserSupplied);
@@ -355,8 +398,30 @@ namespace smf
             parent1[k] = (par >= 0) ? inv_po[par] : -1;
             colcount1[k] = colcount0[static_cast<std::size_t>(old)];
         }
+        // User 2x2 pairs: perm is still user_perm here, so a pair's
+        // positions in the permuted numbering are user_iperm; the earlier
+        // one is flagged (in the postordered numbering, via inv_po) when the
+        // later one is its etree parent, i.e. L(later, earlier) != 0.
+        std::vector<std::uint8_t> keep_with_parent;
+        if (user_order && control.user_num_pairs > 0)
+        {
+            keep_with_parent.assign(sn_sz, 0);
+            const Int *pf = control.user_pair_first;
+            for (Int k = 0; k < control.user_num_pairs; ++k)
+            {
+                Int pa = user_iperm[static_cast<std::size_t>(pf[2 * static_cast<std::size_t>(k)])];
+                Int pb = user_iperm[static_cast<std::size_t>(pf[2 * static_cast<std::size_t>(k) + 1])];
+                if (pa > pb)
+                    std::swap(pa, pb);
+                if (etree0.parent[static_cast<std::size_t>(pa)] == pb)
+                    keep_with_parent[static_cast<std::size_t>(inv_po[pa])] = 1;
+                else
+                    ++info.pairs_split;
+            }
+        }
         amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
-                           order, snodes);
+                           order, snodes,
+                           keep_with_parent.empty() ? nullptr : keep_with_parent.data());
 
         // Final permutation and its elimination tree (relabelled, not rebuilt).
         for (Int k = 0; k < n; ++k)

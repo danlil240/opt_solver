@@ -300,7 +300,8 @@ namespace smf
     }
 
     void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
-                            std::vector<Int> &order, std::vector<Supernode> &snodes)
+                            std::vector<Int> &order, std::vector<Supernode> &snodes,
+                            const std::uint8_t *keep_with_parent)
     {
         order.resize(static_cast<std::size_t>(n));
         snodes.clear();
@@ -370,7 +371,24 @@ namespace smf
         // then streams through.
         for (Int s = 0; s < nsn; ++s)
             group[static_cast<std::size_t>(s)] = s;
-        if (nemin > 1)
+        // Forced merges (keep_with_parent): a flagged column whose parent
+        // lies in another fundamental supernode is that supernode's last
+        // column (inside one, parent[j] == j + 1), so the supernode's own
+        // parent is the column's parent's supernode.
+        std::vector<std::uint8_t> forced;
+        if (keep_with_parent != nullptr)
+        {
+            forced.assign(nsz, 0);
+            for (Int j = 0; j < n; ++j)
+            {
+                const Int pj = parent[static_cast<std::size_t>(j)];
+                const Int sj = snode_of[static_cast<std::size_t>(j)];
+                if (keep_with_parent[static_cast<std::size_t>(j)] != 0 && pj >= 0 &&
+                    snode_of[static_cast<std::size_t>(pj)] != sj)
+                    forced[static_cast<std::size_t>(sj)] = 1;
+            }
+        }
+        if (nemin > 1 || !forced.empty())
         {
             std::vector<LongInt> fill(nsz, 0);
             for (Int j = 0; j < n; ++j)
@@ -383,19 +401,22 @@ namespace smf
                 if (p < 0)
                     continue;
                 const auto pi = static_cast<std::size_t>(p);
-                if (nelim[si] >= nemin || nelim[pi] >= nemin)
-                    continue;
-                const auto stored = [&](std::size_t g, LongInt cols) {
-                    const LongInt q = colcount[static_cast<std::size_t>(first[g + 1]) - 1] - 1;
-                    return cols * (cols + q);
-                };
-                const LongInt k = nelim[si] + nelim[pi];
-                const LongInt entries = stored(pi, k);
-                const LongInt zeros = entries - fill[si] - fill[pi];
-                const LongInt added = entries - stored(si, nelim[si]) - stored(pi, nelim[pi]);
-                if (added > kAmalgamateFreeZeros &&
-                    static_cast<double>(zeros) > kAmalgamateMaxZeroShare * static_cast<double>(entries))
-                    continue;
+                if (forced.empty() || forced[si] == 0)
+                {
+                    if (nelim[si] >= nemin || nelim[pi] >= nemin)
+                        continue;
+                    const auto stored = [&](std::size_t g, LongInt cols) {
+                        const LongInt q = colcount[static_cast<std::size_t>(first[g + 1]) - 1] - 1;
+                        return cols * (cols + q);
+                    };
+                    const LongInt k = nelim[si] + nelim[pi];
+                    const LongInt entries = stored(pi, k);
+                    const LongInt zeros = entries - fill[si] - fill[pi];
+                    const LongInt added = entries - stored(si, nelim[si]) - stored(pi, nelim[pi]);
+                    if (added > kAmalgamateFreeZeros &&
+                        static_cast<double>(zeros) > kAmalgamateMaxZeroShare * static_cast<double>(entries))
+                        continue;
+                }
                 group[si] = p;
                 nelim[pi] += nelim[si];
                 fill[pi] += fill[si];
