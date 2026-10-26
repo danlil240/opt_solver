@@ -10,6 +10,7 @@
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <span>
@@ -80,6 +81,25 @@ struct IpmStats {
 /// factor() (the probation factor, which points at the new analysis, stays
 /// usable for solves until then) and never re-analyses this pattern again.
 /// analyse() starts a new history.
+///
+/// Feature 3, IpmControl::static_mode. Fallback: threshold pivoting with
+/// delays, static pivots only where delaying fails (root fronts and fronts
+/// over their delay budget). Regularized, the quasidefinite mode:
+///  - analyse() adds every structurally missing diagonal entry to the
+///    pattern (values keep the input entry order and count) and analyses
+///    with AMD (no matching ordering);
+///  - the first factor() after analyse() classifies the rows, then they stay
+///    fixed: a zero or missing diagonal is a constraint row, anything else
+///    (negative included) a primal row (row_is_constraint());
+///  - every factor() adds +rho to the primal and -rho to the constraint
+///    diagonal, rho = reg_rho x max|A| after scaling, and factors with 1x1
+///    pivots in order (no search, no delays); a pivot with |d| < rho is
+///    raised to rho and counted in Info::static_pivots (IpmStats sums them);
+///  - a raised pivot counts as a zero eigenvalue if it was raised from an
+///    exact zero, else by its sign (hybrid), or always as a zero with
+///    IpmControl::static_as_zero;
+///  - every full solve is refined against the unregularized matrix, up to
+///    Control::refinement_max_iters steps.
 class IpmSession {
  public:
   /// Store the pattern (lower CSC; its own values are ignored) and start a
@@ -136,6 +156,12 @@ class IpmSession {
   /// values, so the buffer need only live until factor() returns.
   void set_user_scale(const double* scale);
 
+  /// Feature 3b (StaticMode::Regularized): whether row i is a constraint row
+  /// (regularized by -rho). Decided at the first factorization after
+  /// analyse() and then fixed; false before it, out of range, or in another
+  /// mode.
+  bool row_is_constraint(Int i) const;
+
   const FactorKeep& factor_keep() const { return fk_; }
   /// The current analysis; null before it has run or after it failed.
   const AnalysisKeep* analysis_keep() const { return ak_.get(); }
@@ -157,6 +183,19 @@ class IpmSession {
   void prepare_analysis();
   // Free prev_ak_ after a passed probation (kept if fk_ still points at it).
   void drop_previous_analysis();
+  // Copy input values (input entry order) into mat_ (through entry_map_).
+  void load_values(std::span<const double> values);
+  bool regularized() const { return ipm_.static_mode == StaticMode::Regularized; }
+
+  // Feature 3b state (StaticMode::Regularized). mat_ is the input pattern
+  // with every missing diagonal entry added (value 0) at the head of its
+  // column; entry_map_[k] is input entry k's slot in it (empty: none added,
+  // the identity). reg_sign_: per row, +1 primal / -1 constraint, set at the
+  // first factorization after analyse() (empty before).
+  std::vector<Int> entry_map_;
+  std::size_t input_nnz_ = 0;
+  std::vector<int8_t> reg_sign_;
+  std::vector<double> refine_rhs_;  // the right-hand sides of the solve being refined
 
   // Feature 2 state.
   std::unique_ptr<AnalysisKeep> prev_ak_;  // the analysis before an adoption (probation)

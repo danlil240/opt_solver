@@ -20,6 +20,10 @@ struct LdltKernelParams {
     /// |d| < eff_small or not finite) counts in inertia.zero; one raised from
     /// a nonzero |d| keeps its sign. Set on fallback fronts.
     bool static_zero_stays_zero = false;
+    /// > 0 (with static_pivot > 0): no pivot search. Column k is the pivot;
+    /// a 1x1 with finite |d| >= min_abs_pivot is accepted as it is, any other
+    /// goes to the static path, which raises it to static_pivot.
+    double min_abs_pivot = 0.0;
 };
 
 struct LdltKernelResult {

@@ -48,7 +48,10 @@ struct SerialFactorStats {
 /// delays). `fallback_static_pivot` > 0 (Control::fallback_static_pivot_tol,
 /// absolute): only a root front, or a front receiving more delayed columns
 /// than its supernode width, static-pivots, with this value in place of
-/// `static_pivot`. ctrl.static_pivots_as_zero counts raised pivots as zeros.
+/// `static_pivot`. ctrl.static_pivots_as_zero counts raised pivots as zeros;
+/// ctrl.static_zero_stays_zero gives `static_pivot` fronts the hybrid
+/// accounting of fallback fronts. ctrl.static_pivot_in_order (with
+/// `static_pivot` > 0): 1x1 pivots in order, no search.
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,

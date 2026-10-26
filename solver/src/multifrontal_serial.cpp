@@ -271,6 +271,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     fallback_prm = cx.prm;
     fallback_prm.static_pivot = cx.fallback_static;
     fallback_prm.static_zero_stays_zero = true;
+    if (fallback_prm.min_abs_pivot > 0.0) fallback_prm.min_abs_pivot = cx.fallback_static;
     prm = &fallback_prm;
   }
 
@@ -500,6 +501,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   prm.posdef = posdef;
   prm.static_pivot = posdef ? 0.0 : static_pivot;
   prm.static_pivots_as_zero = ctrl.static_pivots_as_zero;
+  prm.static_zero_stays_zero = ctrl.static_zero_stays_zero;
+  // Control::static_pivot_in_order: 1x1 pivots in order, |d| below the
+  // static pivot raised (the quasidefinite mode).
+  prm.min_abs_pivot = (prm.static_pivot > 0.0 && ctrl.static_pivot_in_order) ? prm.static_pivot : 0.0;
   const double fallback_static = posdef ? 0.0 : fallback_static_pivot;
 
   // Early abort once the negative pivots exceed the limit (indefinite only).

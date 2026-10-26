@@ -1,6 +1,7 @@
 #include "smf/ipm_session.hpp"
 
 #include "smf/pivot_order.hpp"
+#include "smf/refinement.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -61,6 +62,9 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   probation_delays_ = 0;
   revert_pending_ = false;
   reanalyse_stopped_ = false;
+  entry_map_.clear();
+  input_nnz_ = 0;
+  reg_sign_.clear();
 
   mat_.n = pattern.n;
   mat_.col_ptr = pattern.col_ptr;
@@ -73,15 +77,70 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
     info_.status = ErrorCode::IllegalValue;
     return info_.status;
   }
+  input_nnz_ = nnz;
+
+  if (regularized()) {
+    // Feature 3b: every row needs a diagonal entry to carry +-rho. A missing
+    // one goes at the head of its column (the smallest row of a lower
+    // column, so sorted columns stay sorted); input entries, duplicates
+    // included, keep their own slots.
+    const std::size_t n = static_cast<std::size_t>(mat_.n);
+    std::vector<Int> col_ptr(n + 1, 0);
+    std::vector<Int> row_idx;
+    row_idx.reserve(nnz + n);
+    std::vector<Int> map(nnz);
+    bool added = false;
+    for (std::size_t j = 0; j < n; ++j) {
+      const Int p0 = pattern.col_ptr[j], p1 = pattern.col_ptr[j + 1];
+      bool has_diag = false;
+      for (Int p = p0; p < p1 && !has_diag; ++p)
+        has_diag = pattern.row_idx[static_cast<std::size_t>(p)] == static_cast<Int>(j);
+      if (!has_diag) {
+        row_idx.push_back(static_cast<Int>(j));
+        added = true;
+      }
+      for (Int p = p0; p < p1; ++p) {
+        map[static_cast<std::size_t>(p)] = static_cast<Int>(row_idx.size());
+        row_idx.push_back(pattern.row_idx[static_cast<std::size_t>(p)]);
+      }
+      col_ptr[j + 1] = static_cast<Int>(row_idx.size());
+    }
+    if (added) {
+      mat_.col_ptr = std::move(col_ptr);
+      mat_.row_idx = std::move(row_idx);
+      mat_.values.assign(mat_.row_idx.size(), 0.0);
+      entry_map_ = std::move(map);
+    }
+  }
   if (values.empty()) return ErrorCode::Success;  // analysis deferred to factor()
 
-  std::copy(values.begin(), values.end(), mat_.values.begin());
+  load_values(values);
   return run_analysis();
+}
+
+void IpmSession::load_values(std::span<const double> values) {
+  if (entry_map_.empty()) {
+    std::copy(values.begin(), values.end(), mat_.values.begin());
+    return;
+  }
+  // Added diagonal entries stay zero; duplicates sum in the engine.
+  std::fill(mat_.values.begin(), mat_.values.end(), 0.0);
+  for (std::size_t k = 0; k < values.size(); ++k)
+    mat_.values[static_cast<std::size_t>(entry_map_[k])] = values[k];
 }
 
 ErrorCode IpmSession::run_analysis() {
   const auto t0 = std::chrono::steady_clock::now();
-  ak_ = solver_.analyse(mat_, ctrl_, info_);
+  Control actrl = ctrl_;
+  if (regularized()) {
+    // Feature 3b: a fixed fill-reducing order, no matching ordering (the
+    // regularized matrix needs no 2x2 pivots).
+    actrl.ordering = OrderingMethod::AMD;
+    actrl.user_perm = nullptr;
+    actrl.user_pair_first = nullptr;
+    actrl.user_num_pairs = 0;
+  }
+  ak_ = solver_.analyse(mat_, actrl, info_);
   info_.analyse_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   if (!ak_ || info_.status != ErrorCode::Success) {
     ak_.reset();
@@ -101,11 +160,11 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
     info_.status = ErrorCode::NotInitialised;
     return IpmFactorStatus::Error;
   }
-  if (values.size() != mat_.values.size()) {
+  if (values.size() != input_nnz_) {
     info_.status = ErrorCode::IllegalValue;
     return IpmFactorStatus::Error;
   }
-  std::copy(values.begin(), values.end(), mat_.values.begin());
+  load_values(values);
 
   // This factor's own Control, kept for completing an abort in solve(): the
   // caller may replace ctrl_ (solve options) and drop its scale buffer.
@@ -128,6 +187,33 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
   if (ipm_.static_mode == StaticMode::Fallback) {
     factor_ctrl_.fallback_static_pivot_tol = 1e-8;
     factor_ctrl_.static_pivots_as_zero = ipm_.static_as_zero;
+  }
+  // Feature 3b: the quasidefinite mode. Rows are classified once per
+  // analysis, at its first factorization: a zero (or added) diagonal is a
+  // constraint row, anything else, negative included, a primal row. The
+  // engine adds +-rho (reg_rho x max|A| after scaling) to the diagonal and
+  // takes 1x1 pivots in order, raising |d| < rho to rho. Raised pivots count
+  // by the hybrid accounting (a zero if raised from an exact zero, else by
+  // sign), or all as zeros with IpmControl::static_as_zero.
+  if (regularized()) {
+    if (reg_sign_.empty()) {
+      const std::size_t n = static_cast<std::size_t>(mat_.n);
+      reg_sign_.assign(n, 1);
+      for (std::size_t j = 0; j < n; ++j) {
+        double d = 0.0;
+        for (Int p = mat_.col_ptr[j]; p < mat_.col_ptr[j + 1]; ++p)
+          if (mat_.row_idx[static_cast<std::size_t>(p)] == static_cast<Int>(j))
+            d += mat_.values[static_cast<std::size_t>(p)];
+        if (d == 0.0) reg_sign_[j] = -1;
+      }
+    }
+    factor_ctrl_.pivot_u = 0.0;
+    factor_ctrl_.static_pivot_tol = ipm_.reg_rho;
+    factor_ctrl_.static_pivot_in_order = true;
+    factor_ctrl_.static_zero_stays_zero = true;
+    factor_ctrl_.static_pivots_as_zero = ipm_.static_as_zero;
+    factor_ctrl_.reg_diag_sign = reg_sign_.data();
+    factor_ctrl_.reg_diag_tol = ipm_.reg_rho;
   }
 
   if (!ak_ && run_analysis() != ErrorCode::Success) return IpmFactorStatus::Error;
@@ -288,7 +374,15 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
     solve_info_.status = ErrorCode::NotInitialised;
     return static_cast<int>(ErrorCode::NotInitialised);
   }
+  // Feature 3b: the factor is of the regularized matrix; refine a full
+  // solve against mat_, the unregularized one.
+  const bool refine_solve = regularized() && job == SolveJob::Full && b != nullptr && n == mat_.n &&
+                            nrhs > 0 && fk_.analysis != nullptr && !fk_.is_posdef;
+  const std::size_t len = static_cast<std::size_t>(n > 0 ? n : 0) * static_cast<std::size_t>(nrhs > 0 ? nrhs : 0);
+  if (refine_solve) refine_rhs_.assign(b, b + len);
   const int rc = solver_.solve(fk_, ctrl_, solve_info_, b, n, nrhs, sws_, job);
+  if (rc == 0 && refine_solve)
+    refine(mat_, fk_, ctrl_, refine_rhs_, std::span<double>(b, len), nrhs, sws_);
   if (rc == 0 && pending_accept_) {
     ++stats_.accepted;
     pending_accept_ = false;
@@ -301,6 +395,10 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
 InertiaCounts IpmSession::inertia() const {
   if (last_spd_ok_) return InertiaCounts{static_cast<int>(mat_.n), 0, 0};
   return InertiaCounts{info_.num_positive, info_.num_negative, info_.num_zero};
+}
+
+bool IpmSession::row_is_constraint(Int i) const {
+  return i >= 0 && static_cast<std::size_t>(i) < reg_sign_.size() && reg_sign_[static_cast<std::size_t>(i)] < 0;
 }
 
 void IpmSession::set_control(const Control& ctrl) {

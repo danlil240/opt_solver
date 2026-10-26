@@ -56,6 +56,23 @@ struct Control {
     // Without it, static_pivot_tol fronts count raised pivots by sign
     // (exact zeros as +), fallback fronts as above.
     bool           static_pivots_as_zero = false;
+    // static_pivot_tol fronts: hybrid accounting, as on fallback fronts (a
+    // pivot raised from an exact zero counts as a zero eigenvalue, one raised
+    // from a nonzero |d| by its kept sign). Off: by sign, exact zeros as +.
+    bool           static_zero_stays_zero = false;
+    // static_pivot_tol > 0 only: no pivot search. Every eligible column is
+    // taken in order as a 1x1 pivot, and one with |d| below
+    // static_pivot_tol * max|A| (or not finite) is raised to it, keeping its
+    // sign (the quasidefinite mode). No 2x2 pivots, no delays.
+    bool           static_pivot_in_order = false;
+    // Diagonal regularization, off while reg_diag_sign is null (indefinite
+    // only): after scaling, diagonal entry i gets
+    // reg_diag_sign[i] * reg_diag_tol * max|A| added, max|A| taken after
+    // scaling and before the regularization. reg_diag_sign: n values in
+    // original index order, +1 / -1 / 0 (none). A row without a structural
+    // diagonal entry is not regularized.
+    const int8_t*  reg_diag_sign = nullptr;
+    double         reg_diag_tol  = 0.0;
     int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
 

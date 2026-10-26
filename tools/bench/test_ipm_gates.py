@@ -247,6 +247,18 @@ class TestReanalyseSolverId(unittest.TestCase):
         self.assertEqual(ipopt_kkt.solver_env("smf_fallback_zero"),
                          {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "fallback", "SMF_IPM_STATIC_ZERO": "1"})
 
+    def test_smf_reg_is_smf_in_regularized_mode(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_reg"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_reg"),
+                         {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "regularized"})
+
+    def test_smf_reg_zero_adds_zero_accounting(self):
+        import ipopt_kkt
+        self.assertEqual(ipopt_kkt.solver_options("smf_reg_zero"), ipopt_kkt.solver_options("smf"))
+        self.assertEqual(ipopt_kkt.solver_env("smf_reg_zero"),
+                         {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "regularized", "SMF_IPM_STATIC_ZERO": "1"})
+
 
 if __name__ == "__main__":
     unittest.main()

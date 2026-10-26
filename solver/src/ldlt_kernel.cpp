@@ -34,6 +34,12 @@ PivotChoice select_pivot(const double *F, int f, int k, int num_elig, int limit,
         if (d > 0.0 && d <= std::numeric_limits<double>::max()) return {1, k, -1};
         return {};
     }
+    if (prm.min_abs_pivot > 0.0) {
+        // In order, no search: column k or nothing (then the static path).
+        const double d = F[static_cast<std::size_t>(k) * sf + k];
+        if (is_finite_fast(d) && std::abs(d) >= prm.min_abs_pivot) return {1, k, -1};
+        return {};
+    }
     for (int cand = k; cand < limit; ++cand) {
         const double *col = F + static_cast<std::size_t>(cand) * sf;
         const double a_cand = std::abs(col[cand]);
@@ -130,6 +136,7 @@ PivotChoice select_pivot(const double *F, int f, int k, int num_elig, int limit,
 // columns current): take the column whose diagonal is largest relative to
 // its column as a 1x1 pivot, so the growth in L stays as small as it can,
 // and lift |d| to prm.static_pivot (keeping its sign) if it is smaller.
+// With prm.min_abs_pivot > 0 (in-order mode) it takes column k as it is.
 // `raised`: 0 = taken as it is, 1 = |d| raised from a nonzero value, 2 =
 // raised from an exact zero (original |d| below prm.eff_small, or not
 // finite: what inertia_1x1 would have counted as zero).
@@ -139,7 +146,9 @@ PivotChoice force_static_pivot(double *F, int f, int k, int num_elig,
     const std::size_t sf = static_cast<std::size_t>(f);
     int best = k;
     double best_ratio = -1.0;
-    for (int cand = k; cand < num_elig; ++cand) {
+    // In-order mode (prm.min_abs_pivot): column k itself, no search.
+    const int search_end = prm.min_abs_pivot > 0.0 ? k : num_elig;
+    for (int cand = k; cand < search_end; ++cand) {
         const double *col = F + static_cast<std::size_t>(cand) * sf;
         double colmax = 0.0;
         for (int i = k; i < cand; ++i)

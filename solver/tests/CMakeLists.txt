@@ -321,6 +321,19 @@ endif()
 add_test(NAME IpmSession COMMAND test_ipm_session)
 set_tests_properties(IpmSession PROPERTIES TIMEOUT 60)
 
+# --- IPM mode Feature 3b: IpmSession Regularized (quasidefinite) mode ---
+
+add_executable(test_ipm_regularized
+    test_ipm_regularized.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_ipm_regularized PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_regularized PRIVATE psapi)
+endif()
+add_test(NAME IpmRegularized COMMAND test_ipm_regularized)
+set_tests_properties(IpmRegularized PROPERTIES TIMEOUT 60)
+
 # --- Task 6: Benchmark adapters tests ---
 
 add_executable(test_benchmark_adapters

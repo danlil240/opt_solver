@@ -465,6 +465,24 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     matrix_max_abs = 0.0;
     for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
   }
+  // Diagonal regularization (Control::reg_diag_sign): +-reg_diag_tol * max|A|
+  // on the scaled diagonal, max|A| taken before it. In the permuted pattern
+  // the diagonal of permuted column j is original row keep.perm[j].
+  if (ctrl.reg_diag_sign != nullptr && ctrl.reg_diag_tol > 0.0 && matrix_max_abs > 0.0) {
+    const double rho = ctrl.reg_diag_tol * matrix_max_abs;
+    for (Int j = 0; j < keep.n; ++j) {
+      const std::size_t sj = static_cast<std::size_t>(j);
+      const Int orig = keep.perm.empty() ? j : keep.perm[sj];
+      const int8_t sign = ctrl.reg_diag_sign[static_cast<std::size_t>(orig)];
+      if (sign == 0) continue;
+      for (Int p = ap_col_ptr[sj]; p < ap_col_ptr[sj + 1]; ++p) {
+        if (ap_row_idx[static_cast<std::size_t>(p)] == j) {
+          ws.perm_values[static_cast<std::size_t>(p)] += sign > 0 ? rho : -rho;
+          break;
+        }
+      }
+    }
+  }
   const double eff_small =
       (matrix_max_abs > 0.0 && matrix_max_abs < ctrl.small_pivot)
           ? (ctrl.small_pivot * matrix_max_abs)
