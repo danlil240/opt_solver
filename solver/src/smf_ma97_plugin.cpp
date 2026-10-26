@@ -2,9 +2,8 @@
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
-#include "smf/solver.hpp"
+#include "smf/ipm_session.hpp"
 #include "smf/types.hpp"
-#include "smf/workspace.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -17,6 +16,7 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -68,15 +68,14 @@ struct ma97_info_d
     double rspare[10];
 };
 
+// The IpmSession owns the analysis, the factor and the workspaces. akeep and
+// fkeep share it: MA97 callers may free akeep and still solve with fkeep.
 struct SmfAkeep
 {
-    smf::Solver solver;
-    smf::Control ctrl;
-    smf::CscLower mat;
-    smf::Info info;
-    std::unique_ptr<smf::AnalysisKeep> ak;
-    smf::NumericWorkspace nws;
-    std::vector<int> sort_perm;
+    std::shared_ptr<smf::IpmSession> session = std::make_shared<smf::IpmSession>();
+    smf::Control ctrl;          // factor control, updated from every MA97 control block
+    smf::CscLower mat;          // pattern + this factorization's values (CSC order)
+    std::vector<int> sort_perm; // CSC entry -> caller's entry
     int n = 0;
     int capture_id = 0;          // KKT dump sequence id (SMF_KKT_DUMP_DIR)
     int dump_factorizations = 0; // factorizations dumped for this analysis
@@ -84,17 +83,22 @@ struct SmfAkeep
 
 struct SmfFkeep
 {
-    smf::FactorKeep fk;
-    smf::Solver solver;
-    smf::Control ctrl;
-    smf::Info info;
-    smf::SolveWorkspace sws;
+    std::shared_ptr<smf::IpmSession> session;
+    smf::Control ctrl; // solve control: the factor's, updated by each solve's control block
     int n = 0;
     int num_neg = 0;
     int num_two = 0;
-    int capture_id = 0;
-    bool rhs_captured = false;
 };
+
+// The IPM features stay off here until their default is decided.
+static smf::IpmControl plugin_ipm_control()
+{
+    smf::IpmControl ipm;
+    ipm.learn_inertia = false;
+    ipm.abort_on_wrong_inertia = false;
+    ipm.static_mode = smf::StaticMode::Off;
+    return ipm;
+}
 
 // Call statistics for benchmarking (SMF_PLUGIN_STATS=1): counts and time of
 // factorizations and solves, printed to stderr when the plugin unloads.
@@ -359,31 +363,33 @@ extern "C"
         // delays ~1 pivot per row on ACOPF KKT systems). IPOPT analyses the
         // pattern only, so without values the analysis is deferred to the
         // first factorization.
+        std::span<const double> values;
         if (val)
         {
             fill_values(ak, val);
-            ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
-            if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
-            {
-                info->flag = -3;
-                delete ak;
-                *akeep = nullptr;
-                return;
-            }
+            values = ak->mat.values;
+        }
+        if (ak->session->analyse(ak->mat, values, ak->ctrl, plugin_ipm_control()) != smf::ErrorCode::Success)
+        {
+            info->flag = -3;
+            delete ak;
+            *akeep = nullptr;
+            return;
         }
 
         info->flag = 0;
         info->matrix_rank = n;
-        if (ak->ak)
+        if (const smf::AnalysisKeep* a = ak->session->analysis_keep())
         {
-            info->matrix_dup = ak->info.matrix_duplicates;
-            info->matrix_outrange = ak->info.matrix_out_of_range;
-            info->matrix_missing_diag = ak->info.matrix_missing_diag;
-            info->num_sup = static_cast<int>(ak->ak->supernodes.size());
-            info->maxdepth = ak->info.max_tree_depth;
-            info->maxfront = ak->info.max_front_size;
-            info->maxsupernode = ak->info.max_supernode_size;
-            info->ordering = ak->info.ordering_used;
+            const smf::Info& si = ak->session->info();
+            info->matrix_dup = si.matrix_duplicates;
+            info->matrix_outrange = si.matrix_out_of_range;
+            info->matrix_missing_diag = si.matrix_missing_diag;
+            info->num_sup = static_cast<int>(a->supernodes.size());
+            info->maxdepth = si.max_tree_depth;
+            info->maxfront = si.max_front_size;
+            info->maxsupernode = si.max_supernode_size;
+            info->ordering = si.ordering_used;
         }
         *akeep = ak;
     }
@@ -420,86 +426,82 @@ extern "C"
         // (scaling = 1, returned in `scale`) and pass it back with
         // scaling = 0 on later factorizations.
         const bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
-        if (!computed_scaling && scale)
-        {
+        const bool reuse_scaling = !computed_scaling && scale;
+        if (reuse_scaling)
             ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
-            ak->ctrl.user_scale = scale;
-        }
 
         fill_values(ak, val);
         dump_kkt(ak);
-        if (!ak->ak)
-        {
-            ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
-            if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
-            {
-                ak->ak.reset();
-                info->flag = -3;
-                return;
-            }
-        }
+        smf::IpmSession& session = *ak->session;
+        session.set_control(ak->ctrl);
+        if (reuse_scaling)
+            session.set_user_scale(scale);
 
-        // Refactorizations reuse the previous factor object so its storage
-        // (factor values, solve layout) is not reallocated every iteration.
-        auto* fw = *fkeep ? static_cast<SmfFkeep*>(*fkeep) : nullptr;
-        if (fw && fw->n != ak->n)
+        // The first factorization also runs the deferred analysis; that time
+        // is not counted as factorization time.
+        const bool analysed_before = session.analysis_keep() != nullptr;
+        const auto t_factor = std::chrono::steady_clock::now();
+        session.factor(ak->mat.values);
+        const smf::Info& si = session.info();
+        if (session.analysis_keep() == nullptr)
         {
-            delete fw;
-            fw = nullptr;
+            info->flag = -3;
+            return;
         }
+        const double analyse_s = analysed_before ? 0.0 : si.analyse_seconds;
+        const smf::FactorStatus fs = si.factor_status;
+        const smf::FactorKeep& fk = session.factor_keep();
+
+        // Refactorizations reuse the previous fkeep handle; the factor's
+        // storage itself lives in the session.
+        auto* fw = *fkeep ? static_cast<SmfFkeep*>(*fkeep) : nullptr;
         *fkeep = nullptr;
         if (!fw)
             fw = new SmfFkeep();
+        fw->session = ak->session;
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
-        const auto t_factor = std::chrono::steady_clock::now();
-        const smf::FactorStatus fs = ak->solver.factor(*ak->ak, ak->mat, ak->ctrl, ak->info, fw->fk, ak->nws);
         if (g_stats.enabled)
         {
             ++g_stats.factors;
-            g_stats.factor_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count();
+            g_stats.factor_s +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s;
         }
+        // A successful SPD factor reports no inertia counts of its own.
+        const bool pd = ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
+                        fs == smf::FactorStatus::Success;
         // Per-factorization trace (SMF_PLUGIN_STATS>=2); corr=1 when the previous
         // plugin call was also a factorization (IPOPT inertia correction).
         if (g_stats.trace)
         {
-            const bool pd = ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
-                            fs == smf::FactorStatus::Success;
             std::fprintf(stderr,
                          "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
                          "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d\n",
-                         g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, ak->info.delayed_pivots,
-                         ak->info.static_pivots, pd ? ak->n : ak->info.num_positive, pd ? 0 : ak->info.num_negative,
-                         pd ? 0 : ak->info.num_zero, static_cast<long long>(ak->info.actual_factor_entries),
-                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count(),
+                         g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, si.delayed_pivots,
+                         si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
+                         pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
                          ctrl ? ctrl->scaling : -1, computed_scaling ? "out" : (scale ? "in" : "-"),
-                         ctrl ? ctrl->u : 0.0, ak->info.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
-                         static_cast<int>(std::count_if(fw->fk.diag_entries.begin(), fw->fk.diag_entries.end(),
+                         ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
+                         static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
                                                         [](const auto& de) { return de.tag == 2; })));
         }
         g_stats.last_call_was_factor = true;
-        ak->ctrl.user_scale = nullptr;
-        fw->ctrl.user_scale = nullptr;
 
         // smf reports input/scaling/allocation failures as Singular too;
         // only SingularMatrix is the MA97 "singular" warning.
-        if (fs == smf::FactorStatus::Singular && ak->info.status != smf::ErrorCode::SingularMatrix)
+        if (fs == smf::FactorStatus::Singular && si.status != smf::ErrorCode::SingularMatrix)
         {
             info->flag = -5;
             delete fw;
             return;
         }
 
-        if (ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
-            fs == smf::FactorStatus::Success)
-        {
-            ak->info.num_positive = ak->n;
-            ak->info.num_negative = 0;
-            ak->info.num_zero = 0;
-        }
-
-        const int inertia_total = ak->info.num_positive + ak->info.num_negative + ak->info.num_zero;
-        if (inertia_total != static_cast<int>(ak->ak->n))
+        const int num_pos = pd ? ak->n : si.num_positive;
+        const int num_neg = pd ? 0 : si.num_negative;
+        const int num_zero = pd ? 0 : si.num_zero;
+        const int inertia_total = num_pos + num_neg + num_zero;
+        if (inertia_total != static_cast<int>(session.analysis_keep()->n))
         {
             info->flag = -5;
             delete fw;
@@ -507,27 +509,27 @@ extern "C"
         }
 
         int two_count = 0;
-        for (const auto &de : fw->fk.diag_entries)
+        for (const auto &de : fk.diag_entries)
         {
             if (de.tag == 2)
                 ++two_count;
         }
 
-        fw->num_neg = ak->info.num_negative;
+        fw->num_neg = num_neg;
         fw->num_two = two_count;
         info->num_neg = fw->num_neg;
         info->num_two = fw->num_two;
-        info->matrix_rank = ak->n - ak->info.num_zero;
-        info->num_delay = ak->info.delayed_pivots;
-        info->maxfront = ak->info.max_front_size;
-        info->num_factor = static_cast<long>(ak->info.actual_factor_entries);
-        info->num_flops = static_cast<long>(ak->info.actual_flops);
-        info->maxsupernode = ak->info.max_supernode_size;
-        info->ordering = ak->info.ordering_used;
+        info->matrix_rank = ak->n - num_zero;
+        info->num_delay = si.delayed_pivots;
+        info->maxfront = si.max_front_size;
+        info->num_factor = static_cast<long>(si.actual_factor_entries);
+        info->num_flops = static_cast<long>(si.actual_flops);
+        info->maxsupernode = si.max_supernode_size;
+        info->ordering = si.ordering_used;
 
-        if (computed_scaling && scale && !fw->fk.scale.empty())
+        if (computed_scaling && scale && !fk.scale.empty())
         {
-            std::copy(fw->fk.scale.begin(), fw->fk.scale.end(), scale);
+            std::copy(fk.scale.begin(), fk.scale.end(), scale);
         }
 
         if (fs == smf::FactorStatus::Singular)
@@ -604,12 +606,14 @@ extern "C"
 
         apply_ma97_control(fw->ctrl, ctrl);
         const smf::SolveJob sjob = static_cast<smf::SolveJob>(job);
+        smf::IpmSession& session = *fw->session;
+        session.set_control(fw->ctrl);
         int rc = 0;
 
         const auto t_solve = std::chrono::steady_clock::now();
         if (ldx == n)
         {
-            rc = fw->solver.solve(fw->fk, fw->ctrl, fw->info, x, n, nrhs, fw->sws, sjob);
+            rc = session.solve(x, n, nrhs, sjob);
         }
         else
         {
@@ -618,7 +622,7 @@ extern "C"
                 std::copy(x + static_cast<size_t>(j) * ldx,
                           x + static_cast<size_t>(j) * ldx + n,
                           buf.data() + static_cast<size_t>(j) * n);
-            rc = fw->solver.solve(fw->fk, fw->ctrl, fw->info, buf.data(), n, nrhs, fw->sws, sjob);
+            rc = session.solve(buf.data(), n, nrhs, sjob);
             if (rc == 0)
             {
                 for (int j = 0; j < nrhs; ++j)

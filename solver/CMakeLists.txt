@@ -432,6 +432,7 @@ add_library(smf STATIC
     src/solve_backward.cpp
     src/solve_diag.cpp
     src/pivot_order.cpp
+    src/ipm_session.cpp
     src/solve.cpp
     src/scaling.cpp
     src/scaling_matching.cpp

@@ -308,6 +308,13 @@ endif()
 add_test(NAME IpmHooks COMMAND test_ipm_hooks)
 set_tests_properties(IpmHooks PROPERTIES TIMEOUT 30)
 
+# --- IPM mode: IpmSession (features off: pass-through to Solver) ---
+
+add_executable(test_ipm_session test_ipm_session.cpp)
+target_link_libraries(test_ipm_session PRIVATE smf GTest::gtest_main)
+add_test(NAME IpmSession COMMAND test_ipm_session)
+set_tests_properties(IpmSession PROPERTIES TIMEOUT 60)
+
 # --- Task 6: Benchmark adapters tests ---
 
 add_executable(test_benchmark_adapters
