@@ -33,6 +33,8 @@ import subprocess
 import sys
 import time
 
+from plugin_trace import parse_trace
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BUILD_REL = REPO / "build" / "Release"
 COINHSL_BIN = pathlib.Path(
@@ -242,12 +244,20 @@ def solver_options(solver: str) -> list[str]:
     raise SystemExit(f"unknown solver {solver}")
 
 
+def solver_env(solver: str) -> dict:
+    """Extra environment variables per solver id (smf* always traces factorizations)."""
+    if solver.startswith("smf"):
+        return {"SMF_PLUGIN_STATS": "2"}
+    return {}
+
+
 def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
               extra_env: dict | None = None, max_iter: int = 200, timeout: float = 900.0) -> dict:
     rundir.mkdir(parents=True, exist_ok=True)
     opts = solver_options(solver) + [f"max_iter {max_iter}", "print_level 5", "print_timing_statistics yes"]
     (rundir / "ipopt.opt").write_text("\n".join(opts) + "\n", encoding="utf-8")
     env = ipopt_env(threads)
+    env.update(solver_env(solver))
     if extra_env:
         env.update(extra_env)
     t0 = time.perf_counter()
@@ -266,7 +276,10 @@ def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
         mm = re.search(pattern, out)
         return cast(mm.group(1)) if mm else None
 
+    trace = parse_trace(out + err) if solver.startswith("smf") else {
+        k: None for k in ("factorizations", "inertia_corrections", "delays_total", "static_total", "factor_s")}
     return {
+        **trace,
         "solver": solver,
         "threads": threads,
         "status": (re.search(r"EXIT: (.*)", out).group(1).strip() if "EXIT:" in out else "no EXIT line"),

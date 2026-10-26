@@ -102,6 +102,7 @@ struct PluginStats
 {
     bool enabled = std::getenv("SMF_PLUGIN_STATS") != nullptr;
     bool trace = std::getenv("SMF_PLUGIN_STATS") != nullptr && std::atoi(std::getenv("SMF_PLUGIN_STATS")) > 1;
+    bool last_call_was_factor = false;  // no solve since the previous factorization => IPOPT inertia correction
     long factors = 0;
     long solves = 0;
     long rhs = 0;
@@ -458,6 +459,25 @@ extern "C"
             ++g_stats.factors;
             g_stats.factor_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count();
         }
+        // Per-factorization trace (SMF_PLUGIN_STATS>=2); corr=1 when the previous
+        // plugin call was also a factorization (IPOPT inertia correction).
+        if (g_stats.trace)
+        {
+            const bool pd = ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
+                            fs == smf::FactorStatus::Success;
+            std::fprintf(stderr,
+                         "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
+                         "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d\n",
+                         g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, ak->info.delayed_pivots,
+                         ak->info.static_pivots, pd ? ak->n : ak->info.num_positive, pd ? 0 : ak->info.num_negative,
+                         pd ? 0 : ak->info.num_zero, static_cast<long long>(ak->info.actual_factor_entries),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count(),
+                         ctrl ? ctrl->scaling : -1, computed_scaling ? "out" : (scale ? "in" : "-"),
+                         ctrl ? ctrl->u : 0.0, ak->info.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
+                         static_cast<int>(std::count_if(fw->fk.diag_entries.begin(), fw->fk.diag_entries.end(),
+                                                        [](const auto& de) { return de.tag == 2; })));
+        }
+        g_stats.last_call_was_factor = true;
         ak->ctrl.user_scale = nullptr;
         fw->ctrl.user_scale = nullptr;
 
@@ -523,14 +543,6 @@ extern "C"
             return;
         }
 
-        if (g_stats.trace)
-            std::fprintf(stderr,
-                         "[smf_ma97] factor %ld: scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d "
-                         "L=%lld delays=%d neg=%d two=%d\n",
-                         g_stats.factors, ctrl->scaling, computed_scaling ? "out" : (scale ? "in" : "-"), ctrl->u,
-                         ak->info.ordering_used, ctrl->ordering, ak->ctrl.nemin,
-                         static_cast<long long>(ak->info.actual_factor_entries), ak->info.delayed_pivots,
-                         fw->num_neg, fw->num_two);
         info->flag = 0;
         *fkeep = fw;
     }
@@ -616,6 +628,7 @@ extern "C"
             }
         }
 
+        g_stats.last_call_was_factor = false;
         if (g_stats.enabled)
         {
             ++g_stats.solves;
