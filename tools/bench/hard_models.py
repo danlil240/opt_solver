@@ -337,3 +337,18 @@ COPS = {
     "cops_polygon_200": (cops_polygon, 200),
 }
 MODELS.update(COPS)
+
+
+# Models reserved for held-out evaluation; every other hard model is "tuning".
+HELDOUT = frozenset({
+    "pglib_opf_case300_ieee",
+    "pglib_opf_case1354_pegase",
+    "pglib_opf_case2000_goc__sad",
+    "pglib_opf_case9241_pegase",
+    "cops_rocket_800",
+    "cops_polygon_200",
+})
+
+
+def split_of(name: str) -> str:
+    return "heldout" if name in HELDOUT else "tuning"

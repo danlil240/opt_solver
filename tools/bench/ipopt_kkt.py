@@ -222,9 +222,21 @@ DEFAULT_MODELS = list(MODELS)
 MODELS.update(hard_models.MODELS)
 
 
-def selected_models(models_arg: str) -> list[str]:
-    """Model names for capture/e2e: the --models list, or DEFAULT_MODELS when empty."""
+HARD_MAX_ITER = 3000  # hard models need far more iterations than the original 7 (glider ~800)
+
+
+def selected_models(models_arg: str, suite: str = "") -> list[str]:
+    """Model names for capture/e2e: --suite hard (every hard model), the --models
+    list, or DEFAULT_MODELS when both are empty."""
+    if suite == "hard":
+        return list(hard_models.MODELS)
+    if suite:
+        raise SystemExit(f"unknown suite {suite!r} (only 'hard')")
     return models_arg.split(",") if models_arg else list(DEFAULT_MODELS)
+
+
+def max_iter_for(name: str) -> int:
+    return HARD_MAX_ITER if name in hard_models.MODELS else 200
 
 
 # ------------------------------------------------------------------ ipopt --
@@ -320,8 +332,15 @@ def build_nl(name: str, scale: float) -> pathlib.Path:
 
 
 def capture(args) -> int:
-    names = selected_models(args.models)
-    fixtures = REPO / "benchmarks" / "fixtures" / "ipopt_kkt"
+    names = selected_models(args.models, args.suite)
+    hard = [n in hard_models.MODELS for n in names]
+    if any(hard) and not all(hard):
+        raise SystemExit("capture: do not mix hard and original models in one run")
+    is_hard = bool(names) and all(hard)
+    suite_id = "ipopt_hard" if is_hard else "ipopt_kkt"
+    fixtures = REPO / "benchmarks" / "fixtures" / suite_id
+    manifest_out = pathlib.Path(args.manifest_out) if args.manifest_out else \
+        REPO / "benchmarks" / "manifests" / f"{suite_id}.json"
     cases = []
     for name in names:
         print(f"{name}:", flush=True)
@@ -331,7 +350,8 @@ def capture(args) -> int:
             shutil.rmtree(dump)
         dump.mkdir(parents=True)
         res = run_ipopt(nl, "smf", WORK / "capture" / name, 1,
-                        {"SMF_KKT_DUMP_DIR": str(dump), "SMF_KKT_DUMP_MAX": "1000"})
+                        {"SMF_KKT_DUMP_DIR": str(dump), "SMF_KKT_DUMP_MAX": "1000"},
+                        max_iter=max_iter_for(name), timeout=args.timeout)
         print(f"  {res['status']}  iters={res['iterations']}", flush=True)
         mtx, vals = dump / "kkt_s0.mtx", dump / "kkt_s0.vals"
         if not mtx.exists():
@@ -346,9 +366,13 @@ def capture(args) -> int:
                 line = f.readline()
             n, _, nnz = (int(t) for t in line.split())
         nfact = vals.stat().st_size // (8 * nnz)
-        # The harness replays 5 refactorizations; keep 5 evenly spaced over
-        # the run (first to last IPOPT iteration) instead of all of them.
-        keep = sorted({round(i * (nfact - 1) / 4) for i in range(5)}) if nfact > 5 else list(range(nfact))
+        # --keep 5 (default): the harness replays 5 refactorizations; keep 5
+        # evenly spaced over the run (first to last IPOPT iteration).
+        # --keep all: every factorization the plugin dumped (the full sequence).
+        if args.keep == "all":
+            keep = list(range(nfact))
+        else:
+            keep = sorted({round(i * (nfact - 1) / 4) for i in range(5)}) if nfact > 5 else list(range(nfact))
         with vals.open("rb") as src, (dest / f"{name}.mtx.vals").open("wb") as dst:
             for i in keep:
                 src.seek(i * 8 * nnz)
@@ -357,15 +381,18 @@ def capture(args) -> int:
         cases.append({
             "matrix_id": name,
             "sequence_id": name,
-            "family_id": "ipopt_kkt",
+            "family_id": suite_id,
             "source": f"IPOPT {res['status']} in {res['iterations']} iterations ({nfact} factorizations)",
             "mtx_path": (dest / f"{name}.mtx").relative_to(REPO).as_posix(),
             "seq_values_path": (dest / f"{name}.mtx.vals").relative_to(REPO).as_posix(),
             "n": n,
             "nnz_lower": nnz,
             "factorizations": nfact,
+            "kept_factorizations": len(keep),
+            "ipopt_status": res["status"],
+            "ipopt_iterations": res["iterations"],
             "matrix_type": "indefinite",
-            "split": "test",
+            "split": hard_models.split_of(name) if is_hard else "test",
             "mode": "warm_sequence",
             "track": "ipopt",
             "expected_outcome": "Success",
@@ -374,19 +401,19 @@ def capture(args) -> int:
     cases.sort(key=lambda c: c["n"])
     manifest = {
         "schema_version": 1,
-        "suite": "ipopt_kkt",
+        "suite": suite_id,
         "solvers": ["smf", "ma27", "mumps", "mkl_pardiso", "ma57", "ma97", "ssids"],
         "required_baselines": [],
         "cases": cases,
     }
-    out = REPO / "benchmarks" / "manifests" / "ipopt_kkt.json"
-    out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {out} ({len(cases)} cases)")
+    manifest_out.parent.mkdir(parents=True, exist_ok=True)
+    manifest_out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {manifest_out} ({len(cases)} cases)")
     return 0
 
 
 def e2e(args) -> int:
-    names = selected_models(args.models)
+    names = selected_models(args.models, args.suite)
     solvers = args.solvers.split(",")
     threads = [int(t) for t in args.threads.split(",")]
     results = []
@@ -394,7 +421,8 @@ def e2e(args) -> int:
         nl = build_nl(name, args.scale)
         for t in threads:
             for s in solvers:
-                res = run_ipopt(nl, s, WORK / "e2e" / f"{name}_{s}_t{t}", t, timeout=args.timeout)
+                res = run_ipopt(nl, s, WORK / "e2e" / f"{name}_{s}_t{t}", t, timeout=args.timeout,
+                                 max_iter=max_iter_for(name))
                 res["model"] = name
                 results.append(res)
                 print(f"{name:22s} t={t:2d} {s:6s} {res['status'][:28]:28s} iters={res['iterations']} "
@@ -411,6 +439,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("command", choices=["capture", "e2e"])
     ap.add_argument("--models", default="")
+    ap.add_argument("--suite", default="", help="'hard' selects every hard_models.MODELS name")
+    ap.add_argument("--keep", choices=["5", "all"], default="5",
+                    help="capture: 5 evenly spaced factorizations (default) or the full sequence")
+    ap.add_argument("--manifest-out", default="",
+                    help="capture: manifest path (default manifests/ipopt_kkt.json; ipopt_hard.json for hard models)")
     ap.add_argument("--scale", type=float, default=1.0)
     ap.add_argument("--solvers", default="mumps,ma27,smf")
     ap.add_argument("--threads", default="1")

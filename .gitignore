@@ -65,3 +65,6 @@ benchmarks/manifests/ipopt_kkt.json
 
 # PGLib-OPF case files: fetched by tools/bench/fetch_pglib.py
 benchmarks/fixtures/pglib/
+
+# Full-sequence KKT captures of the hard corpus (ipopt_kkt.py capture --suite hard --keep all)
+benchmarks/fixtures/ipopt_hard/
