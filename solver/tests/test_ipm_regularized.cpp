@@ -14,6 +14,7 @@
 #include "smf/info.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
@@ -479,3 +480,95 @@ TEST(IpmRegularized, NoDelays) {
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The refinement matrix is prepared once per analysis (RefineMatrix) and only
+// its values change per factor.
+
+TEST(IpmRegularized, ConsecutiveSolvesAreIdentical) {
+    const CscLower A = good_kkt();  // missing diagonals: the augmented pattern
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, {}, ipopt_control(), reg_mode()), ErrorCode::Success);
+    for (int f = 0; f < 2; ++f) {
+        ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+        std::vector<double> x1 = rhs(A.n), x2 = rhs(A.n);
+        ASSERT_EQ(s.solve(x1.data(), static_cast<int>(A.n), 1), 0);
+        ASSERT_EQ(s.solve(x2.data(), static_cast<int>(A.n), 1), 0);
+        EXPECT_EQ(x1, x2) << "factor " << f;
+        EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(A, rhs(A.n), x1, 1)));
+    }
+
+    Replay rp;
+    if (!load_replay("acopf_grid_80", rp)) GTEST_SKIP() << "acopf_grid_80 fixture not present";
+    Control ctrl = ipopt_control();
+    ctrl.scaling = ScalingMethod::Matching;
+    IpmSession r;
+    ASSERT_EQ(r.analyse(rp.A, {}, ctrl, reg_mode()), ErrorCode::Success);
+    for (std::size_t k : {std::size_t{0}, rp.steps.size() - 1}) {
+        ASSERT_EQ(r.factor(rp.steps[k]), IpmFactorStatus::Ok);
+        std::vector<double> x1 = rhs(rp.A.n), x2 = rhs(rp.A.n);
+        ASSERT_EQ(r.solve(x1.data(), static_cast<int>(rp.A.n), 1), 0);
+        ASSERT_EQ(r.solve(x2.data(), static_cast<int>(rp.A.n), 1), 0);
+        EXPECT_EQ(x1, x2) << "step " << k;
+        CscLower Av = rp.A;
+        Av.values = rp.steps[k];
+        EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(Av, rhs(rp.A.n), x1, 1)))
+            << "step " << k;
+    }
+}
+
+TEST(IpmRegularized, PreparedRefineMatchesCscRefine) {
+    // Same factor and starting x: refine(RefineMatrix) is bit-identical to
+    // refine(CscLower) on a matrix without duplicates.
+    const CscLower A = with_zero_diagonal(good_kkt());
+    std::vector<int8_t> sign(static_cast<std::size_t>(A.n), 1);
+    for (Int i = kN; i < A.n; ++i) sign[static_cast<std::size_t>(i)] = -1;
+    Control c = ipopt_control();
+    c.ordering = OrderingMethod::AMD;
+    c.pivot_u = 0.0;
+    c.static_pivot_tol = 1e-8;
+    c.static_pivot_in_order = true;
+    c.reg_diag_sign = sign.data();
+    c.reg_diag_tol = 1e-8;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, c, info);
+    ASSERT_TRUE(ak != nullptr);
+    FactorKeep fk;
+    NumericWorkspace nws;
+    ASSERT_EQ(solver.factor(*ak, A, c, info, fk, nws), FactorStatus::Success);
+    std::vector<double> x0 = rhs(A.n);
+    SolveWorkspace ws0;
+    ASSERT_EQ(solver.solve(fk, c, info, x0.data(), static_cast<int>(A.n), 1, ws0), 0);
+    const std::vector<double> b = rhs(A.n);
+
+    std::vector<double> xa = x0, xb = x0;
+    SolveWorkspace wa, wb;
+    const RefinementResult ra = refine(A, fk, c, b, xa, 1, wa);
+    RefineMatrix m;
+    ASSERT_EQ(prepare_refine_matrix(A, m), ErrorCode::Success);
+    set_refine_values(A.values, m);
+    const RefinementResult rb = refine(m, fk, c, b, xb, 1, wb);
+    EXPECT_EQ(xa, xb);
+    EXPECT_EQ(ra.status, rb.status);
+    EXPECT_EQ(ra.iterations, rb.iterations);
+    EXPECT_EQ(ra.eta_inf, rb.eta_inf);
+    EXPECT_EQ(ra.omega, rb.omega);
+
+    // Duplicates are summed into one canonical entry; non-finite values are
+    // rejected like the CscLower overload does.
+    const CscLower D = with_duplicates(A);
+    RefineMatrix md;
+    ASSERT_EQ(prepare_refine_matrix(D, md), ErrorCode::Success);
+    EXPECT_EQ(md.entries.size(), m.entries.size());
+    set_refine_values(D.values, md);
+    std::vector<double> xd = x0;
+    SolveWorkspace wd;
+    const RefinementResult rd = refine(md, fk, c, b, xd, 1, wd);
+    EXPECT_EQ(rd.status, ErrorCode::Success);
+    std::vector<double> bad = D.values;
+    bad[0] = std::nan("");
+    set_refine_values(bad, md);
+    std::vector<double> xn = x0;
+    EXPECT_EQ(refine(md, fk, c, b, xn, 1, wd).status, ErrorCode::IllegalValue);
+}

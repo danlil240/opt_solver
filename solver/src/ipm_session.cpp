@@ -65,6 +65,7 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   entry_map_.clear();
   input_nnz_ = 0;
   reg_sign_.clear();
+  refine_mat_ = RefineMatrix{};
 
   mat_.n = pattern.n;
   mat_.col_ptr = pattern.col_ptr;
@@ -110,6 +111,12 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
       mat_.row_idx = std::move(row_idx);
       mat_.values.assign(mat_.row_idx.size(), 0.0);
       entry_map_ = std::move(map);
+    }
+    // The refinement matrix: sorted once here, values per factor().
+    if (prepare_refine_matrix(mat_, refine_mat_) != ErrorCode::Success) {
+      mat_ = CscLower{};
+      info_.status = ErrorCode::IllegalValue;
+      return info_.status;
     }
   }
   if (values.empty()) return ErrorCode::Success;  // analysis deferred to factor()
@@ -196,6 +203,7 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
   // by the hybrid accounting (a zero if raised from an exact zero, else by
   // sign), or all as zeros with IpmControl::static_as_zero.
   if (regularized()) {
+    set_refine_values(mat_.values, refine_mat_);
     if (reg_sign_.empty()) {
       const std::size_t n = static_cast<std::size_t>(mat_.n);
       reg_sign_.assign(n, 1);
@@ -382,7 +390,7 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
   if (refine_solve) refine_rhs_.assign(b, b + len);
   const int rc = solver_.solve(fk_, ctrl_, solve_info_, b, n, nrhs, sws_, job);
   if (rc == 0 && refine_solve)
-    refine(mat_, fk_, ctrl_, refine_rhs_, std::span<double>(b, len), nrhs, sws_);
+    refine(refine_mat_, fk_, ctrl_, refine_rhs_, std::span<double>(b, len), nrhs, sws_);
   if (rc == 0 && pending_accept_) {
     ++stats_.accepted;
     pending_accept_ = false;

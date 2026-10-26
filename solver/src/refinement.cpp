@@ -27,11 +27,7 @@ struct NeumaierAcc {
     long double result() const noexcept { return sum + c; }
 };
 
-struct CanonicalSymEntry {
-    Int row = 0;
-    Int col = 0;
-    long double val = 0.0L;
-};
+using CanonicalSymEntry = RefineEntry;
 
 constexpr double kTargetEtaInf = 1e-10;
 constexpr double kTargetOmega = 1e-8;
@@ -129,6 +125,32 @@ bool compute_residual_and_backward_error(
     return std::isfinite(eta_inf_out) && std::isfinite(omega_out);
 }
 
+long double norm_inf_of(int n, const std::vector<RefineEntry> &entries) {
+    std::vector<NeumaierAcc> row_abs(static_cast<std::size_t>(n));
+    for (const auto &e : entries) {
+        const long double av = std::fabsl(e.val);
+        row_abs[static_cast<std::size_t>(e.row)].add(av);
+        if (e.row != e.col) {
+            row_abs[static_cast<std::size_t>(e.col)].add(av);
+        }
+    }
+    long double norm_A_inf = 0.0L;
+    for (int i = 0; i < n; ++i) {
+        norm_A_inf = std::max(norm_A_inf, row_abs[static_cast<std::size_t>(i)].result());
+    }
+    return norm_A_inf;
+}
+
+RefinementResult refine_core(int n,
+                             const std::vector<RefineEntry> &entries,
+                             long double norm_A_inf,
+                             const FactorKeep &fkeep,
+                             const Control &ctrl,
+                             std::span<const double> b,
+                             std::span<double> x,
+                             int nrhs,
+                             SolveWorkspace &ws);
+
 } // namespace
 
 RefinementResult refine(const CscLower &original,
@@ -180,19 +202,86 @@ RefinementResult refine(const CscLower &original,
         }
     }
 
-    std::vector<NeumaierAcc> row_abs(static_cast<std::size_t>(n));
-    for (const auto &e : entries) {
-        const long double av = std::fabsl(e.val);
-        row_abs[static_cast<std::size_t>(e.row)].add(av);
-        if (e.row != e.col) {
-            row_abs[static_cast<std::size_t>(e.col)].add(av);
+    return refine_core(n, entries, norm_inf_of(n, entries), fkeep, ctrl, b, x, nrhs, ws);
+}
+
+RefinementResult refine(const RefineMatrix &original,
+                        const FactorKeep &fkeep,
+                        const Control &ctrl,
+                        std::span<const double> b,
+                        std::span<double> x,
+                        int nrhs,
+                        SolveWorkspace &ws) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const int n = static_cast<int>(original.n);
+    if (n <= 0 || nrhs <= 0 || !original.finite) {
+        return RefinementResult{ErrorCode::IllegalValue, 0, inf, inf};
+    }
+    const std::size_t total_len = static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs);
+    if (b.size() < total_len || x.size() < total_len) {
+        return RefinementResult{ErrorCode::IllegalValue, 0, inf, inf};
+    }
+    return refine_core(n, original.entries, original.norm_inf, fkeep, ctrl, b, x, nrhs, ws);
+}
+
+ErrorCode prepare_refine_matrix(const CscLower &A, RefineMatrix &m) {
+    m = RefineMatrix{};
+    if (A.n <= 0 || A.validate_shape() != ErrorCode::Success) return ErrorCode::IllegalValue;
+    const int n = static_cast<int>(A.n);
+    struct Item {
+        Int row, col, k;
+    };
+    std::vector<Item> items;
+    items.reserve(A.row_idx.size());
+    for (int j = 0; j < n; ++j) {
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+             p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const Int i = A.row_idx[static_cast<std::size_t>(p)];
+            items.push_back(i >= j ? Item{i, static_cast<Int>(j), p} : Item{static_cast<Int>(j), i, p});
         }
     }
-    long double norm_A_inf = 0.0L;
-    for (int i = 0; i < n; ++i) {
-        norm_A_inf = std::max(norm_A_inf, row_abs[static_cast<std::size_t>(i)].result());
+    std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &c) {
+        return a.col != c.col ? a.col < c.col : a.row < c.row;
+    });
+    m.n = A.n;
+    m.slot.assign(items.size(), 0);
+    m.entries.reserve(items.size());
+    for (const Item &it : items) {
+        if (m.entries.empty() || m.entries.back().row != it.row || m.entries.back().col != it.col)
+            m.entries.push_back({it.row, it.col, 0.0L});
+        m.slot[static_cast<std::size_t>(it.k)] = static_cast<Int>(m.entries.size() - 1);
     }
+    m.finite = false;  // until set_refine_values
+    return ErrorCode::Success;
+}
 
+void set_refine_values(std::span<const double> values, RefineMatrix &m) {
+    for (auto &e : m.entries) e.val = 0.0L;
+    bool finite = values.size() == m.slot.size();
+    if (finite) {
+        for (std::size_t k = 0; k < values.size(); ++k) {
+            const double v = values[k];
+            finite = finite && std::isfinite(v);
+            m.entries[static_cast<std::size_t>(m.slot[k])].val += static_cast<long double>(v);
+        }
+    }
+    m.finite = finite;
+    m.norm_inf = finite ? norm_inf_of(static_cast<int>(m.n), m.entries) : 0.0L;
+}
+
+namespace {
+
+RefinementResult refine_core(int n,
+                             const std::vector<RefineEntry> &entries,
+                             long double norm_A_inf,
+                             const FactorKeep &fkeep,
+                             const Control &ctrl,
+                             std::span<const double> b,
+                             std::span<double> x,
+                             int nrhs,
+                             SolveWorkspace &ws) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::size_t total_len = static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs);
     double best_eta = inf;
     double best_omega = inf;
     if (!compute_residual_and_backward_error(
@@ -279,5 +368,7 @@ RefinementResult refine(const CscLower &original,
         best_eta,
         best_omega};
 }
+
+} // namespace
 
 } // namespace smf

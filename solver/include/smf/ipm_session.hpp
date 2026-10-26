@@ -6,6 +6,7 @@
 #include "smf/error.hpp"
 #include "smf/factor_posdef.hpp"
 #include "smf/info.hpp"
+#include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
@@ -196,6 +197,9 @@ class IpmSession {
   std::size_t input_nnz_ = 0;
   std::vector<int8_t> reg_sign_;
   std::vector<double> refine_rhs_;  // the right-hand sides of the solve being refined
+  // The unregularized matrix refinement checks against: mat_'s canonical
+  // pattern, built once per analyse(); values set on every factor().
+  RefineMatrix refine_mat_;
 
   // Feature 2 state.
   std::unique_ptr<AnalysisKeep> prev_ak_;  // the analysis before an adoption (probation)
