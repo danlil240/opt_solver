@@ -1,7 +1,7 @@
 # smf long-term roadmap
 
 **Date:** 2026-10-26
-**Input:** `solver_research_report.md` (state of the art in optimization solvers, Oct 2026) and the performance write-ups in `docs/performance/`.
+**Input:** `solver_research_report.md` (state of the art in optimization solvers, Oct 2026; a local file in the working copy, not committed to the repository) and the performance write-ups in `docs/performance/`.
 
 ## Positioning
 
@@ -33,8 +33,8 @@ The research report ranks complete solvers like COPT, Gurobi and cuOpt on LP, MI
    - **Make the regularized ("quasidefinite") path a supported mode** instead of an opt-in (`Control::static_pivot_tol`). A quasidefinite matrix can be factored stably in any symmetric order (Vanderbei), so ordering and memory are fixed at analysis. That is what makes parallel and GPU factorization tractable in Horizon 2.
    - **Status (2026-10-26):** all three are built, behind `smf::IpmSession` (`docs/performance/2026-10-26-ipm-mode.md`). All stay **off by default**, because each failed its gate:
      - **Early abort on wrong inertia:** identical IPOPT logs, but it saves < 5%, since the excess negatives appear only in the root front.
-     - **Realized-order re-analysis:** cuts delays 16–18× when adopted, but rejected attempts cost wall time; it needs a retry backoff.
-     - **Fallback and Regularized static modes:** new failures, +23% to 2.75× iterations, and up to 4.7× wall time on the held-out models.
+     - **Realized-order re-analysis:** cuts delays 15–18× when adopted, but rejected attempts cost wall time; it needs a retry backoff.
+     - **Fallback and Regularized static modes** fail the held-out outcome gate. Fallback (hybrid accounting): a new failure (case9241 max_iter) and 2.75× iterations. Regularized (hybrid): no new failures, but +23% iterations and 4.7× wall time. The all-zero accounting variants of both have new failures.
 
      Next levers: re-analysis backoff, ρ applied after scaling, and the case9241 replay-accuracy triage.
 3. **Close the backsolve gap.** IPOPT does one solve plus up to three refinement solves per factorization, so a 2× slower solve shows up directly in end-to-end time (robot_arm: 0.44 s vs MA27's 0.20 s). Options: blocked multi-RHS solves and a solve-friendly factor layout.
@@ -79,4 +79,10 @@ The research report ranks complete solvers like COPT, Gurobi and cuOpt on LP, MI
 
 ## Next step
 
-Apply for the HSL academic licence, and start the interior-point mode: pivot-sequence reuse, cheap δ refactors, and static/quasidefinite mode as the default on the IPOPT track.
+The interior-point mode is built and gated (all features off by default). Next, from its open items (`docs/performance/2026-10-26-ipm-mode.md`):
+
+- **Replay-accuracy triage of plain smf** on pglib_opf_case9241_pegase (4 of 5 default replay steps fail, omega up to 1.0), and with matching scaling on case2000_goc__sad (34 of 75 steps) and case1354_pegase (1 of 46).
+- **Re-analysis retry backoff** (or stop after k rejected attempts): the rejected attempts are the whole held-out wall loss; then re-run its gates.
+- **Regularized mode:** apply ρ only after scaling (force scaling, or scale ρ per row), record the refinement result in `IpmStats`, and cut the refinement cost before re-gating it.
+- **The IPOPT robustness gap** on cops_chain_800 and cops_elec_200 (smf worse than MA27), untouched by every default.
+- **Apply for the HSL academic licence** (Horizon 1, item 1) to benchmark against MA57 and MA97.
