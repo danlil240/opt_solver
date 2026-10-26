@@ -33,6 +33,86 @@ class TestPglib(unittest.TestCase):
         self.assertEqual(len([n for n in hard_models.MODELS if n.startswith("pglib_")]), 8)
 
 
+def _ipopt_exe():
+    import ipopt_kkt
+
+    return ipopt_kkt.IPOPT_EXE
+
+
+class TestCops(unittest.TestCase):
+    # (builder, size, COPS 3.0 report optimum in the problem's own sense, one_sided).
+    # Sizes are the smallest the report tabulates (Dolan, More & Munson,
+    # ANL/MCS-TM-273, Tables 1.2-14.2); the report has no nh=100/np=25/nv=25
+    # column for chain, rocket, steering, pinene, elec, polygon.
+    # one_sided: elec and polygon have many local optima; assert IPOPT reaches
+    # the report value or better.
+    KNOWN = [
+        ("cops_chain", 200, 5.06891, False),          # Table 4.2, min
+        ("cops_catmix", 100, -4.80556e-2, False),     # Table 14.2, min
+        ("cops_rocket", 400, 1.01283, False),         # Table 10.2, max
+        ("cops_steering", 200, 5.54577e-1, False),    # Table 9.2, min
+        ("cops_glider", 100, 1.25505e3, False),       # Table 11.2, max
+        ("cops_elec", 50, 1.05518e3, True),           # Table 2.2, min
+        ("cops_pinene", 100, 1.98721e1, False),       # Table 5.2, min
+    ]
+    # Table 1.2, max; best reported local maximum (SNOPT). IPOPT 3.14 + MUMPS
+    # stops at a worse local maximum (area 0.719741 at nv=50, below every value
+    # in Table 1.2: 0.760725..0.784015), so this one is an expected failure.
+    POLYGON = ("cops_polygon", 50, 7.84015e-1, True)
+
+    def test_models_entries(self):
+        import hard_models
+
+        names = ["cops_glider_400", "cops_rocket_800", "cops_catmix_800", "cops_chain_800",
+                 "cops_pinene_400", "cops_steering_800", "cops_elec_200", "cops_polygon_200"]
+        for name in names:
+            self.assertIn(name, hard_models.MODELS)
+            builder, arg = hard_models.MODELS[name]
+            self.assertIs(type(arg), int, name)  # int: --scale applies
+            self.assertEqual(builder.__name__, name.rsplit("_", 1)[0])
+            self.assertEqual(arg, int(name.rsplit("_", 1)[1]))
+
+    def _check_optimum(self, tmp, name, size, ref, one_sided):
+        import pyomo.environ as pe
+        import hard_models
+        import ipopt_kkt
+
+        model = getattr(hard_models, name)(size)
+        sense = next(model.component_data_objects(pe.Objective, active=True)).sense
+        nl = pathlib.Path(tmp) / f"{name}_{size}.nl"
+        model.write(str(nl), format="nl")
+        res = ipopt_kkt.run_ipopt(nl, "mumps", pathlib.Path(tmp) / name, threads=1, max_iter=3000)
+        self.assertEqual(res["status"], "Optimal Solution Found.", res)
+        # IPOPT's AMPL interface minimizes -f for a maximize objective and
+        # prints the internal (minimized) value.
+        got = (-1.0 if sense == pe.maximize else 1.0) * res["objective"]
+        print(f"  {name}({size}): ref {ref:.6g} got {got:.9g} iters {res['iterations']}", flush=True)
+        tol = 1e-4 * abs(ref)
+        if not one_sided:
+            self.assertLessEqual(abs(got - ref), tol)
+        elif sense == pe.maximize:
+            self.assertGreaterEqual(got, ref - tol)
+        else:
+            self.assertLessEqual(got, ref + tol)
+
+    @unittest.skipUnless(_ipopt_exe().exists(), "IPOPT (smfbench env) not found")
+    def test_known_optima(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name, size, ref, one_sided in self.KNOWN:
+                with self.subTest(model=name, size=size):
+                    self._check_optimum(tmp, name, size, ref, one_sided)
+
+    @unittest.skipUnless(_ipopt_exe().exists(), "IPOPT (smfbench env) not found")
+    @unittest.expectedFailure
+    def test_polygon_known_optimum(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._check_optimum(tmp, *self.POLYGON)
+
+
 class TestDefaultSelection(unittest.TestCase):
     ORIGINAL = ["pde_control_120", "pde_control_250", "robot_arm_8k", "obstacle_surface_200",
                 "acopf_grid_80", "acopf_grid_160", "portfolio_20k"]
