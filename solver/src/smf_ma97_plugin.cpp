@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -85,6 +86,12 @@ struct SmfAkeep
     int dump_factorizations = 0; // factorizations dumped for this analysis
 };
 
+// The factor itself lives in the session, so two fkeeps made from one akeep
+// would share it: `generation` is the session's factor_generation() when this
+// fkeep was factored, and a solve with an fkeep whose factor has since been
+// replaced (another fkeep factored from the same akeep) fails with flag -1
+// (MA97's "error in the sequence of calls"). IPOPT reuses one fkeep handle per
+// akeep, which always holds the current generation.
 struct SmfFkeep
 {
     std::shared_ptr<smf::IpmSession> session;
@@ -92,6 +99,7 @@ struct SmfFkeep
     int n = 0;
     int num_neg = 0;
     int num_two = 0;
+    std::uint64_t generation = 0; // session factor generation of this fkeep's factor
     bool aborted = false; // factor stopped on wrong inertia: num_neg is a partial count
 };
 
@@ -538,6 +546,7 @@ extern "C"
         fw->session = ak->session;
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
+        fw->generation = session.factor_generation();
         fw->aborted = false;
         if (g_stats.enabled)
         {
@@ -700,6 +709,13 @@ extern "C"
 
         auto* fw = static_cast<SmfFkeep*>(*fkeep);
         const int n = fw->n;
+        // This fkeep's factor was replaced by a later factorization into
+        // another fkeep from the same akeep (they share one session).
+        if (!fw->session || fw->generation != fw->session->factor_generation())
+        {
+            info->flag = -1;
+            return;
+        }
         if (nrhs < 1)
         {
             info->flag = -2;

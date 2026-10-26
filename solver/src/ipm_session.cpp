@@ -34,6 +34,7 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   // A new pattern starts a new history (the factor before the analyses it
   // points at).
   fk_ = FactorKeep{};
+  ++factor_generation_;  // the factor is gone: older handles are stale
   ak_.reset();
   nws_ = NumericWorkspace{};
   sws_ = SolveWorkspace{};
@@ -163,6 +164,8 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
   aborted_ = false;
   pending_accept_ = false;
   last_spd_ok_ = false;
+  // Every factor() replaces (or invalidates) the session's factor.
+  ++factor_generation_;
   if (mat_.n <= 0) {
     info_.status = ErrorCode::NotInitialised;
     return IpmFactorStatus::Error;
@@ -195,6 +198,10 @@ IpmFactorStatus IpmSession::factor(std::span<const double> values,
     factor_ctrl_.fallback_static_pivot_tol = 1e-8;
     factor_ctrl_.static_pivots_as_zero = ipm_.static_as_zero;
   }
+  // Both static modes need the serial engine: the task-parallel one
+  // (Control::tree_parallel) ignores the fallback, static and in-order
+  // settings.
+  if (ipm_.static_mode != StaticMode::Off) factor_ctrl_.tree_parallel = false;
   // Feature 3b: the quasidefinite mode. Rows are classified once per
   // analysis, at its first factorization: a zero (or added) diagonal is a
   // constraint row, anything else, negative included, a primal row. The
@@ -267,18 +274,20 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
   case FactorStatus::NotPositiveDefinite:
     break;
   }
-  solvable_ = result == IpmFactorStatus::Ok || result == IpmFactorStatus::Singular;
+  // Only a factor the engine actually ran can be solved with or judged. A
+  // failure before it starts (e.g. the matching scaling finds no matching:
+  // Singular with SingularMatrix) clears fk_'s factor values and may leave
+  // fk_ pointing at the previous analysis. The caller still sees Singular
+  // (the MA97 plugin's flag 7), but solve() refuses this factor.
+  const bool ran = fk_.analysis == ak_.get() && !fk_.factor_values.empty();
+  solvable_ = result == IpmFactorStatus::Ok || (result == IpmFactorStatus::Singular && ran);
   aborted_ = result == IpmFactorStatus::WrongInertia;
   pending_accept_ = solvable_;
   last_spd_ok_ = factor_ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
                  fs == FactorStatus::Success;
 
   // Probation: judged on the adopted analysis' first complete factorization
-  // (an aborted one is judged when solve() completes it). Only a factor the
-  // engine actually ran counts: a failure before it starts (e.g. the
-  // matching scaling finds no matching: Singular with SingularMatrix) leaves
-  // fk_ as it was, pointing at the previous analysis, with no factor values.
-  const bool ran = fk_.analysis == ak_.get() && !fk_.factor_values.empty();
+  // (an aborted one is judged when solve() completes it).
   if (solvable_ && ran) stats_.static_pivots += info_.static_pivots;
   if (probation_ && solvable_ && ran) {
     probation_ = false;

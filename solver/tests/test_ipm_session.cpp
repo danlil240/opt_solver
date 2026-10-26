@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -84,6 +85,14 @@ IpmControl features_off() {
     ipm.abort_on_wrong_inertia = false;
     ipm.reanalyse = false;
     ipm.static_mode = StaticMode::Off;
+    return ipm;
+}
+
+// Feature 1 on (IpmControl's defaults leave the abort off: its gate failed).
+IpmControl abort_on() {
+    IpmControl ipm = features_off();
+    ipm.learn_inertia = true;
+    ipm.abort_on_wrong_inertia = true;
     return ipm;
 }
 
@@ -334,7 +343,7 @@ double eta(const CscLower &A, const std::vector<double> &b, const std::vector<do
     return smf::bench::validate(A, b, x, 1).eta_inf;
 }
 
-// A session on the small KKT pattern with Feature 1 on (IpmControl defaults).
+// A session on the small KKT pattern with Feature 1 on (abort_on()).
 struct AbortHarness {
     Control ctrl = ipopt_control();
     CscLower good = small_kkt();
@@ -342,7 +351,7 @@ struct AbortHarness {
     IpmSession session;
     int n = static_cast<int>(good.n);
 
-    AbortHarness() { EXPECT_EQ(session.analyse(good, {}, ctrl, IpmControl{}), ErrorCode::Success); }
+    AbortHarness() { EXPECT_EQ(session.analyse(good, {}, ctrl, abort_on()), ErrorCode::Success); }
 
     // Factor the good KKT and solve with it: the session learns 18.
     void accept_good() {
@@ -478,7 +487,7 @@ TEST(IpmSession, ExplicitExpectationAndSwitches) {
     }
     {
         // learn_inertia off: no learned expectation, no abort.
-        IpmControl ipm;
+        IpmControl ipm = abort_on();
         ipm.learn_inertia = false;
         AbortHarness h;
         ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, ipm), ErrorCode::Success);
@@ -499,7 +508,7 @@ TEST(IpmSession, ExplicitExpectationAndSwitches) {
         // A new analysis forgets the expectation.
         AbortHarness h;
         h.accept_good();
-        ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, IpmControl{}), ErrorCode::Success);
+        ASSERT_EQ(h.session.analyse(h.good, {}, h.ctrl, abort_on()), ErrorCode::Success);
         EXPECT_FALSE(h.session.expected_negatives().has_value());
         EXPECT_EQ(h.session.factor(h.bad.values), IpmFactorStatus::Ok);
     }
@@ -938,6 +947,81 @@ TEST(IpmSession, ProbationIgnoresAFactorThatNeverRan) {
     expect_factor_points_at_a_live_analysis(s);
 }
 
+// A factor that fails before the engine runs (the matching scaling finds no
+// matching: Singular with SingularMatrix, the MA97 plugin's flag 7) leaves no
+// factor of its values. solve() must refuse it, and neither accept it nor
+// learn its inertia, whether or not an earlier factor exists.
+TEST(IpmSession, SolveRefusesAFactorThatNeverRan) {
+    const CscLower A = grid_kkt(40, 7);
+    CscLower Z = A;
+    const Int r = A.n - 1; // the last constraint row: zero its couplings
+    for (Int j = 0; j < Z.n; ++j)
+        for (Int p = Z.col_ptr[static_cast<std::size_t>(j)]; p < Z.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (Z.row_idx[static_cast<std::size_t>(p)] == r) Z.values[static_cast<std::size_t>(p)] = 0.0;
+    // continue_on_singular as in the MA97 plugin (IPOPT's action = 0): the
+    // Solver itself would then solve with a Singular factor.
+    Control none = delay_ctrl();
+    none.continue_on_singular = true;
+    Control matching = none;
+    matching.scaling = ScalingMethod::Matching;
+    IpmControl ipm = features_off();
+    ipm.learn_inertia = true;
+    const std::vector<double> b = rhs(A.n);
+    const int n = static_cast<int>(A.n);
+
+    {
+        // No factor before it.
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, A.values, none, ipm), ErrorCode::Success);
+        s.set_control(matching);
+        EXPECT_EQ(s.factor(Z.values), IpmFactorStatus::Singular);
+        ASSERT_EQ(s.info().status, ErrorCode::SingularMatrix);
+        std::vector<double> x = b;
+        EXPECT_NE(s.solve(x.data(), n, 1), 0);
+        EXPECT_EQ(x, b); // untouched
+        EXPECT_FALSE(s.expected_negatives().has_value());
+        EXPECT_EQ(s.stats().accepted, 0);
+    }
+    {
+        // An accepted factor of the same analysis before it.
+        IpmSession s;
+        ASSERT_EQ(s.analyse(A, A.values, none, ipm), ErrorCode::Success);
+        factor_and_solve(s, A);
+        ASSERT_TRUE(s.expected_negatives().has_value());
+        const int learned = *s.expected_negatives();
+        s.set_control(matching);
+        EXPECT_EQ(s.factor(Z.values), IpmFactorStatus::Singular);
+        ASSERT_EQ(s.info().status, ErrorCode::SingularMatrix);
+        std::vector<double> x = b;
+        EXPECT_NE(s.solve(x.data(), n, 1), 0);
+        EXPECT_EQ(x, b);
+        EXPECT_EQ(s.stats().accepted, 1);
+        ASSERT_TRUE(s.expected_negatives().has_value());
+        EXPECT_EQ(*s.expected_negatives(), learned);
+        // The next factor that runs is solvable again.
+        s.set_control(none);
+        factor_and_solve(s, A);
+        EXPECT_EQ(s.stats().accepted, 2);
+    }
+}
+
+TEST(IpmSession, FactorGenerationAdvancesOnEveryFactor) {
+    const CscLower A = small_kkt();
+    IpmSession s;
+    const std::uint64_t g0 = s.factor_generation();
+    ASSERT_EQ(s.analyse(A, {}, ipopt_control(), features_off()), ErrorCode::Success);
+    const std::uint64_t g1 = s.factor_generation();
+    EXPECT_GT(g1, g0);
+    ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+    const std::uint64_t g2 = s.factor_generation();
+    EXPECT_GT(g2, g1);
+    std::vector<double> x = rhs(A.n);
+    ASSERT_EQ(s.solve(x.data(), static_cast<int>(A.n), 1), 0);
+    EXPECT_EQ(s.factor_generation(), g2); // a solve keeps the factor
+    ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+    EXPECT_GT(s.factor_generation(), g2);
+}
+
 // ---------------------------------------------------------------------------
 // Feature 3a: StaticMode::Fallback.
 
@@ -968,6 +1052,17 @@ FactorCounts factor_once(const CscLower &A, const IpmControl &ipm) {
 
 TEST(IpmSession, StaticAsZeroDefaultsOff) {
     EXPECT_FALSE(IpmControl{}.static_as_zero);
+}
+
+// The measured decision (docs/performance/2026-10-26-ipm-mode.md): the
+// features that failed their gates default to off; the spec's struct had
+// abort_on_wrong_inertia true (and reanalyse was true until the gates ran).
+TEST(IpmSession, GateFailedFeaturesDefaultOff) {
+    const IpmControl d{};
+    EXPECT_FALSE(d.abort_on_wrong_inertia);
+    EXPECT_FALSE(d.reanalyse);
+    EXPECT_EQ(d.static_mode, StaticMode::Off);
+    EXPECT_TRUE(d.learn_inertia); // harmless alone: it only arms the abort
 }
 
 TEST(IpmSession, FallbackStaticPivotAccounting) {

@@ -82,7 +82,10 @@ struct Control {
     // pivots than this have been accepted the factorization stops with
     // FactorStatus::InertiaExceeded: an interior-point method that expects
     // this many negatives would reject the factor anyway. A factorization
-    // that stays within the limit is bit-identical to an unarmed one.
+    // that stays within the limit is bit-identical to an unarmed one on the
+    // serial engine (num_threads = 1). Multi-threaded factorizations vary
+    // run to run at ~1e-14, armed or not: there only the inertia, delays and
+    // factor size are identical.
     int            max_negative_pivots = -1;
     double         factor_memory_multiplier = 1.1;
     int            expected_refactors = 1;

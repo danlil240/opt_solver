@@ -22,10 +22,17 @@ namespace smf {
 enum class StaticMode { Off, Fallback, Regularized };
 
 /// Interior-point options of an IpmSession.
+///
+/// abort_on_wrong_inertia and reanalyse default to false. The spec's struct
+/// (docs/superpowers/specs/2026-10-26-ipm-mode-design.md) had
+/// abort_on_wrong_inertia = true, and reanalyse (added beside it) was true
+/// until the gates ran. Both features failed their gates on the IPOPT tuning
+/// and held-out models (docs/performance/2026-10-26-ipm-mode.md), so the
+/// measured decision is off and a caller opts in explicitly.
 struct IpmControl {
   bool       learn_inertia          = true;  // infer the expected #neg from accepted factors
-  bool       abort_on_wrong_inertia = true;  // stop once #neg exceeds the expectation
-  bool       reanalyse              = true;  // Feature 2: re-analysis from the realized order
+  bool       abort_on_wrong_inertia = false; // stop once #neg exceeds the expectation (gate failed: off)
+  bool       reanalyse              = false; // Feature 2: re-analysis from the realized order (gate failed: off)
   double     reanalyse_delay_frac   = 0.01;  // delays > frac * n -> try realized-order re-analysis
   double     reanalyse_flops_ratio  = 1.0;   // adopt only if predicted flops <= ratio * last actual
   int        reanalyse_min_gap      = 5;     // factorizations between re-analysis attempts
@@ -85,7 +92,10 @@ struct IpmStats {
 ///
 /// Feature 3, IpmControl::static_mode. Fallback: threshold pivoting with
 /// delays, static pivots only where delaying fails (root fronts and fronts
-/// over their delay budget). Regularized, the quasidefinite mode:
+/// over their delay budget). Both static modes factor with the serial
+/// engine (Control::tree_parallel is forced off: the task-parallel engine
+/// ignores the fallback, static and in-order settings). Regularized, the
+/// quasidefinite mode:
 ///  - analyse() adds every structurally missing diagonal entry to the
 ///    pattern (values keep the input entry order and count) and analyses
 ///    with AMD (no matching ordering);
@@ -127,9 +137,13 @@ class IpmSession {
                          std::optional<int> expected_negatives = {});
 
   /// Solve with the last factor, in place (b: n x nrhs, column-major).
-  /// Returns 0 on success. A successful solve marks the last factor
-  /// "accepted" (and, with learn_inertia, its negative count becomes the
-  /// expectation). `job` selects a partial solve (MA97 jobs 1-4). The solve
+  /// Returns 0 on success, nonzero (ErrorCode::NotInitialised) when there
+  /// is no factor to solve with: none yet, a failed one, or a Singular one
+  /// the engine never ran (a failure before it, e.g. the matching scaling
+  /// finding no matching), which leaves no factor of these values; such a
+  /// solve neither accepts the factor nor learns its inertia. A successful
+  /// solve marks the last factor "accepted" (and, with learn_inertia, its
+  /// negative count becomes the expectation). `job` selects a partial solve (MA97 jobs 1-4). The solve
   /// options come from the current Control. After a WrongInertia factor the
   /// stored values are first factorized in full, with the Control and user
   /// scale of that factor() call and no negative-pivot limit.
@@ -145,6 +159,11 @@ class IpmSession {
   /// The learned expectation: the negative count of the most recent factor
   /// followed by a successful solve; unset before one, and after analyse().
   std::optional<int> expected_negatives() const { return expected_neg_; }
+  /// Increases on every analyse() and factor() call (never reset): a caller
+  /// holding several handles to one session (the MA97 plugin's fkeeps)
+  /// records it at factor time to tell whether the session's factor is
+  /// still the one its handle was given.
+  std::uint64_t factor_generation() const { return factor_generation_; }
 
   /// Replace the Control used by the next factor and solve (an MA97 caller
   /// passes a control block on every call: pivot threshold, matrix type,
@@ -229,6 +248,7 @@ class IpmSession {
   Info solve_info_;
   IpmStats stats_;
   std::optional<int> expected_neg_;
+  std::uint64_t factor_generation_ = 0;
   bool user_scale_once_ = false;
   bool solvable_ = false;        // last factor Ok or Singular
   bool aborted_ = false;         // last factor WrongInertia: complete it before solving

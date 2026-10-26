@@ -261,10 +261,6 @@ class TestReanalyseSolverId(unittest.TestCase):
                          {"SMF_PLUGIN_STATS": "2", "SMF_IPM_STATIC": "regularized", "SMF_IPM_STATIC_ZERO": "1"})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestMergeRepeats(unittest.TestCase):
     @staticmethod
     def row(model, solver, wall, fact, iters=10, obj=1.0, status="Optimal Solution Found."):
@@ -312,3 +308,7 @@ class TestObjectiveDiffers(unittest.TestCase):
     def test_zero_objective_uses_absolute_floor(self):
         self.assertFalse(objective_differs(0.0, 1e-9))
         self.assertTrue(objective_differs(0.0, 1e-3))
+
+
+if __name__ == "__main__":
+    unittest.main()

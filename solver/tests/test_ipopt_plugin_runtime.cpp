@@ -462,3 +462,81 @@ TEST(Ma97PluginRuntime, EarlyAbortOnWrongInertia) {
 
     sym.finalise(&akeep, &fkeep);
 }
+
+// Two fkeeps factored from one akeep share the session's factor: a solve
+// with the older fkeep, whose factor has been replaced, fails with MA97's
+// "error in the sequence of calls" (flag -1) instead of solving with the
+// other matrix. Refactoring into the same fkeep (IPOPT's pattern) is unchanged.
+TEST(Ma97PluginRuntime, StaleFkeepFromSameAkeepIsRefused) {
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 1;
+
+    // The 3x3 matrices of ChangedValuesAndInertia: A1 = [[4,1,.5],[1,-3,1],
+    // [.5,1,5]], A2 the same with (3,3) = -5. x = [1, 1, 1] for both.
+    const int n = 3;
+    const int ptr[4] = {1, 5, 7, 8};
+    const int row[7] = {1, 1, 2, 3, 2, 3, 3};
+    const double val1[7] = {2.0, 2.0, 1.0, 0.5, -3.0, 1.0, 5.0};
+    const double val2[7] = {2.0, 2.0, 1.0, 0.5, -3.0, 1.0, -5.0};
+    const auto rhs1 = [] { return std::vector<double>{5.5, -1.0, 6.5}; };
+    const auto rhs2 = [] { return std::vector<double>{5.5, -1.0, -3.5}; };
+
+    void *akeep = nullptr;
+    void *fkeep1 = nullptr;
+    void *fkeep2 = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, ptr, row, nullptr, &akeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+
+    sym.factor(4, ptr, row, val1, &akeep, &fkeep1, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    ASSERT_EQ(info.num_neg, 1);
+    sym.factor(4, ptr, row, val2, &akeep, &fkeep2, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    ASSERT_EQ(info.num_neg, 2);
+    ASSERT_NE(fkeep1, fkeep2);
+
+    // fkeep1's factor was replaced by A2's: refused, x untouched.
+    std::vector<double> x = rhs1();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep1, &ctrl, &info);
+    EXPECT_EQ(info.flag, -1);
+    EXPECT_EQ(x, rhs1());
+
+    // fkeep2 holds the current factor.
+    x = rhs2();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep2, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_EQ(info.num_neg, 2);
+    for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-11);
+
+    // Refactoring into fkeep1 makes it current again and fkeep2 stale.
+    sym.factor(4, ptr, row, val1, &akeep, &fkeep1, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    x = rhs1();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep1, &ctrl, &info);
+    ASSERT_EQ(info.flag, 0);
+    EXPECT_EQ(info.num_neg, 1);
+    for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-11);
+    x = rhs2();
+    sym.solve(0, 1, x.data(), n, &akeep, &fkeep2, &ctrl, &info);
+    EXPECT_EQ(info.flag, -1);
+
+    // IPOPT's pattern: one fkeep, refactored and solved repeatedly.
+    for (int k = 0; k < 3; ++k) {
+        const bool second = (k % 2) == 1;
+        sym.factor(4, ptr, row, second ? val2 : val1, &akeep, &fkeep1, &ctrl, &info, nullptr);
+        ASSERT_EQ(info.flag, 0);
+        x = second ? rhs2() : rhs1();
+        sym.solve(0, 1, x.data(), n, &akeep, &fkeep1, &ctrl, &info);
+        ASSERT_EQ(info.flag, 0) << "k=" << k;
+        for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-11);
+    }
+
+    sym.free_fkeep(&fkeep2);
+    sym.finalise(&akeep, &fkeep1);
+    EXPECT_EQ(fkeep2, nullptr);
+    EXPECT_EQ(fkeep1, nullptr);
+}
