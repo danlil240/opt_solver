@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 
+import hard_models
 from plugin_trace import parse_trace
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -214,6 +215,8 @@ MODELS = {
     "acopf_grid_160": (acopf_grid, 160),
     "portfolio_20k": (portfolio_qp, 20000),
 }
+# Hard nonconvex corpus (PGLib-OPF via Egret, ...): arg may be a case-name string.
+MODELS.update(hard_models.MODELS)
 
 
 # ------------------------------------------------------------------ ipopt --
@@ -302,7 +305,7 @@ def build_nl(name: str, scale: float) -> pathlib.Path:
         return nl
     nl.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()
-    model = builder(max(4, int(size * scale)))
+    model = builder(size if isinstance(size, str) else max(4, int(size * scale)))
     model.write(str(nl), format="nl")
     print(f"  built {name} in {time.perf_counter() - t0:.1f}s", flush=True)
     return nl

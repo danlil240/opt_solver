@@ -62,3 +62,6 @@ benchmarks/results/
 # Generated manifests for the ignored fixtures above (fetch_suitesparse.py, ipopt_kkt.py)
 benchmarks/manifests/large.json
 benchmarks/manifests/ipopt_kkt.json
+
+# PGLib-OPF case files: fetched by tools/bench/fetch_pglib.py
+benchmarks/fixtures/pglib/
