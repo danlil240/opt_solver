@@ -35,6 +35,31 @@ def _pressure(r: dict, n: int) -> tuple[float, float, bool]:
     return corr_frac, delay_per_fact, corr_frac >= CORR_FRAC or delay_per_fact >= DELAY_FRAC * n
 
 
+def qualified_by(r: dict, n: int) -> str:
+    """Which half of the criterion a model's smf run meets: corrections, delays, both or no."""
+    if not r.get("factorizations"):
+        return "no"
+    fact = r["factorizations"]
+    c = r["inertia_corrections"] / fact >= CORR_FRAC
+    d = r["delays_total"] / fact >= DELAY_FRAC * n
+    return "both" if c and d else "corrections" if c else "delays" if d else "no"
+
+
+def corrections_only(results: list[dict], n_by_model: dict[str, int]) -> list[str]:
+    """Tuning models that qualify through inertia corrections (alone or with delays).
+
+    delays_total counts delay events, not distinct columns, so the delay half is
+    weak evidence; this is the stricter view reported next to the verdict.
+    """
+    names: list[str] = []
+    for r in results:
+        if not str(r.get("solver", "")).startswith("smf") or _split(r) != "tuning" or r["model"] in names:
+            continue
+        if qualified_by(r, n_by_model[r["model"]]) in ("corrections", "both"):
+            names.append(r["model"])
+    return names
+
+
 def exit_ok(results: list[dict], n_by_model: dict[str, int]) -> tuple[bool, list[str]]:
     """True when >= 3 tuning models qualify; also returns the qualifying tuning models.
 
@@ -68,7 +93,7 @@ def report(results: list[dict], n_by_model: dict[str, int]) -> str:
         "",
         "Hard IPOPT corpus, single-thread baseline. Pressure columns come from the smf plugin trace.",
         "",
-        "| model | split | n | factorizations | corrections | corr frac | delays/fact | 0.01 n | qualifies | "
+        "| model | split | n | factorizations | corrections | corr frac | delays/fact | 0.01 n | qualified by | "
         + " | ".join(f"{s} status (iters)" for s in solvers) + " |",
         "|" + "---|" * (9 + len(solvers)),
     ]
@@ -76,20 +101,25 @@ def report(results: list[dict], n_by_model: dict[str, int]) -> str:
         smf = runs.get("smf")
         n = n_by_model.get(model, 0)
         if smf and smf.get("factorizations"):
-            cf, df, q = _pressure(smf, n)
+            cf, df, _ = _pressure(smf, n)
             cols = [str(smf["factorizations"]), str(smf["inertia_corrections"]), f"{cf:.3f}",
-                    f"{df:.2f}", f"{DELAY_FRAC * n:.2f}", "yes" if q else "no"]
+                    f"{df:.2f}", f"{DELAY_FRAC * n:.2f}", qualified_by(smf, n)]
         else:
             cols = ["-"] * 5 + ["no"]
         status = [f"{runs[s]['status']} ({runs[s]['iterations']})" if s in runs else "-" for s in solvers]
         lines.append(f"| {model} | {hard_models.split_of(model)} | {n} | " + " | ".join(cols)
                      + " | " + " | ".join(status) + " |")
+    corr = corrections_only(results, n_by_model)
     lines += [
         "",
         f"Qualification: inertia_corrections/factorizations >= {CORR_FRAC} or "
         f"delays_total/factorizations >= {DELAY_FRAC} * n; only tuning models count.",
         "",
         f"Qualifying tuning models ({len(names)}): " + (", ".join(names) if names else "none"),
+        "",
+        f"Qualifying by inertia corrections only ({len(corr)}): " + (", ".join(corr) if corr else "none")
+        + ". delays_total counts delay events, not distinct columns, so the delay criterion is weak "
+        "evidence; the verdict above uses the plan's either-criterion rule.",
         "",
         f"**Phase 0 verdict: {'PASS' if ok else 'FAIL'}** (need >= {MIN_MODELS} tuning models)"
         + ("" if ok else "; add harder models before Phase 1."),

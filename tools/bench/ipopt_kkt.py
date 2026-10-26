@@ -318,6 +318,32 @@ def run_ipopt(nl: pathlib.Path, solver: str, rundir: pathlib.Path, threads: int,
     }
 
 
+def manifest_fields(status: str, iterations, dumped: int, kept: int, traced_total=None) -> dict:
+    """Run-dependent manifest fields of a captured case (pure; no IPOPT needed).
+
+    `factorizations` is the true number of factorizations IPOPT requested in the
+    capture run (the plugin trace count); `dumped` is what SMF_KKT_DUMP_MAX let the
+    plugin write and `kept` what is stored in the .vals file. When the trace is
+    unavailable the dumped count is used and `factorizations_source` says so.
+    """
+    total = traced_total if traced_total else dumped
+    truncated = kept < total
+    optimal = status.startswith("Optimal Solution Found") or status.startswith("Solved To Acceptable")
+    note = f" (stored {kept} of {total} factorizations)" if truncated else f" ({total} factorizations)"
+    return {
+        "source": f"IPOPT {status} in {iterations} iterations{note}",
+        "factorizations": total,
+        "factorizations_source": "plugin_trace" if traced_total else "dump_count",
+        "dumped_factorizations": dumped,
+        "kept_factorizations": kept,
+        "truncated": truncated,
+        "ipopt_status": status,
+        "ipopt_iterations": iterations,
+        "expected_outcome": "Success" if optimal else "MaxIterations" if "Maximum Number of Iterations" in status
+        else "Failure",
+    }
+
+
 def build_nl(name: str, scale: float) -> pathlib.Path:
     builder, size = MODELS[name]
     nl = WORK / "nl" / f"{name}.nl"
@@ -382,22 +408,17 @@ def capture(args) -> int:
             "matrix_id": name,
             "sequence_id": name,
             "family_id": suite_id,
-            "source": f"IPOPT {res['status']} in {res['iterations']} iterations ({nfact} factorizations)",
             "mtx_path": (dest / f"{name}.mtx").relative_to(REPO).as_posix(),
             "seq_values_path": (dest / f"{name}.mtx.vals").relative_to(REPO).as_posix(),
             "n": n,
             "nnz_lower": nnz,
-            "factorizations": nfact,
-            "kept_factorizations": len(keep),
-            "ipopt_status": res["status"],
-            "ipopt_iterations": res["iterations"],
+            **manifest_fields(res["status"], res["iterations"], nfact, len(keep), res.get("factorizations")),
             "matrix_type": "indefinite",
             "split": hard_models.split_of(name) if is_hard else "test",
             "mode": "warm_sequence",
             "track": "ipopt",
-            "expected_outcome": "Success",
         })
-        print(f"  KKT n={n} nnz={nnz} factorizations={nfact}", flush=True)
+        print(f"  KKT n={n} nnz={nnz} dumped={nfact} kept={len(keep)} traced={res.get('factorizations')}", flush=True)
     cases.sort(key=lambda c: c["n"])
     manifest = {
         "schema_version": 1,
