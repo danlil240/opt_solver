@@ -75,15 +75,45 @@ def fmt_ms(ms: float) -> str:
     return f"{ms:.2f}"
 
 
+PHASE_FIELDS = {
+    "wall": ("wall_ms",),
+    "analyse": ("analyse_ms",),
+    "factor": ("factor_ms",),
+    "solve": ("solve_ms",),
+    "refine": ("refine_ms",),
+    "solve_refine": ("solve_ms", "refine_ms"),
+}
+
+
+def phase_ms(rec: dict[str, Any], phase: str) -> float:
+    return sum(float(rec.get(k) or 0.0) for k in PHASE_FIELDS[phase])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--manifest", default=None)
     ap.add_argument("--output", default=None)
+    ap.add_argument("--split", default=None, choices=["tuning", "heldout"],
+                    help="keep only manifest cases of this split (needs --manifest)")
+    ap.add_argument("--track", default=None, choices=["recommended", "ipopt"],
+                    help="keep only records of this track")
+    ap.add_argument("--phase", default="wall", choices=sorted(PHASE_FIELDS),
+                    help="timing shown in each cell (default: wall)")
     args = ap.parse_args(argv)
+    if args.split and not args.manifest:
+        ap.error("--split requires --manifest")
 
     records = load_records(pathlib.Path(args.input))
     measured = [r for r in records if not r.get("warmup", False)]
+    if args.track:
+        measured = [r for r in measured if r.get("track", "recommended") == args.track]
+    if args.split:
+        man_ = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
+        keep = {(c["matrix_id"], c.get("track", "recommended"))
+                for c in man_.get("cases", []) if c.get("split") == args.split}
+        measured = [r for r in measured
+                    if (str(r["matrix_id"]), r.get("track", "recommended")) in keep]
     if not measured:
         print("error: no measured records", file=sys.stderr)
         return 2
@@ -113,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     for (mid, sid), recs in by_cs.items():
         outs = [qualified_outcome(r) for r in recs]
         if all(o == "Success" for o in outs):
-            times = [float(r["wall_ms"]) for r in recs if float(r.get("wall_ms", 0)) > 0]
+            times = [phase_ms(r, args.phase) for r in recs if phase_ms(r, args.phase) > 0]
             cell[(mid, sid)] = ("Success", statistics.median(times) if times else None)
         else:
             worst = next((o for o in outs if o != "Success"), outs[0])
@@ -174,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
 
     n_cases = len(case_order)
     lines: list[str] = []
-    lines.append("## Per-case median wall time (analyse+factor+solve, ms unless noted)\n")
+    lines.append(f"## Per-case median {args.phase} time (ms unless noted)\n")
     lines.extend(rows)
     lines.append("")
     lines.append("## Solve rate\n")

@@ -76,6 +76,16 @@ def find_replay_binary(build_dir: pathlib.Path, explicit_binary: Optional[str]) 
     return None
 
 
+def replay_override_args(case: dict) -> List[str]:
+    """Per-case bench_replay overrides. The `ipopt` track only implies u = 1e-8;
+    a case may additionally pin the ordering (front-tier manifest uses
+    "ordering": "matching" on the ipopt track)."""
+    args: List[str] = []
+    if case.get("ordering"):
+        args += ["--ordering", str(case["ordering"])]
+    return args
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run SMF benchmark manifest in isolated subprocesses.")
     parser.add_argument("--manifest", required=True, help="Path to benchmark manifest JSON")
@@ -191,6 +201,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         cmd.extend(["--mtype", str(case["matrix_type"])])
                     if case.get("seq_values_path"):
                         cmd.extend(["--seq-values", str(case["seq_values_path"])])
+                    cmd.extend(replay_override_args(case))
                     if is_warmup:
                         cmd.append("--warmup")
                     t0 = time.perf_counter()
