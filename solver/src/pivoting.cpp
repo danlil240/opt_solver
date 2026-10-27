@@ -4,8 +4,19 @@
 
 namespace smf {
 
+namespace {
+// std::max({|a|, |b|, |c|}) without the initializer_list (MSVC lowers that
+// to a vectorized max_element call): same result, NaN handling included.
+inline double max3_abs(double a, double b, double c) noexcept {
+  double m = std::abs(a);
+  if (m < std::abs(b)) m = std::abs(b);
+  if (m < std::abs(c)) m = std::abs(c);
+  return m;
+}
+} // namespace
+
 double scaled_det_2x2(double d00, double d10, double d11, double &scale_out) noexcept {
-  const double s = std::max({std::abs(d00), std::abs(d10), std::abs(d11)});
+  const double s = max3_abs(d00, d10, d11);
   scale_out = s;
   if (!std::isfinite(s) || s == 0.0) {
     return 0.0;

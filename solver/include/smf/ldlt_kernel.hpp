@@ -64,6 +64,28 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
                                    double *work, int first = 0);
 
+/// Largest front the small-front kernels (ldlt_factor_small_front) take.
+inline constexpr int kSmallFrontMax = 32;
+
+/// Leading dimension of the small-front layout for a front of size
+/// 1 <= f <= kSmallFrontMax: 4, 8, 16 or 32.
+inline constexpr int small_front_ld(int f) noexcept {
+    return f <= 4 ? 4 : (f <= 8 ? 8 : (f <= 16 ? 16 : kSmallFrontMax));
+}
+
+/// ldlt_factor_front (first = 0) on a front of size f <= kSmallFrontMax
+/// stored in the small-front layout: column-major with leading dimension
+/// ld = small_front_ld(f), F 32-byte aligned, and rows [f, fe) of every
+/// column zero, fe = f rounded up to a multiple of 4. The update kernels are
+/// AVX2 microkernels over whole aligned 4-row blocks; they also write the
+/// rows of each column above its diagonal down to the 4-row boundary (the
+/// unused upper triangle; keep it finite, zero is best) and keep the padding
+/// rows zero. Pivot sequence, tags, rows, inertia, static pivots and flops
+/// are those of ldlt_factor_front, and the factor and Schur complement the
+/// same values (the same operations per entry, in the same order).
+LdltKernelResult ldlt_factor_small_front(double *F, int ld, int f, int num_elig, Int *rows,
+                                         const LdltKernelParams &prm, int8_t *tags);
+
 /// Number of doubles ldlt_factor_front needs in `work` for a front of size f.
 inline std::size_t ldlt_work_size(int f, const LdltKernelParams &prm) {
     return static_cast<std::size_t>(f) * static_cast<std::size_t>(prm.nb + 2);

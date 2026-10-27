@@ -102,6 +102,12 @@ struct Control {
     double         reg_diag_tol  = 0.0;
     int            indef_panel_size = 16;   // blocked indefinite panel width
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
+    // Fronts of at most 32 rows on the TPP kernel are assembled and factored
+    // in an aligned per-thread buffer with AVX2 rank-1 / rank-2 microkernels
+    // (ldlt_factor_small_front), and a front whose parent is factored next
+    // hands its contribution block over in that buffer instead of the stack.
+    // Same pivots and factor values as the generic path (false).
+    bool           small_front_kernels = true;
 
     // Front kernel of plain threshold-pivoting indefinite fronts (see
     // FrontKernel). Aptp = APTP on all fronts; Auto = APTP on fronts with at

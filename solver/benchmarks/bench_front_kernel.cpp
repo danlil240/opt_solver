@@ -104,10 +104,63 @@ int run_aptp_bench(int only_f) {
     return 0;
 }
 
+// --small: ldlt_factor_small_front (padded layout, microkernels) vs the
+// generic unblocked ldlt_factor_front on fronts of f <= 32 rows, half of them
+// eligible (the leaf shape of sparse KKT trees). The times include setting
+// the front up: the padded layout's zero rows, the generic front's copy.
+int run_small_bench() {
+    std::puts("=== bench_front_kernel --small: small-front kernels vs generic (single thread) ===");
+    std::puts("  type     f  elig | generic ns  small ns  speedup");
+    std::mt19937 rng(15);
+    for (const bool kkt : {false, true}) {
+        for (const int f : {4, 6, 8, 12, 16, 24, 32}) {
+            const int elig = std::max(1, f / 2);
+            const std::vector<double> A = make_front(f, kkt, rng);
+            smf::LdltKernelParams kp;
+            kp.u = 1e-8;
+            std::vector<double> F(A.size());
+            std::vector<double> wk(smf::ldlt_work_size(f, kp));
+            std::vector<smf::Int> rows(f);
+            std::vector<int8_t> tags(f);
+            alignas(32) double buf[smf::kSmallFrontMax * smf::kSmallFrontMax];
+            const int ld = smf::small_front_ld(f);
+            const int fe = (f + 3) & ~3;
+            const int reps = 200000 / f;
+            double best[2] = {1e300, 1e300};
+            for (int trial = 0; trial < 5; ++trial) {
+                for (int which = 0; which < 2; ++which) {
+                    const auto t0 = Clock::now();
+                    for (int r = 0; r < reps; ++r) {
+                        std::iota(rows.begin(), rows.end(), 0);
+                        if (which == 0) {
+                            std::copy(A.begin(), A.end(), F.begin());
+                            smf::ldlt_factor_front(F.data(), f, elig, rows.data(), kp, tags.data(), wk.data());
+                        } else {
+                            for (int j = 0; j < f; ++j) {
+                                const int r0 = j & ~3;
+                                std::fill(buf + j * ld + r0, buf + j * ld + fe, 0.0);
+                                std::copy(A.begin() + static_cast<std::ptrdiff_t>(j) * f + j,
+                                          A.begin() + static_cast<std::ptrdiff_t>(j + 1) * f, buf + j * ld + j);
+                            }
+                            smf::ldlt_factor_small_front(buf, ld, f, elig, rows.data(), kp, tags.data());
+                        }
+                    }
+                    const double t = std::chrono::duration<double>(Clock::now() - t0).count() / reps;
+                    best[which] = std::min(best[which], t);
+                }
+            }
+            std::printf("  %-6s %3d %5d | %10.1f %9.1f %7.2fx\n", kkt ? "kkt" : "random", f, elig,
+                        best[0] * 1e9, best[1] * 1e9, best[0] / best[1]);
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc > 1 && std::strcmp(argv[1], "--aptp") == 0) return run_aptp_bench(argc > 2 ? std::atoi(argv[2]) : 0);
+    if (argc > 1 && std::strcmp(argv[1], "--small") == 0) return run_small_bench();
     std::puts("=== bench_front_kernel: reference vs blocked indefinite front ===");
     const int f = (argc > 1) ? std::atoi(argv[1]) : 96;
     const int p = (argc > 2) ? std::atoi(argv[2]) : 64;

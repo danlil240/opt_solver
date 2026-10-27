@@ -20,6 +20,10 @@
 #include <span>
 #include <vector>
 
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
+
 namespace smf {
 
 // Per-thread output and scratch of the tree-parallel path, kept in the
@@ -94,6 +98,22 @@ struct FrontPass {
   std::size_t fo = 0, ro = 0, cv_top = 0, cr_top = 0;
   SerialFactorStats st;
   int64_t growths = 0;
+  // Small-front buffers (Control::small_front_kernels): a front of at most
+  // kSmallFrontMax rows is assembled and factored in one of these, in the
+  // small-front layout (ldlt_factor_small_front), and only its L columns are
+  // copied to the factor. When its parent is the next front this pass
+  // processes, its contribution block stays in the buffer (node = the front)
+  // and the parent assembles straight from it, with no stack copy. The
+  // parent itself uses the other buffer, so a delay-budget retry can
+  // assemble it again from the intact child block.
+  struct SmallBuf {
+    alignas(64) double v[kSmallFrontMax * kSmallFrontMax];
+    Int rows[kSmallFrontMax];  // the held block's row ids
+    Int node = -1;             // supernode whose contribution block is held, or -1
+    int ld = 0;                // leading dimension of v while held
+    int off = 0;               // the held block starts at row and column off
+  };
+  SmallBuf sbuf[2];
 };
 
 struct NodeBlock {
@@ -133,6 +153,8 @@ struct FactorContext {
   // used on plain threshold fronts of >= kTopTileMinFront rows processed
   // with a TileCtx (the top of the tree).
   const AptpParams *tile_aprm = nullptr;
+  // Control::small_front_kernels: FrontPass::sbuf path for small fronts.
+  bool small_fronts = false;
 };
 
 // Threads of a front at the top of the tree: its share of the BLAS-thread
@@ -160,6 +182,16 @@ struct BudgetState {
 // with ErrorCode::InternalError (and an assert in debug builds).
 constexpr double kWorkCanary = -1.2345678901234567e-300;
 
+// dst[0, n) = src[0, n) for the short columns of small fronts, inline: a
+// memmove call per column costs more than the copy.
+inline void copy_short(const double *src, double *dst, std::size_t n) noexcept {
+  std::size_t i = 0;
+#if defined(__AVX2__)
+  for (; i + 4 <= n; i += 4) _mm256_storeu_pd(dst + i, _mm256_loadu_pd(src + i));
+#endif
+  for (; i < n; ++i) dst[i] = src[i];
+}
+
 // Kernel workspace (doubles) of a front: ldlt_factor_front's, or with APTP
 // the larger of APTP's plus its canary and the TPP fallback's.
 std::size_t front_work_need(int f, int num_elig, const LdltKernelParams &prm,
@@ -185,8 +217,11 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
 // produced them; with `pop` (postorder passes, where they are the top of the
 // stack) blocks on P's own stack are popped. `bs` (null: no budget) is the
 // delay budget state of the sequence s belongs to, updated by this front.
+// `next` is the front P processes right after s (-1: none or unknown): a
+// small front whose parent it is hands its contribution block over in
+// P.sbuf.
 ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
-                        BudgetState *bs, const TileCtx *tc = nullptr) {
+                        BudgetState *bs, const TileCtx *tc = nullptr, Int next = -1) {
   const AnalysisKeep &keep = cx.keep;
   NumericWorkspace &ws = cx.ws;
   FactorKeep &fkeep = cx.fkeep;
@@ -199,11 +234,26 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   Int *const pos = P.pos;
   cx.front_pass[si] = me;
 
+  // A child's contribution block held in one of P's small-front buffers
+  // (the previous front's): that buffer, or -1.
+  const auto held_buf = [&](std::size_t ci) -> int {
+    const Int c = static_cast<Int>(ci);
+    return P.sbuf[0].node == c ? 0 : (P.sbuf[1].node == c ? 1 : -1);
+  };
   const auto child_rows = [&](std::size_t ci) -> const Int * {
+    if (const int b = held_buf(ci); b >= 0) return P.sbuf[b].rows;
     if (ws.cb_owner[ci] < 0) return (*cx.node_blocks)[ci].rows.data();
     return cx.passes[ws.cb_owner[ci]]->cbr->data() + ws.cb_row_off[ci];
   };
-  const auto child_values = [&](std::size_t ci) -> const double * {
+  // Packed lower block, or (held in a small-front buffer) its first column
+  // with leading dimension ld > 0.
+  const auto child_values = [&](std::size_t ci, std::size_t &ld) -> const double * {
+    ld = 0;
+    if (const int b = held_buf(ci); b >= 0) {
+      const FrontPass::SmallBuf &h = P.sbuf[b];
+      ld = static_cast<std::size_t>(h.ld);
+      return h.v + static_cast<std::size_t>(h.off) * (ld + 1);
+    }
     if (ws.cb_owner[ci] < 0) return (*cx.node_blocks)[ci].values.get();
     return cx.passes[ws.cb_owner[ci]]->cbv->data() + ws.cb_value_off[ci];
   };
@@ -272,6 +322,19 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
                                : nullptr;
   grow(*P.work, front_work_need(f, num_elig, cx.prm, aprm), P.growths);
   double *F = P.fv->data() + P.fo;
+  // Small fronts (Control::small_front_kernels; never APTP or tiled): the
+  // front is assembled and factored in the small-front buffer not holding a
+  // child's block, Fa with leading dimension lda; otherwise Fa = F, lda = f.
+  const bool small = cx.small_fronts && f <= kSmallFrontMax && aprm == nullptr;
+  int sb = -1;
+  double *Fa = F;
+  std::size_t lda = sf;
+  if (small) {
+    sb = P.sbuf[0].node >= 0 ? 1 : 0;
+    assert(P.sbuf[sb].node < 0);
+    Fa = P.sbuf[sb].v;
+    lda = static_cast<std::size_t>(small_front_ld(f));
+  }
 
   // Fallback static pivoting: only where delaying fails. A root has no
   // parent to delay to (its unaccepted columns would be zero pivots), and a
@@ -326,13 +389,23 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // pushed or released before this front's own Schur complement, so a delay
   // budget retry can assemble the front again.
   for (;;) {
-    for (std::size_t j = 0; j < sf; ++j) {
-      std::fill_n(F + j * sf + j, sf - j, 0.0);
+    if (small) {
+      // The small-front layout: rows [f, fe) zero, and the rows above the
+      // diagonal its kernels write (down to the 4-row boundary) finite.
+      const std::size_t fe = (sf + 3) & ~std::size_t{3};
+      for (std::size_t j = 0; j < sf; ++j) {
+        const std::size_t r0 = j & ~std::size_t{3};
+        std::fill_n(Fa + j * lda + r0, fe - r0, 0.0);
+      }
+    } else {
+      for (std::size_t j = 0; j < sf; ++j) {
+        std::fill_n(F + j * sf + j, sf - j, 0.0);
+      }
     }
 
     // Original entries of the pivot columns (lower CSC, so pos[row] >= pos[col]).
     for (Int j = sn.col_start; j < sn.col_end; ++j) {
-      double *Fj = F + static_cast<std::size_t>(pos[j]) * sf;
+      double *Fj = Fa + static_cast<std::size_t>(pos[j]) * lda;
       for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) {
         Fj[pos[cx.ari[k]]] += cx.av[k];
       }
@@ -343,7 +416,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       const Int q = ws.cb_size[ci];
       if (q <= 0) continue;
       const Int *cr = child_rows(ci);
-      const double *cv = child_values(ci);
+      std::size_t cld = 0;  // > 0: strided block in a small-front buffer
+      const double *const cv0 = child_values(ci, cld);
+      const double *cv = cv0;
       bool monotone = true;
       Int prev = -1;
       for (Int t = 0; t < q; ++t) {
@@ -354,16 +429,18 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
       if (monotone) {
         for (Int jj = 0; jj < q; ++jj) {
-          double *Fc = F + static_cast<std::size_t>(cm[jj]) * sf;
+          if (cld > 0) cv = cv0 + static_cast<std::size_t>(jj) * (cld + 1);
+          double *Fc = Fa + static_cast<std::size_t>(cm[jj]) * lda;
           for (Int ii = jj; ii < q; ++ii) Fc[cm[ii]] += *cv++;
         }
       } else {
         for (Int jj = 0; jj < q; ++jj) {
+          if (cld > 0) cv = cv0 + static_cast<std::size_t>(jj) * (cld + 1);
           const std::size_t lj = static_cast<std::size_t>(cm[jj]);
           for (Int ii = jj; ii < q; ++ii) {
             const std::size_t li = static_cast<std::size_t>(cm[ii]);
-            if (li >= lj) F[lj * sf + li] += *cv++;
-            else F[li * sf + lj] += *cv++;
+            if (li >= lj) Fa[lj * lda + li] += *cv++;
+            else Fa[li * lda + lj] += *cv++;
           }
         }
       }
@@ -400,6 +477,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       kr.inertia.negative += ar.inertia.negative;
       kr.inertia.zero += ar.inertia.zero;
       kr.flops += ar.flops;
+    } else if (small) {
+      kr = ldlt_factor_small_front(Fa, static_cast<int>(lda), f, num_elig, rows, *prm, tags);
     } else {
       kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
     }
@@ -421,6 +500,18 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     // assembly order, rows[pos[r]] = r, with the child map as scratch.
     for (int t = 0; t < f; ++t) cm[pos[rows[t]]] = rows[t];
     std::copy(cm, cm + f, rows);
+  }
+  // Children's blocks held in small-front buffers are consumed.
+  for (const Int c : kids) {
+    if (const int b = held_buf(static_cast<std::size_t>(c)); b >= 0) P.sbuf[b].node = -1;
+  }
+  // A small front's L columns (with D) go to the factor; its contribution
+  // block is read from the buffer below.
+  if (small) {
+    for (int c = 0; c < kr.num_accepted; ++c) {
+      const std::size_t uc = static_cast<std::size_t>(c);
+      copy_short(Fa + uc * lda + uc, F + uc * sf + uc, sf - uc);
+    }
   }
   st.aptp_failed += aptp_failed;
   if (tiled) ++st.top_tile_fronts;
@@ -511,7 +602,20 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // Push the Schur complement (delayed columns first) for the parent: on
   // P's stack, or into its own node buffer when stacks are not popped.
   const int q = f - p;
-  if (!is_root && q > 0) {
+  if (!is_root && q > 0 && small && pop && next == sn.parent) {
+    // The parent is next: it assembles the block from the buffer.
+    FrontPass::SmallBuf &h = P.sbuf[sb];
+    h.node = s;
+    h.ld = static_cast<int>(lda);
+    h.off = p;
+    std::copy(rows + p, rows + f, h.rows);
+    ws.cb_owner[si] = me;
+    ws.cb_value_off[si] = static_cast<LongInt>(P.cv_top);
+    ws.cb_row_off[si] = static_cast<LongInt>(P.cr_top);
+    ws.cb_size[si] = q;
+    ws.cb_delayed[si] = num_elig - p;
+    st.delayed += num_elig - p;
+  } else if (!is_root && q > 0) {
     const std::size_t sq = static_cast<std::size_t>(q);
     double *dst;
     Int *dst_rows;
@@ -536,8 +640,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       ws.cb_row_off[si] = 0;
     }
     for (int jj = 0; jj < q; ++jj) {
-      const double *src = F + static_cast<std::size_t>(p + jj) * sf + (p + jj);
-      std::copy(src, src + (q - jj), dst);
+      const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
+      if (small) copy_short(src, dst, static_cast<std::size_t>(q - jj));
+      else std::copy(src, src + (q - jj), dst);
       dst += q - jj;
     }
     std::copy(rows + p, rows + f, dst_rows);
@@ -846,7 +951,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
-                           budget_static, det_tc != nullptr ? &tile_aprm : nullptr};
+                           budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
+                           ctrl.small_front_kernels};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -869,7 +975,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           budget = BudgetState{};  // first front of a subtree
         }
       }
-      status = process_front(cx, main, 0, sk, true, bs, det_tc);
+      const Int next_s = k + 1 < keep.postorder.size() ? keep.postorder[k + 1] : Int{-1};
+      status = process_front(cx, main, 0, sk, true, bs, det_tc, next_s);
       if (budget_regions && (region_end[k] == npos || region_end[k] == k))
         node_budget[static_cast<std::size_t>(sk)] = *bs;
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
@@ -909,7 +1016,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
-                           budget_static, tiles_on ? &tile_aprm : nullptr};
+                           budget_static, tiles_on ? &tile_aprm : nullptr,
+                           ctrl.small_front_kernels};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
@@ -958,8 +1066,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
             break;
           const int neg0 = P.st.inertia.negative;
+          const Int next_s = k < hi ? keep.postorder[k + 1] : Int{-1};
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
-                                            budget_regions ? &budget : nullptr, det_tc);
+                                            budget_regions ? &budget : nullptr, det_tc, next_s);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
             complete = false;

@@ -44,6 +44,18 @@
 #include <utility>
 
 namespace smf {
+
+namespace {
+// std::max({|a|, |b|, |c|}) without the initializer_list (MSVC lowers that
+// to a vectorized max_element call): same result, NaN handling included.
+inline double max3_abs(double a, double b, double c) noexcept {
+  double m = std::abs(a);
+  if (m < std::abs(b)) m = std::abs(b);
+  if (m < std::abs(c)) m = std::abs(c);
+  return m;
+}
+} // namespace
+
 namespace aptp_detail {
 
 namespace {
@@ -70,7 +82,7 @@ void view_swap(double *A, int ld, int m, int p, int q, int8_t *tags, Int *rows,
 // Stable inverse of the 2x2 pivot [d00 d10; d10 d11] (as ldlt_factor_front).
 inline void inv_2x2(double d00, double d10, double d11, double &i00, double &i10,
                     double &i11) noexcept {
-    const double s = std::max({std::abs(d00), std::abs(d10), std::abs(d11)});
+    const double s = max3_abs(d00, d10, d11);
     const double a = d00 / s;
     const double b = d10 / s;
     const double c = d11 / s;

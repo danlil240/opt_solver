@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <numeric>
 #include <random>
 #include <span>
@@ -825,4 +826,171 @@ TEST(DelayedPivots, BudgetOvershootRetryKeepsRowLabels) {
     const auto val = smf::bench::validate(A, b, x, 1);
     EXPECT_TRUE(smf::bench::is_qualified_validation(val))
         << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+}
+
+namespace {
+
+// Leaf B = [0, 4) under C = [4, 6), and C and the leaf E = [6, 8) under the
+// root D = [8, 10); identity order, each block structurally dense. B is well
+// conditioned and couples weakly (0.01) to C. C's columns have d = 0.01 and
+// couple to each other only through B's update and to D with 1.0: at
+// u = 0.1 neither a 1x1 nor the 2x2 passes, two delays against a budget of
+// 1, so C is assembled again (a retry) while B's contribution block, B being
+// the front just before its parent C, is held in a small-front buffer.
+CscLower held_retry_matrix() {
+    const Int n = 10;
+    std::vector<std::vector<std::pair<Int, double>>> cols(static_cast<std::size_t>(n));
+    const auto add = [&](Int i, Int j, double v) { cols[static_cast<std::size_t>(j)].push_back({i, v}); };
+    for (Int j = 0; j < 4; ++j) {
+        add(j, j, 4.0);
+        for (Int i = j + 1; i < 4; ++i) add(i, j, 0.1);
+        add(4, j, 0.01);
+        add(5, j, -0.01);
+    }
+    add(4, 4, 0.01);
+    add(5, 4, 0.0);
+    add(5, 5, 0.01);
+    for (Int j = 4; j < 6; ++j) {
+        add(8, j, 1.0);
+        add(9, j, j == 4 ? 1.0 : -1.0);
+    }
+    add(6, 6, 4.0);
+    add(7, 6, 0.1);
+    add(7, 7, 4.0);
+    for (Int j = 6; j < 8; ++j) {
+        add(8, j, 0.2);
+        add(9, j, 0.2);
+    }
+    add(8, 8, 4.0);
+    add(9, 8, 0.1);
+    add(9, 9, 4.0);
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (auto [i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+} // namespace
+
+// Control::small_front_kernels: fronts of <= 32 rows assembled and factored
+// in the small-front buffers (microkernels; a block handed to the parent in
+// the buffer when it is next) give the generic path's factor bit for bit:
+// delays, static pivots and delay-budget retries included (a retried parent
+// assembles again from a child block held in a buffer), at 1 thread and in
+// deterministic mode at 2 threads.
+TEST(DelayedPivots, SmallFrontPathMatchesGeneric) {
+    struct Config {
+        int g, m;
+        int budget;
+        int threads;
+        double fallback;
+    };
+    const Config configs[] = {
+        {12, 40, -1, 1, 0.0}, {30, 300, -1, 1, 0.0}, {30, 300, 10, 1, 0.0},
+        {30, 300, 0, 1, 0.0}, {30, 300, -1, 1, 1e-8}, {30, 300, 10, 2, 0.0},
+    };
+    int retries = 0;
+    for (const Config &c : configs) {
+        const CscLower A = delayed_kkt(c.g, c.m, 4.0);
+        const int n = A.n;
+        Control on = budget_control();
+        on.delay_budget = c.budget;
+        on.num_threads = c.threads;
+        on.deterministic = c.threads > 1;
+        on.fallback_static_pivot_tol = c.fallback;
+        Control off = on;
+        off.small_front_kernels = false;
+        ASSERT_TRUE(on.small_front_kernels);
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(A, on, info);
+        ASSERT_NE(ak.get(), nullptr);
+        std::vector<double> b(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = std::cos(0.03 * i) + 0.5;
+
+        NumericWorkspace ws_on, ws_off;
+        FactorKeep fk_on, fk_off;
+        Info i_on, i_off;
+        // Twice each: the second factorization reuses the warmed workspace.
+        for (int rep = 0; rep < 2; ++rep) {
+            const FactorStatus s_off = solver.factor(*ak, A, off, i_off, fk_off, ws_off);
+            const FactorStatus s_on = solver.factor(*ak, A, on, i_on, fk_on, ws_on);
+            ASSERT_EQ(s_off, FactorStatus::Success);
+            ASSERT_EQ(s_on, FactorStatus::Success);
+        }
+        SCOPED_TRACE("g=" + std::to_string(c.g) + " budget=" + std::to_string(c.budget) +
+                     " threads=" + std::to_string(c.threads));
+        EXPECT_EQ(i_on.delayed_pivots, i_off.delayed_pivots);
+        EXPECT_EQ(i_on.static_pivots, i_off.static_pivots);
+        EXPECT_EQ(i_on.delay_budget_retries, i_off.delay_budget_retries);
+        EXPECT_EQ(i_on.num_positive, i_off.num_positive);
+        EXPECT_EQ(i_on.num_negative, i_off.num_negative);
+        EXPECT_EQ(i_on.num_zero, i_off.num_zero);
+        retries += i_on.delay_budget_retries;
+        ASSERT_EQ(fk_on.factor_values.size(), fk_off.factor_values.size());
+        EXPECT_EQ(std::memcmp(fk_on.factor_values.data(), fk_off.factor_values.data(),
+                              fk_on.factor_values.size() * sizeof(double)),
+                  0);
+        std::vector<double> x_on = b, x_off = b;
+        ASSERT_EQ(solver.solve(fk_on, on, i_on, x_on.data(), n, 1), 0);
+        ASSERT_EQ(solver.solve(fk_off, off, i_off, x_off.data(), n, 1), 0);
+        EXPECT_EQ(std::memcmp(x_on.data(), x_off.data(), x_on.size() * sizeof(double)), 0);
+        std::printf("[SmallFront] g=%d budget=%d threads=%d: delays=%d static=%d retries=%d\n",
+                    c.g, c.budget, c.threads, i_on.delayed_pivots, i_on.static_pivots,
+                    i_on.delay_budget_retries);
+    }
+
+    // A retried parent whose last child's block is held in a buffer.
+    {
+        const CscLower A = held_retry_matrix();
+        std::vector<Int> perm(static_cast<std::size_t>(A.n));
+        std::iota(perm.begin(), perm.end(), Int{0});
+        Control on;
+        on.matrix_type = MatrixType::RealSymmetricIndefinite;
+        on.ordering = OrderingMethod::UserSupplied;
+        on.user_perm = perm.data();
+        on.scaling = ScalingMethod::None;
+        on.nemin = 1;
+        on.pivot_u = 0.1;
+        on.delay_budget = 1;
+        Control off = on;
+        off.small_front_kernels = false;
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(A, on, info);
+        ASSERT_NE(ak.get(), nullptr);
+        std::printf("[SmallFront] held-retry tree: %zu supernodes\n", ak->supernodes.size());
+        NumericWorkspace ws_on, ws_off;
+        FactorKeep fk_on, fk_off;
+        Info i_on, i_off;
+        ASSERT_EQ(solver.factor(*ak, A, off, i_off, fk_off, ws_off), FactorStatus::Success);
+        ASSERT_EQ(solver.factor(*ak, A, on, i_on, fk_on, ws_on), FactorStatus::Success);
+        EXPECT_EQ(i_on.delay_budget_retries, 1);
+        EXPECT_EQ(i_on.delay_budget_retries, i_off.delay_budget_retries);
+        EXPECT_EQ(i_on.delayed_pivots, i_off.delayed_pivots);
+        EXPECT_EQ(i_on.static_pivots, i_off.static_pivots);
+        EXPECT_EQ(i_on.num_positive, i_off.num_positive);
+        EXPECT_EQ(i_on.num_negative, i_off.num_negative);
+        retries += i_on.delay_budget_retries;
+        ASSERT_EQ(fk_on.factor_values.size(), fk_off.factor_values.size());
+        EXPECT_EQ(std::memcmp(fk_on.factor_values.data(), fk_off.factor_values.data(),
+                              fk_on.factor_values.size() * sizeof(double)),
+                  0);
+        std::vector<double> b(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < b.size(); ++i) b[i] = 1.0 - 0.2 * static_cast<double>(i);
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk_on, on, i_on, x.data(), static_cast<int>(A.n), 1), 0);
+        const auto val = smf::bench::validate(A, b, x, 1);
+        EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+            << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+    }
+    EXPECT_GT(retries, 0);
 }
