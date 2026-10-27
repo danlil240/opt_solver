@@ -4,6 +4,7 @@
 #include "smf/error.hpp"
 #include "smf/etree.hpp"
 #include "smf/ordering.hpp"
+#include "smf/ordering_parallel_nd.hpp"
 #include "smf/solver.hpp"
 #include "smf/supernode.hpp"
 #include "smf/sym_graph.hpp"
@@ -409,9 +410,21 @@ namespace smf
             const double refactors = std::max(1, control.expected_refactors);
             if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
             {
-                auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
-                auto [xadj_m, adjncy_m] = build_symmetric_adjacency(C);
-                std::vector<Int> mperm = backend->compute_ordering(n, xadj_m, adjncy_m);
+                std::vector<Int> mperm;
+                if (control.num_threads > 1)
+                {
+                    // Parallel nested dissection straight off the arena's
+                    // adjacency (compressed, AMD leaves on threads).
+                    mperm.resize(sn_sz);
+                    if (!parallel_nd_order(n, xadj, adj, nullptr, control.num_threads, mperm.data()))
+                        mperm.clear();
+                }
+                else
+                {
+                    auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
+                    auto [xadj_m, adjncy_m] = build_symmetric_adjacency(C);
+                    mperm = backend->compute_ordering(n, xadj_m, adjncy_m);
+                }
                 if (mperm.size() == sn_sz)
                 {
                     const Int depth_m = symbolic_counts(mperm.data(), sym1);

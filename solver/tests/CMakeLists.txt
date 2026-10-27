@@ -70,6 +70,10 @@ add_executable(test_symbolic test_symbolic.cpp)
 target_link_libraries(test_symbolic PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME Symbolic COMMAND test_symbolic)
 
+add_executable(test_parallel_nd test_parallel_nd.cpp)
+target_link_libraries(test_parallel_nd PRIVATE smf GTest::GTest GTest::Main)
+add_test(NAME ParallelNd COMMAND test_parallel_nd)
+
 # --- pg:3a test targets ---
 
 add_executable(test_frontal_matrix test_frontal_matrix.cpp)

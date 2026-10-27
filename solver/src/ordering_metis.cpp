@@ -5,8 +5,57 @@
 #include <vector>
 #include <algorithm>
 #include <memory>
+#include <mutex>
 
 namespace smf {
+
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+static_assert(sizeof(idx_t) == sizeof(Int), "METIS idx_t must match smf::Int");
+
+namespace {
+std::mutex& metis_mutex()
+{
+    static std::mutex m;
+    return m;
+}
+
+void metis_options(idx_t* options)
+{
+    METIS_SetDefaultOptions(options);
+    options[METIS_OPTION_SEED] = 0;
+    options[METIS_OPTION_NUMBERING] = 0;
+}
+} // namespace
+#endif
+
+bool metis_node_nd(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* perm, Int* iperm)
+{
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+    idx_t nv = n;
+    idx_t options[METIS_NOPTIONS];
+    metis_options(options);
+    std::lock_guard<std::mutex> lock(metis_mutex());
+    return METIS_NodeND(&nv, xadj, adjncy, vwgt, options, perm, iperm) == METIS_OK;
+#else
+    (void)n; (void)xadj; (void)adjncy; (void)vwgt; (void)perm; (void)iperm;
+    return false;
+#endif
+}
+
+bool metis_vertex_separator(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* part, Int* sepsize)
+{
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+    idx_t nv = n;
+    idx_t options[METIS_NOPTIONS];
+    metis_options(options);
+    std::lock_guard<std::mutex> lock(metis_mutex());
+    return METIS_ComputeVertexSeparator(&nv, xadj, adjncy, vwgt, options, sepsize, part) ==
+           METIS_OK;
+#else
+    (void)n; (void)xadj; (void)adjncy; (void)vwgt; (void)part; (void)sepsize;
+    return false;
+#endif
+}
 
 std::vector<Int> MetisOrdering::compute_ordering(
     Int n,
@@ -17,31 +66,15 @@ std::vector<Int> MetisOrdering::compute_ordering(
     if (n == 0) return {};
 
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
-    // METIS uses idx_t (= int32_t or int64_t depending on build)
-    // Our Int = int32_t; METIS default is idx_t = int32_t. Safe to cast.
-    idx_t metis_n = static_cast<idx_t>(n);
-    // METIS_NodeND wants mutable pointers
-    std::vector<idx_t> xadj_m(xadj.begin(), xadj.end());
-    std::vector<idx_t> adjncy_m(adjncy.begin(), adjncy.end());
-    std::vector<idx_t> perm_m(static_cast<std::size_t>(n));
-    std::vector<idx_t> iperm_m(static_cast<std::size_t>(n));
-
-    int ret = METIS_NodeND(
-        &metis_n,
-        xadj_m.data(),
-        adjncy_m.data(),
-        nullptr,   // vwgt (no vertex weights)
-        nullptr,   // options (use defaults)
-        perm_m.data(),
-        iperm_m.data()
-    );
-
-    if (ret != METIS_OK) {
+    // METIS_NodeND wants mutable arrays.
+    std::vector<Int> xadj_m(xadj.begin(), xadj.end());
+    std::vector<Int> adjncy_m(adjncy.begin(), adjncy.end());
+    std::vector<Int> perm(static_cast<std::size_t>(n));
+    std::vector<Int> iperm(static_cast<std::size_t>(n));
+    if (!metis_node_nd(n, xadj_m.data(), adjncy_m.data(), nullptr, perm.data(), iperm.data())) {
         info.status = ErrorCode::OrderingFailed;
         return {};
     }
-
-    std::vector<Int> perm(perm_m.begin(), perm_m.end());
     return perm;
 #else
     info.status = ErrorCode::Success;

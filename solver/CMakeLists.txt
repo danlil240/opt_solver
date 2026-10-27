@@ -448,6 +448,7 @@ add_library(smf STATIC
     src/ordering_amd.cpp
     src/ordering_matching.cpp
     src/ordering_metis.cpp
+    src/ordering_parallel_nd.cpp
     src/sym_graph.cpp
     src/etree.cpp
     src/supernode_detection.cpp
