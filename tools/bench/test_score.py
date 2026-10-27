@@ -51,9 +51,9 @@ class TestScore(unittest.TestCase):
         ]
         res = score.score(records, m, split="tuning", shift_ms=10.0)
         row = res["hard_indef"]["recommended"][1]["ratio"]
-        assert row["n"] == 1
-        assert math.isclose(row["geomean"], (100.0 + 10.0) / (200.0 + 10.0))
-        assert row["best_solver_counts"] == {"ma27": 1}
+        self.assertEqual(row["n"], 1)
+        self.assertTrue(math.isclose(row["geomean"], (100.0 + 10.0) / (200.0 + 10.0)))
+        self.assertEqual(row["best_solver_counts"], {"ma27": 1})
 
 
     def test_split_filter(self):
@@ -63,11 +63,11 @@ class TestScore(unittest.TestCase):
         tuning = score.score(records, m, split="tuning", shift_ms=10.0)
         held = score.score(records, m, split="heldout", shift_ms=10.0)
         both = score.score(records, m, split="all", shift_ms=10.0)
-        assert tuning["spd"]["recommended"][1]["ratio"]["n"] == 1
-        assert math.isclose(tuning["spd"]["recommended"][1]["ratio"]["geomean"], 20 / 30)
-        assert held["spd"]["recommended"][1]["ratio"]["n"] == 1
-        assert math.isclose(held["spd"]["recommended"][1]["ratio"]["geomean"], 50 / 30)
-        assert both["spd"]["recommended"][1]["ratio"]["n"] == 2
+        self.assertEqual(tuning["spd"]["recommended"][1]["ratio"]["n"], 1)
+        self.assertTrue(math.isclose(tuning["spd"]["recommended"][1]["ratio"]["geomean"], 20 / 30))
+        self.assertEqual(held["spd"]["recommended"][1]["ratio"]["n"], 1)
+        self.assertTrue(math.isclose(held["spd"]["recommended"][1]["ratio"]["geomean"], 50 / 30))
+        self.assertEqual(both["spd"]["recommended"][1]["ratio"]["n"], 2)
 
 
     def test_failure_counts_by_class(self):
@@ -85,10 +85,10 @@ class TestScore(unittest.TestCase):
         ]
         res = score.score(records, m, split="all", shift_ms=10.0)
         s = res["small_kkt"]["recommended"][1]["solvers"]["smf"]
-        assert (s["total"], s["solved"], s["inaccurate"], s["failed"]) == (3, 1, 1, 1)
+        self.assertEqual((s["total"], s["solved"], s["inaccurate"], s["failed"]), (3, 1, 1, 1))
         s27 = res["spd"]["recommended"][1]["solvers"]["ma27"]
-        assert (s27["total"], s27["solved"], s27["inaccurate"], s27["failed"]) == (1, 0, 1, 0)
-        assert res["spd"]["recommended"][1]["solvers"]["smf"]["solved"] == 1
+        self.assertEqual((s27["total"], s27["solved"], s27["inaccurate"], s27["failed"]), (1, 0, 1, 0))
+        self.assertEqual(res["spd"]["recommended"][1]["solvers"]["smf"]["solved"], 1)
 
 
     def test_profile_csv_monotone(self):
@@ -98,18 +98,18 @@ class TestScore(unittest.TestCase):
         }
         taus = [1.0, 1.5, 2.0, 3.0, 10.0]
         rows = score.performance_profile(times, taus)
-        assert [r["tau"] for r in rows] == taus
+        self.assertEqual([r["tau"] for r in rows], taus)
         for solver in times:
             vals = [r[solver] for r in rows]
-            assert vals == sorted(vals)
-            assert all(0.0 <= v <= 1.0 for v in vals)
-        assert rows[0]["smf"] == 1 / 3 and rows[0]["ma27"] == 2 / 3
-        assert rows[-1]["smf"] == 2 / 3  # case c never solved by smf
+            self.assertEqual(vals, sorted(vals))
+            self.assertTrue(all(0.0 <= v <= 1.0 for v in vals))
+        self.assertTrue(rows[0]["smf"] == 1 / 3 and rows[0]["ma27"] == 2 / 3)
+        self.assertEqual(rows[-1]["smf"], 2 / 3)  # case c never solved by smf
         buf = io.StringIO()
         score.write_profile_csv(rows, ["smf", "ma27"], buf)
         parsed = list(csv.DictReader(io.StringIO(buf.getvalue())))
-        assert list(parsed[0].keys()) == ["tau", "smf", "ma27"]
-        assert len(parsed) == len(taus)
+        self.assertEqual(list(parsed[0].keys()), ["tau", "smf", "ma27"])
+        self.assertEqual(len(parsed), len(taus))
 
 
     def test_inertia_column_on_ipopt_track_only(self):
@@ -123,10 +123,10 @@ class TestScore(unittest.TestCase):
         ]
         res = score.score(records, m, split="all", shift_ms=10.0)
         ip = res["hard_indef"]["ipopt"][1]["solvers"]
-        assert ip["smf"]["inertia_pass"] == 0 and ip["smf"]["inertia_checked"] == 1
-        assert ip["ma27"]["inertia_pass"] == 1
+        self.assertTrue(ip["smf"]["inertia_pass"] == 0 and ip["smf"]["inertia_checked"] == 1)
+        self.assertEqual(ip["ma27"]["inertia_pass"], 1)
         rc = res["hard_indef"]["recommended"][1]["solvers"]
-        assert rc["smf"]["inertia_checked"] == 0
+        self.assertEqual(rc["smf"]["inertia_checked"], 0)
 
 
     def test_thread_groups_are_separate_tables(self):
@@ -134,8 +134,8 @@ class TestScore(unittest.TestCase):
         records = [rec("a", "smf", 10.0), rec("a", "ma27", 20.0),
                    rec("a", "smf", 4.0, threads=8), rec("a", "mkl_pardiso", 8.0, threads=8)]
         res = score.score(records, m, split="all", shift_ms=10.0)
-        assert set(res["spd"]["recommended"]) == {1, 8}
-        assert math.isclose(res["spd"]["recommended"][8]["ratio"]["geomean"], 14 / 18)
+        self.assertEqual(set(res["spd"]["recommended"]), {1, 8})
+        self.assertTrue(math.isclose(res["spd"]["recommended"][8]["ratio"]["geomean"], 14 / 18))
 
 
     def test_phase_columns_warm_sequence_fallback(self):
@@ -144,14 +144,37 @@ class TestScore(unittest.TestCase):
                 factor_ms=50.0)
         res = score.score([r, rec("a", "ma27", 90.0, track="ipopt")], m, split="all")
         ph = res["large_kkt"]["ipopt"][1]["solvers"]["smf"]["phases"]
-        assert math.isclose(ph["refactor_ms"], 10.0)
-        assert ph["first_factor_ms"] is None
+        self.assertTrue(math.isclose(ph["refactor_ms"], 10.0))
+        self.assertTrue(ph["first_factor_ms"] is None)
 
 
     def test_replay_override_args(self):
         import run
-        assert run.replay_override_args({"ordering": "matching"}) == ["--ordering", "matching"]
-        assert run.replay_override_args({}) == []
+        self.assertEqual(run.replay_override_args({"ordering": "matching"}), ["--ordering", "matching"])
+        self.assertEqual(run.replay_override_args({}), [])
+
+    def test_report_only_excluded_from_gates_ratio_and_listed(self):
+        m = manifest([case("a", "hard_indef", "tuning"),
+                      dict(case("sing", "hard_indef", "tuning"), report_only=True)])
+        records = [rec("a", "smf", 100.0), rec("a", "ma27", 200.0),
+                   rec("sing", "smf", 5.0, eta=1e-3), rec("sing", "ma27", 6.0)]
+        res = score.score(records, m, split="all")
+        g = res["hard_indef"]["recommended"][1]
+        self.assertEqual(g["solvers"]["smf"]["total"], 1)
+        self.assertEqual(g["solvers"]["smf"]["inaccurate"], 0)
+        self.assertEqual(g["ratio"]["n"], 1)
+        self.assertEqual(g["n_cases"], 1)
+        self.assertEqual(set(g["report_only"]), {"sing"})
+        self.assertNotIn("sing", g["times"]["smf"])
+        self.assertIn("sing", score.render(res, "all"))
+
+    def test_dropped_for_no_accurate_competitor_is_counted(self):
+        m = manifest([case("a", "spd", "tuning"), case("b", "spd", "tuning")])
+        records = [rec("a", "smf", 10.0), rec("a", "ma27", 20.0),
+                   rec("b", "smf", 10.0), rec("b", "ma27", 20.0, eta=1e-3)]
+        res = score.score(records, m, split="all")
+        r = res["spd"]["recommended"][1]["ratio"]
+        self.assertEqual((r["n"], r["no_accurate_competitor"]), (1, 1))
 
 
 if __name__ == "__main__":

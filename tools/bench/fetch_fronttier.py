@@ -37,40 +37,50 @@ SEED = 20261027
 HELDOUT_FRACTION = 0.30
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# Duff-Hogg-Lopez hard indefinite set as far as research_notes/.../benchmark_evidence.md
-# names it: "TSOPF_FS power-flow, GHS_indef cont-201/300, ncvxqp1/3/5/7, cvxqp3,
-# bratu3d, stokes128, darcy003, d_pretok, turon_m, c-big".
-# (group, name, family). Matrices already in large.json are reused from there.
+# Duff-Hogg-Lopez (RAL-TR-2018-012) hard indefinite set, all 24 matrices
+# (.superpowers/sdd/2026-10-27-front-tier-solver/dhl-hard-set.md).
+# (group, name, family).
 DHL_HARD = [
-    ("GHS_indef", "cont-201", "kkt_qp"), ("GHS_indef", "cont-300", "kkt_qp"),
-    ("GHS_indef", "ncvxqp1", "kkt_qp"), ("GHS_indef", "ncvxqp3", "kkt_qp"),
-    ("GHS_indef", "ncvxqp5", "kkt_qp"), ("GHS_indef", "ncvxqp7", "kkt_qp"),
-    ("GHS_indef", "cvxqp3", "kkt_qp"), ("GHS_indef", "bratu3d", "indef_pde"),
-    ("GHS_indef", "stokes128", "kkt_pde"), ("GHS_indef", "darcy003", "kkt_pde"),
+    ("TSOPF", "TSOPF_FS_b39_c7", "power_flow"), ("TSOPF", "TSOPF_FS_b162_c1", "power_flow"),
+    ("QY", "case39", "power_flow"), ("TSOPF", "TSOPF_FS_b39_c19", "power_flow"),
+    ("TSOPF", "TSOPF_FS_b39_c30", "power_flow"), ("GHS_indef", "cont-201", "kkt_qp"),
+    ("GHS_indef", "stokes128", "kkt_pde"), ("TSOPF", "TSOPF_FS_b162_c3", "power_flow"),
+    ("TSOPF", "TSOPF_FS_b162_c4", "power_flow"), ("GHS_indef", "ncvxqp1", "kkt_qp"),
+    ("GHS_indef", "darcy003", "kkt_pde"), ("GHS_indef", "cont-300", "kkt_qp"),
+    ("GHS_indef", "bratu3d", "indef_pde"), ("GHS_indef", "cvxqp3", "kkt_qp"),
+    ("TSOPF", "TSOPF_FS_b300", "power_flow"), ("TSOPF", "TSOPF_FS_b300_c1", "power_flow"),
     ("GHS_indef", "d_pretok", "kkt_pde"), ("GHS_indef", "turon_m", "kkt_pde"),
-    ("Schenk_IBMNA", "c-big", "indef_opt"),
+    ("TSOPF", "TSOPF_FS_b300_c2", "power_flow"), ("TSOPF", "TSOPF_FS_b300_c3", "power_flow"),
+    ("GHS_indef", "ncvxqp5", "kkt_qp"), ("GHS_indef", "ncvxqp3", "kkt_qp"),
+    ("GHS_indef", "ncvxqp7", "kkt_qp"), ("Schenk_IBMNA", "c-big", "indef_opt"),
 ]
-DHL_UNLISTED = {
-    "matrix_id": "TSOPF_FS_*",
-    "class": "hard_indef",
-    "source": "SuiteSparse TSOPF/TSOPF_FS_*",
-    "reason": ("benchmark_evidence.md names the TSOPF_FS power-flow family as part of "
-               "the 24-matrix DHL hard set (about 11 of the 24) but does not list the "
-               "individual matrices, and RAL-TR-2018-012's table is not in the notes; "
-               "not guessed"),
-}
+# Singular matrices: kept for robustness reporting, excluded from accuracy gates.
+REPORT_ONLY = {"d_pretok", "turon_m"}
 
 
-def assign_splits(ids: list[str], seed: int = SEED,
-                  fraction: float = HELDOUT_FRACTION) -> dict[str, str]:
-    """Deterministic per-class split: round(fraction * N) (>= 1) matrices held out."""
+LABEL_MAP = {"train": "tuning", "test": "heldout", "tuning": "tuning", "heldout": "heldout"}
+
+
+def assign_splits(ids: list[str], seed: int = SEED, fraction: float = HELDOUT_FRACTION,
+                  fixed: dict[str, str] | None = None) -> dict[str, str]:
+    """Deterministic per-class split of about `fraction` held out (>= 1).
+
+    `fixed` maps matrix_id -> pre-existing label ("tuning"/"heldout"); those are
+    kept and only the unlabeled ids are drawn by the seed to reach the target.
+    """
     ids = sorted(set(ids))
+    fixed = {k: v for k, v in (fixed or {}).items() if k in ids}
+    free = [i for i in ids if i not in fixed]
     rng = random.Random(seed)
-    order = ids[:]
+    order = free[:]
     rng.shuffle(order)
-    k = min(max(1, round(fraction * len(ids))), len(ids)) if ids else 0
+    target = min(max(1, round(fraction * len(ids))), len(ids)) if ids else 0
+    have = sum(v == "heldout" for v in fixed.values())
+    k = min(len(order), max(0, target - have))
     held = set(order[:k])
-    return {i: ("heldout" if i in held else "tuning") for i in ids}
+    out = dict(fixed)
+    out.update({i: ("heldout" if i in held else "tuning") for i in free})
+    return out
 
 
 def _load(name: str) -> dict:
@@ -103,7 +113,7 @@ def fetch_new(out: pathlib.Path, wanted: list[tuple[str, str, str]], budget_mb: 
         mtx = mdir / f"{name}.mtx"
         if not mtx.exists():
             if not do_fetch:
-                why[name] = "not on disk (run with --fetch)"
+                why[name] = "not on disk: download deferred (slow mirror at low priority); run fetch_fronttier.py --fetch"
                 continue
             size = archive_size(group, name)
             mb = (size or 0) / 1e6
@@ -168,6 +178,7 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
 
     base: list[tuple[str, dict]] = []   # (class, case without track/split)
     missing: list[dict] = []
+    prelabel: dict[str, dict[str, str]] = {}   # class -> matrix_id -> existing label
 
     def add(cls: str, case: dict, source_manifest: str) -> None:
         if not _exists(case):
@@ -176,6 +187,8 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
                             "reason": "fixture file(s) absent on disk"})
             return
         c = {k: v for k, v in case.items() if k not in ("split", "track")}
+        if source_manifest == "ipopt_hard.json" and case.get("split") in LABEL_MAP:
+            prelabel.setdefault(cls, {})[case["matrix_id"]] = LABEL_MAP[case["split"]]
         base.append((cls, _fill_dims(c)))
 
     # hard_indef: DHL names (reuse large.json entry when present) + all large GHS_indef
@@ -195,7 +208,6 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
         else:
             missing.append({"matrix_id": name, "class": "hard_indef",
                             "source": f"SuiteSparse {group}/{name}", "reason": why[name]})
-    missing.append(dict(DHL_UNLISTED))
     for c in large["cases"]:
         if c["matrix_type"] == "indefinite" and c["matrix_id"] not in seen:
             add("hard_indef", c, "large.json")
@@ -206,6 +218,8 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
     for c in ipopt_hard["cases"]:
         if c["matrix_id"].startswith("pglib_"):
             add("small_kkt", c, "ipopt_hard.json")
+        elif c["matrix_id"].startswith("cops_"):
+            add("large_kkt", c, "ipopt_hard.json")
     for c in ipopt_kkt["cases"]:
         add("large_kkt", c, "ipopt_kkt.json")
     for c in large["cases"]:
@@ -215,7 +229,8 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
     # split per class at matrix level
     splits: dict[str, dict[str, str]] = {}
     for cls in {c for c, _ in base}:
-        splits[cls] = assign_splits([x["matrix_id"] for k, x in base if k == cls])
+        splits[cls] = assign_splits([x["matrix_id"] for k, x in base if k == cls],
+                                   fixed=prelabel.get(cls))
 
     cases = []
     for cls, c in base:
@@ -225,6 +240,8 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
             e["class"] = cls
             e["split"] = splits[cls][c["matrix_id"]]
             e["track"] = track
+            if c["matrix_id"] in REPORT_ONLY:
+                e["report_only"] = True   # singular: robustness reporting only
             if track == "ipopt":
                 e["ordering"] = "matching"   # run.py -> bench_replay --ordering
             cases.append(e)

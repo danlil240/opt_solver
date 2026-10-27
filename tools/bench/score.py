@@ -186,7 +186,10 @@ def shifted_geomean(pairs: list[tuple[float, float]], shift_ms: float) -> float 
 
 def performance_profile(times: dict[str, dict[str, float | None]],
                         taus: list[float]) -> list[dict[str, float]]:
-    """Dolan-More profile. times[solver][case] is an accurate time or None."""
+    """Dolan-More profile. times[solver][case] is an accurate time or None.
+
+    The denominator is every case seen (including ones no solver solved, which
+    therefore cap all curves below 1), as in Dolan & More."""
     cases = sorted({c for per in times.values() for c in per})
     best = {}
     for c in cases:
@@ -278,9 +281,14 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         pairs: list[tuple[float, float]] = []
         best_counts: collections.Counter = collections.Counter()
         unsolved_subject = 0
+        no_competitor = 0
+        report_only: dict[str, dict[str, dict[str, Any]]] = {}
         times: dict[str, dict[str, float | None]] = {s: {} for s in solver_ids}
 
         for mid, per in per_case.items():
+            if cases[(mid, track)].get("report_only"):
+                report_only[mid] = per
+                continue
             ref = _inertia_reference(per, subject) if track == "ipopt" else None
             for sid in solver_ids:
                 a = per.get(sid)
@@ -320,11 +328,12 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 best_t, best_s = min(comp)
                 pairs.append((subj["wall_ms"], best_t))
                 best_counts[best_s] += 1
+            else:
+                no_competitor += 1
 
         for sid in solver_ids:
             stats[sid]["wall_median_ms"] = _median(walls[sid])
             stats[sid]["phases"] = {k: _median(v) for k, v in phase_vals[sid].items()}
-            # flat view of the phase medians for convenience
         result.setdefault(cls, {}).setdefault(track, {})[threads] = {
             "solvers": stats,
             "ratio": {
@@ -334,9 +343,11 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 "shift_ms": shift_ms,
                 "best_solver_counts": dict(best_counts),
                 "subject_unsolved": unsolved_subject,
+                "no_accurate_competitor": no_competitor,
             },
+            "report_only": report_only,
             "times": times,
-            "n_cases": len(per_case),
+            "n_cases": len(per_case) - len(report_only),
         }
     return result
 
@@ -372,6 +383,7 @@ def render(result: dict[str, Any], split: str) -> str:
                     f"(shift {ratio['shift_ms']:g} ms): "
                     f"**{'n/a' if gm is None else f'{gm:.3f}'}** over {ratio['n']} cases; "
                     f"{ratio['subject']} unsolved on {ratio['subject_unsolved']}; "
+                    f"dropped for no accurate competitor: {ratio['no_accurate_competitor']}; "
                     f"best competitor counts: {ratio['best_solver_counts'] or '-'}")
                 out.append("")
                 ip = track == "ipopt"
@@ -405,6 +417,16 @@ def render(result: dict[str, Any], split: str) -> str:
                             row += " n/a |"
                     out.append(row)
                 out.append("")
+                if g["report_only"]:
+                    out.append("Report-only (singular; excluded from gates, ratio and profile):")
+                    out.append("")
+                    out.append("| case | solver | status | wall ms | eta_inf | omega | inertia |")
+                    out.append("|---|---|---|---:|---:|---:|---|")
+                    for mid, per in sorted(g["report_only"].items()):
+                        for sid, a in sorted(per.items()):
+                            out.append(f"| {mid} | {sid} | {a['status']} | {_fmt(a['wall_ms'])} | "
+                                       f"{_fmt(a['eta'])} | {_fmt(a['omega'])} | {a['inertia']} |")
+                    out.append("")
     return "\n".join(out) + "\n"
 
 
