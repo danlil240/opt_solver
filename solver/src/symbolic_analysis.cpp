@@ -223,11 +223,18 @@ namespace smf
         const std::size_t nnz_c = C.row_idx.size();
         const std::size_t nz_adj = lower_csc_adjacency_size(n, C.col_ptr.data(), C.row_idx.data());
         // Layout: a fixed head (adjacency, iperm, two etree/count blocks),
-        // then a region that holds AMD's arrays during the ordering and every
-        // later temporary afterwards, so the pages AMD touched are reused.
+        // then a region that holds AMD's arrays during the ordering and the
+        // later temporaries afterwards, so the pages AMD touched are reused:
+        // the relabelling arrays (live from step 6 to 8) followed by one
+        // scratch area for, in turn, the counts workspace (step 5), the
+        // amalgamation workspace (step 6) and the row form plus the assembly
+        // tree's mark/depth arrays (steps 7-8).
         const std::size_t head_need = 8 * sn_sz + 1 + nz_adj;
         const std::size_t amd_need = amd_adjacency_work_size(n, nz_adj);
-        const std::size_t late_need = 34 * sn_sz + 8 + 2 * nnz_c;
+        const std::size_t scratch_need =
+            std::max({4 * sn_sz + 1, amalgamate_relaxed_work_size(n),
+                      5 * sn_sz + 1 + 2 * nnz_c});
+        const std::size_t late_need = 4 * sn_sz + scratch_need;
         const std::size_t work_need = head_need + std::max(amd_need, late_need);
         if (analyse_arena_size_ < work_need)
         {
@@ -241,18 +248,19 @@ namespace smf
         Int *sym_b = sym_a + 3 * sn_sz;          // 3n: a candidate ordering's
         Int *region = sym_b + 3 * sn_sz;         // max(amd_need, late_need)
         Int *amd_work = region;
-        Int *sym_work = region;                  // 4n + 1
-        Int *row_ptr = sym_work + 4 * sn_sz + 1; // n + 1
-        Int *head = row_ptr + sn_sz + 1;         // n
-        Int *col_count = head + sn_sz;           // n
-        Int *inv_po = col_count + sn_sz;         // n
+        Int *inv_po = region;                    // n
         Int *parent1 = inv_po + sn_sz;           // n
         Int *colcount1 = parent1 + sn_sz;        // n
         Int *inv_order = colcount1 + sn_sz;      // n
-        Int *row_col = inv_order + sn_sz;        // nnz
+        Int *scratch = inv_order + sn_sz;        // scratch_need
+        Int *sym_work = scratch;                 // 4n + 1 (step 5)
+        Int *amal_work = scratch;                // step 6
+        Int *row_ptr = scratch;                  // n + 1 (steps 7-8)
+        Int *head = row_ptr + sn_sz + 1;         // n
+        Int *col_count = head + sn_sz;           // n
+        Int *tree_work = col_count + sn_sz;      // 2n
+        Int *row_col = tree_work + 2 * sn_sz;    // nnz
         Int *row_src = row_col + nnz_c;          // nnz
-        Int *amal_work = row_src + nnz_c;        // 16n + 6
-        Int *tree_work = amal_work + amalgamate_relaxed_work_size(n); // 2n
         lower_csc_adjacency(n, C.col_ptr.data(), C.row_idx.data(), xadj, adj);
 
         bool auto_matching = false;
