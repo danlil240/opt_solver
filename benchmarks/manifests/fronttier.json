@@ -1445,7 +1445,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1462,7 +1462,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -1478,7 +1478,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1495,7 +1495,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -1775,7 +1775,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1792,7 +1792,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -1895,6 +1895,39 @@
       "track": "recommended"
     },
     {
+      "matrix_id": "TSOPF_FS_b300_c2",
+      "sequence_id": "TSOPF_FS_b300_c2",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c2",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b300_c2/TSOPF_FS_b300_c2.mtx",
+      "matrix_sha256": "9c89c2351b066b9291c9eb528edf4867b18b9dfa4a11bb924b957199ba0db25a",
+      "n": 56814,
+      "nnz_lower": 4391071,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "heldout",
+      "track": "ipopt",
+      "ordering": "matching"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b300_c2",
+      "sequence_id": "TSOPF_FS_b300_c2",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c2",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b300_c2/TSOPF_FS_b300_c2.mtx",
+      "matrix_sha256": "9c89c2351b066b9291c9eb528edf4867b18b9dfa4a11bb924b957199ba0db25a",
+      "n": 56814,
+      "nnz_lower": 4391071,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "heldout",
+      "track": "recommended"
+    },
+    {
       "matrix_id": "blockqp1",
       "sequence_id": "blockqp1",
       "family_id": "kkt_qp",
@@ -1907,7 +1940,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1924,7 +1957,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -2006,7 +2039,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2023,7 +2056,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -2052,6 +2085,39 @@
       "matrix_sha256": "037a49be13f3d3276ce9f40ed9f8dac38d31ec2ae63c2f4c29e34186046b9ccf",
       "n": 80595,
       "nnz_lower": 239596,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "tuning",
+      "track": "recommended"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b300_c3",
+      "sequence_id": "TSOPF_FS_b300_c3",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c3",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b300_c3/TSOPF_FS_b300_c3.mtx",
+      "matrix_sha256": "94ee4a0fa2aff1d499b17e8176bc3e83dd55c496b5b3f2723a8b7b5b182d3fc1",
+      "n": 84414,
+      "nnz_lower": 6578753,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "tuning",
+      "track": "ipopt",
+      "ordering": "matching"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b300_c3",
+      "sequence_id": "TSOPF_FS_b300_c3",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c3",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b300_c3/TSOPF_FS_b300_c3.mtx",
+      "matrix_sha256": "94ee4a0fa2aff1d499b17e8176bc3e83dd55c496b5b3f2723a8b7b5b182d3fc1",
+      "n": 84414,
+      "nnz_lower": 6578753,
       "matrix_type": "indefinite",
       "mode": "cold",
       "expected_outcome": "Success",
@@ -2105,7 +2171,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2122,43 +2188,43 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
+      "split": "tuning",
+      "track": "recommended"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b39_c30",
+      "sequence_id": "TSOPF_FS_b39_c30",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
+      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
+      "n": 120216,
+      "nnz_lower": 1575639,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "heldout",
+      "track": "ipopt",
+      "ordering": "matching"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b39_c30",
+      "sequence_id": "TSOPF_FS_b39_c30",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
+      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
+      "n": 120216,
+      "nnz_lower": 1575639,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
       "split": "heldout",
       "track": "recommended"
     },
     {
-      "matrix_id": "TSOPF_FS_b39_c30",
-      "sequence_id": "TSOPF_FS_b39_c30",
-      "family_id": "power_flow",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
-      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
-      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
-      "n": 120216,
-      "nnz_lower": 1575639,
-      "matrix_type": "indefinite",
-      "mode": "cold",
-      "expected_outcome": "Success",
-      "class": "hard_indef",
-      "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
-    },
-    {
-      "matrix_id": "TSOPF_FS_b39_c30",
-      "sequence_id": "TSOPF_FS_b39_c30",
-      "family_id": "power_flow",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
-      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
-      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
-      "n": 120216,
-      "nnz_lower": 1575639,
-      "matrix_type": "indefinite",
-      "mode": "cold",
-      "expected_outcome": "Success",
-      "class": "hard_indef",
-      "split": "tuning",
-      "track": "recommended"
-    },
-    {
       "matrix_id": "cont-300",
       "sequence_id": "cont-300",
       "family_id": "kkt_qp",
@@ -2171,7 +2237,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2188,7 +2254,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -2204,7 +2270,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "report_only": true,
       "ordering": "matching"
@@ -2222,7 +2288,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended",
       "report_only": true
     },
@@ -2239,7 +2305,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "report_only": true,
       "ordering": "matching"
@@ -2257,7 +2323,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended",
       "report_only": true
     },
@@ -2586,18 +2652,5 @@
       "track": "recommended"
     }
   ],
-  "missing": [
-    {
-      "matrix_id": "TSOPF_FS_b300_c2",
-      "class": "hard_indef",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c2",
-      "reason": "not on disk: download deferred (slow mirror at low priority); run fetch_fronttier.py --fetch"
-    },
-    {
-      "matrix_id": "TSOPF_FS_b300_c3",
-      "class": "hard_indef",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b300_c3",
-      "reason": "not on disk: download deferred (slow mirror at low priority); run fetch_fronttier.py --fetch"
-    }
-  ]
+  "missing": []
 }
