@@ -18,13 +18,66 @@ namespace smf
     // cost is O(nnz(A) alpha(n)) instead of one step per entry of L (the
     // row-subtree walk this replaces cost 20% of analysis on bmwcra_1).
     // Needs parent[j] > j, true for the etree of a permuted matrix.
+    // for_each_below(j, f) calls f(i) for every row i > j of column j of the
+    // strict lower triangle, in any order (the result does not depend on
+    // it). work: 4n ints; delta (the counts) n ints.
+    template <class ForEachBelow>
+    static void gnp_column_counts(Int n, const Int *parent, const Int *post, Int *delta,
+                                  Int *work, ForEachBelow &&for_each_below)
+    {
+        const auto sn = static_cast<std::size_t>(n);
+        std::fill(work, work + 4 * sn, -1);
+        Int *ancestor = work;
+        Int *maxfirst = ancestor + sn;
+        Int *prevleaf = maxfirst + sn;
+        Int *first = prevleaf + sn;
+        for (Int k = 0; k < n; ++k)
+        {
+            Int j = post[k];
+            delta[j] = (first[j] == -1) ? 1 : 0; // leaf
+            for (; j != -1 && first[j] == -1; j = parent[j])
+                first[j] = k;
+        }
+        for (Int i = 0; i < n; ++i)
+            ancestor[i] = i;
+        for (Int k = 0; k < n; ++k)
+        {
+            const Int j = post[k];
+            if (parent[j] != -1)
+                --delta[parent[j]];
+            for_each_below(j, [&](Int i) {
+                if (first[j] <= maxfirst[i])
+                    return; // j is not a leaf of row subtree i
+                maxfirst[i] = first[j];
+                const Int jprev = prevleaf[i];
+                prevleaf[i] = j;
+                ++delta[j]; // A(i, j) is in the skeleton
+                if (jprev == -1)
+                    return; // first leaf of row subtree i
+                Int q = jprev;
+                while (q != ancestor[q])
+                    q = ancestor[q];
+                for (Int s = jprev; s != q;)
+                {
+                    const Int sparent = ancestor[s];
+                    ancestor[s] = q;
+                    s = sparent;
+                }
+                --delta[q]; // q = lca(jprev, j) was counted twice
+            });
+            if (parent[j] != -1)
+                ancestor[j] = parent[j];
+        }
+        for (Int j = 0; j < n; ++j)
+            if (parent[j] != -1)
+                delta[parent[j]] += delta[j];
+    }
+
     std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
                                                     const Int *row_cols,
                                                     const EliminationTree &etree)
     {
         const auto sn = static_cast<std::size_t>(n);
-        const Int *parent = etree.parent.data();
-        const Int *post = etree.postorder.data();
 
         // Column form of the strict lower triangle: rows i > j of column j.
         std::vector<Int> cp(sn + 1, 0);
@@ -43,55 +96,33 @@ namespace smf
                         ci[static_cast<std::size_t>(next[static_cast<std::size_t>(row_cols[p])]++)] = i;
         }
 
-        std::vector<Int> w(4 * sn, -1);
-        Int *ancestor = w.data();
-        Int *maxfirst = ancestor + sn;
-        Int *prevleaf = maxfirst + sn;
-        Int *first = prevleaf + sn;
+        std::vector<Int> w(4 * sn);
         std::vector<Int> delta(sn);
-        for (Int k = 0; k < n; ++k)
-        {
-            Int j = post[k];
-            delta[static_cast<std::size_t>(j)] = (first[j] == -1) ? 1 : 0; // leaf
-            for (; j != -1 && first[j] == -1; j = parent[j])
-                first[j] = k;
-        }
-        for (Int i = 0; i < n; ++i)
-            ancestor[i] = i;
-        for (Int k = 0; k < n; ++k)
-        {
-            const Int j = post[k];
-            if (parent[j] != -1)
-                --delta[static_cast<std::size_t>(parent[j])];
-            for (Int p = cp[static_cast<std::size_t>(j)]; p < cp[static_cast<std::size_t>(j) + 1]; ++p)
-            {
-                const Int i = ci[static_cast<std::size_t>(p)];
-                if (first[j] <= maxfirst[i])
-                    continue; // j is not a leaf of row subtree i
-                maxfirst[i] = first[j];
-                const Int jprev = prevleaf[i];
-                prevleaf[i] = j;
-                ++delta[static_cast<std::size_t>(j)]; // A(i, j) is in the skeleton
-                if (jprev == -1)
-                    continue; // first leaf of row subtree i
-                Int q = jprev;
-                while (q != ancestor[q])
-                    q = ancestor[q];
-                for (Int s = jprev; s != q;)
-                {
-                    const Int sparent = ancestor[s];
-                    ancestor[s] = q;
-                    s = sparent;
-                }
-                --delta[static_cast<std::size_t>(q)]; // q = lca(jprev, j) was counted twice
-            }
-            if (parent[j] != -1)
-                ancestor[j] = parent[j];
-        }
-        for (Int j = 0; j < n; ++j)
-            if (parent[j] != -1)
-                delta[static_cast<std::size_t>(parent[j])] += delta[static_cast<std::size_t>(j)];
+        gnp_column_counts(n, etree.parent.data(), etree.postorder.data(), delta.data(), w.data(),
+                          [&](Int j, auto &&f) {
+                              for (Int p = cp[static_cast<std::size_t>(j)];
+                                   p < cp[static_cast<std::size_t>(j) + 1]; ++p)
+                                  f(ci[static_cast<std::size_t>(p)]);
+                          });
         return delta;
+    }
+
+    void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
+                                             const Int *perm, const Int *iperm,
+                                             const Int *parent, const Int *postorder,
+                                             Int *colcount, Int *work)
+    {
+        // Column j of P A P^T below the diagonal: the neighbours of old
+        // vertex perm[j] numbered above j. No permuted copy is formed.
+        gnp_column_counts(n, parent, postorder, colcount, work, [&](Int j, auto &&f) {
+            const Int v = perm[j];
+            for (Int p = xadj[v]; p < xadj[v + 1]; ++p)
+            {
+                const Int i = iperm[adj[p]];
+                if (i > j)
+                    f(i);
+            }
+        });
     }
 
     // Compute exact simplicial column counts |L_{*w}| of the Cholesky factor.

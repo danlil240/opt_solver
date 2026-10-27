@@ -213,6 +213,35 @@ namespace smf
         // (regularised constraint blocks) below 1% of their column's largest
         // off-diagonal. Indefinite PDE matrices have under 1% such columns.
         const CscLower &C = cleaned.clean;
+
+        // Temporaries live in a solver-owned buffer reused across analyses
+        // (fresh allocations are dominated by page faults at these sizes).
+        // The symmetric adjacency of C is built once: AMD consumes a copy and
+        // the etree and column counts of every candidate ordering read it
+        // directly, so no permuted copy of A is formed for them.
+        const auto sn_sz = static_cast<std::size_t>(n);
+        const std::size_t nnz_c = C.row_idx.size();
+        const std::size_t nz_adj = lower_csc_adjacency_size(n, C.col_ptr.data(), C.row_idx.data());
+        const std::size_t work_need = 19 * sn_sz + 3 + nz_adj + 2 * nnz_c;
+        if (analyse_work_.size() < work_need)
+            analyse_work_.resize(work_need);
+        Int *xadj = analyse_work_.data();        // n + 1
+        Int *adj = xadj + sn_sz + 1;             // nz_adj
+        Int *iperm_w = adj + nz_adj;             // n
+        Int *sym_a = iperm_w + sn_sz;            // 3n: parent, postorder, counts
+        Int *sym_b = sym_a + 3 * sn_sz;          // 3n: a candidate ordering's
+        Int *sym_work = sym_b + 3 * sn_sz;       // 4n + 1
+        Int *row_ptr = sym_work + 4 * sn_sz + 1; // n + 1
+        Int *head = row_ptr + sn_sz + 1;         // n
+        Int *col_count = head + sn_sz;           // n
+        Int *inv_po = col_count + sn_sz;         // n
+        Int *parent1 = inv_po + sn_sz;           // n
+        Int *colcount1 = parent1 + sn_sz;        // n
+        Int *inv_order = colcount1 + sn_sz;      // n
+        Int *row_col = inv_order + sn_sz;        // nnz
+        Int *row_src = row_col + nnz_c;          // nnz
+        lower_csc_adjacency(n, C.col_ptr.data(), C.row_idx.data(), xadj, adj);
+
         bool auto_matching = false;
         lap(phases.ordering);
         if (auto_order && !use_identity_ordering && n >= kAutoMatchingMinN &&
@@ -282,18 +311,23 @@ namespace smf
                 control.ordering == OrderingMethod::AMD ||
                 control.ordering == OrderingMethod::AutoParallel ||
                 control.ordering == OrderingMethod::Matching;
-            amd_ordered = !matching_ordered && amd_backend &&
-                          amd_order_lower_csc(n, C.col_ptr, C.row_idx, perm,
-                                              analyse_scratch_);
+            if (!matching_ordered && amd_backend)
+            {
+                const std::size_t amd_need = amd_adjacency_work_size(n, nz_adj);
+                if (analyse_scratch_.size() < amd_need)
+                    analyse_scratch_.resize(amd_need);
+                amd_ordered = amd_order_adjacency(n, xadj, adj, perm.data(),
+                                                  analyse_scratch_.data());
+            }
             if (!matching_ordered && !amd_ordered)
             {
                 auto backend = make_ordering_backend(control.ordering, n, info);
 
                 // Step 3: build symmetric adjacency graph for the cleaned pattern.
-                auto [xadj, adjncy] = build_symmetric_adjacency(C);
+                auto [xadj_g, adjncy_g] = build_symmetric_adjacency(C);
 
                 // Step 4: compute fill-reducing permutation.
-                perm = backend->compute_ordering(n, xadj, adjncy);
+                perm = backend->compute_ordering(n, xadj_g, adjncy_g);
             }
             if (perm.empty())
             {
@@ -318,46 +352,35 @@ namespace smf
 
         lap(phases.ordering);
 
-        // Temporaries live in a solver-owned buffer reused across analyses
-        // (fresh allocations are dominated by page faults at these sizes).
-        const auto sn_sz = static_cast<std::size_t>(n);
-        const std::size_t nnz_c = C.row_idx.size();
-        const std::size_t work_need = 7 * sn_sz + 1 + 2 * nnz_c;
-        if (analyse_work_.size() < work_need)
-            analyse_work_.resize(work_need);
-        Int *row_ptr = analyse_work_.data();     // n + 1
-        Int *head = row_ptr + sn_sz + 1;         // n
-        Int *col_count = head + sn_sz;           // n
-        Int *inv_po = col_count + sn_sz;         // n
-        Int *parent1 = inv_po + sn_sz;           // n
-        Int *colcount1 = parent1 + sn_sz;        // n
-        Int *inv_order = colcount1 + sn_sz;      // n
-        Int *row_col = inv_order + sn_sz;        // nnz
-        Int *row_src = row_col + nnz_c;          // nnz
-
         std::vector<Int> iperm(sn_sz);
-        const auto symbolic_counts = [&](const std::vector<Int> &p, EliminationTree &et,
-                                         std::vector<Int> &cc) {
+        // Etree (parent, postorder) and exact column counts of an ordering,
+        // into one of the 3n blocks sym_a / sym_b.
+        const auto symbolic_counts = [&](const Int *p, Int *sym) {
             for (Int i = 0; i < n; ++i)
-                iperm[static_cast<std::size_t>(p[static_cast<std::size_t>(i)])] = i;
-            build_row_form(C, iperm.data(), row_ptr, row_col, nullptr, nullptr, head);
-            et = build_elimination_tree_from_rows(n, row_ptr, row_col);
-            cc = filled_column_counts_from_rows(n, row_ptr, row_col, et);
+                iperm_w[p[i]] = i;
+            etree_from_adjacency(n, xadj, adj, p, iperm_w, sym, sym_work);
+            const Int depth = etree_postorder(n, sym, sym + sn_sz, sym_work);
+            filled_column_counts_from_adjacency(n, xadj, adj, p, iperm_w, sym, sym + sn_sz,
+                                                sym + 2 * sn_sz, sym_work);
+            return depth;
         };
-        const auto factor_flops = [](const std::vector<Int> &cc) {
+        const auto factor_flops = [&](const Int *sym) {
             double fl = 0.0;
-            for (Int c : cc)
-                fl += static_cast<double>(c) * static_cast<double>(c);
+            for (Int j = 0; j < n; ++j)
+            {
+                const double c = static_cast<double>(sym[2 * sn_sz + static_cast<std::size_t>(j)]);
+                fl += c * c;
+            }
             return fl;
         };
 
-        EliminationTree etree0;
-        std::vector<Int> colcount0;
         std::vector<Int> order;
         std::vector<Supernode> snodes;
         std::vector<Int> parentf(sn_sz);
         // Step 5: elimination tree and exact column counts of the ordering.
-        symbolic_counts(perm, etree0, colcount0);
+        Int *sym0 = sym_a;
+        Int *sym1 = sym_b;
+        Int depth0 = symbolic_counts(perm.data(), sym0);
         lap(phases.etree_counts);
 
         // AutoParallel on large matrices: METIS costs several us per vertex
@@ -366,23 +389,21 @@ namespace smf
         if (kHaveMetis && amd_ordered &&
             control.ordering == OrderingMethod::AutoParallel && n > 8192)
         {
-            const double fl = factor_flops(colcount0);
+            const double fl = factor_flops(sym0);
             const double refactors = std::max(1, control.expected_refactors);
             if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
             {
                 auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
-                auto [xadj, adjncy] = build_symmetric_adjacency(C);
-                std::vector<Int> mperm = backend->compute_ordering(n, xadj, adjncy);
+                auto [xadj_m, adjncy_m] = build_symmetric_adjacency(C);
+                std::vector<Int> mperm = backend->compute_ordering(n, xadj_m, adjncy_m);
                 if (mperm.size() == sn_sz)
                 {
-                    EliminationTree etm;
-                    std::vector<Int> ccm;
-                    symbolic_counts(mperm, etm, ccm);
-                    if (factor_flops(ccm) < fl)
+                    const Int depth_m = symbolic_counts(mperm.data(), sym1);
+                    if (factor_flops(sym1) < fl)
                     {
                         perm = std::move(mperm);
-                        etree0 = std::move(etm);
-                        colcount0 = std::move(ccm);
+                        std::swap(sym0, sym1);
+                        depth0 = depth_m;
                         info.ordering_used = static_cast<int>(OrderingMethod::METIS);
                     }
                 }
@@ -397,17 +418,18 @@ namespace smf
         // flops exceed AMD's by more than a constant factor.
         if (auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching))
         {
-            EliminationTree etm;
-            std::vector<Int> ccm;
-            symbolic_counts(matching_perm, etm, ccm);
-            if (factor_flops(ccm) <= kMatchingFlopsRatio * factor_flops(colcount0))
+            const Int depth_m = symbolic_counts(matching_perm.data(), sym1);
+            if (factor_flops(sym1) <= kMatchingFlopsRatio * factor_flops(sym0))
             {
                 perm = std::move(matching_perm);
-                etree0 = std::move(etm);
-                colcount0 = std::move(ccm);
+                std::swap(sym0, sym1);
+                depth0 = depth_m;
                 info.ordering_used = static_cast<int>(OrderingMethod::Matching);
             }
         }
+        const Int *parent0 = sym0;
+        const Int *post0 = sym0 + sn_sz;
+        const Int *colcount0 = sym0 + 2 * sn_sz;
 
         lap(phases.matching);
 
@@ -415,13 +437,13 @@ namespace smf
         // become contiguous), then relaxed amalgamation, which returns a
         // further topological reordering making merged groups contiguous.
         for (Int k = 0; k < n; ++k)
-            inv_po[etree0.postorder[static_cast<std::size_t>(k)]] = k;
+            inv_po[post0[k]] = k;
         for (Int k = 0; k < n; ++k)
         {
-            const Int old = etree0.postorder[static_cast<std::size_t>(k)];
-            const Int par = etree0.parent[static_cast<std::size_t>(old)];
+            const Int old = post0[k];
+            const Int par = parent0[old];
             parent1[k] = (par >= 0) ? inv_po[par] : -1;
-            colcount1[k] = colcount0[static_cast<std::size_t>(old)];
+            colcount1[k] = colcount0[old];
         }
         // User 2x2 pairs: perm is still user_perm here, so a pair's
         // positions in the permuted numbering are user_iperm; the earlier
@@ -438,7 +460,7 @@ namespace smf
                 Int pb = user_iperm[static_cast<std::size_t>(pf[2 * static_cast<std::size_t>(k) + 1])];
                 if (pa > pb)
                     std::swap(pa, pb);
-                if (etree0.parent[static_cast<std::size_t>(pa)] == pb)
+                if (parent0[pa] == pb)
                     keep_with_parent[static_cast<std::size_t>(inv_po[pa])] = 1;
                 else
                     ++info.pairs_split;
@@ -459,8 +481,7 @@ namespace smf
                 const Int k1 = order[static_cast<std::size_t>(k)];
                 const Int p1 = parent1[k1];
                 parentf[static_cast<std::size_t>(k)] = (p1 >= 0) ? inv_order[p1] : -1;
-                const Int old = perm0[static_cast<std::size_t>(
-                    etree0.postorder[static_cast<std::size_t>(k1)])];
+                const Int old = perm0[static_cast<std::size_t>(post0[k1])];
                 perm[static_cast<std::size_t>(k)] = old;
                 identity_final = identity_final && (old == k);
             }
@@ -469,11 +490,11 @@ namespace smf
             iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
 
         // Relabelling preserves the tree: numbering 1 *is* the postorder of
-        // etree0, so k -> inv_order[k] lists the final labels in postorder.
+        // the ordering's etree, so k -> inv_order[k] lists the final labels in postorder.
         EliminationTree etree;
         etree.parent = std::move(parentf);
         etree.postorder.assign(inv_order, inv_order + n);
-        etree.max_depth = etree0.max_depth;
+        etree.max_depth = depth0;
 
         lap(phases.amalgamate);
 

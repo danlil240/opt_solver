@@ -2,6 +2,7 @@
 #include "smf/types.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
+#include <cstddef>
 #include <vector>
 #include <memory>
 
@@ -40,6 +41,28 @@ bool amd_order_lower_csc(Int n,
                          const std::vector<Int>& row_idx,
                          std::vector<Int>& perm,
                          std::vector<Int>& work);
+
+/// Size of lower_csc_adjacency's `adj`: twice the off-diagonal entries of a
+/// cleaned lower CSC (rows sorted and unique, all >= their column). O(n).
+std::size_t lower_csc_adjacency_size(Int n, const Int *col_ptr, const Int *row_idx);
+
+/// Symmetric adjacency (both triangles, no diagonal) of a cleaned lower CSC:
+/// vertex v's neighbours are adj[xadj[v] .. xadj[v+1]), ascending, which is
+/// the order amd_order_lower_csc feeds amd_2. One counting pass and one fill
+/// pass; xadj has n + 1 entries, adj lower_csc_adjacency_size() entries.
+void lower_csc_adjacency(Int n, const Int *col_ptr, const Int *row_idx, Int *xadj, Int *adj);
+
+/// Ints amd_order_adjacency needs in `work` for an adjacency of nz entries:
+/// amd_2's nine size-n arrays plus its Iw with amd_order's elbow room
+/// (1.2 nz + n).
+std::size_t amd_adjacency_work_size(Int n, std::size_t nz);
+
+/// AMD (amd_2) on an adjacency from lower_csc_adjacency, which is copied
+/// into `work` (amd_2 destroys its input), so the caller can reuse it for the
+/// elimination tree and column counts. Same permutation as
+/// amd_order_lower_csc on the same matrix. perm[new] = old; false when AMD is
+/// not compiled in.
+bool amd_order_adjacency(Int n, const Int *xadj, const Int *adj, Int *perm, Int *work);
 
 struct MatchingOrderStats {
     Int pairs = 0;              ///< 2x2 pivot pairs kept adjacent

@@ -27,4 +27,16 @@ EliminationTree build_elimination_tree(Int n, const std::vector<Int> &col_ptr,
 EliminationTree build_elimination_tree_from_rows(Int n, const Int *row_ptr,
                                                  const Int *row_cols);
 
+/// Postorder of a forest given by parent[] (parent[j] = -1 for roots), as
+/// EliminationTree::postorder (roots and children in increasing index);
+/// returns max_depth. `work` holds 4n + 1 ints.
+Int etree_postorder(Int n, const Int *parent, Int *postorder, Int *work);
+
+/// Elimination tree (parent array, new numbering) of P A P^T straight from
+/// the symmetric adjacency of A (both triangles, no diagonal; see
+/// lower_csc_adjacency), perm[new] = old and iperm[old] = new: no permuted
+/// copy of A is formed. `ancestor` is n ints of workspace.
+void etree_from_adjacency(Int n, const Int *xadj, const Int *adj, const Int *perm,
+                          const Int *iperm, Int *parent, Int *ancestor);
+
 } // namespace smf

@@ -57,6 +57,16 @@ std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
                                                 const Int *row_cols,
                                                 const EliminationTree &etree);
 
+/// The same exact column counts of P A P^T straight from the symmetric
+/// adjacency of A (both triangles, no diagonal; see lower_csc_adjacency),
+/// perm[new] = old, iperm[old] = new, and that matrix's etree (parent and
+/// postorder in the new numbering, e.g. etree_from_adjacency and
+/// etree_postorder). colcount: n ints out; work: 4n ints.
+void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
+                                         const Int *perm, const Int *iperm,
+                                         const Int *parent, const Int *postorder,
+                                         Int *colcount, Int *work);
+
 /// Relaxed amalgamation that may merge *any* child into its parent, not only
 /// the child whose columns happen to precede the parent's.
 ///

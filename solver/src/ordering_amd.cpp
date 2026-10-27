@@ -204,6 +204,95 @@ bool amd_order_lower_csc(Int n,
 #endif
 }
 
+std::size_t lower_csc_adjacency_size(Int n, const Int *col_ptr, const Int *row_idx)
+{
+    // Cleaned columns: sorted rows >= j, so a diagonal is the first entry.
+    std::size_t diag = 0;
+    for (Int j = 0; j < n; ++j)
+        diag += (col_ptr[j + 1] > col_ptr[j] && row_idx[col_ptr[j]] == j) ? 1 : 0;
+    return 2 * (static_cast<std::size_t>(col_ptr[n]) - diag);
+}
+
+void lower_csc_adjacency(Int n, const Int *col_ptr, const Int *row_idx, Int *xadj, Int *adj)
+{
+    // The interleaved fill of amd_order_lower_csc (entry (i, j) appends i to
+    // j's list and j to i's, columns in increasing order) leaves vertex v's
+    // list as its lower-triangle row (columns j < v) then its column below
+    // the diagonal, both ascending: the order amd_2 is fed today. Degrees are
+    // counted into xadj[v], turned into starts, used as fill cursors (each
+    // ends at the next vertex's start) and shifted back into place.
+    std::fill(xadj, xadj + n + 1, 0);
+    for (Int j = 0; j < n; ++j) {
+        Int k = col_ptr[j];
+        const Int k1 = col_ptr[j + 1];
+        if (k < k1 && row_idx[k] == j) ++k;
+        xadj[j] += k1 - k;
+        for (; k < k1; ++k) ++xadj[row_idx[k]];
+    }
+    Int start = 0;
+    for (Int v = 0; v < n; ++v) {
+        const Int d = xadj[v];
+        xadj[v] = start;
+        start += d;
+    }
+    xadj[n] = start;
+    for (Int j = 0; j < n; ++j) {
+        Int k = col_ptr[j];
+        const Int k1 = col_ptr[j + 1];
+        if (k < k1 && row_idx[k] == j) ++k;
+        for (; k < k1; ++k) {
+            const Int i = row_idx[k];
+            adj[xadj[j]++] = i;
+            adj[xadj[i]++] = j;
+        }
+    }
+    for (Int v = n; v > 0; --v) xadj[v] = xadj[v - 1];
+    xadj[0] = 0;
+}
+
+std::size_t amd_adjacency_work_size(Int n, std::size_t nz)
+{
+    const auto sn = static_cast<std::size_t>(n);
+    return 9 * sn + nz + nz / 5 + sn;
+}
+
+bool amd_order_adjacency(Int n, const Int *xadj, const Int *adj, Int *perm, Int *work)
+{
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
+    if (n == 0) return true;
+    const auto sn = static_cast<std::size_t>(n);
+    const auto nz = static_cast<std::size_t>(xadj[n]);
+    if (nz == 0) {
+        std::iota(perm, perm + n, 0);
+        return true;
+    }
+    const std::size_t iwlen = nz + nz / 5 + sn;
+    Int *Pe = work;
+    Int *Len = Pe + sn;
+    Int *Nv = Len + sn;
+    Int *Next = Nv + sn;
+    Int *Last = Next + sn;
+    Int *Head = Last + sn;
+    Int *Elen = Head + sn;
+    Int *Degree = Elen + sn;
+    Int *W = Degree + sn;
+    Int *Iw = W + sn;
+    for (Int i = 0; i < n; ++i) {
+        Pe[i] = xadj[i];
+        Len[i] = xadj[i + 1] - xadj[i];
+    }
+    std::copy(adj, adj + nz, Iw);
+    amd_2(static_cast<int>(n), Pe, Iw, Len, static_cast<int>(iwlen),
+          static_cast<int>(nz), Nv, Next, Last, Head, Elen, Degree, W,
+          nullptr, nullptr);
+    std::copy(Last, Last + sn, perm);
+    return true;
+#else
+    (void)n; (void)xadj; (void)adj; (void)perm; (void)work;
+    return false;
+#endif
+}
+
 std::vector<Int> AmdOrdering::compute_ordering(
     Int n,
     const std::vector<Int>& xadj,

@@ -1,47 +1,56 @@
 #include "smf/etree.hpp"
 #include <vector>
-#include <stack>
 #include <algorithm>
 
 namespace smf {
 
 namespace {
 
-// Children lists, postorder and depth for a parent array (shared by both
-// etree builders).
+// Children lists, postorder and depth for a parent array (shared by the
+// vector-returning etree builders).
 void finish_elimination_tree(Int n, std::vector<Int> parent, EliminationTree &et)
 {
     const auto sn = static_cast<std::size_t>(n);
-    // All temporaries in one block: children CSR (ch_start, children), a
-    // fill cursor, and the DFS stacks (node, child cursor) reused as the
-    // depth array afterwards.
-    std::vector<Int> work(5 * sn + 1, 0);
-    Int *ch_start = work.data();         // n + 1
-    Int *children = ch_start + sn + 1;   // n
-    Int *cursor = children + sn;         // n
-    Int *stk_node = cursor + sn;         // n
-    Int *stk_ci = stk_node + sn;         // n
+    std::vector<Int> work(4 * sn + 1);
+    std::vector<Int> postorder(sn);
+    et.max_depth = etree_postorder(n, parent.data(), postorder.data(), work.data());
+    et.parent    = std::move(parent);
+    et.postorder = std::move(postorder);
+}
 
-    // Phase 2: build children lists (flat CSR) for postorder traversal
+} // namespace
+
+Int etree_postorder(Int n, const Int *parent, Int *postorder, Int *work)
+{
+    const auto sn = static_cast<std::size_t>(n);
+    // Children CSR (ch_start, children) and the DFS stacks (node, child
+    // cursor); the child-cursor stack is the fill cursor before the DFS and
+    // the node stack is the depth array after it.
+    Int *ch_start = work;                // n + 1
+    Int *children = ch_start + sn + 1;   // n
+    Int *stk_node = children + sn;       // n
+    Int *stk_ci = stk_node + sn;         // n
+    Int *cursor = stk_ci;
+
+    std::fill(ch_start, ch_start + n + 1, 0);
     for (Int j = 0; j < n; ++j)
-        if (parent[static_cast<std::size_t>(j)] >= 0)
-            ++ch_start[parent[static_cast<std::size_t>(j)] + 1];
+        if (parent[j] >= 0)
+            ++ch_start[parent[j] + 1];
     for (Int k = 0; k < n; ++k)
         ch_start[k + 1] += ch_start[k];
     std::copy(ch_start, ch_start + n, cursor);
     for (Int j = 0; j < n; ++j)
-        if (parent[static_cast<std::size_t>(j)] >= 0)
-            children[cursor[parent[static_cast<std::size_t>(j)]]++] = j;
+        if (parent[j] >= 0)
+            children[cursor[parent[j]]++] = j;
 
     // Iterative postorder DFS (leaves before parents) with index cursors.
-    std::vector<Int> postorder;
-    postorder.reserve(sn);
+    // Roots are pushed in reverse index order so the smallest-index root is
+    // processed first (gives ascending postorder for chains).
+    Int npost = 0;
     {
         Int top = 0;
-        // Push roots in reverse index order so smallest-index root is
-        // processed first (gives ascending postorder for chains).
         for (Int j = n - 1; j >= 0; --j)
-            if (parent[static_cast<std::size_t>(j)] == -1) {
+            if (parent[j] == -1) {
                 stk_node[top] = j;
                 stk_ci[top] = 0;
                 ++top;
@@ -57,30 +66,51 @@ void finish_elimination_tree(Int n, std::vector<Int> parent, EliminationTree &et
                 stk_ci[top] = 0;
                 ++top;
             } else {
-                postorder.push_back(node);
+                postorder[npost++] = node;
                 --top;
             }
         }
     }
 
-    // Phase 3: compute max_depth via bottom-up pass in postorder
-    // depth[j] = length of longest path from j down to a leaf
+    // depth[j] = length of the longest path from j down to a leaf.
     Int *depth = stk_node;
     std::fill(depth, depth + n, 0);
     Int max_depth = 0;
-    for (Int j : postorder) {
-        const Int pj = parent[static_cast<std::size_t>(j)];
+    for (Int k = 0; k < npost; ++k) {
+        const Int j = postorder[k];
+        const Int pj = parent[j];
         if (pj >= 0)
             depth[pj] = std::max(depth[pj], depth[j] + 1);
         max_depth = std::max(max_depth, depth[j]);
     }
-
-    et.parent    = std::move(parent);
-    et.postorder = std::move(postorder);
-    et.max_depth = max_depth;
+    return max_depth;
 }
 
-} // namespace
+void etree_from_adjacency(Int n, const Int *xadj, const Int *adj, const Int *perm,
+                          const Int *iperm, Int *parent, Int *ancestor)
+{
+    // Liu's algorithm over the rows of P A P^T: row k is old vertex perm[k],
+    // its entries left of the diagonal the neighbours numbered below k. The
+    // tree does not depend on the order a row's entries are visited in.
+    std::fill(parent, parent + n, -1);
+    std::fill(ancestor, ancestor + n, -1);
+    for (Int k = 0; k < n; ++k) {
+        const Int v = perm[k];
+        for (Int p = xadj[v]; p < xadj[v + 1]; ++p) {
+            Int r = iperm[adj[p]];
+            if (r >= k) continue;
+            while (ancestor[r] != -1 && ancestor[r] != k) {
+                const Int t = ancestor[r];
+                ancestor[r] = k;
+                r = t;
+            }
+            if (ancestor[r] == -1) {
+                parent[r] = k;
+                ancestor[r] = k;
+            }
+        }
+    }
+}
 
 
 EliminationTree build_elimination_tree(
