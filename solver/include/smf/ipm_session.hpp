@@ -127,6 +127,10 @@ class IpmSession {
   /// (ErrorCode::SingularMatrix); every other failure, including a failed
   /// deferred analysis (then analysis_keep() is null), is Error.
   /// info().factor_status is the engine's FactorStatus of this call.
+  /// info().inertia_exact is false whenever a pivot was static-pivoted
+  /// (the static modes, Control::static_pivot_tol or delay_budget); the
+  /// session reports it and does not act on it (the MA97 plugin turns it
+  /// into a failure outside its own static modes).
   ///
   /// WrongInertia: the factorization stopped once its negative pivots
   /// exceeded the expectation (`expected_negatives` when given, else the

@@ -3,6 +3,7 @@
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
 #include "smf/numeric_front.hpp"
+#include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -532,4 +533,200 @@ TEST(DelayedPivots, AptpRefactorStartsClean) {
     const auto val = smf::bench::validate(A2, b, x, 1);
     EXPECT_TRUE(smf::bench::is_qualified_validation(val))
         << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+}
+
+namespace {
+
+// delayed_kkt with every constraint diagonal set to `cdiag` (same pattern).
+CscLower delayed_kkt_cdiag(int g, int m, double hdiag, double cdiag)
+{
+    CscLower A = delayed_kkt(g, m, hdiag);
+    const int nx = g * g;
+    for (Int j = nx; j < A.n; ++j)
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (A.row_idx[static_cast<std::size_t>(p)] == j) A.values[static_cast<std::size_t>(p)] = cdiag;
+    return A;
+}
+
+// As delayed_kkt on a g x g x g grid (7-point Laplacian, diagonal hdiag):
+// enough front work for the tree-parallel engine.
+CscLower delayed_kkt3d(int g, int m, double hdiag)
+{
+    const int nx = g * g * g, n = nx + m;
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+    for (int z = 0; z < g; ++z)
+        for (int y = 0; y < g; ++y)
+            for (int x = 0; x < g; ++x) {
+                const int j = (z * g + y) * g + x;
+                auto &c = cols[static_cast<std::size_t>(j)];
+                c.push_back({j, hdiag});
+                if (x + 1 < g) c.push_back({j + 1, -1.0});
+                if (y + 1 < g) c.push_back({j + g, -1.0});
+                if (z + 1 < g) c.push_back({j + g * g, -1.0});
+            }
+    const double coef[3] = {1.0, -0.5, 0.25};
+    for (int k = 0; k < m; ++k) {
+        const int row = nx + k;
+        for (int t = 0; t < 3; ++t)
+            cols[static_cast<std::size_t>((7 * k + 3 * t) % nx)].push_back({row, coef[t]});
+        cols[static_cast<std::size_t>(row)].push_back({row, 0.0});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (auto [i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+Control budget_control()
+{
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.nemin = 1;
+    ctrl.ordering = OrderingMethod::AMD;  // delays the constraint rows (see delayed_kkt)
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.pivot_u = 0.01;
+    return ctrl;
+}
+
+} // namespace
+
+// Control::delay_budget: once the running delayed count reaches the budget
+// the remaining fronts static-pivot (static_pivot_tol = 1e-8), so a KKT that
+// delays more than 5% of n stops delaying at the budget, reports
+// inertia_exact = false, and still solves accurately with refinement.
+TEST(DelayedPivots, BudgetSwitchesToStatic) {
+    const int g = 30, m = 300;
+    const CscLower A = delayed_kkt(g, m, 4.0);
+    const int n = A.n;
+    Control ctrl = budget_control();
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+
+    // Precondition (default budget -1 = unlimited): > 5% of n delayed, exact.
+    NumericWorkspace ws;
+    FactorKeep f0;
+    Info i0;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, i0, f0, ws), FactorStatus::Success);
+    ASSERT_GT(i0.delayed_pivots, n / 20);
+    EXPECT_EQ(i0.static_pivots, 0);
+    EXPECT_TRUE(i0.inertia_exact);
+
+    ctrl.delay_budget = 10;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    std::printf("[Budget] unlimited: %d delays; budget 10: %d delays, %d static\n",
+                i0.delayed_pivots, info.delayed_pivots, info.static_pivots);
+    EXPECT_LE(info.delayed_pivots, 10);
+    EXPECT_GT(info.static_pivots, 0);
+    EXPECT_FALSE(info.inertia_exact);
+    EXPECT_EQ(info.num_positive + info.num_negative + info.num_zero, n);
+
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * i;
+    std::vector<double> x = b;
+    SolveWorkspace sws;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), n, 1, sws), 0);
+    const RefinementResult rr = refine(A, fk, ctrl, b, x, 1, sws);
+    const auto val = smf::bench::validate(A, b, x, 1);
+    std::printf("[Budget] refinement: %d iterations, eta_inf=%.3e omega=%.3e\n", rr.iterations,
+                val.eta_inf, val.omega);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+
+    // Budget 0: every front static-pivots from the start, no delays at all.
+    ctrl.delay_budget = 0;
+    Info iz;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, iz, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(iz.delayed_pivots, 0);
+    EXPECT_GT(iz.static_pivots, 0);
+    EXPECT_FALSE(iz.inertia_exact);
+}
+
+// A refactorization starts its budget afresh: well-conditioned values on the
+// same pattern (and the same Info) give no static pivots and exact inertia.
+TEST(DelayedPivots, BudgetResetsOnRefactor) {
+    const int g = 30, m = 300;
+    const CscLower A = delayed_kkt(g, m, 4.0);
+    const CscLower A2 = delayed_kkt_cdiag(g, m, 4.0, -1.0);
+    const int n = A.n;
+    Control ctrl = budget_control();
+    ctrl.delay_budget = 10;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    ASSERT_GT(info.static_pivots, 0);
+    ASSERT_FALSE(info.inertia_exact);
+
+    ASSERT_EQ(solver.factor(*ak, A2, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.static_pivots, 0);
+    EXPECT_TRUE(info.inertia_exact);
+    EXPECT_LE(info.delayed_pivots, 10);
+    EXPECT_EQ(info.num_positive, g * g);
+    EXPECT_EQ(info.num_negative, m);
+    std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), n, 1), 0);
+    const auto val = smf::bench::validate(A2, b, x, 1);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+}
+
+// Tree-parallel engine: the budget is evaluated per subtree (each subtree's
+// fronts in postorder, from zero) and, at the top of the tree, from the
+// subtrees' total plus the front's own top-part descendants. Both are fixed
+// by the partition, so repeated runs agree exactly.
+TEST(DelayedPivots, BudgetDeterministicUnderThreads) {
+    const CscLower A = delayed_kkt3d(22, 1000, 8.0);
+    const int n = A.n;
+    Control ctrl = budget_control();
+    ctrl.delay_budget = 25;
+    ctrl.num_threads = 4;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = std::sin(0.01 * i) + 1.0;
+    int delays_ref = -1, static_ref = -1, neg_ref = -1;
+    for (int rep = 0; rep < 3; ++rep) {
+        NumericWorkspace ws;
+        FactorKeep fk;
+        Info ri;
+        ASSERT_EQ(solver.factor(*ak, A, ctrl, ri, fk, ws), FactorStatus::Success);
+        std::printf("[Budget threads] rep %d: subtrees=%d delays=%d static=%d neg=%d\n", rep,
+                    ri.parallel_subtrees, ri.delayed_pivots, ri.static_pivots, ri.num_negative);
+        EXPECT_GT(ri.parallel_subtrees, 0);
+        EXPECT_GT(ri.static_pivots, 0);
+        EXPECT_FALSE(ri.inertia_exact);
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk, ctrl, ri, x.data(), n, 1), 0);
+        SolveWorkspace sws;
+        refine(A, fk, ctrl, b, x, 1, sws);
+        const auto val = smf::bench::validate(A, b, x, 1);
+        EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+            << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+        if (rep == 0) {
+            delays_ref = ri.delayed_pivots;
+            static_ref = ri.static_pivots;
+            neg_ref = ri.num_negative;
+        } else {
+            EXPECT_EQ(ri.delayed_pivots, delays_ref);
+            EXPECT_EQ(ri.static_pivots, static_ref);
+            EXPECT_EQ(ri.num_negative, neg_ref);
+        }
+    }
 }

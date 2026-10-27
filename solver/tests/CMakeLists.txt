@@ -391,6 +391,15 @@ add_test(NAME TaskBudget COMMAND test_task_budget)
 add_executable(test_ma97_plugin_abi test_ma97_plugin_abi.cpp)
 target_link_libraries(test_ma97_plugin_abi PRIVATE smf GTest::gtest_main)
 add_test(NAME Ma97PluginAbi COMMAND test_ma97_plugin_abi)
+if(SMF_BUILD_MA97_PLUGIN)
+    # InexactInertiaReportsFailure loads the plugin.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_ma97_plugin_abi PRIVATE dl)
+    endif()
+    add_dependencies(test_ma97_plugin_abi smf_ma97)
+    target_compile_definitions(test_ma97_plugin_abi PRIVATE
+        SMF_MA97_PLUGIN_PATH="$<TARGET_FILE:smf_ma97>")
+endif()
 
 if(SMF_BUILD_MA97_PLUGIN)
     add_executable(test_ipopt_plugin_runtime test_ipopt_plugin_runtime.cpp)

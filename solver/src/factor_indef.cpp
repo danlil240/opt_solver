@@ -22,6 +22,11 @@ namespace smf {
 
 namespace {
 
+// Control::delay_budget: static pivot tolerance (relative to max|A| after
+// scaling) of the fronts after the budget, sqrt(eps) scale as in MA57
+// (refinement_mixed_precision.md).
+constexpr double kDelayBudgetStaticTol = 1e-8;
+
 bool check_analysis_storage_bounds(const AnalysisKeep &keep) noexcept {
   LongInt total_predicted = 0;
   const std::size_t ns = keep.supernodes.size();
@@ -344,6 +349,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
   info.delayed_pivots = 0;
+  info.static_pivots = 0;
+  info.inertia_exact = true;
   info.aptp_failed_columns = 0;
   info.aborted_flops_skipped = 0.0;
   ws.front_heap_allocations_last_call = 0;
@@ -501,9 +508,14 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
         ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;
     const double fallback_static_pivot =
         ctrl.fallback_static_pivot_tol > 0.0 ? ctrl.fallback_static_pivot_tol * matrix_max_abs : 0.0;
+    // Control::delay_budget: the fronts after the budget static-pivot at
+    // kDelayBudgetStaticTol * max|A| (sqrt(eps) scale, as MA57).
+    const double budget_static_pivot =
+        ctrl.delay_budget >= 0 ? kDelayBudgetStaticTol * matrix_max_abs : 0.0;
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-        eff_small, static_pivot, fallback_static_pivot, /*posdef=*/false, fkeep, ws, st);
+        eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
+        fkeep, ws, st);
     blas_threads.reset();
     if (err == ErrorCode::InertiaExceeded) {
       // Too many negative pivots: stopped early, the factor is unusable.
@@ -514,6 +526,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       fkeep.status = FactorStatus::InertiaExceeded;
       info.delayed_pivots = st.delayed;
       info.static_pivots = st.static_pivots;
+      info.inertia_exact = st.static_pivots == 0;
       info.aptp_failed_columns = st.aptp_failed;
       info.parallel_subtrees = st.parallel_subtrees;
       info.num_positive = st.inertia.positive;
@@ -535,6 +548,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     }
     info.delayed_pivots = st.delayed;
     info.static_pivots = st.static_pivots;
+    info.inertia_exact = st.static_pivots == 0;
     info.aptp_failed_columns = st.aptp_failed;
     info.parallel_subtrees = st.parallel_subtrees;
     info.num_positive = st.inertia.positive;

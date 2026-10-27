@@ -317,6 +317,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
                           FactorKeep &fkeep, NumericWorkspace &ws) {
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
+  info.static_pivots = 0;  // SPD: no pivoting, the inertia is always exact
+  info.inertia_exact = true;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
 
@@ -428,7 +430,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
-      0.0, 0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
+      0.0, 0.0, 0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
   blas_threads.reset();
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);

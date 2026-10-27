@@ -70,6 +70,22 @@ struct Control {
     // static_pivot_tol * max|A| (or not finite) is raised to it, keeping its
     // sign (the quasidefinite mode). No 2x2 pivots, no delays.
     bool           static_pivot_in_order = false;
+    // Delay budget (MA57's approach), -1 = unlimited. Indefinite, serial
+    // engine (num_threads >= 1, not tree_parallel), threshold pivoting only
+    // (ignored with static_pivot_tol > 0). Once delay_budget delayed pivots
+    // (Info::delayed_pivots) have been counted, every remaining front
+    // factors with the static path at static_pivot_tol = 1e-8 (relative to
+    // max|A| after scaling, inertia accounted as for static_pivot_tol). A
+    // front whose own delays would take the count past the budget is factored
+    // again with the static path, so Info::delayed_pivots <= delay_budget on
+    // the single-pass engine. Any static pivot makes Info::inertia_exact
+    // false. Tree-parallel engine (num_threads > 1): each concurrently
+    // factored subtree has its own budget, counted from zero over its fronts
+    // in postorder, and a front of the top part counts the delays of every
+    // subtree plus those of its top-part descendants. Both are fixed by the
+    // tree partition, so the static/threshold choice of every front does not
+    // depend on thread timing; the total may then exceed the budget.
+    int            delay_budget  = -1;
     // Diagonal regularization, off while reg_diag_sign is null (indefinite
     // only): after scaling, diagonal entry i gets
     // reg_diag_sign[i] * reg_diag_tol * max|A| added, max|A| taken after

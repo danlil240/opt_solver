@@ -119,6 +119,19 @@ struct FactorContext {
   // least aptp_min_elig fully summed columns.
   const AptpParams *aprm = nullptr;
   int aptp_min_elig = 0;
+  // Control::delay_budget (-1 = off) and the absolute static pivot of the
+  // fronts that run after the budget is spent.
+  int delay_budget = -1;
+  double budget_static = 0.0;
+};
+
+// Running delay budget state (Control::delay_budget) of a sequence of
+// fronts: the delays counted so far and whether the budget is spent (the
+// count reached it, or a front would have taken it past it). Once spent,
+// every further front of the sequence static-pivots.
+struct BudgetState {
+  int count = 0;
+  bool spent = false;
 };
 
 // Written one past the APTP kernel's declared workspace and checked after
@@ -149,8 +162,10 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
 // Assemble, factor and store supernode s with pass P (index `me` in
 // cx.passes). Children's contribution blocks are read from whichever pass
 // produced them; with `pop` (postorder passes, where they are the top of the
-// stack) blocks on P's own stack are popped.
-ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop) {
+// stack) blocks on P's own stack are popped. `bs` (null: no budget) is the
+// delay budget state of the sequence s belongs to, updated by this front.
+ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
+                        BudgetState *bs) {
   const AnalysisKeep &keep = cx.keep;
   NumericWorkspace &ws = cx.ws;
   FactorKeep &fkeep = cx.fkeep;
@@ -217,63 +232,149 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   grow(*P.fv, P.fo + sf * sf, P.growths);
   grow(*P.cmap, sf, P.growths);
   grow(*P.tags, sf, P.growths);
-  // APTP only on plain threshold-pivoting fronts: a fallback static front
-  // (below) keeps the TPP kernel.
+  // Delay budget (Control::delay_budget): once spent, the front
+  // static-pivots like a static_pivot_tol front.
+  const bool budget_on = bs != nullptr && cx.delay_budget >= 0 && cx.budget_static > 0.0;
+  if (budget_on && bs->count >= cx.delay_budget) bs->spent = true;
+  bool budget_front = budget_on && bs->spent;
+  // APTP only on plain threshold-pivoting fronts: a fallback or budget
+  // static front (below) keeps the TPP kernel.
   const bool fallback_front = cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym);
-  const AptpParams *aprm =
-      (cx.aprm != nullptr && !fallback_front && num_elig >= cx.aptp_min_elig) ? cx.aprm : nullptr;
+  const AptpParams *aprm = (cx.aprm != nullptr && !fallback_front && !budget_front &&
+                            num_elig >= cx.aptp_min_elig)
+                               ? cx.aprm
+                               : nullptr;
   grow(*P.work, front_work_need(f, num_elig, cx.prm, aprm), P.growths);
   double *F = P.fv->data() + P.fo;
-  for (std::size_t j = 0; j < sf; ++j) {
-    std::fill_n(F + j * sf + j, sf - j, 0.0);
+
+  // Fallback static pivoting: only where delaying fails. A root has no
+  // parent to delay to (its unaccepted columns would be zero pivots), and a
+  // front that receives more delayed columns than its own width is over its
+  // delay budget. Every other front pivots with delays as usual. A pivot
+  // forced there from an exact zero stays a zero eigenvalue (hybrid
+  // accounting), so a singular matrix is still reported singular; one raised
+  // from a nonzero value keeps its sign unless ctrl.static_pivots_as_zero.
+  // A fallback front keeps its own tolerance and hybrid accounting; a budget
+  // front is a static_pivot_tol front (the Control's accounting).
+  const LdltKernelParams *prm = &cx.prm;
+  LdltKernelParams fallback_prm;
+  LdltKernelParams budget_prm;
+  if (budget_on) {
+    budget_prm = cx.prm;
+    budget_prm.static_pivot = cx.budget_static;
+  }
+  if (fallback_front) {
+    fallback_prm = cx.prm;
+    fallback_prm.static_pivot = cx.fallback_static;
+    fallback_prm.static_zero_stays_zero = true;
+    if (fallback_prm.min_abs_pivot > 0.0) fallback_prm.min_abs_pivot = cx.fallback_static;
+    prm = &fallback_prm;
+  } else if (budget_front) {
+    prm = &budget_prm;
   }
 
-  // Original entries of the pivot columns (lower CSC, so pos[row] >= pos[col]).
-  for (Int j = sn.col_start; j < sn.col_end; ++j) {
-    double *Fj = F + static_cast<std::size_t>(pos[j]) * sf;
-    for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) {
-      Fj[pos[cx.ari[k]]] += cx.av[k];
-    }
-  }
-
-  // Children's contribution blocks (the top of P's stack when P made them).
+  int8_t *tags = P.tags->data();
+  SerialFactorStats &st = P.st;
+  double *const work = P.work->data();
+  const bool is_root = (sn.parent == -1);
   std::size_t new_cv_top = P.cv_top;
   std::size_t new_cr_top = P.cr_top;
   Int *cm = P.cmap->data();
-  for (const Int c : kids) {
-    const std::size_t ci = static_cast<std::size_t>(c);
-    const Int q = ws.cb_size[ci];
-    if (q <= 0) continue;
-    const Int *cr = child_rows(ci);
-    const double *cv = child_values(ci);
-    bool monotone = true;
-    Int prev = -1;
-    for (Int t = 0; t < q; ++t) {
-      const Int l = pos[cr[t]];
-      cm[t] = l;
-      monotone = monotone && (l > prev);
-      prev = l;
+  LdltKernelResult kr;
+  int aptp_failed = 0;
+  // Assemble and factor; at most twice. Children's contribution blocks (the
+  // top of P's stack when P made them) are only read here, and nothing is
+  // pushed or released before this front's own Schur complement, so a delay
+  // budget retry can assemble the front again.
+  for (;;) {
+    for (std::size_t j = 0; j < sf; ++j) {
+      std::fill_n(F + j * sf + j, sf - j, 0.0);
     }
-    if (monotone) {
-      for (Int jj = 0; jj < q; ++jj) {
-        double *Fc = F + static_cast<std::size_t>(cm[jj]) * sf;
-        for (Int ii = jj; ii < q; ++ii) Fc[cm[ii]] += *cv++;
+
+    // Original entries of the pivot columns (lower CSC, so pos[row] >= pos[col]).
+    for (Int j = sn.col_start; j < sn.col_end; ++j) {
+      double *Fj = F + static_cast<std::size_t>(pos[j]) * sf;
+      for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) {
+        Fj[pos[cx.ari[k]]] += cx.av[k];
       }
-    } else {
-      for (Int jj = 0; jj < q; ++jj) {
-        const std::size_t lj = static_cast<std::size_t>(cm[jj]);
-        for (Int ii = jj; ii < q; ++ii) {
-          const std::size_t li = static_cast<std::size_t>(cm[ii]);
-          if (li >= lj) F[lj * sf + li] += *cv++;
-          else F[li * sf + lj] += *cv++;
+    }
+
+    for (const Int c : kids) {
+      const std::size_t ci = static_cast<std::size_t>(c);
+      const Int q = ws.cb_size[ci];
+      if (q <= 0) continue;
+      const Int *cr = child_rows(ci);
+      const double *cv = child_values(ci);
+      bool monotone = true;
+      Int prev = -1;
+      for (Int t = 0; t < q; ++t) {
+        const Int l = pos[cr[t]];
+        cm[t] = l;
+        monotone = monotone && (l > prev);
+        prev = l;
+      }
+      if (monotone) {
+        for (Int jj = 0; jj < q; ++jj) {
+          double *Fc = F + static_cast<std::size_t>(cm[jj]) * sf;
+          for (Int ii = jj; ii < q; ++ii) Fc[cm[ii]] += *cv++;
+        }
+      } else {
+        for (Int jj = 0; jj < q; ++jj) {
+          const std::size_t lj = static_cast<std::size_t>(cm[jj]);
+          for (Int ii = jj; ii < q; ++ii) {
+            const std::size_t li = static_cast<std::size_t>(cm[ii]);
+            if (li >= lj) F[lj * sf + li] += *cv++;
+            else F[li * sf + lj] += *cv++;
+          }
         }
       }
+      if (pop && ws.cb_owner[ci] == me) {
+        new_cv_top = std::min(new_cv_top, static_cast<std::size_t>(ws.cb_value_off[ci]));
+        new_cr_top = std::min(new_cr_top, static_cast<std::size_t>(ws.cb_row_off[ci]));
+      }
     }
-    if (pop && ws.cb_owner[ci] == me) {
-      new_cv_top = std::min(new_cv_top, static_cast<std::size_t>(ws.cb_value_off[ci]));
-      new_cr_top = std::min(new_cr_top, static_cast<std::size_t>(ws.cb_row_off[ci]));
+
+    kr = LdltKernelResult{};
+    aptp_failed = 0;
+    if (aprm != nullptr) {
+      // APTP, then the blocked TPP kernel on the columns it failed (their
+      // Schur state is current); what TPP fails too is delayed as usual.
+      const std::size_t need = aptp_work_size(f, num_elig, *aprm);
+      work[need] = kWorkCanary;
+      const AptpResult ar = ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
+      if (work[need] != kWorkCanary) {
+        assert(false && "APTP front kernel overran its workspace");
+        for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+        return ErrorCode::InternalError;
+      }
+      aptp_failed = ar.num_failed;
+      if (ar.num_failed > 0) {
+        kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, ar.num_eliminated);
+      } else {
+        kr.num_accepted = ar.num_eliminated;
+      }
+      kr.inertia.positive += ar.inertia.positive;
+      kr.inertia.negative += ar.inertia.negative;
+      kr.inertia.zero += ar.inertia.zero;
+      kr.flops += ar.flops;
+    } else {
+      kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
     }
+    // Delay budget: a front whose delays would take the count past the
+    // budget is assembled again and static-pivoted (it then delays nothing),
+    // and the budget is spent. A root's unaccepted columns are zero pivots,
+    // not delays.
+    if (!budget_on || budget_front || fallback_front || is_root ||
+        bs->count + (num_elig - kr.num_accepted) <= cx.delay_budget)
+      break;
+    bs->spent = true;
+    budget_front = true;
+    prm = &budget_prm;
+    aprm = nullptr;
   }
+  st.aptp_failed += aptp_failed;
+  const int p = kr.num_accepted;
+  if (budget_on && !is_root) bs->count += num_elig - p;
   P.cv_top = new_cv_top;
   P.cr_top = new_cr_top;
   if (!pop) {
@@ -285,53 +386,6 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
     }
   }
-
-  // Fallback static pivoting: only where delaying fails. A root has no
-  // parent to delay to (its unaccepted columns would be zero pivots), and a
-  // front that receives more delayed columns than its own width is over its
-  // delay budget. Every other front pivots with delays as usual. A pivot
-  // forced there from an exact zero stays a zero eigenvalue (hybrid
-  // accounting), so a singular matrix is still reported singular; one raised
-  // from a nonzero value keeps its sign unless ctrl.static_pivots_as_zero.
-  const LdltKernelParams *prm = &cx.prm;
-  LdltKernelParams fallback_prm;
-  if (fallback_front) {
-    fallback_prm = cx.prm;
-    fallback_prm.static_pivot = cx.fallback_static;
-    fallback_prm.static_zero_stays_zero = true;
-    if (fallback_prm.min_abs_pivot > 0.0) fallback_prm.min_abs_pivot = cx.fallback_static;
-    prm = &fallback_prm;
-  }
-
-  int8_t *tags = P.tags->data();
-  SerialFactorStats &st = P.st;
-  double *const work = P.work->data();
-  LdltKernelResult kr;
-  if (aprm != nullptr) {
-    // APTP, then the blocked TPP kernel on the columns it failed (their
-    // Schur state is current); what TPP fails too is delayed as usual.
-    const std::size_t need = aptp_work_size(f, num_elig, *aprm);
-    work[need] = kWorkCanary;
-    const AptpResult ar = ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
-    if (work[need] != kWorkCanary) {
-      assert(false && "APTP front kernel overran its workspace");
-      for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
-      return ErrorCode::InternalError;
-    }
-    st.aptp_failed += ar.num_failed;
-    if (ar.num_failed > 0) {
-      kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, ar.num_eliminated);
-    } else {
-      kr.num_accepted = ar.num_eliminated;
-    }
-    kr.inertia.positive += ar.inertia.positive;
-    kr.inertia.negative += ar.inertia.negative;
-    kr.inertia.zero += ar.inertia.zero;
-    kr.flops += ar.flops;
-  } else {
-    kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
-  }
-  const int p = kr.num_accepted;
   st.inertia.positive += kr.inertia.positive;
   st.inertia.negative += kr.inertia.negative;
   st.inertia.zero += kr.inertia.zero;
@@ -349,7 +403,6 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // column, so a static pivot is never one of them: it is a real 1x1 pivot
   // (tag 1, d raised) that the solve divides by and realized_pivot_order
   // keeps in place.
-  const bool is_root = (sn.parent == -1);
   int p_store = p;
   if (is_root && p < num_elig) {
     for (int c = p; c < num_elig; ++c) tags[c] = 0;
@@ -536,6 +589,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
                                      double static_pivot, double fallback_static_pivot,
+                                     double budget_static_pivot,
                                      bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st) {
   const std::size_t n = static_cast<std::size_t>(keep.n);
@@ -559,6 +613,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // static pivot raised (the quasidefinite mode).
   prm.min_abs_pivot = (prm.static_pivot > 0.0 && ctrl.static_pivot_in_order) ? prm.static_pivot : 0.0;
   const double fallback_static = posdef ? 0.0 : fallback_static_pivot;
+  // Control::delay_budget: threshold-pivoting indefinite fronts only (with
+  // static_pivot_tol every front already static-pivots and never delays).
+  const bool budget_armed = !posdef && prm.static_pivot == 0.0 && ctrl.delay_budget >= 0 &&
+                            budget_static_pivot > 0.0;
+  const int delay_budget = budget_armed ? ctrl.delay_budget : -1;
+  const double budget_static = budget_armed ? budget_static_pivot : 0.0;
 
   // APTP (Control::front_kernel) on plain threshold-pivoting fronts only: it
   // has no static-pivot mode, so SPD, static_pivot_tol and in-order fronts
@@ -686,10 +746,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (threads <= 1) {
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
-                           fallback_static, aptp,             aptp_min_elig};
+                           fallback_static, aptp,             aptp_min_elig, delay_budget,
+                           budget_static};
+    // One running budget over the whole postorder.
+    BudgetState budget;
     std::size_t k = 0;
     for (; k < keep.postorder.size(); ++k) {
-      status = process_front(cx, main, 0, keep.postorder[k], true);
+      status = process_front(cx, main, 0, keep.postorder[k], true, &budget);
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
         status = ErrorCode::InertiaExceeded;
       if (status != ErrorCode::Success) break;
@@ -725,7 +788,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     node_blocks.resize(ns);
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
-                           fallback_static, aptp,             aptp_min_elig};
+                           fallback_static, aptp,             aptp_min_elig, delay_budget,
+                           budget_static};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
@@ -763,11 +827,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           break;
         const auto [lo, hi] = subtrees[i];
         const std::size_t first_step = P.steps->size();
+        // Delay budget: each subtree from zero over its own postorder, so the
+        // outcome does not depend on which thread takes it or when.
+        BudgetState budget;
         for (std::size_t k = lo; k <= hi; ++k) {
           if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
             break;
           const int neg0 = P.st.inertia.negative;
-          const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true);
+          const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true, &budget);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
             break;
@@ -809,6 +876,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::mutex mtx;
     std::condition_variable cv;
     int free_threads = threads;
+    // Delay budget of the top part: a front starts from the delays of every
+    // subtree plus those of its top-part descendants (and is spent if any of
+    // them spent it). Children finish before their parent becomes ready and
+    // pass their state up under the mutex, so the state a front sees is
+    // fixed by the partition, whatever the completion order.
+    std::vector<BudgetState> top_budget;
+    int top_base = 0;
+    if (delay_budget >= 0) {
+      for (int t = 0; t < threads; ++t) top_base += tpass[static_cast<std::size_t>(t)].st.delayed;
+      top_budget.assign(ns, BudgetState{top_base, false});
+    }
     if (failed.load() == static_cast<int>(ErrorCode::Success)) {
       run_pool([&](int tid) {
         FrontPass &P = tpass[static_cast<std::size_t>(tid)];
@@ -829,9 +907,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
           ErrorCode e;
           const int neg0 = P.st.inertia.negative;
+          // Ready means every child has finished: s's own state is final.
+          BudgetState *bs = top_budget.empty() ? nullptr : &top_budget[static_cast<std::size_t>(s)];
           {
             BlasThreadGuard blas(blas_threads);
-            e = process_front(cx, P, 1 + tid, s, false);
+            e = process_front(cx, P, 1 + tid, s, false, bs);
           }
           std::lock_guard<std::mutex> lk(mtx);
           free_threads += blas_threads;
@@ -844,6 +924,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             done_order.push_back({tid, P.steps->size() - 1, s});
             P.diag_marks.emplace_back(s, P.diag->size());
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
+            if (bs != nullptr && parent >= 0 && top[static_cast<std::size_t>(parent)]) {
+              // Pass the delays of this front and its top-part descendants
+              // (its count above the shared base) and its spent flag up.
+              BudgetState &pb = top_budget[static_cast<std::size_t>(parent)];
+              pb.count += bs->count - top_base;
+              pb.spent = pb.spent || bs->spent;
+            }
             if (parent >= 0 && top[static_cast<std::size_t>(parent)] &&
                 --pending[static_cast<std::size_t>(parent)] == 0)
               ready.push_back(parent);

@@ -57,6 +57,11 @@ struct Info {
     double       actual_flops           = 0.0;
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
+    /// False iff this factorization perturbed a pivot by static pivoting
+    /// (static_pivots > 0: Control::delay_budget, static_pivot_tol,
+    /// fallback_static_pivot_tol): the inertia counts are then those of a
+    /// perturbed matrix, not necessarily of A.
+    bool         inertia_exact          = true;
     /// Fully summed columns the APTP front kernel failed (summed over
     /// fronts, before the TPP fallback; Control::front_kernel). Those the
     /// fallback could not pivot either are also in delayed_pivots.

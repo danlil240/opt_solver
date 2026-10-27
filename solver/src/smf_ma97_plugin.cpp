@@ -149,6 +149,20 @@ static smf::IpmControl plugin_ipm_control()
     return ipm;
 }
 
+// Test seam, never set in production: SMF_TEST_DELAY_BUDGET=k gives every
+// factorization Control::delay_budget = k (k = 0: every front static-pivots),
+// so a test can force static pivots without requesting a static mode. Read
+// once, at the first analyse after the plugin is loaded; unset, the plugin
+// keeps the default delay_budget = -1 (unlimited delays, exact inertia).
+static int test_delay_budget()
+{
+    static const int budget = [] {
+        const char* v = std::getenv("SMF_TEST_DELAY_BUDGET");
+        return (v == nullptr || *v == '\0') ? -1 : std::atoi(v);
+    }();
+    return budget;
+}
+
 // Call statistics for benchmarking (SMF_PLUGIN_STATS=1): counts and time of
 // factorizations and solves, printed to stderr when the plugin unloads.
 struct PluginStats
@@ -324,6 +338,9 @@ static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctr
     // MA97 callers (IPOPT) refactor one pattern every iteration, which pays
     // for a costlier ordering.
     out_ctrl.expected_refactors = 10;
+    // No delay budget: delays are never traded for static pivots (inexact
+    // inertia), except through the test seam.
+    out_ctrl.delay_budget = test_delay_budget();
 
     switch (ctrl->ordering)
     {
@@ -691,6 +708,27 @@ extern "C"
 
         if (status == smf::IpmFactorStatus::Singular)
         {
+            info->flag = 7;
+            *fkeep = fw;
+            return;
+        }
+
+        // Honest inertia: a factor with a static pivot (Info::inertia_exact
+        // false) has the inertia of a perturbed matrix, which IPOPT must not
+        // accept as the KKT inertia. MA97 has no flag for that, so it is
+        // reported as MA97's singular warning (flag 7), on which IPOPT
+        // increases its regularization and refactors. This applies only when
+        // the plugin did not ask for static pivots itself: the opt-in static
+        // modes (SMF_IPM_STATIC=fallback|regularized, off by default) perturb
+        // pivots on purpose and report their inertia by their own
+        // (hybrid / static_as_zero) accounting, unchanged. With the defaults
+        // (no static mode, delay_budget -1) no pivot is ever static, so the
+        // guard never fires.
+        if (!si.inertia_exact && plugin_ipm_control().static_mode == smf::StaticMode::Off)
+        {
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] factor %ld: %d static pivots, inexact inertia: flag 7\n",
+                             g_stats.factors, si.static_pivots);
             info->flag = 7;
             *fkeep = fw;
             return;
