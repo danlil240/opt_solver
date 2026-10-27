@@ -29,7 +29,13 @@
 // final symmetric permutation that moves failed columns to the back turns it
 // into column p', row q' as the ldlt_factor_front layout requires.
 
+//
+// The steps of one block column are separate functions (aptp_internal.hpp)
+// so that the 2D tile tasks of the top of the tree (parallel/tile_tasks.cpp)
+// can run them as tasks; sweep() below chains them for the serial kernel.
+
 #include "smf/ldlt_aptp.hpp"
+#include "aptp_internal.hpp"
 #include "smf/dense_kernel.hpp"
 
 #include <algorithm>
@@ -38,31 +44,9 @@
 #include <utility>
 
 namespace smf {
+namespace aptp_detail {
 
 namespace {
-
-struct Ctx {
-    double inv_u = 100.0;
-    double small = 1e-20;
-    int nb = 128; // effective outer block
-    int ib = 32;  // effective inner block (<= nb)
-    double *bk[2] = {nullptr, nullptr}; // block-column backups per level
-    double *lt = nullptr;   // unit lower copy of the tile's L (nb x nb)
-    double *ga = nullptr;   // gathered rows (nb x nb)
-    double *gb = nullptr;   // gathered L D rows (nb x nb)
-    double *gc = nullptr;   // product scratch (nb x nb)
-    double *dinv = nullptr; // 2 * nb: diagonal / off-diagonal of D^{-1}
-    double *colbuf = nullptr; // f
-    int *top_lp = nullptr;  // num_elig
-    int *q[2] = {nullptr, nullptr}; // failed-column lists per level
-    int *lpc[2] = {nullptr, nullptr}; // child permutations per level
-    int *cp_lp = nullptr;   // nb
-    int *itmp = nullptr;    // nb
-};
-
-inline std::size_t idx(int j, int ld) noexcept {
-    return static_cast<std::size_t>(j) * static_cast<std::size_t>(ld);
-}
 
 inline bool l_ok(double l, double inv_u) noexcept { return std::abs(l) <= inv_u; }
 
@@ -307,6 +291,7 @@ void trsm_rlt(double *X, int nrows, int k, const double *L, int ldl, int ldx) {
     }
 }
 
+
 int factor_tile(double *A, int ld, int w, int8_t *tags, Int *rows, int *lp, Ctx &cx);
 
 // ---------------------------------------------------------------------------
@@ -317,216 +302,19 @@ int factor_tile(double *A, int ld, int w, int8_t *tags, Int *rows, int *lp, Ctx 
 // On return the eliminated pivots occupy [0, nelim) and lp[t] is the view
 // position that moved to t.
 // ---------------------------------------------------------------------------
-int sweep(double *A, int ld, int m, int ne, int level, int8_t *tags, Int *rows,
-          int *lp, Ctx &cx) {
-    const int bs = (level == 0) ? cx.nb : cx.ib;
-    for (int t = 0; t < ne; ++t) {
-        lp[t] = t;
-        tags[t] = 0;
-    }
-    int *Q = cx.q[level];
-    int nq = 0;
-    int num_elim = 0;
-    double *bk = cx.bk[level];
-    int *lpc = cx.lpc[level];
-
-    for (int c0 = 0; c0 < ne; c0 += bs) {
-        const int w = std::min(bs, ne - c0);
-        const int ldb = m - c0;
-        const int rb = m - c0 - w; // rows below the tile
-
-        // 1. Backup: column c0 + t, rows [c0 + t, m).
-        for (int t = 0; t < w; ++t)
-            std::memcpy(bk + idx(t, ldb) + t, A + idx(c0 + t, ld) + c0 + t,
-                        sizeof(double) * static_cast<std::size_t>(m - c0 - t));
-
-        // 2. Factor the diagonal tile.
-        double *T = A + idx(c0, ld) + c0;
-        const int ne_t = (level == 0) ? factor_tile(T, ld, w, tags + c0, rows + c0, lpc, cx)
-                                      : cp_factor(T, ld, w, tags + c0, rows + c0, lpc, cx);
-
-        // 3. Apply the tile permutation outside the tile.
-        if (!is_identity(lpc, w)) {
-            permute_rows(A, ld, c0, c0, w, lpc, cx.colbuf);
-            for (int t = 0; t < w; ++t)
-                std::memcpy(A + idx(c0 + t, ld) + c0 + w, bk + idx(lpc[t], ldb) + w,
-                            sizeof(double) * static_cast<std::size_t>(rb));
-            for (int t = 0; t < w; ++t) cx.itmp[t] = lp[c0 + lpc[t]];
-            std::memcpy(lp + c0, cx.itmp, sizeof(int) * static_cast<std::size_t>(w));
-        }
-
+int sweep(double *A, int ld, int m, int ne, int level, int8_t *tags, Int *rows, int *lp,
+          Ctx &cx) {
+    Sweep sw = sweep_begin(A, ld, m, ne, level, tags, rows, lp, cx);
+    for (int c0 = 0; c0 < ne; c0 += sw.bs) {
+        const int w = std::min(sw.bs, ne - c0);
+        const int ne_t = block_factor(sw, c0, w, cx);
         int nelim = ne_t;
-        if (ne_t > 0) {
-            // 4. L_t (unit lower, 2x2 off-diagonals zeroed) and D^{-1}.
-            double *lt = cx.lt;
-            for (int j = 0; j < ne_t; ++j) {
-                double *lj = lt + idx(j, bs);
-                lj[j] = 1.0;
-                const double *tj = T + idx(j, ld);
-                for (int i = j + 1; i < ne_t; ++i) lj[i] = tj[i];
-            }
-            for (int j = 0; j < ne_t; ++j) {
-                const double *tj = T + idx(j, ld);
-                if (tags[c0 + j] == 2) {
-                    lt[idx(j, bs) + j + 1] = 0.0;
-                    double i00, i10, i11;
-                    inv_2x2(tj[j], tj[j + 1], T[idx(j + 1, ld) + j + 1], i00, i10, i11);
-                    cx.dinv[2 * j] = i00;
-                    cx.dinv[2 * j + 1] = i10;
-                    cx.dinv[2 * (j + 1)] = i11;
-                    cx.dinv[2 * (j + 1) + 1] = 0.0;
-                    ++j;
-                } else {
-                    cx.dinv[2 * j] = 1.0 / tj[j];
-                    cx.dinv[2 * j + 1] = 0.0;
-                }
-            }
-
-            // ApplyN: rows below the tile, in place.
-            if (rb > 0) {
-                double *X = A + idx(c0, ld) + c0 + w;
-                trsm_rlt(X, rb, ne_t, lt, bs, ld);
-                nelim = scale_and_check(X, rb, ld, ne_t, tags + c0, cx.dinv, cx.inv_u);
-            }
-
-            // ApplyT: rows of earlier failed columns (stored transposed in
-            // those columns), out of place so nothing needs restoring.
-            for (int i0 = 0; i0 < nq && nelim > 0; i0 += bs) {
-                const int nc = std::min(bs, nq - i0);
-                for (int t = 0; t < nelim; ++t)
-                    for (int ii = 0; ii < nc; ++ii)
-                        cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
-                trsm_rlt(cx.ga, nc, nelim, lt, bs, bs);
-                nelim = scale_and_check(cx.ga, nc, bs, nelim, tags + c0, cx.dinv, cx.inv_u);
-            }
-            // Adjust: never keep only the first column of a 2x2.
-            if (nelim > 0 && tags[c0 + nelim - 1] == 2) --nelim;
-        }
-
-        // 5. Restore the failed columns [nelim, w) from the backup.
-        if (nelim < w) {
-            auto bks = [&](int a, int b) {
-                return (a >= b) ? bk[idx(b, ldb) + a] : bk[idx(a, ldb) + b];
-            };
-            for (int s2 = nelim; s2 < w; ++s2) {
-                double *col = T + idx(s2, ld);
-                for (int s1 = s2; s1 < w; ++s1) col[s1] = bks(lpc[s1], lpc[s2]);
-                std::memcpy(col + w, bk + idx(lpc[s2], ldb) + w,
-                            sizeof(double) * static_cast<std::size_t>(rb));
-                tags[c0 + s2] = 0;
-            }
-        }
-
-        if (nelim > 0) {
-            // ApplyT, final: L rows of the earlier failed columns for the
-            // accepted pivots, written back in place.
-            for (int i0 = 0; i0 < nq; i0 += bs) {
-                const int nc = std::min(bs, nq - i0);
-                if (nq > bs) {
-                    for (int t = 0; t < nelim; ++t)
-                        for (int ii = 0; ii < nc; ++ii)
-                            cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
-                    trsm_rlt(cx.ga, nc, nelim, cx.lt, bs, bs);
-                    scale_and_check(cx.ga, nc, bs, nelim, tags + c0, cx.dinv, cx.inv_u);
-                } // else: ga still holds the single chunk from the check pass
-                for (int t = 0; t < nelim; ++t)
-                    for (int ii = 0; ii < nc; ++ii)
-                        A[idx(Q[i0 + ii], ld) + c0 + t] = cx.ga[idx(t, bs) + ii];
-            }
-
-            // 6a. UpdateNN: eligible columns [e0, ne), rows to m. L D for
-            // those columns goes, transposed, into the unused strict upper
-            // triangle rows [c0, c0 + nelim) of the same columns.
-            const int e0 = c0 + nelim;
-            const int msz = ne - e0;
-            if (msz > 0) {
-                for (int col = e0; col < ne; ++col)
-                    row_times_d(A + idx(c0, ld) + col, static_cast<std::size_t>(ld), nelim, T,
-                                ld, tags + c0, A + idx(col, ld) + c0, 1);
-                const double *Wt = A + idx(e0, ld) + c0;
-                smf_dgemmt_lower_nn_sub(A + idx(e0, ld) + e0, msz, nelim, A + idx(c0, ld) + e0,
-                                        ld, Wt, ld, ld);
-                if (m > ne)
-                    smf_dgemm(A + idx(e0, ld) + ne, m - ne, msz, nelim, A + idx(c0, ld) + ne, ld,
-                              Wt, ld, ld, -1.0, 1.0);
-            }
-
-            // 6b. UpdateNT / UpdateTN: earlier failed columns q, rows [e0, m)
-            // and rows of other failed columns q' >= q.
-            const int mr = m - e0;
-            for (int j0 = 0; j0 < nq; j0 += bs) {
-                const int nj = std::min(bs, nq - j0);
-                for (int jj = 0; jj < nj; ++jj)
-                    row_times_d(A + idx(Q[j0 + jj], ld) + c0, 1, nelim, T, ld, tags + c0,
-                                cx.gb + jj, static_cast<std::size_t>(bs));
-                if (mr > 0) {
-                    double *Tm = bk; // backup no longer needed
-                    smf_dgemm_nt(Tm, mr, nj, nelim, A + idx(c0, ld) + e0, ld, cx.gb, bs, mr, 1.0,
-                                 0.0);
-                    for (int jj = 0; jj < nj; ++jj) {
-                        double *dst = A + idx(Q[j0 + jj], ld) + e0;
-                        const double *src = Tm + idx(jj, mr);
-                        for (int r = 0; r < mr; ++r) dst[r] -= src[r];
-                    }
-                }
-                for (int i0 = j0; i0 < nq; i0 += bs) {
-                    const int ni = std::min(bs, nq - i0);
-                    for (int t = 0; t < nelim; ++t)
-                        for (int ii = 0; ii < ni; ++ii)
-                            cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
-                    smf_dgemm_nt(cx.gc, ni, nj, nelim, cx.ga, bs, cx.gb, bs, bs, 1.0, 0.0);
-                    for (int jj = 0; jj < nj; ++jj) {
-                        const int qj = Q[j0 + jj];
-                        double *colq = A + idx(qj, ld);
-                        for (int ii = 0; ii < ni; ++ii) {
-                            const int qi = Q[i0 + ii];
-                            if (qi >= qj) colq[qi] -= cx.gc[idx(jj, bs) + ii];
-                        }
-                    }
-                }
-            }
-        }
-
-        num_elim += nelim;
-        for (int s = nelim; s < w; ++s) Q[nq++] = c0 + s;
+        if (ne_t > 0 && m - c0 - w > 0) nelim = apply_n(sw, c0, ne_t, c0 + w, m, cx);
+        block_finish(sw, c0, w, ne_t, nelim, UpdateNN::Full, cx);
     }
-
-    // Move the failed columns behind the eliminated ones (eliminated order
-    // kept, so 2x2 pairs stay adjacent).
-    if (num_elim < ne) {
-        int dst = 0;
-        for (int src = 0; src < ne; ++src) {
-            if (tags[src] == 0) continue;
-            if (src != dst) view_swap(A, ld, m, dst, src, tags, rows, lp);
-            ++dst;
-        }
-    }
-
-    // Deferred update of the non-eligible trailing triangle, at rank num_elim:
-    // F[ne:m, ne:m] -= L D L^T, with (L D)^T formed in the strict upper
-    // triangle F[0:p, ne:m].
-    const int qn = m - ne;
-    if (qn > 0 && num_elim > 0) {
-        for (int c = 0; c < num_elim; ++c) {
-            const double *Lc = A + idx(c, ld);
-            if (tags[c] == 2) {
-                const double *Lc1 = Lc + ld;
-                const double d00 = Lc[c], d10 = Lc[c + 1], d11 = Lc1[c + 1];
-                for (int i = ne; i < m; ++i) {
-                    double *row = A + idx(i, ld);
-                    row[c] = Lc[i] * d00 + Lc1[i] * d10;
-                    row[c + 1] = Lc[i] * d10 + Lc1[i] * d11;
-                }
-                ++c;
-            } else {
-                const double d = Lc[c];
-                for (int i = ne; i < m; ++i) A[idx(i, ld) + c] = Lc[i] * d;
-            }
-        }
-        smf_dgemmt_lower_nn_sub(A + idx(ne, ld) + ne, qn, num_elim, A + ne, ld, A + idx(ne, ld), ld,
-                                ld);
-    }
-    return num_elim;
+    sweep_compact(sw);
+    trailing_update(sw);
+    return sw.num_elim;
 }
 
 // Diagonal tile of the outer sweep: inner APTP with block ib (complete
@@ -563,24 +351,302 @@ Sizes effective_sizes(int num_elig, const AptpParams &prm) noexcept {
 
 } // namespace
 
-std::size_t aptp_work_size(int f, int num_elig, const AptpParams &prm) {
-    const Sizes s = effective_sizes(num_elig, prm);
-    const std::size_t F = static_cast<std::size_t>(std::max(f, 1));
-    const std::size_t nb = static_cast<std::size_t>(s.nb);
-    const std::size_t ib = static_cast<std::size_t>(s.ib);
-    const std::size_t ne = static_cast<std::size_t>(std::max(num_elig, 1));
-    const std::size_t doubles = F * nb + nb * ib + 4 * nb * nb + 2 * nb + F;
-    const std::size_t ints = 2 * ne + 4 * nb + ib;
-    return doubles + (ints * sizeof(int) + sizeof(double) - 1) / sizeof(double) + 1;
+// ---------------------------------------------------------------------------
+// Sweep steps (aptp_internal.hpp)
+// ---------------------------------------------------------------------------
+
+Sweep sweep_begin(double *A, int ld, int m, int ne, int level, int8_t *tags, Int *rows,
+                  int *lp, Ctx &cx) {
+    Sweep sw;
+    sw.A = A;
+    sw.ld = ld;
+    sw.m = m;
+    sw.ne = ne;
+    sw.level = level;
+    sw.bs = (level == 0) ? cx.nb : cx.ib;
+    sw.tags = tags;
+    sw.rows = rows;
+    sw.lp = lp;
+    sw.Q = cx.q[level];
+    for (int t = 0; t < ne; ++t) {
+        lp[t] = t;
+        tags[t] = 0;
+    }
+    return sw;
 }
 
-AptpResult ldlt_aptp_front(double *F, int f, int num_elig, Int *rows, const AptpParams &prm,
-                           int8_t *tags, double *work) {
-    AptpResult res;
-    if (f <= 0 || num_elig <= 0) {
-        res.num_failed = std::max(0, num_elig);
-        return res;
+int block_factor(Sweep &sw, int c0, int w, Ctx &cx) {
+    double *const A = sw.A;
+    const int ld = sw.ld;
+    const int m = sw.m;
+    const int bs = sw.bs;
+    int8_t *const tags = sw.tags;
+    int *const lp = sw.lp;
+    double *bk = cx.bk[sw.level];
+    int *lpc = cx.lpc[sw.level];
+    const int ldb = m - c0;
+    const int rb = m - c0 - w; // rows below the tile
+
+    // 1. Backup: column c0 + t, rows [c0 + t, m).
+    for (int t = 0; t < w; ++t)
+        std::memcpy(bk + idx(t, ldb) + t, A + idx(c0 + t, ld) + c0 + t,
+                    sizeof(double) * static_cast<std::size_t>(m - c0 - t));
+
+    // 2. Factor the diagonal tile.
+    double *T = A + idx(c0, ld) + c0;
+    const int ne_t = (sw.level == 0) ? factor_tile(T, ld, w, tags + c0, sw.rows + c0, lpc, cx)
+                                     : cp_factor(T, ld, w, tags + c0, sw.rows + c0, lpc, cx);
+
+    // 3. Apply the tile permutation outside the tile.
+    if (!is_identity(lpc, w)) {
+        permute_rows(A, ld, c0, c0, w, lpc, cx.colbuf);
+        for (int t = 0; t < w; ++t)
+            std::memcpy(A + idx(c0 + t, ld) + c0 + w, bk + idx(lpc[t], ldb) + w,
+                        sizeof(double) * static_cast<std::size_t>(rb));
+        for (int t = 0; t < w; ++t) cx.itmp[t] = lp[c0 + lpc[t]];
+        std::memcpy(lp + c0, cx.itmp, sizeof(int) * static_cast<std::size_t>(w));
     }
+
+    if (ne_t > 0) {
+        // 4. L_t (unit lower, 2x2 off-diagonals zeroed) and D^{-1}.
+        double *lt = cx.lt;
+        for (int j = 0; j < ne_t; ++j) {
+            double *lj = lt + idx(j, bs);
+            lj[j] = 1.0;
+            const double *tj = T + idx(j, ld);
+            for (int i = j + 1; i < ne_t; ++i) lj[i] = tj[i];
+        }
+        for (int j = 0; j < ne_t; ++j) {
+            const double *tj = T + idx(j, ld);
+            if (tags[c0 + j] == 2) {
+                lt[idx(j, bs) + j + 1] = 0.0;
+                double i00, i10, i11;
+                inv_2x2(tj[j], tj[j + 1], T[idx(j + 1, ld) + j + 1], i00, i10, i11);
+                cx.dinv[2 * j] = i00;
+                cx.dinv[2 * j + 1] = i10;
+                cx.dinv[2 * (j + 1)] = i11;
+                cx.dinv[2 * (j + 1) + 1] = 0.0;
+                ++j;
+            } else {
+                cx.dinv[2 * j] = 1.0 / tj[j];
+                cx.dinv[2 * j + 1] = 0.0;
+            }
+        }
+    }
+    return ne_t;
+}
+
+int apply_n(const Sweep &sw, int c0, int ne_t, int r0, int r1, const Ctx &cx) {
+    if (ne_t <= 0 || r1 <= r0) return ne_t;
+    double *X = sw.A + idx(c0, sw.ld) + r0;
+    trsm_rlt(X, r1 - r0, ne_t, cx.lt, sw.bs, sw.ld);
+    return scale_and_check(X, r1 - r0, sw.ld, ne_t, sw.tags + c0, cx.dinv, cx.inv_u);
+}
+
+int block_finish(Sweep &sw, int c0, int w, int ne_t, int nelim, UpdateNN mode, Ctx &cx) {
+    double *const A = sw.A;
+    const int ld = sw.ld;
+    const int m = sw.m;
+    const int ne = sw.ne;
+    const int bs = sw.bs;
+    int8_t *const tags = sw.tags;
+    const int *const Q = sw.Q;
+    const int nq = sw.nq;
+    double *bk = cx.bk[sw.level];
+    const int *lpc = cx.lpc[sw.level];
+    const int ldb = m - c0;
+    const int rb = m - c0 - w;
+    double *T = A + idx(c0, ld) + c0;
+
+    if (ne_t > 0) {
+        // ApplyT: rows of earlier failed columns (stored transposed in
+        // those columns), out of place so nothing needs restoring.
+        for (int i0 = 0; i0 < nq && nelim > 0; i0 += bs) {
+            const int nc = std::min(bs, nq - i0);
+            for (int t = 0; t < nelim; ++t)
+                for (int ii = 0; ii < nc; ++ii)
+                    cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
+            trsm_rlt(cx.ga, nc, nelim, cx.lt, bs, bs);
+            nelim = scale_and_check(cx.ga, nc, bs, nelim, tags + c0, cx.dinv, cx.inv_u);
+        }
+        // Adjust: never keep only the first column of a 2x2.
+        if (nelim > 0 && tags[c0 + nelim - 1] == 2) --nelim;
+    }
+
+    // 5. Restore the failed columns [nelim, w) from the backup.
+    if (nelim < w) {
+        auto bks = [&](int a, int b) {
+            return (a >= b) ? bk[idx(b, ldb) + a] : bk[idx(a, ldb) + b];
+        };
+        for (int s2 = nelim; s2 < w; ++s2) {
+            double *col = T + idx(s2, ld);
+            for (int s1 = s2; s1 < w; ++s1) col[s1] = bks(lpc[s1], lpc[s2]);
+            std::memcpy(col + w, bk + idx(lpc[s2], ldb) + w,
+                        sizeof(double) * static_cast<std::size_t>(rb));
+            tags[c0 + s2] = 0;
+        }
+    }
+
+    if (nelim > 0) {
+        // ApplyT, final: L rows of the earlier failed columns for the
+        // accepted pivots, written back in place.
+        for (int i0 = 0; i0 < nq; i0 += bs) {
+            const int nc = std::min(bs, nq - i0);
+            if (nq > bs) {
+                for (int t = 0; t < nelim; ++t)
+                    for (int ii = 0; ii < nc; ++ii)
+                        cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
+                trsm_rlt(cx.ga, nc, nelim, cx.lt, bs, bs);
+                scale_and_check(cx.ga, nc, bs, nelim, tags + c0, cx.dinv, cx.inv_u);
+            } // else: ga still holds the single chunk from the check pass
+            for (int t = 0; t < nelim; ++t)
+                for (int ii = 0; ii < nc; ++ii)
+                    A[idx(Q[i0 + ii], ld) + c0 + t] = cx.ga[idx(t, bs) + ii];
+        }
+
+        // 6a. UpdateNN: eligible columns [e0, ne), rows to m. L D for
+        // those columns goes, transposed, into the unused strict upper
+        // triangle rows [c0, c0 + nelim) of the same columns.
+        const int e0 = c0 + nelim;
+        const int msz = ne - e0;
+        if (msz > 0) {
+            for (int col = e0; col < ne; ++col)
+                row_times_d(A + idx(c0, ld) + col, static_cast<std::size_t>(ld), nelim, T, ld,
+                            tags + c0, A + idx(col, ld) + c0, 1);
+            const double *Wt = A + idx(e0, ld) + c0;
+            if (mode == UpdateNN::Full) {
+                smf_dgemmt_lower_nn_sub(A + idx(e0, ld) + e0, msz, nelim, A + idx(c0, ld) + e0, ld,
+                                        Wt, ld, ld);
+                if (m > ne)
+                    smf_dgemm(A + idx(e0, ld) + ne, m - ne, msz, nelim, A + idx(c0, ld) + ne, ld,
+                              Wt, ld, ld, -1.0, 1.0);
+            } else {
+                // Own failed columns [e0, ce) only; update_tile does the
+                // block columns to their right.
+                const int ce = c0 + w;
+                const int nown = ce - e0;
+                if (nown > 0) {
+                    smf_dgemmt_lower_nn_sub(A + idx(e0, ld) + e0, nown, nelim,
+                                            A + idx(c0, ld) + e0, ld, Wt, ld, ld);
+                    if (m > ce)
+                        smf_dgemm(A + idx(e0, ld) + ce, m - ce, nown, nelim, A + idx(c0, ld) + ce,
+                                  ld, Wt, ld, ld, -1.0, 1.0);
+                }
+            }
+        }
+
+        // 6b. UpdateNT / UpdateTN: earlier failed columns q, rows [e0, m)
+        // and rows of other failed columns q' >= q.
+        const int mr = m - e0;
+        for (int j0 = 0; j0 < nq; j0 += bs) {
+            const int nj = std::min(bs, nq - j0);
+            for (int jj = 0; jj < nj; ++jj)
+                row_times_d(A + idx(Q[j0 + jj], ld) + c0, 1, nelim, T, ld, tags + c0,
+                            cx.gb + jj, static_cast<std::size_t>(bs));
+            if (mr > 0) {
+                double *Tm = bk; // backup no longer needed
+                smf_dgemm_nt(Tm, mr, nj, nelim, A + idx(c0, ld) + e0, ld, cx.gb, bs, mr, 1.0, 0.0);
+                for (int jj = 0; jj < nj; ++jj) {
+                    double *dst = A + idx(Q[j0 + jj], ld) + e0;
+                    const double *src = Tm + idx(jj, mr);
+                    for (int r = 0; r < mr; ++r) dst[r] -= src[r];
+                }
+            }
+            for (int i0 = j0; i0 < nq; i0 += bs) {
+                const int ni = std::min(bs, nq - i0);
+                for (int t = 0; t < nelim; ++t)
+                    for (int ii = 0; ii < ni; ++ii)
+                        cx.ga[idx(t, bs) + ii] = A[idx(Q[i0 + ii], ld) + c0 + t];
+                smf_dgemm_nt(cx.gc, ni, nj, nelim, cx.ga, bs, cx.gb, bs, bs, 1.0, 0.0);
+                for (int jj = 0; jj < nj; ++jj) {
+                    const int qj = Q[j0 + jj];
+                    double *colq = A + idx(qj, ld);
+                    for (int ii = 0; ii < ni; ++ii) {
+                        const int qi = Q[i0 + ii];
+                        if (qi >= qj) colq[qi] -= cx.gc[idx(jj, bs) + ii];
+                    }
+                }
+            }
+        }
+    }
+
+    sw.num_elim += nelim;
+    for (int s = nelim; s < w; ++s) sw.Q[sw.nq++] = c0 + s;
+    return nelim;
+}
+
+void update_tile(const Sweep &sw, int c0, int nelim, int j0, int j1, int r0, int r1) {
+    if (nelim <= 0 || j1 <= j0 || r1 <= r0) return;
+    double *const A = sw.A;
+    const int ld = sw.ld;
+    double *C = A + idx(j0, ld) + r0;
+    const double *L = A + idx(c0, ld) + r0;
+    const double *Wt = A + idx(j0, ld) + c0;
+    if (r0 == j0)
+        smf_dgemmt_lower_nn_sub(C, j1 - j0, nelim, L, ld, Wt, ld, ld);
+    else
+        smf_dgemm(C, r1 - r0, j1 - j0, nelim, L, ld, Wt, ld, ld, -1.0, 1.0);
+}
+
+void sweep_compact(Sweep &sw) {
+    // Move the failed columns behind the eliminated ones (eliminated order
+    // kept, so 2x2 pairs stay adjacent).
+    if (sw.num_elim < sw.ne) {
+        int dst = 0;
+        for (int src = 0; src < sw.ne; ++src) {
+            if (sw.tags[src] == 0) continue;
+            if (src != dst) view_swap(sw.A, sw.ld, sw.m, dst, src, sw.tags, sw.rows, sw.lp);
+            ++dst;
+        }
+    }
+}
+
+// Deferred update of the non-eligible trailing triangle, at rank num_elim:
+// F[ne:m, ne:m] -= L D L^T, with (L D)^T formed in the strict upper
+// triangle F[0:p, ne:m].
+void trailing_form_w(const Sweep &sw, int j0, int j1) {
+    double *const A = sw.A;
+    const int ld = sw.ld;
+    for (int c = 0; c < sw.num_elim; ++c) {
+        const double *Lc = A + idx(c, ld);
+        if (sw.tags[c] == 2) {
+            const double *Lc1 = Lc + ld;
+            const double d00 = Lc[c], d10 = Lc[c + 1], d11 = Lc1[c + 1];
+            for (int i = j0; i < j1; ++i) {
+                double *row = A + idx(i, ld);
+                row[c] = Lc[i] * d00 + Lc1[i] * d10;
+                row[c + 1] = Lc[i] * d10 + Lc1[i] * d11;
+            }
+            ++c;
+        } else {
+            const double d = Lc[c];
+            for (int i = j0; i < j1; ++i) A[idx(i, ld) + c] = Lc[i] * d;
+        }
+    }
+}
+
+void trailing_tile(const Sweep &sw, int j0, int j1, int r0, int r1) {
+    const int p = sw.num_elim;
+    if (p <= 0 || j1 <= j0 || r1 <= r0) return;
+    double *const A = sw.A;
+    const int ld = sw.ld;
+    double *C = A + idx(j0, ld) + r0;
+    if (r0 == j0)
+        smf_dgemmt_lower_nn_sub(C, j1 - j0, p, A + r0, ld, A + idx(j0, ld), ld, ld);
+    else
+        smf_dgemm(C, r1 - r0, j1 - j0, p, A + r0, ld, A + idx(j0, ld), ld, ld, -1.0, 1.0);
+}
+
+void trailing_update(Sweep &sw) {
+    const int qn = sw.m - sw.ne;
+    if (qn > 0 && sw.num_elim > 0) {
+        trailing_form_w(sw, sw.ne, sw.m);
+        smf_dgemmt_lower_nn_sub(sw.A + idx(sw.ne, sw.ld) + sw.ne, qn, sw.num_elim, sw.A + sw.ne,
+                                sw.ld, sw.A + idx(sw.ne, sw.ld), sw.ld, sw.ld);
+    }
+}
+
+Ctx make_ctx(int f, int num_elig, const AptpParams &prm, double *work) {
     const Sizes s = effective_sizes(num_elig, prm);
     Ctx cx;
     cx.inv_u = 1.0 / prm.u;
@@ -620,11 +686,14 @@ AptpResult ldlt_aptp_front(double *F, int f, int num_elig, Int *rows, const Aptp
     cx.cp_lp = ip;
     ip += nb;
     cx.itmp = ip;
+    return cx;
+}
 
-    const int pe = sweep(F, f, f, num_elig, 0, tags, rows, cx.top_lp, cx);
+AptpResult front_result(const double *F, int f, int num_elig, int pe, const AptpParams &prm,
+                        const int8_t *tags) {
+    AptpResult res;
     res.num_eliminated = pe;
     res.num_failed = num_elig - pe;
-
     const std::size_t sf = static_cast<std::size_t>(f);
     for (int k = 0; k < pe; ++k) {
         if (tags[k] == 2) {
@@ -640,6 +709,31 @@ AptpResult ldlt_aptp_front(double *F, int f, int num_elig, Int *rows, const Aptp
         }
     }
     return res;
+}
+
+} // namespace aptp_detail
+
+std::size_t aptp_work_size(int f, int num_elig, const AptpParams &prm) {
+    const aptp_detail::Sizes s = aptp_detail::effective_sizes(num_elig, prm);
+    const std::size_t F = static_cast<std::size_t>(std::max(f, 1));
+    const std::size_t nb = static_cast<std::size_t>(s.nb);
+    const std::size_t ib = static_cast<std::size_t>(s.ib);
+    const std::size_t ne = static_cast<std::size_t>(std::max(num_elig, 1));
+    const std::size_t doubles = F * nb + nb * ib + 4 * nb * nb + 2 * nb + F;
+    const std::size_t ints = 2 * ne + 4 * nb + ib;
+    return doubles + (ints * sizeof(int) + sizeof(double) - 1) / sizeof(double) + 1;
+}
+
+AptpResult ldlt_aptp_front(double *F, int f, int num_elig, Int *rows, const AptpParams &prm,
+                           int8_t *tags, double *work) {
+    if (f <= 0 || num_elig <= 0) {
+        AptpResult res;
+        res.num_failed = std::max(0, num_elig);
+        return res;
+    }
+    aptp_detail::Ctx cx = aptp_detail::make_ctx(f, num_elig, prm, work);
+    const int pe = aptp_detail::sweep(F, f, f, num_elig, 0, tags, rows, cx.top_lp, cx);
+    return aptp_detail::front_result(F, f, num_elig, pe, prm, tags);
 }
 
 } // namespace smf
