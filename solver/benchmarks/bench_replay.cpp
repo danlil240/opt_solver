@@ -561,6 +561,7 @@ int main(int argc, char **argv) {
 
         std::vector<std::vector<double>> step_solutions(static_cast<std::size_t>(kSeqSteps), b);
         double total_factor_ms = 0.0;
+        std::vector<double> step_factor_ms;  // successful factors, in order
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
         const bool refine = (track == "ipopt" && nrhs == 1);
@@ -578,6 +579,7 @@ int main(int argc, char **argv) {
             for (int step = 0; step < kSeqSteps; ++step) {
                 out_f = adapter->factor(seq_values[step]);
                 total_factor_ms += adapter->stats().factor_ms;
+                if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
                 // The IpmSession adapter runs the deferred analysis in factor().
                 if (step == 0 && !has_phases && adapter->stats().has_analyse_phases) {
                     has_phases = true;
@@ -638,6 +640,15 @@ int main(int argc, char **argv) {
         rec.has_analyse_phases = has_phases;
         rec.analyse_phases = phases;
         rec.factor_ms = total_factor_ms;
+        if (!step_factor_ms.empty()) {
+            rec.first_factor_ms = step_factor_ms.front();
+            if (step_factor_ms.size() > 1) {
+                std::vector<double> warm(step_factor_ms.begin() + 1, step_factor_ms.end());
+                std::sort(warm.begin(), warm.end());
+                const std::size_t m = warm.size();
+                rec.refactor_ms = (m % 2 == 1) ? warm[m / 2] : 0.5 * (warm[m / 2 - 1] + warm[m / 2]);
+            }
+        }
         rec.solve_ms = total_solve_ms;
         rec.refine_ms = total_refine_ms;
         rec.wall_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

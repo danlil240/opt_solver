@@ -63,6 +63,11 @@ struct RunRecord {
     bool has_analyse_phases = false;  // smf solvers only
     AnalysePhaseSeconds analyse_phases;  // seconds, as Info::analyse_phases
     double factor_ms = 0.0;
+    // warm_sequence only (negative = not measured, left out of the record):
+    // the first factorization after analyse, and the median of the warm
+    // refactorizations that follow it.
+    double first_factor_ms = -1.0;
+    double refactor_ms = -1.0;
     double solve_ms = 0.0;
     double refine_ms = 0.0;
     double wall_ms = 0.0;

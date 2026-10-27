@@ -147,6 +147,14 @@ std::string RunRecord::to_json_line() const {
     }
     oss << ",\"factor_ms\":";
     write_json_double(oss, factor_ms);
+    if (first_factor_ms >= 0.0) {
+        oss << ",\"first_factor_ms\":";
+        write_json_double(oss, first_factor_ms);
+    }
+    if (refactor_ms >= 0.0) {
+        oss << ",\"refactor_ms\":";
+        write_json_double(oss, refactor_ms);
+    }
     oss << ",\"solve_ms\":";
     write_json_double(oss, solve_ms);
     oss << ",\"refine_ms\":";
