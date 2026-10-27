@@ -68,7 +68,7 @@ void FrontalMatrix::scatter_original(const std::vector<Int>& col_ptr,
 }
 
 void FrontalMatrix::assemble_contrib(const double* contrib, Int q,
-                                     const std::vector<Int>& parent_rows)
+                                     std::span<const Int> parent_rows)
 {
     for (Int j = 0; j < q; ++j) {
         const Int pr_j = parent_rows[static_cast<std::size_t>(j)];

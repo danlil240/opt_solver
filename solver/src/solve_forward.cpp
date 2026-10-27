@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <type_traits>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -32,7 +33,7 @@ static const std::vector<Int> &get_or_compute_postorder(
   }
   while (!stack.empty()) {
     auto &[node, child_pos] = stack.back();
-    const auto &children = ak.supernodes[static_cast<std::size_t>(node)].children;
+    const std::span<const Int> children = ak.children(node);
     if (child_pos < static_cast<Int>(children.size())) {
       stack.push_back({children[static_cast<std::size_t>(child_pos++)], 0});
     } else {
@@ -352,13 +353,12 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
         step_front(static_cast<std::size_t>(pos), L, rows, p, f);
       } else {
         const Int s = (*postorder)[static_cast<std::size_t>(pos)];
-        const FrontalInfo &fi = ak->fronts[static_cast<std::size_t>(s)];
         const Supernode &sn = ak->supernodes[static_cast<std::size_t>(s)];
-        rows = fi.row_indices.data();
+        rows = ak->front_rows(s).data();
         L = &fkeep.factor_values[static_cast<std::size_t>(
             fkeep.factor_col_ptr[static_cast<std::size_t>(s)])];
         p = static_cast<int>(sn.width());
-        f = static_cast<int>(fi.front_size());
+        f = static_cast<int>(ak->front_size(s));
       }
       forward_front(L, rows, p, f, posdef, xcol, b_loc, b_ext, DirectUpdate{xcol});
     }

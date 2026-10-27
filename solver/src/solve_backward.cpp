@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <span>
 #include <vector>
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -31,7 +32,7 @@ static const std::vector<Int> &get_or_compute_postorder(
   }
   while (!stack.empty()) {
     auto &[node, child_pos] = stack.back();
-    const auto &children = ak.supernodes[static_cast<std::size_t>(node)].children;
+    const std::span<const Int> children = ak.children(node);
     if (child_pos < static_cast<Int>(children.size())) {
       stack.push_back({children[static_cast<std::size_t>(child_pos++)], 0});
     } else {
@@ -372,12 +373,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
         } else {
           const Int s = (*postorder)[static_cast<std::size_t>(pos)];
           const Supernode &sn = ak->supernodes[static_cast<std::size_t>(s)];
-          const FrontalInfo &fi = ak->fronts[static_cast<std::size_t>(s)];
-          rows = fi.row_indices.data();
+          rows = ak->front_rows(s).data();
           factor_data = fkeep.factor_values.data() +
                         fkeep.factor_col_ptr[static_cast<std::size_t>(s)];
           p = sn.width();
-          f = fi.front_size();
+          f = ak->front_size(s);
         }
         backward_front(factor_data, rows, p, f, posdef, apply_d, xc, b_loc, b_ext);
       }

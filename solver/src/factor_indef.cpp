@@ -15,6 +15,7 @@
 #include <cmath>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -24,10 +25,10 @@ namespace {
 bool check_analysis_storage_bounds(const AnalysisKeep &keep) noexcept {
   LongInt total_predicted = 0;
   const std::size_t ns = keep.supernodes.size();
-  if (keep.fronts.size() < ns) return false;
+  if (ns > 0 && keep.front_row_ptr.size() < ns + 1) return false;
   for (std::size_t s = 0; s < ns; ++s) {
     const LongInt p = static_cast<LongInt>(keep.supernodes[s].width());
-    const LongInt f = static_cast<LongInt>(keep.fronts[s].front_size());
+    const LongInt f = static_cast<LongInt>(keep.front_size(static_cast<Int>(s)));
     LongInt front_sq = 0;
     if (!checked_storage_elements(f, f, front_sq)) {
       return false;
@@ -56,13 +57,14 @@ FrontResult build_and_factor_supernode_front(
     NumericWorkspace *ws_opt) {
   const std::size_t si = static_cast<std::size_t>(s);
   const Supernode &sn = keep.supernodes[si];
-  const FrontalInfo &fi = keep.fronts[si];
+  const std::span<const Int> frows = keep.front_rows(s);
+  const std::span<const Int> kids = keep.children(s);
   const int p_sym = static_cast<int>(sn.width());
-  const int f_sym = static_cast<int>(fi.front_size());
+  const int f_sym = static_cast<int>(frows.size());
 
   std::vector<Int> eligible_rows;
   eligible_rows.reserve(static_cast<std::size_t>(p_sym + 8));
-  for (Int c : sn.children) {
+  for (Int c : kids) {
     const auto &c_res = node_results[static_cast<std::size_t>(c)];
     for (Int dcol : c_res.delayed_col_ids) {
       if (std::find(eligible_rows.begin(), eligible_rows.end(), dcol) ==
@@ -72,7 +74,7 @@ FrontResult build_and_factor_supernode_front(
     }
   }
   for (int k = 0; k < p_sym; ++k) {
-    const Int r_id = fi.row_indices[static_cast<std::size_t>(k)];
+    const Int r_id = frows[static_cast<std::size_t>(k)];
     if (std::find(eligible_rows.begin(), eligible_rows.end(), r_id) ==
         eligible_rows.end()) {
       eligible_rows.push_back(r_id);
@@ -83,13 +85,13 @@ FrontResult build_and_factor_supernode_front(
   std::vector<Int> ext_rows;
   ext_rows.reserve(static_cast<std::size_t>(std::max(0, f_sym - p_sym) + 8));
   for (int k = p_sym; k < f_sym; ++k) {
-    const Int r_id = fi.row_indices[static_cast<std::size_t>(k)];
+    const Int r_id = frows[static_cast<std::size_t>(k)];
     if (std::find(eligible_rows.begin(), eligible_rows.end(), r_id) ==
         eligible_rows.end()) {
       ext_rows.push_back(r_id);
     }
   }
-  for (Int c : sn.children) {
+  for (Int c : kids) {
     const auto &c_res = node_results[static_cast<std::size_t>(c)];
     for (Int crow : c_res.contrib_row_ids) {
       if (std::find(eligible_rows.begin(), eligible_rows.end(), crow) ==
@@ -131,7 +133,7 @@ FrontResult build_and_factor_supernode_front(
 
   front.scatter_original_columns(Ap, sn.col_start, sn.col_end);
 
-  for (Int c : sn.children) {
+  for (Int c : kids) {
     auto &c_res = node_results[static_cast<std::size_t>(c)];
     if (!c_res.contrib.empty()) {
       front.assemble_contribution(c_res.contrib_row_ids, c_res.contrib);
@@ -584,7 +586,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     policy.memory_budget_bytes = ctrl.memory_budget_bytes;
     policy.min_task_flops = ctrl.factor_parallel_min_flops;
     policy.deterministic = ctrl.deterministic;
-    run_costed_postorder(keep.supernodes, keep.fronts, policy, process_node);
+    run_costed_postorder(keep, policy, process_node);
   }
 #endif
 

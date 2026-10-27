@@ -1,6 +1,7 @@
 #pragma once
 #include "smf/types.hpp"
 #include "smf/utils/memory.hpp"
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -19,7 +20,7 @@ namespace smf {
 class FrontalMatrix {
 public:
     /// Fast pointer-based constructor — zero copies; row_map/col_map must outlive this.
-    /// Typically pass fi.row_indices.data() for both: the first p entries serve as
+    /// Typically pass AnalysisKeep::front_rows(s).data() for both: the first p entries serve as
     /// col_map and all f entries serve as row_map.
     FrontalMatrix(Int front_size, Int pivot_cols,
                   const Int* row_map, const Int* col_map,
@@ -42,7 +43,7 @@ public:
 
     /// Add a (q×q) lower-triangular contribution block (column-major) into this front.
     void assemble_contrib(const double* contrib, Int q,
-                          const std::vector<Int>& parent_rows);
+                          std::span<const Int> parent_rows);
 
     // ---- Accessors ----------------------------------------------------------
 

@@ -213,7 +213,6 @@ namespace smf
                 continue;
             const Int par_sn = snode_id[static_cast<std::size_t>(par_col)];
             result[static_cast<std::size_t>(s)].parent = par_sn;
-            result[static_cast<std::size_t>(par_sn)].children.push_back(s);
         }
 
         return result;
@@ -249,13 +248,12 @@ namespace smf
                 supernodes[static_cast<std::size_t>(s)].col_end ==
                     supernodes[static_cast<std::size_t>(p)].col_start)
             {
-                // Merge s into p: absorb s's column range; s's children become
-                // children of p (their new_parent is re-pointed below).
+                // Merge s into p: absorb s's column range. s's children (all
+                // already visited: smaller indices) keep pointing at s; the
+                // parent resolution below skips through dead nodes to p.
                 supernodes[static_cast<std::size_t>(p)].col_start =
                     supernodes[static_cast<std::size_t>(s)].col_start;
                 dead[static_cast<std::size_t>(s)] = 1;
-                for (Int c : supernodes[static_cast<std::size_t>(s)].children)
-                    new_parent[static_cast<std::size_t>(c)] = p;
             }
         }
 
@@ -292,8 +290,6 @@ namespace smf
                 continue;
             const Int ri_par = orig_to_ri[static_cast<std::size_t>(par)];
             result[static_cast<std::size_t>(i)].parent = ri_par;
-            if (ri_par >= 0)
-                result[static_cast<std::size_t>(ri_par)].children.push_back(i);
         }
 
         return result;
@@ -517,17 +513,42 @@ namespace smf
             out.col_end = pos;
             const Int gp = gparent[static_cast<std::size_t>(g)];
             out.parent = (gp >= 0) ? new_id[static_cast<std::size_t>(gp)] : -1;
-            out.children.clear();
-            out.children.reserve(static_cast<std::size_t>(
-                ch_ptr[static_cast<std::size_t>(g) + 1] - ch_ptr[static_cast<std::size_t>(g)]));
         }
-        // Children were numbered before their parent; push in increasing index.
-        for (Int i = 0; i < ng; ++i)
+    }
+
+    void build_children_csr(std::span<const Supernode> snodes,
+                            std::vector<Int> &child_ptr, std::vector<Int> &child_idx)
+    {
+        const std::size_t nsn = snodes.size();
+        child_ptr.assign(nsn + 1, 0);
+        // Pass 1: count each parent's children.
+        for (std::size_t s = 0; s < nsn; ++s)
         {
-            const Int par = snodes[static_cast<std::size_t>(i)].parent;
+            const Int par = snodes[s].parent;
             if (par >= 0)
-                snodes[static_cast<std::size_t>(par)].children.push_back(i);
+                ++child_ptr[static_cast<std::size_t>(par) + 1];
         }
+        for (std::size_t s = 0; s < nsn; ++s)
+            child_ptr[s + 1] += child_ptr[s];
+        child_idx.resize(static_cast<std::size_t>(child_ptr[nsn]));
+        // Pass 2: fill each parent's slots from the back while visiting the
+        // children in increasing index, which leaves them in descending order.
+        // child_ptr[par + 1] serves as the moving end and is restored after.
+        for (std::size_t s = 0; s < nsn; ++s)
+        {
+            const Int par = snodes[s].parent;
+            if (par >= 0)
+            {
+                const Int slot = --child_ptr[static_cast<std::size_t>(par) + 1];
+                child_idx[static_cast<std::size_t>(slot)] = static_cast<Int>(s);
+            }
+        }
+        // Each end pointer child_ptr[p + 1] was decremented down to p's
+        // start, i.e. now holds the original child_ptr[p]: shift down by one.
+        const Int total = static_cast<Int>(child_idx.size());
+        for (std::size_t s = 0; s < nsn; ++s)
+            child_ptr[s] = child_ptr[s + 1];
+        child_ptr[nsn] = total;
     }
 
 } // namespace smf

@@ -193,10 +193,10 @@ TEST(NumericWorkspace, StorageOverflow) {
     big_sn.parent = -1;
     bogus_ak.supernodes.push_back(big_sn);
 
-    FrontalInfo big_fi;
-    // Set row_indices size via metadata check: 50000 x 50000 = 2.5e9 > kMaxFactorStorageEntries
-    big_fi.row_indices.resize(50000, 0);
-    bogus_ak.fronts.push_back(big_fi);
+    // Front of 50000 rows via metadata: 50000 x 50000 = 2.5e9 > kMaxFactorStorageEntries
+    bogus_ak.child_ptr = {0, 0};
+    bogus_ak.front_row_ptr = {0, 50000};
+    bogus_ak.front_row_idx.assign(50000, 0);
     bogus_ak.postorder = {0};
     bogus_ak.solve_postorder = {0};
 

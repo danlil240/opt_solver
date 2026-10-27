@@ -13,6 +13,7 @@
 #include <cstring>
 #include <numeric>
 #include <optional>
+#include <span>
 
 namespace smf {
 
@@ -79,8 +80,8 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   {
     const std::size_t si = static_cast<std::size_t>(s);
     const int p = static_cast<int>(keep.supernodes[si].width());
-    const int f = static_cast<int>(keep.fronts[si].front_size());
-    row_count += keep.fronts[si].row_indices.size();
+    const int f = static_cast<int>(keep.front_size(s));
+    row_count += static_cast<std::size_t>(f);
     max_p = std::max(max_p, p);
     max_q = std::max(max_q, f - p);
   }
@@ -88,16 +89,16 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
 
   for (Int s : keep.solve_postorder) {
     const std::size_t si = static_cast<std::size_t>(s);
-    const FrontalInfo &fi = keep.fronts[si];
+    const std::span<const Int> rows = keep.front_rows(s);
     const Supernode &sn = keep.supernodes[si];
     SolveStep step;
     step.row_offset = static_cast<LongInt>(fkeep.solve_row_indices.size());
     step.factor_offset = fkeep.factor_col_ptr[si];
     step.p = static_cast<int>(sn.width());
-    step.f = static_cast<int>(fi.front_size());
+    step.f = static_cast<int>(rows.size());
     fkeep.solve_steps.push_back(step);
     fkeep.solve_row_indices.insert(fkeep.solve_row_indices.end(),
-                                   fi.row_indices.begin(), fi.row_indices.end());
+                                   rows.begin(), rows.end());
   }
 
   fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
@@ -126,7 +127,7 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
     LongInt offset = 0;
     for (Int s = 0; s < ns; ++s) {
       fkeep.factor_col_ptr[static_cast<std::size_t>(s)] = offset;
-      const LongInt f = keep.fronts[static_cast<std::size_t>(s)].front_size();
+      const LongInt f = keep.front_size(s);
       const LongInt p = keep.supernodes[static_cast<std::size_t>(s)].width();
       offset += f * p;
     }
@@ -150,10 +151,10 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
       return;
 
     const std::size_t si = static_cast<std::size_t>(s);
-    const FrontalInfo &fi = keep.fronts[si];
+    const std::span<const Int> rows = keep.front_rows(s);
     const Supernode &sn = keep.supernodes[si];
     const Int p = sn.width();
-    const Int f = fi.front_size();
+    const Int f = static_cast<Int>(rows.size());
     const Int q = f - p;
 
     if (p <= 0)
@@ -167,7 +168,7 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
         8192u;
     AlignedArena arena(arena_sz);
 
-    FrontalMatrix F(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
+    FrontalMatrix F(f, p, rows.data(), rows.data(), arena);
 
     double *a22 = nullptr;
     if (q > 0) {
@@ -182,40 +183,37 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
     F.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
 
     // Assemble child contributions (children are fully done by taskwait).
-    // Children in sn.children are pre-sorted; child_parent_rows may be
-    // precomputed or built on demand for large-n analyses.
+    // Children come in descending postorder; the parent-row map is read
+    // from the analysis when stored (keep.child_parent_rows) and built on
+    // demand otherwise.
     std::vector<Int> parent_rows_local;
-    for (std::size_t k = 0; k < sn.children.size(); ++k) {
-      const Int c = sn.children[k];
+    const std::span<const Int> kids = keep.children(s);
+    for (std::size_t k = 0; k < kids.size(); ++k) {
+      const Int c = kids[k];
       const std::size_t ci = static_cast<std::size_t>(c);
       if (contrib[ci].empty())
         continue;
 
-      const FrontalInfo &fi_c = keep.fronts[ci];
+      const std::span<const Int> rows_c = keep.front_rows(c);
       const Int p_c = keep.supernodes[ci].width();
-      const Int f_c = fi_c.front_size();
+      const Int f_c = static_cast<Int>(rows_c.size());
       const Int q_c = f_c - p_c;
       if (q_c <= 0)
         continue;
 
       const double *cc = contrib[ci].data();
-      const std::vector<Int> *parent_rows_ptr = nullptr;
-      if (k < fi.child_parent_rows.size() &&
-          fi.child_parent_rows[k].size() == static_cast<std::size_t>(q_c)) {
-        parent_rows_ptr = &fi.child_parent_rows[k];
-      } else {
+      std::span<const Int> parent_rows =
+          keep.child_parent_rows(s, static_cast<Int>(k));
+      if (parent_rows.size() != static_cast<std::size_t>(q_c)) {
         parent_rows_local.resize(static_cast<std::size_t>(q_c));
         for (Int ii = 0; ii < q_c; ++ii) {
-          const Int ext_row =
-              fi_c.row_indices[static_cast<std::size_t>(p_c + ii)];
-          const auto it = std::lower_bound(fi.row_indices.begin(),
-                                           fi.row_indices.end(), ext_row);
+          const Int ext_row = rows_c[static_cast<std::size_t>(p_c + ii)];
+          const auto it = std::lower_bound(rows.begin(), rows.end(), ext_row);
           parent_rows_local[static_cast<std::size_t>(ii)] =
-              static_cast<Int>(it - fi.row_indices.begin());
+              static_cast<Int>(it - rows.begin());
         }
-        parent_rows_ptr = &parent_rows_local;
+        parent_rows = parent_rows_local;
       }
-      const std::vector<Int> &parent_rows = *parent_rows_ptr;
 
       // Assemble A11/A21 parts into F.
       F.assemble_contrib(cc, q_c, parent_rows);
@@ -291,7 +289,7 @@ static FactorStatus factor_posdef_parallel(const AnalysisKeep &keep,
   };
 
   // ---- Step 5: Parallel postorder traversal --------------------------------
-  run_parallel_postorder(keep.supernodes, process_node, ctrl.num_threads);
+  run_parallel_postorder(keep, process_node, ctrl.num_threads);
 
   if (err_flag.load() != 0)
     return FactorStatus::NotPositiveDefinite;

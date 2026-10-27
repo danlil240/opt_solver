@@ -10,7 +10,6 @@
 #include "smf/solve_sparse_fwd.hpp"
 
 #include "smf/analysis.hpp"
-#include "smf/assembly_tree.hpp"  // FrontalInfo
 #include "smf/dense_kernel.hpp"   // smf_dtrsv_lower, smf_dtrsv_lower_unit, smf_dgemv
 #include "smf/factor_posdef.hpp"  // FactorKeep
 #include "smf/supernode.hpp"      // Supernode
@@ -19,6 +18,7 @@
 #include <cassert>
 #include <cstddef>
 #include <utility>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -40,7 +40,6 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
         return;
 
     const auto &supernodes = akeep.supernodes;
-    const auto &fronts     = akeep.fronts;
     const auto &iperm      = fkeep.iperm;   // iperm[old] = new (permuted index)
     const int   ns         = static_cast<int>(supernodes.size());
 
@@ -102,9 +101,9 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
                 dfs_stk.push_back({i, 0});
         while (!dfs_stk.empty()) {
             auto& [node, ci] = dfs_stk.back();
-            const int nch = static_cast<int>(supernodes[static_cast<std::size_t>(node)].children.size());
-            if (ci < nch) {
-                dfs_stk.push_back({supernodes[static_cast<std::size_t>(node)].children[static_cast<std::size_t>(ci++)], 0});
+            const std::span<const Int> ch = akeep.children(node);
+            if (ci < static_cast<Int>(ch.size())) {
+                dfs_stk.push_back({ch[static_cast<std::size_t>(ci++)], 0});
             } else {
                 po_buf.push_back(node);
                 dfs_stk.pop_back();
@@ -131,11 +130,11 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
     std::vector<double> b_ext;
 
     for (int s : reach) {
-        const FrontalInfo &fi = fronts[static_cast<std::size_t>(s)];
+        const std::span<const Int> rows = akeep.front_rows(s);
         const Supernode   &sn = supernodes[static_cast<std::size_t>(s)];
 
         const int p = static_cast<int>(sn.width());       // pivot columns
-        const int f = static_cast<int>(fi.front_size());  // total front rows
+        const int f = static_cast<int>(rows.size());      // total front rows
         const int q = f - p;                               // extended rows
 
         if (p <= 0)
@@ -150,7 +149,7 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
         b_loc.resize(static_cast<std::size_t>(p));
         for (int k = 0; k < p; ++k)
             b_loc[static_cast<std::size_t>(k)] =
-                x_out[fi.row_indices[static_cast<std::size_t>(k)]];
+                x_out[rows[static_cast<std::size_t>(k)]];
 
         // (b) Solve L11 * y = b_loc.
         //   SPD path:  non-unit lower triangular (dpotrf stores full L).
@@ -162,7 +161,7 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
 
         // (c) Scatter pivot values back.
         for (int k = 0; k < p; ++k)
-            x_out[fi.row_indices[static_cast<std::size_t>(k)]] =
+            x_out[rows[static_cast<std::size_t>(k)]] =
                 b_loc[static_cast<std::size_t>(k)];
 
         // (d) Update extended rows: x_out[ext] -= L21 * b_loc.
@@ -172,7 +171,7 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
             // Gather extended rows.
             for (int k = 0; k < q; ++k)
                 b_ext[static_cast<std::size_t>(k)] =
-                    x_out[fi.row_indices[static_cast<std::size_t>(p + k)]];
+                    x_out[rows[static_cast<std::size_t>(p + k)]];
 
             // L21 is rows [p, f) of the f×p block (col-major, lda = f).
             // b_ext = -1 * L21 * b_loc + 1 * b_ext
@@ -180,7 +179,7 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
 
             // Scatter extended rows back.
             for (int k = 0; k < q; ++k)
-                x_out[fi.row_indices[static_cast<std::size_t>(p + k)]] =
+                x_out[rows[static_cast<std::size_t>(p + k)]] =
                     b_ext[static_cast<std::size_t>(k)];
         }
     }

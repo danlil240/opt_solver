@@ -16,31 +16,40 @@ using namespace smf;
 
 namespace {
 
+// A hand-made analysis: the supernodes' tree in CSR form and fronts of the
+// given sizes (row values do not matter to the scheduler).
+AnalysisKeep make_keep(std::vector<Supernode> snodes, const std::vector<Int> &front_sizes) {
+    AnalysisKeep ak;
+    ak.supernodes = std::move(snodes);
+    build_children_csr(ak.supernodes, ak.child_ptr, ak.child_idx);
+    ak.front_row_ptr.assign(1, 0);
+    for (const Int f : front_sizes)
+        ak.front_row_ptr.push_back(ak.front_row_ptr.back() + f);
+    ak.front_row_idx.assign(static_cast<std::size_t>(ak.front_row_ptr.back()), 0);
+    return ak;
+}
+
 // Build a tree with 16 tiny leaf supernodes (width 1, front 2 -> ~4 flops each)
 // feeding into a root supernode 16.
-void make_tiny_leaves_tree(std::vector<Supernode> &snodes,
-                           std::vector<FrontalInfo> &fronts) {
-    snodes.resize(17);
-    fronts.resize(17);
+AnalysisKeep make_tiny_leaves_tree() {
+    std::vector<Supernode> snodes(17);
+    std::vector<Int> fsz(17, 2);
     for (int i = 0; i < 16; ++i) {
         snodes[i].col_start = i;
         snodes[i].col_end = i + 1;
         snodes[i].parent = 16;
-        snodes[16].children.push_back(i);
-        fronts[i].row_indices = {i, 16};
     }
     snodes[16].col_start = 16;
     snodes[16].col_end = 17;
     snodes[16].parent = -1;
-    fronts[16].row_indices = {16};
+    fsz[16] = 1;
+    return make_keep(std::move(snodes), fsz);
 }
 
 } // namespace
 
 TEST(TaskBudget, CoarsensTinySubtrees) {
-    std::vector<Supernode> snodes;
-    std::vector<FrontalInfo> fronts;
-    make_tiny_leaves_tree(snodes, fronts);
+    const AnalysisKeep ak = make_tiny_leaves_tree();
 
     ExecutionPolicy policy;
     policy.threads = 4;
@@ -49,7 +58,7 @@ TEST(TaskBudget, CoarsensTinySubtrees) {
 
     std::atomic<int> visited{0};
     TaskScheduleStats st = run_costed_postorder(
-        snodes, fronts, policy, [&](Int) { visited.fetch_add(1, std::memory_order_relaxed); });
+        ak, policy, [&](Int) { visited.fetch_add(1, std::memory_order_relaxed); });
 
     EXPECT_EQ(visited.load(), 17);
     EXPECT_GT(st.coarsened_subtrees, 0);
@@ -61,19 +70,19 @@ TEST(TaskBudget, RespectsLiveMemory) {
     // If all 8 ran simultaneously before parent consumed them, live contribution memory would be 160,000 bytes.
     // Set memory_budget_bytes = 50,000 bytes -> scheduler must throttle so peak_live_contrib_bytes <= 50,000!
     std::vector<Supernode> snodes(9);
-    std::vector<FrontalInfo> fronts(9);
+    std::vector<Int> fsz(9, 0);
     for (int i = 0; i < 8; ++i) {
         snodes[i].col_start = i * 10;
         snodes[i].col_end = (i + 1) * 10;
         snodes[i].parent = 8;
-        snodes[8].children.push_back(i);
         // p = 10, f = 60 -> q = 50 extension rows -> 50*50*8 = 20,000 bytes contribution
-        fronts[i].row_indices.resize(60, 0);
+        fsz[i] = 60;
     }
     snodes[8].col_start = 80;
     snodes[8].col_end = 130;
     snodes[8].parent = -1;
-    fronts[8].row_indices.resize(50, 0);
+    fsz[8] = 50;
+    const AnalysisKeep ak = make_keep(std::move(snodes), fsz);
 
     ExecutionPolicy policy;
     policy.threads = 4;
@@ -82,7 +91,7 @@ TEST(TaskBudget, RespectsLiveMemory) {
 
     std::atomic<int> visited{0};
     TaskScheduleStats st = run_costed_postorder(
-        snodes, fronts, policy, [&](Int) { visited.fetch_add(1, std::memory_order_relaxed); });
+        ak, policy, [&](Int) { visited.fetch_add(1, std::memory_order_relaxed); });
 
     EXPECT_EQ(visited.load(), 9);
     EXPECT_LE(st.peak_live_contrib_bytes, 50000u);
@@ -93,17 +102,14 @@ TEST(TaskBudget, LargeRootMakesProgress) {
     // Even if a single node's contribution or root front exceeds the nominal memory_budget_bytes,
     // the scheduler must still admit it when live memory is 0 so a large root always makes progress!
     std::vector<Supernode> snodes(2);
-    std::vector<FrontalInfo> fronts(2);
     snodes[0].col_start = 0;
     snodes[0].col_end = 20;
-    snodes[0].parent = 1;
-    fronts[0].row_indices.resize(100, 0); // q = 80 -> 80*80*8 = 51,200 bytes
+    snodes[0].parent = 1; // front 100: q = 80 -> 80*80*8 = 51,200 bytes
 
     snodes[1].col_start = 20;
     snodes[1].col_end = 100;
     snodes[1].parent = -1;
-    snodes[1].children = {0};
-    fronts[1].row_indices.resize(80, 0);
+    const AnalysisKeep ak = make_keep(std::move(snodes), {100, 80});
 
     ExecutionPolicy policy;
     policy.threads = 2;
@@ -112,7 +118,7 @@ TEST(TaskBudget, LargeRootMakesProgress) {
 
     std::vector<Int> order;
     TaskScheduleStats st = run_costed_postorder(
-        snodes, fronts, policy, [&](Int s) { order.push_back(s); });
+        ak, policy, [&](Int s) { order.push_back(s); });
 
     ASSERT_EQ(order.size(), 2u);
     EXPECT_EQ(order[0], 0);
@@ -125,17 +131,15 @@ TEST(TaskBudget, ConcurrentInstancesAndDeepTree) {
     {
         const int depth = 2500;
         std::vector<Supernode> snodes(depth);
-        std::vector<FrontalInfo> fronts(depth);
         for (int i = 0; i < depth; ++i) {
             snodes[i].col_start = i;
             snodes[i].col_end = i + 1;
             snodes[i].parent = (i + 1 < depth) ? (i + 1) : -1;
-            if (i > 0) snodes[i].children = {i - 1};
-            fronts[i].row_indices = {i};
         }
+        const AnalysisKeep ak = make_keep(std::move(snodes), std::vector<Int>(depth, 1));
         ExecutionPolicy policy{2, 0, 1000, false};
         int count = 0;
-        run_costed_postorder(snodes, fronts, policy, [&](Int) { ++count; });
+        run_costed_postorder(ak, policy, [&](Int) { ++count; });
         EXPECT_EQ(count, depth);
     }
 

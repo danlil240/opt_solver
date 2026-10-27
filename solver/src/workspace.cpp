@@ -47,7 +47,7 @@ void NumericWorkspace::prepare_for_analysis(const AnalysisKeep &ak) {
 
     std::size_t max_front = 1;
     for (std::size_t s = 0; s < ns; ++s) {
-        const std::size_t f = ak.fronts[s].row_indices.size();
+        const std::size_t f = static_cast<std::size_t>(ak.front_size(static_cast<Int>(s)));
         const std::size_t p = static_cast<std::size_t>(ak.supernodes[s].width());
         if (f > max_front) max_front = f;
         auto &fr = node_results[s];

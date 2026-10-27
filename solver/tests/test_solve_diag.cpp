@@ -62,9 +62,9 @@ TEST(SolveDiag, BlockD2x2) {
   sn.parent = -1;
   ak.supernodes.push_back(std::move(sn));
 
-  FrontalInfo fi;
-  fi.row_indices = {0, 1};
-  ak.fronts.push_back(std::move(fi));
+  ak.child_ptr = {0, 0};
+  ak.front_row_ptr = {0, 2};
+  ak.front_row_idx = {0, 1};
 
   // factor_values layout: f=2 (front_size), p=2 (width), col-major.
   //   (row, col) → col*f + row

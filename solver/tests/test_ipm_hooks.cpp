@@ -1038,7 +1038,7 @@ TEST(IpmHooks, FallbackBudgetBoundary) {
         const Supernode &P = parent_front(*off.ak);
         ASSERT_NE(P.parent, -1) << "P must not be a root";
         ASSERT_EQ(P.width(), wide ? 2 : 1);
-        ASSERT_EQ(P.children.size(), 2u);
+        ASSERT_EQ(off.ak->children(static_cast<Int>(&P - off.ak->supernodes.data())).size(), 2u);
         off.factor(-1);
         EXPECT_EQ(off.info.static_pivots, 0);
         EXPECT_GT(off.info.delayed_pivots, 2) << "b must be delayed past P";

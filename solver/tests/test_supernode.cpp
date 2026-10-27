@@ -125,16 +125,40 @@ TEST(Supernode, AmalgamationKeepsParentSiblings) {
 
     supernodes[1].parent = 2;
     supernodes[0].parent = 2;
-    supernodes[2].children = {0, 1};
 
     auto amalg = amalgamate_supernodes(std::move(supernodes), 2);
 
     ASSERT_EQ(static_cast<Int>(amalg.size()), 3);
     EXPECT_EQ(amalg[1].col_start, 1);
     EXPECT_EQ(amalg[1].col_end, 3);
-    ASSERT_EQ(amalg[1].children.size(), 1u);
-    EXPECT_EQ(amalg[1].children[0], 0);
+    std::vector<Int> child_ptr, child_idx;
+    build_children_csr(amalg, child_ptr, child_idx);
+    ASSERT_EQ(child_ptr[2] - child_ptr[1], 1);
+    EXPECT_EQ(child_idx[static_cast<std::size_t>(child_ptr[1])], 0);
     EXPECT_EQ(amalg[0].parent, 1);
+}
+
+// Children CSR from parent links: every non-root appears once, under its
+// parent, in descending index order; roots and leaves get empty ranges.
+TEST(Supernode, ChildrenCsrDescending) {
+    // Forest: 0,1,3 -> 4; 2 -> 3; 4 root; 5 root (isolated); 6 -> 7; 7 root.
+    std::vector<Supernode> sn(8);
+    const Int parent[8] = {4, 4, 3, 4, -1, -1, 7, -1};
+    for (Int s = 0; s < 8; ++s) {
+        sn[static_cast<std::size_t>(s)].col_start = s;
+        sn[static_cast<std::size_t>(s)].col_end = s + 1;
+        sn[static_cast<std::size_t>(s)].parent = parent[s];
+    }
+    std::vector<Int> child_ptr, child_idx;
+    build_children_csr(sn, child_ptr, child_idx);
+    ASSERT_EQ(child_ptr.size(), 9u);
+    EXPECT_EQ(child_ptr, (std::vector<Int>{0, 0, 0, 0, 1, 4, 4, 4, 5}));
+    EXPECT_EQ(child_idx, (std::vector<Int>{2, 3, 1, 0, 6}));
+
+    std::vector<Supernode> none;
+    build_children_csr(none, child_ptr, child_idx);
+    EXPECT_EQ(child_ptr, (std::vector<Int>{0}));
+    EXPECT_TRUE(child_idx.empty());
 }
 
 // n=0 edge case

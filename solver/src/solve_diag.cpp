@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace smf {
 
@@ -46,10 +47,10 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
       continue;
 
     const Supernode &sn = analysis.supernodes[si];
-    const FrontalInfo &fi = analysis.fronts[si];
+    const std::span<const Int> rows = analysis.front_rows(s);
 
     const int p = static_cast<int>(sn.width());
-    const int f = static_cast<int>(fi.front_size());
+    const int f = static_cast<int>(rows.size());
     const LongInt start = fkeep.factor_col_ptr[si];
 
     for (int k = 0; k < p; ++k) {
@@ -62,7 +63,7 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
         // 1×1 pivot: divide x[r] by D[k,k]
         const double dkk =
             fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
-        x[fi.row_indices[ki]] /= dkk;
+        x[rows[ki]] /= dkk;
 
       } else if (tag == 2) {
         // 2×2 pivot block at columns k and k+1
@@ -75,8 +76,8 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
             start + (k + 1) * f + (k + 1))];
 
         const double det = d00 * d11 - d10 * d10;
-        const int r0 = static_cast<int>(fi.row_indices[ki]);
-        const int r1 = static_cast<int>(fi.row_indices[ki + 1]);
+        const int r0 = static_cast<int>(rows[ki]);
+        const int r1 = static_cast<int>(rows[ki + 1]);
         const double x0 = x[r0];
         const double x1 = x[r1];
         // D^{-1} = [[d11, -d10], [-d10, d00]] / det

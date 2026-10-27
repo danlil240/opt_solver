@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -20,7 +21,8 @@ struct CostModel {
 };
 
 static std::vector<Int>
-serial_postorder(const std::vector<Supernode> &supernodes) {
+serial_postorder(const AnalysisKeep &ak) {
+  const std::vector<Supernode> &supernodes = ak.supernodes;
   const Int ns = static_cast<Int>(supernodes.size());
   std::vector<Int> order;
   order.reserve(static_cast<std::size_t>(ns));
@@ -35,12 +37,9 @@ serial_postorder(const std::vector<Supernode> &supernodes) {
 
   while (!stk.empty()) {
     auto &[nd, ci] = stk.back();
-    const Int nch = static_cast<Int>(
-        supernodes[static_cast<std::size_t>(nd)].children.size());
-    if (ci < nch) {
-      const Int child =
-          supernodes[static_cast<std::size_t>(nd)]
-              .children[static_cast<std::size_t>(ci)];
+    const std::span<const Int> ch = ak.children(nd);
+    if (ci < static_cast<Int>(ch.size())) {
+      const Int child = ch[static_cast<std::size_t>(ci)];
       ++ci;
       stk.push_back({child, 0});
     } else {
@@ -52,10 +51,11 @@ serial_postorder(const std::vector<Supernode> &supernodes) {
   return order;
 }
 
-static CostModel build_cost_model(const std::vector<Supernode> &supernodes,
-                                  const std::vector<FrontalInfo> &fronts,
+static CostModel build_cost_model(const AnalysisKeep &ak,
                                   const std::vector<Int> &postorder) {
+  const std::vector<Supernode> &supernodes = ak.supernodes;
   const std::size_t ns = supernodes.size();
+  const bool have_fronts = ak.front_row_ptr.size() == ns + 1;
   CostModel cm;
   cm.node_flops.assign(ns, 1);
   cm.subtree_flops.assign(ns, 1);
@@ -63,9 +63,9 @@ static CostModel build_cost_model(const std::vector<Supernode> &supernodes,
 
   for (std::size_t s = 0; s < ns; ++s) {
     const int64_t p = std::max<int64_t>(1, supernodes[s].width());
-    const int64_t f = (s < fronts.size())
-                          ? std::max<int64_t>(p, fronts[s].front_size())
-                          : p;
+    const int64_t f =
+        have_fronts ? std::max<int64_t>(p, ak.front_size(static_cast<Int>(s)))
+                    : p;
     const int64_t q = std::max<int64_t>(0, f - p);
     cm.node_flops[s] = f * f * p;
     if (supernodes[s].parent >= 0 && q > 0) {
@@ -77,7 +77,7 @@ static CostModel build_cost_model(const std::vector<Supernode> &supernodes,
   for (Int s : postorder) {
     const std::size_t si = static_cast<std::size_t>(s);
     int64_t sum = cm.node_flops[si];
-    for (Int c : supernodes[si].children) {
+    for (Int c : ak.children(s)) {
       sum += cm.subtree_flops[static_cast<std::size_t>(c)];
     }
     cm.subtree_flops[si] = sum;
@@ -94,11 +94,11 @@ struct LiveMemoryTracker {
   std::atomic<int> coarsened_subtrees{0};
 
   void on_node_complete(Int s,
-                        const std::vector<Supernode> &supernodes,
+                        const AnalysisKeep &ak,
                         const CostModel &cm) {
     const std::size_t si = static_cast<std::size_t>(s);
     uint64_t consumed = 0;
-    for (Int c : supernodes[si].children) {
+    for (Int c : ak.children(s)) {
       consumed += cm.contrib_bytes[static_cast<std::size_t>(c)];
     }
     const uint64_t produced = cm.contrib_bytes[si];
@@ -118,7 +118,7 @@ struct LiveMemoryTracker {
 
 static void execute_subtree_iterative(
     Int root_node,
-    const std::vector<Supernode> &supernodes,
+    const AnalysisKeep &ak,
     const CostModel &cm,
     LiveMemoryTracker &tracker,
     const std::function<void(Int)> &fn) {
@@ -126,7 +126,7 @@ static void execute_subtree_iterative(
   stk.push_back({root_node, 0});
   while (!stk.empty()) {
     auto &[nd, ci] = stk.back();
-    const auto &ch = supernodes[static_cast<std::size_t>(nd)].children;
+    const std::span<const Int> ch = ak.children(nd);
     if (ci < static_cast<Int>(ch.size())) {
       const Int child = ch[static_cast<std::size_t>(ci++)];
       stk.push_back({child, 0});
@@ -134,7 +134,7 @@ static void execute_subtree_iterative(
       const Int finished = nd;
       stk.pop_back();
       fn(finished);
-      tracker.on_node_complete(finished, supernodes, cm);
+      tracker.on_node_complete(finished, ak, cm);
     }
   }
 }
@@ -143,29 +143,29 @@ static void execute_subtree_iterative(
 static void costed_task_impl(
     Int node,
     int depth,
-    const std::vector<Supernode> &supernodes,
+    const AnalysisKeep &ak,
     const CostModel &cm,
     const ExecutionPolicy &policy,
     LiveMemoryTracker &tracker,
     const std::function<void(Int)> &fn) {
   const std::size_t ni = static_cast<std::size_t>(node);
-  const Supernode &sn = supernodes[ni];
+  const std::span<const Int> kids = ak.children(node);
 
   // Coarsen small subtrees or deep recursion chains into iterative execution
-  if (sn.children.empty() ||
+  if (kids.empty() ||
       cm.subtree_flops[ni] < policy.min_task_flops ||
       depth >= 32) {
-    if (!sn.children.empty()) {
+    if (!kids.empty()) {
       tracker.coarsened_subtrees.fetch_add(1, std::memory_order_relaxed);
     }
-    execute_subtree_iterative(node, supernodes, cm, tracker, fn);
+    execute_subtree_iterative(node, ak, cm, tracker, fn);
     return;
   }
 
   // Separate children into tiny (coarsened inline) and parallelizable
   std::vector<Int> tiny_children;
   std::vector<Int> par_children;
-  for (Int c : sn.children) {
+  for (Int c : kids) {
     if (cm.subtree_flops[static_cast<std::size_t>(c)] < policy.min_task_flops) {
       tiny_children.push_back(c);
     } else {
@@ -177,7 +177,7 @@ static void costed_task_impl(
     tracker.coarsened_subtrees.fetch_add(
         static_cast<int>(tiny_children.size()), std::memory_order_relaxed);
     for (Int tc : tiny_children) {
-      execute_subtree_iterative(tc, supernodes, cm, tracker, fn);
+      execute_subtree_iterative(tc, ak, cm, tracker, fn);
     }
   }
 
@@ -231,32 +231,32 @@ static void costed_task_impl(
       tracker.tasks_spawned.fetch_add(1, std::memory_order_relaxed);
       const int next_depth = depth + 1;
 #pragma omp task firstprivate(child, next_depth)                               \
-    shared(supernodes, cm, policy, tracker, fn) default(none)
-      costed_task_impl(child, next_depth, supernodes, cm, policy, tracker, fn);
+    shared(ak, cm, policy, tracker, fn) default(none)
+      costed_task_impl(child, next_depth, ak, cm, policy, tracker, fn);
     }
 
 #pragma omp taskwait
   }
 
   fn(node);
-  tracker.on_node_complete(node, supernodes, cm);
+  tracker.on_node_complete(node, ak, cm);
 }
 #endif // SMF_PARALLEL
 
 } // anonymous namespace
 
 TaskScheduleStats run_costed_postorder(
-    const std::vector<Supernode> &supernodes,
-    const std::vector<FrontalInfo> &fronts,
+    const AnalysisKeep &ak,
     const ExecutionPolicy &policy,
     std::function<void(Int)> process_node) {
   TaskScheduleStats stats;
+  const std::vector<Supernode> &supernodes = ak.supernodes;
   if (supernodes.empty()) {
     return stats;
   }
 
-  const std::vector<Int> postorder = serial_postorder(supernodes);
-  const CostModel cm = build_cost_model(supernodes, fronts, postorder);
+  const std::vector<Int> postorder = serial_postorder(ak);
+  const CostModel cm = build_cost_model(ak, postorder);
   LiveMemoryTracker tracker;
 
 #ifdef SMF_PARALLEL
@@ -272,7 +272,7 @@ TaskScheduleStats run_costed_postorder(
 
     const int nthreads = policy.threads;
 #pragma omp parallel num_threads(nthreads)                                     \
-    shared(roots, supernodes, cm, policy, tracker, process_node) default(none)
+    shared(roots, ak, cm, policy, tracker, process_node) default(none)
     {
 #pragma omp single
       {
@@ -281,13 +281,13 @@ TaskScheduleStats run_costed_postorder(
               policy.min_task_flops) {
             tracker.coarsened_subtrees.fetch_add(1, std::memory_order_relaxed);
             execute_subtree_iterative(
-                root, supernodes, cm, tracker, process_node);
+                root, ak, cm, tracker, process_node);
           } else {
             tracker.tasks_spawned.fetch_add(1, std::memory_order_relaxed);
 #pragma omp task firstprivate(root)                                            \
-    shared(supernodes, cm, policy, tracker, process_node) default(none)
+    shared(ak, cm, policy, tracker, process_node) default(none)
             costed_task_impl(
-                root, 0, supernodes, cm, policy, tracker, process_node);
+                root, 0, ak, cm, policy, tracker, process_node);
           }
         }
       }
@@ -303,19 +303,19 @@ TaskScheduleStats run_costed_postorder(
 
   // Serial or deterministic execution
   for (const Int s : postorder) {
-    if (supernodes[static_cast<std::size_t>(s)].children.empty() &&
+    if (ak.children(s).empty() &&
         cm.node_flops[static_cast<std::size_t>(s)] < policy.min_task_flops) {
       tracker.coarsened_subtrees.fetch_add(1, std::memory_order_relaxed);
     }
     process_node(s);
-    tracker.on_node_complete(s, supernodes, cm);
+    tracker.on_node_complete(s, ak, cm);
   }
   stats.coarsened_subtrees = tracker.coarsened_subtrees.load();
   stats.peak_live_contrib_bytes = tracker.peak_bytes;
   return stats;
 }
 
-void run_parallel_postorder(const std::vector<Supernode> &supernodes,
+void run_parallel_postorder(const AnalysisKeep &ak,
                             std::function<void(Int)> process_node,
                             int num_threads) {
   ExecutionPolicy policy;
@@ -323,8 +323,9 @@ void run_parallel_postorder(const std::vector<Supernode> &supernodes,
   policy.min_task_flops = 0;
   policy.memory_budget_bytes = 0;
   policy.deterministic = false;
-  std::vector<FrontalInfo> empty_fronts;
-  run_costed_postorder(supernodes, empty_fronts, policy, std::move(process_node));
+  // min_task_flops = 0 and no memory budget: the cost model does not
+  // affect the schedule here.
+  run_costed_postorder(ak, policy, std::move(process_node));
 }
 
 } // namespace smf

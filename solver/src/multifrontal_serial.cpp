@@ -13,6 +13,7 @@
 #include <queue>
 #include <thread>
 #include <utility>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -134,9 +135,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   FactorKeep &fkeep = cx.fkeep;
   const std::size_t si = static_cast<std::size_t>(s);
   const Supernode &sn = keep.supernodes[si];
-  const FrontalInfo &fi = keep.fronts[si];
+  const std::span<const Int> frows = keep.front_rows(s);
+  const std::span<const Int> kids = keep.children(s);
   const int p_sym = static_cast<int>(sn.width());
-  const int f_sym = static_cast<int>(fi.front_size());
+  const int f_sym = static_cast<int>(frows.size());
   Int *const pos = P.pos;
   cx.front_pass[si] = me;
 
@@ -152,12 +154,12 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // Front rows: delayed columns from children, own pivots, then the
   // symbolic extension rows.
   int nd = 0;
-  for (const Int c : sn.children) nd += ws.cb_delayed[static_cast<std::size_t>(c)];
+  for (const Int c : kids) nd += ws.cb_delayed[static_cast<std::size_t>(c)];
   grow(*P.rows, static_cast<std::size_t>(nd + f_sym), P.growths);
   Int *rows = P.rows->data();
   int f = 0;
   if (nd > 0) {
-    for (const Int c : sn.children) {
+    for (const Int c : kids) {
       const std::size_t ci = static_cast<std::size_t>(c);
       const Int *cr = child_rows(ci);
       for (Int t = 0; t < ws.cb_delayed[ci]; ++t) {
@@ -167,13 +169,13 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     }
   }
   for (int t = 0; t < f_sym; ++t) {
-    const Int r = fi.row_indices[static_cast<std::size_t>(t)];
+    const Int r = frows[static_cast<std::size_t>(t)];
     rows[f] = r;
     pos[r] = f++;
   }
   const int num_elig = nd + p_sym;
   // Defensive: a child row outside the symbolic structure joins the front.
-  for (const Int c : sn.children) {
+  for (const Int c : kids) {
     const std::size_t ci = static_cast<std::size_t>(c);
     const Int *cr = child_rows(ci);
     for (Int t = ws.cb_delayed[ci]; t < ws.cb_size[ci]; ++t) {
@@ -212,7 +214,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   std::size_t new_cv_top = P.cv_top;
   std::size_t new_cr_top = P.cr_top;
   Int *cm = P.cmap->data();
-  for (const Int c : sn.children) {
+  for (const Int c : kids) {
     const std::size_t ci = static_cast<std::size_t>(c);
     const Int q = ws.cb_size[ci];
     if (q <= 0) continue;
@@ -249,7 +251,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   P.cv_top = new_cv_top;
   P.cr_top = new_cr_top;
   if (!pop) {
-    for (const Int c : sn.children) {
+    for (const Int c : kids) {
       const std::size_t ci = static_cast<std::size_t>(c);
       if (ws.cb_size[ci] > 0 && ws.cb_owner[ci] < 0) {
         NodeBlock &nb = (*cx.node_blocks)[ci];
@@ -417,7 +419,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
 // Predicted flops of supernode si's front, the term Info::predicted_flops
 // sums (assembly_tree.cpp): p f^2 for the symbolic pivot count and size.
 double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
-  const double f = static_cast<double>(keep.fronts[si].front_size());
+  const double f = static_cast<double>(keep.front_size(static_cast<Int>(si)));
   const double p = static_cast<double>(keep.supernodes[si].width());
   return p * f * f;
 }
@@ -439,11 +441,11 @@ partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8
   for (std::size_t k = 0; k < keep.postorder.size(); ++k) {
     const std::size_t si = static_cast<std::size_t>(keep.postorder[k]);
     const Supernode &sn = keep.supernodes[si];
-    const double f = static_cast<double>(keep.fronts[si].row_indices.size());
+    const double f = static_cast<double>(keep.front_size(static_cast<Int>(si)));
     work[si] = f * f * static_cast<double>(sn.width());
     first[si] = k;
     at[si] = k;
-    for (const Int c : sn.children) {
+    for (const Int c : keep.children(static_cast<Int>(si))) {
       const std::size_t ci = static_cast<std::size_t>(c);
       work[si] += work[ci];
       first[si] = std::min(first[si], first[ci]);
@@ -465,7 +467,7 @@ partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8
     const Int s = heap.top().second;
     heap.pop();
     top[static_cast<std::size_t>(s)] = 1;
-    for (const Int c : keep.supernodes[static_cast<std::size_t>(s)].children)
+    for (const Int c : keep.children(s))
       heap.emplace(work[static_cast<std::size_t>(c)], c);
   }
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
@@ -528,12 +530,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     for (const Int s : keep.postorder) {
       const std::size_t si = static_cast<std::size_t>(s);
       const Supernode &sn = keep.supernodes[si];
-      const std::size_t f = keep.fronts[si].row_indices.size();
+      const std::size_t f = static_cast<std::size_t>(keep.front_size(static_cast<Int>(si)));
       const std::size_t p = static_cast<std::size_t>(sn.width());
       max_f = std::max(max_f, f);
       pred_factor += f * p;
       pred_rows += f;
-      for (const Int c : sn.children) {
+      for (const Int c : keep.children(s)) {
         const std::size_t ci = static_cast<std::size_t>(c);
         if (ws.cb_size[ci] > 0) {
           vtop = std::min(vtop, static_cast<std::size_t>(ws.cb_value_off[ci]));
@@ -721,7 +723,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     for (std::size_t si = 0; si < ns; ++si) {
       if (!top[si]) continue;
       ++remaining;
-      for (const Int c : keep.supernodes[si].children)
+      for (const Int c : keep.children(static_cast<Int>(si)))
         if (top[static_cast<std::size_t>(c)]) ++pending[si];
       if (pending[si] == 0) ready.push_back(static_cast<Int>(si));
     }

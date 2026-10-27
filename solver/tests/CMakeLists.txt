@@ -60,7 +60,7 @@ add_test(NAME Supernode COMMAND test_supernode)
 
 # --- M2.S3 test target ---
 
-add_executable(test_assembly_tree test_assembly_tree.cpp)
+add_executable(test_assembly_tree test_assembly_tree.cpp ../benchmarks/common/validation.cpp)
 target_link_libraries(test_assembly_tree PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME AssemblyTree COMMAND test_assembly_tree)
 

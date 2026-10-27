@@ -268,15 +268,15 @@ int main(int argc, char **argv) {
                 long long sum_f2 = 0, sum_pf = 0, sum_assembly = 0;
                 int max_f = 0, max_ch = 0, max_p = 0;
                 for (std::size_t s2 = 0; s2 < ak->supernodes.size(); ++s2) {
-                    const int f = static_cast<int>(ak->fronts[s2].front_size());
+                    const int f = static_cast<int>(ak->front_size(static_cast<smf::Int>(s2)));
                     const int p = static_cast<int>(ak->supernodes[s2].width());
                     sum_f2 += 1LL * f * f;
                     sum_pf += 1LL * p * f;
                     max_f = std::max(max_f, f);
                     max_p = std::max(max_p, p);
-                    max_ch = std::max(max_ch, static_cast<int>(ak->supernodes[s2].children.size()));
-                    for (smf::Int ch : ak->supernodes[s2].children) {
-                        const int qc = static_cast<int>(ak->fronts[static_cast<std::size_t>(ch)].front_size() -
+                    max_ch = std::max(max_ch, static_cast<int>(ak->children(static_cast<smf::Int>(s2)).size()));
+                    for (smf::Int ch : ak->children(static_cast<smf::Int>(s2))) {
+                        const int qc = static_cast<int>(ak->front_size(ch) -
                                                         ak->supernodes[static_cast<std::size_t>(ch)].width());
                         sum_assembly += 1LL * qc * f;
                     }

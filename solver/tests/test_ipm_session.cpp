@@ -882,7 +882,7 @@ namespace {
 double kernel_flops(const AnalysisKeep &ak) {
     double t = 0.0;
     for (std::size_t s = 0; s < ak.supernodes.size(); ++s) {
-        const double f = static_cast<double>(ak.fronts[s].front_size());
+        const double f = static_cast<double>(ak.front_size(static_cast<Int>(s)));
         for (Int k = 0; k < ak.supernodes[s].width(); ++k) {
             const double r = f - static_cast<double>(k) - 1.0;
             t += r + r * (r + 1.0);

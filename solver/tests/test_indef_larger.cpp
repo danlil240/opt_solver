@@ -180,7 +180,6 @@ TEST(IndefLarger, NonAdjacentSupernodesAreNotAmalgamated)
     }
 
     supernodes[0].parent = 3;
-    supernodes[3].children.push_back(0);
 
     const std::vector<Supernode> merged = amalgamate_supernodes(supernodes, 8);
 

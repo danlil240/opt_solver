@@ -1,7 +1,6 @@
 #pragma once
 
-#include "smf/assembly_tree.hpp"
-#include "smf/supernode.hpp"
+#include "smf/analysis.hpp"
 #include "smf/types.hpp"
 
 #include <cstdint>
@@ -24,13 +23,15 @@ struct TaskScheduleStats {
     int memory_throttled_waits = 0;
 };
 
+/// Run process_node over the supernode tree of `ak` children-first (a node's
+/// children in ak.children() order). Costs use ak.front_size() when
+/// ak.front_row_ptr is populated, else the supernode widths.
 TaskScheduleStats run_costed_postorder(
-    const std::vector<Supernode> &supernodes,
-    const std::vector<FrontalInfo> &fronts,
+    const AnalysisKeep &ak,
     const ExecutionPolicy &policy,
     std::function<void(Int)> process_node);
 
-void run_parallel_postorder(const std::vector<Supernode> &supernodes,
+void run_parallel_postorder(const AnalysisKeep &ak,
                             std::function<void(Int)> process_node,
                             int num_threads = 1);
 

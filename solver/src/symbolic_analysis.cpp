@@ -172,6 +172,8 @@ namespace smf
             // Trivially empty analysis
             auto keep = std::make_unique<AnalysisKeep>();
             keep->n = 0;
+            keep->child_ptr.assign(1, 0);
+            keep->front_row_ptr.assign(1, 0);
             keep->orig_col_ptr = A.col_ptr;
             keep->orig_row_idx = A.row_idx;
             keep->cleaned = std::move(cleaned.clean);
@@ -503,19 +505,24 @@ namespace smf
             }
         }
 
-        // Step 8: build assembly tree and fill info predictions
-        auto fronts = build_assembly_tree(identity_final ? C : A_perm, snodes, info);
-
-        // Step 8.5: supernodes are numbered in postorder by construction;
-        // the factor's LIFO contribution stack wants children in descending
-        // postorder.
+        // Step 8: supernode tree and front rows in flat CSR form. Children
+        // come out in descending postorder (the factor's LIFO contribution
+        // stack consumes them that way). A front holds its columns plus the
+        // rows below its last column, so the column counts give the exact
+        // total and front_row_idx is allocated once.
         const Int nsn = static_cast<Int>(snodes.size());
+        std::vector<Int> child_ptr, child_idx, front_row_ptr, front_row_idx;
+        build_children_csr(snodes, child_ptr, child_idx);
+        std::size_t rows_total = 0;
+        for (const Supernode &sn : snodes)
+            rows_total += static_cast<std::size_t>(sn.width()) +
+                          static_cast<std::size_t>(
+                              colcount1[order[static_cast<std::size_t>(sn.col_end) - 1]]) - 1;
+        build_assembly_tree(identity_final ? C : A_perm, snodes, child_ptr, child_idx,
+                            front_row_ptr, front_row_idx, info, rows_total);
+
         std::vector<Int> sn_postorder(static_cast<std::size_t>(nsn));
         std::iota(sn_postorder.begin(), sn_postorder.end(), 0);
-        for (Int s = 0; s < nsn; ++s) {
-            auto& ch = snodes[static_cast<std::size_t>(s)].children;
-            std::reverse(ch.begin(), ch.end());
-        }
 
         lap(phases.assembly_tree);
 
@@ -545,7 +552,10 @@ namespace smf
         keep->iperm = std::move(iperm);
         keep->etree = std::move(etree);
         keep->supernodes = std::move(snodes);
-        keep->fronts = std::move(fronts);
+        keep->child_ptr = std::move(child_ptr);
+        keep->child_idx = std::move(child_idx);
+        keep->front_row_ptr = std::move(front_row_ptr);
+        keep->front_row_idx = std::move(front_row_idx);
         keep->postorder = sn_postorder;
         keep->solve_postorder = std::move(sn_postorder);
         // The matching's scaling only pays off with the matching ordering

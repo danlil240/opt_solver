@@ -2,6 +2,7 @@
 #include "smf/types.hpp"
 #include "smf/etree.hpp"
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -12,11 +13,19 @@ struct Supernode {
     Int col_start;  ///< first column in this supernode (0-based)
     Int col_end;    ///< one-past-last column (col_end - col_start = width)
     Int parent;     ///< index of parent supernode in supernode tree; -1 for roots
-    std::vector<Int> children; ///< indices of child supernodes
+                    ///< (children: see build_children_csr / AnalysisKeep::children)
 
     /// Width (number of pivot columns) of this supernode.
     Int width() const { return col_end - col_start; }
 };
+
+/// Children of every supernode in CSR form, from the parent links of a forest
+/// numbered in postorder (children before parents). The children of s are
+/// child_idx[child_ptr[s] .. child_ptr[s+1]) in *descending* index order (the
+/// order the factor's LIFO contribution stack consumes them). Two passes
+/// (count, fill); child_ptr gets nsn + 1 entries, child_idx one per non-root.
+void build_children_csr(std::span<const Supernode> snodes,
+                        std::vector<Int> &child_ptr, std::vector<Int> &child_idx);
 
 /// Detect fundamental supernodes from the elimination tree and sparsity pattern.
 ///
@@ -60,7 +69,7 @@ std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
 /// in `order` (order[new] = old index of the input numbering); it is a
 /// topological order of the same elimination tree, so the factor's fill is
 /// unchanged. `snodes` receives the amalgamated supernodes in that order,
-/// numbered in postorder with children lists in increasing index.
+/// numbered in postorder (parent links only; see build_children_csr).
 ///
 /// `keep_with_parent` (optional, length n, same numbering): a column flagged
 /// 1 always ends up in its etree parent's supernode, regardless of `nemin`
@@ -75,8 +84,8 @@ void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin
 /// Two adjacent supernodes S (child) and P (parent) are merged when:
 ///   S.width() < nemin  AND  P.width() < nemin
 ///
-/// Merging absorbs S into P: P.col_start = S.col_start; P inherits S's children
-/// while preserving P's other children.
+/// Merging absorbs S into P: P.col_start = S.col_start; S's children become
+/// P's children (parent links resolved through merged nodes).
 /// Repeated bottom-up until stable.
 ///
 /// @param supernodes  fundamental supernodes (taken by value; modified internally)

@@ -17,7 +17,7 @@ namespace {
 double kernel_flops(const AnalysisKeep &ak) {
   double total = 0.0;
   for (std::size_t s = 0; s < ak.supernodes.size(); ++s) {
-    const double f = static_cast<double>(ak.fronts[s].front_size());
+    const double f = static_cast<double>(ak.front_size(static_cast<Int>(s)));
     const Int p = ak.supernodes[s].width();
     for (Int k = 0; k < p; ++k) {
       const double r = f - static_cast<double>(k) - 1.0;

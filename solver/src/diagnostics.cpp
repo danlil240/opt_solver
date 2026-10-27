@@ -12,8 +12,8 @@ double count_flops(const AnalysisKeep &keep) {
   for (std::size_t s = 0; s < ns; ++s) {
     const Supernode &sn = keep.supernodes[s];
     const double p = static_cast<double>(sn.width());
-    const double f = (s < keep.fronts.size())
-                         ? static_cast<double>(keep.fronts[s].front_size())
+    const double f = (keep.front_row_ptr.size() == ns + 1)
+                         ? static_cast<double>(keep.front_size(static_cast<Int>(s)))
                          : p;
     const double q = f - p;
     total += p * p * p / 3.0 + p * p * q;
