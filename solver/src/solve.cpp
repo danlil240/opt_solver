@@ -1,4 +1,5 @@
 #include "smf/solve_backward.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/determinism.hpp"
 #include "smf/scaling.hpp"
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace smf {
@@ -279,6 +281,14 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   // Deterministic mode: one thread, the factor's steps in order (postorder).
   const bool det = deterministic_mode(ctrl);
   if (det) enable_blas_reproducibility();
+  // Deterministic mode pins the solve's BLAS to one thread, whatever the
+  // caller's BLAS runs: the nrhs > 1 blocked solve calls GEMM / TRSM per
+  // front, and their results must not depend on the BLAS thread count (as
+  // the factor's kernels run serial BLAS in this mode). Outside it the
+  // caller's BLAS threads stay, so a serial-tree solve of many right-hand
+  // sides can still use threaded GEMM on its large fronts.
+  std::optional<BlasThreadGuard> det_blas;
+  if (det) det_blas.emplace(1);
   const int threads =
       (ctrl.num_threads > 1 && !det &&
        static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)

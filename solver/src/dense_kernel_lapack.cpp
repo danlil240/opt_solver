@@ -326,6 +326,7 @@ void smf_dtrsm_left_lower(double *B, int m, int n, const double *L, int ldl,
 int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
   // Column j of the inverse: solve L x = e_j below the diagonal, using the
   // already inverted columns to the right (backward over j).
+  std::vector<double> t(static_cast<std::size_t>(std::max(m, 1)));
   for (int j = m - 1; j >= 0; --j) {
     double ajj = 1.0;
     if (!unit) {
@@ -334,7 +335,6 @@ int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
       A[j * lda + j] = ajj;
     }
     // x(j+1:m) = -inv(L(j+1:m, j+1:m)) * L(j+1:m, j) * ajj
-    std::vector<double> t(static_cast<std::size_t>(m - j - 1));
     for (int i = j + 1; i < m; ++i) t[i - j - 1] = A[j * lda + i];
     for (int i = j + 1; i < m; ++i) {
       double sum = 0.0;

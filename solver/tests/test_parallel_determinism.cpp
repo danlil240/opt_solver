@@ -8,6 +8,7 @@
 //   independent ordering, a postorder factor layout and a serial postorder
 //   solve, MKL CNR. BitwiseAcrossThreadCounts checks it bit for bit.
 
+#include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/solver.hpp"
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <gtest/gtest.h>
 #include <string>
+#include <span>
 #include <vector>
 
 using namespace smf;
@@ -347,6 +349,7 @@ struct DetCase {
 
 struct DetRun {
     std::vector<double> x;
+    std::vector<double> xm;  // nrhs = 5 blocked solve (Task 16)
     std::vector<double> d;  // D entries (indefinite), elimination order
     int pos = 0, neg = 0, zero = 0;
     int subtrees = 0, tiles = 0;
@@ -359,6 +362,8 @@ DetRun det_run(const DetCase &c, int threads) {
     ctrl.num_threads = threads;
     ctrl.deterministic = true;
     ctrl.ordering = c.ordering;
+    // Cached L11^-1 (built at factor time) is part of what must reproduce.
+    ctrl.cache_inverse_diag = true;
     // AutoParallel tries METIS only when AMD's flops times the refactors
     // are large enough per row.
     if (c.ordering == OrderingMethod::AutoParallel) ctrl.expected_refactors = 100;
@@ -377,6 +382,16 @@ DetRun det_run(const DetCase &c, int threads) {
     for (std::size_t i = 0; i < r.x.size(); ++i)
         r.x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
     EXPECT_EQ(solver.solve(fk, ctrl, info, r.x.data(), n, 1, sws), 0);
+    // nrhs > 1: the serial blocked solve (GEMM / TRSM per front). The caller's
+    // BLAS runs `threads` threads, as a threaded application's would.
+    {
+        constexpr int kNrhs = 5;
+        r.xm.resize(static_cast<std::size_t>(n) * kNrhs);
+        for (std::size_t i = 0; i < r.xm.size(); ++i)
+            r.xm[i] = std::cos(0.007 * static_cast<double>(i)) + 0.25;
+        BlasThreadGuard blas(threads);
+        EXPECT_EQ(solver.solve(fk, ctrl, info, std::span<double>(r.xm), kNrhs, n, sws), 0);
+    }
     for (const DiagSolveEntry &e : fk.diag_entries) {
         r.d.push_back(e.d00);
         r.d.push_back(e.d10);
@@ -459,6 +474,11 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
                 EXPECT_EQ(r.zero, ref.zero) << threads << " threads, run " << run;
                 const auto [dx, mx] = bit_diff(r.x, ref.x);
                 const auto [dd, md] = bit_diff(r.d, ref.d);
+                const auto [dm, mm] = bit_diff(r.xm, ref.xm);
+                if (dm != 0)
+                    ADD_FAILURE() << c.name << ": " << threads << " threads, run " << run << ": "
+                                  << dm << " of " << r.xm.size()
+                                  << " nrhs = 5 solution entries differ (max " << mm << ")";
                 if (dx != 0 || dd != 0) {
                     ++mismatches;
                     ADD_FAILURE() << c.name << ": " << threads << " threads, run " << run << ": "

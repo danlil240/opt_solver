@@ -18,7 +18,8 @@ namespace {
 // kappa_1(L11) = ||L11||_1 ||L11^-1||_1 <= kInvDiagMaxCond. Multiplying by a
 // computed inverse loses accuracy as kappa grows, where the triangular solve
 // stays backward stable: an ill-conditioned block keeps its TRSV. Column
-// sums: contiguous, no scratch.
+// sums: contiguous, no scratch. A NaN or infinite column sum (a non-finite
+// entry in L11 or its inverse) rejects the block: std::max would drop a NaN.
 bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X, int p,
                               bool unit) {
   double nl = 0.0, nx = 0.0;
@@ -31,10 +32,12 @@ bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X
       sl += std::abs(lc[i]);
       sx += std::abs(xc[i]);
     }
+    if (!std::isfinite(sl) || !std::isfinite(sx))
+      return false;
     nl = std::max(nl, sl);
     nx = std::max(nx, sx);
   }
-  return nl * nx <= kInvDiagMaxCond;  // false for NaN / inf too
+  return nl * nx <= kInvDiagMaxCond;
 }
 
 } // namespace
@@ -43,12 +46,27 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   info.inverse_diag_fronts = 0;
   info.inverse_diag_seconds = 0.0;
   fkeep.inv_diag_offset.clear();
-  const bool usable = fkeep.status == FactorStatus::Success ||
-                      (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular);
-  if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd || !usable) {
+  // Only a factorization that ran to the end: Success, or Singular
+  // reported as SingularMatrix under continue_on_singular. A hard error
+  // (input, mapping, scaling, allocation) also reports Singular but clears
+  // factor_values and may leave stale or partial solve steps behind.
+  const bool usable =
+      (fkeep.status == FactorStatus::Success && info.status == ErrorCode::Success) ||
+      (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular &&
+       info.status == ErrorCode::SingularMatrix);
+  if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd ||
+      !usable || fkeep.factor_values.empty()) {
     fkeep.inv_diag.clear();
     return;
   }
+  // Every step's front must lie inside factor_values.
+  const auto nvals = static_cast<LongInt>(fkeep.factor_values.size());
+  for (const SolveStep &st : fkeep.solve_steps)
+    if (st.p < 0 || st.f < st.p || st.factor_offset < 0 ||
+        st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals) {
+      fkeep.inv_diag.clear();
+      return;
+    }
   const auto t0 = std::chrono::steady_clock::now();
   const std::size_t ns = fkeep.solve_steps.size();
   LongInt total = 0;

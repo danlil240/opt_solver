@@ -265,17 +265,42 @@ double max_abs_diff(const std::vector<double> &a, const std::vector<double> &b) 
 // operations moves x by up to cond(A) * eps, so the solution-space check
 // alone cannot hold there; the residual-space one is what a backward-stable
 // solve guarantees.
-// within(tol, floor): the solution check, or the residual one against tol
-// or, when larger, floor (a multiple of the reference solve's own backward
-// error: robot_arm_8k's unrefined solve has 8e-7, and its parallel solve
-// alone moves x by that much from run to run).
+// within(tol): the literal solution check. within_floor(tol, floor): also
+// accepts the residual check against tol or, when larger, floor (a multiple
+// of the reference solve's own backward error: robot_arm_8k's unrefined
+// solve has 8e-7, and its parallel solve alone moves x by that much from run
+// to run). Only the measured ill-conditioned cases (floor_cases) use it.
 struct Agreement {
   double solution = 0.0;
   double residual = 0.0;
-  bool within(double tol, double floor = 0.0) const {
+  bool within(double tol) const { return solution <= tol; }
+  bool within_floor(double tol, double floor) const {
     return solution <= tol || residual <= std::max(tol, floor);
   }
 };
+
+// The cases measured to miss the literal solution tolerance through rounding
+// alone (cond(A) * eps above it), per test; every other case must meet it.
+//  InverseDiag: indef_rand_1500 (8.8e-13 at 1 thread, ill-conditioned dense
+//    indefinite blocks), robot_arm_8k (4 threads: the parallel solve's own
+//    run-to-run spread is 2e-5).
+//  MultiRhs (BLAS-3 vs BLAS-2 order, no inverse needed): indef_helmholtz_50
+//    (5.6e-13), indef_rand_1500 (1.6e-12), kkt_eq_qp (1.7e-14), kkt_pde_opt
+//    (4.1e-14), pde_control_120 (6.9e-14), acopf_grid_80 (7.7e-14 at 1
+//    thread, 6.5e-14 at 4).
+bool floor_case(const std::string &test, const std::string &name) {
+  static const char *const inverse_diag[] = {"indef_rand_1500", "robot_arm_8k"};
+  static const char *const multi_rhs[] = {"indef_helmholtz_50", "indef_rand_1500", "kkt_eq_qp",
+                                          "kkt_pde_opt", "pde_control_120", "acopf_grid_80"};
+  if (test == "InverseDiag") {
+    for (const char *c : inverse_diag)
+      if (name == c) return true;
+  } else {
+    for (const char *c : multi_rhs)
+      if (name == c) return true;
+  }
+  return false;
+}
 
 Agreement agreement(const CscLower &A, const double *xa, const double *xb) {
   const auto n = static_cast<std::size_t>(A.n);
@@ -396,11 +421,64 @@ TEST(SolveEndToEnd, InverseDiagMatchesTrsv) {
                   " solution %.2e residual %.2e\n", c.name.c_str(),
                   threads, backward_error(c.A, xi.data(), 0), backward_error(c.A, xt.data(), 0),
                   g.solution, g.residual);
-      EXPECT_TRUE(g.within(1e-13, 10.0 * backward_error(c.A, xt.data(), 0))) << threads << " threads: solution " << g.solution
+      const bool ok = floor_case("InverseDiag", c.name)
+                          ? g.within_floor(1e-13, 10.0 * backward_error(c.A, xt.data(), 0))
+                          : g.within(1e-13);
+      EXPECT_TRUE(ok) << threads << " threads: solution " << g.solution
                                    << " residual " << g.residual;
     }
   }
   EXPECT_GT(cached_total, 0) << "no front had its L11 inverse cached";
+}
+
+// 7-point Laplacian on an m^3 grid, lower CSC: fronts of well over 16
+// pivots, all well conditioned (every one gets a cached inverse).
+static CscLower grid_3d(int m) {
+  const int n = m * m * m;
+  CscLower A;
+  A.n = n;
+  A.col_ptr.push_back(0);
+  for (int z = 0; z < m; ++z)
+    for (int y = 0; y < m; ++y)
+      for (int x = 0; x < m; ++x) {
+        const int j = (z * m + y) * m + x;
+        A.row_idx.push_back(j);
+        A.values.push_back(6.0);
+        if (x + 1 < m) { A.row_idx.push_back(j + 1); A.values.push_back(-1.0); }
+        if (y + 1 < m) { A.row_idx.push_back(j + m); A.values.push_back(-1.0); }
+        if (z + 1 < m) { A.row_idx.push_back(j + m * m); A.values.push_back(-1.0); }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+      }
+  return A;
+}
+
+// A factorization that fails hard (here: a values span of the wrong size)
+// under continue_on_singular reports Singular with factor_values cleared
+// and the previous factor's solve steps left behind: the inverse cache must
+// not be built from them (it read past factor_values).
+TEST(SolveEndToEnd, InverseDiagSkipsHardFactorError) {
+  const CscLower A = grid_3d(14);
+  Control ctrl;
+  ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+  ctrl.continue_on_singular = true;
+  ctrl.cache_inverse_diag = true;
+  Solver s;
+  Info info;
+  auto ak = s.analyse(A, ctrl, info);
+  ASSERT_NE(ak.get(), nullptr);
+  FactorKeep fk;
+  NumericWorkspace nws;
+  ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, info, fk, nws),
+            FactorStatus::Success);
+  ASSERT_GT(info.inverse_diag_fronts, 0);
+  ASSERT_FALSE(fk.inv_diag_offset.empty());
+
+  const std::vector<double> bad(A.values.begin(), A.values.end() - 1);
+  s.factor(*ak, std::span<const double>(bad), ctrl, info, fk, nws);
+  EXPECT_NE(info.status, ErrorCode::Success);
+  EXPECT_NE(info.status, ErrorCode::SingularMatrix);
+  EXPECT_EQ(info.inverse_diag_fronts, 0);
+  EXPECT_TRUE(fk.inv_diag_offset.empty());
 }
 
 // The blocked multi-RHS solve (BLAS-3 per front, leading dimension ldb > n)
@@ -411,15 +489,20 @@ TEST(SolveEndToEnd, MultiRhsMatchesLoop) {
   {
     std::vector<SolveCase> big = load_cases(false, true);
     for (auto &c : big)
-      if (c.name == "portfolio_20k" || c.name == "pde_control_120")
+      if (c.name == "portfolio_20k" || c.name == "pde_control_120" || c.name == "acopf_grid_80")
         cases.push_back(std::move(c));
   }
   ASSERT_FALSE(cases.empty()) << "no optim20 / large_kkt fixtures";
   for (const SolveCase &c : cases) {
     SCOPED_TRACE(c.name);
+    // acopf_grid_80 also at 4 threads (parallel solve, nrhs = 7: per-column
+    // parallel solves against the single-RHS loop).
+    for (const int threads : {1, 4})
     for (const bool cache : {false, true}) {
+      if (threads > 1 && c.name != "acopf_grid_80") continue;
       Control ctrl;
       ctrl.matrix_type = c.type;
+      ctrl.num_threads = threads;
       ctrl.cache_inverse_diag = cache;
       Solver s;
       Info info;
@@ -431,6 +514,7 @@ TEST(SolveEndToEnd, MultiRhsMatchesLoop) {
       ASSERT_EQ(s.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
       const int n = static_cast<int>(c.A.n);
       for (const int nrhs : {1, 2, 7, 32}) {
+        if (threads > 1 && nrhs != 7) continue;
         const int ldb = n + 3;
         std::vector<double> B(static_cast<std::size_t>(ldb) * nrhs, -7.0);
         std::vector<double> loop(static_cast<std::size_t>(n) * nrhs);
@@ -446,14 +530,18 @@ TEST(SolveEndToEnd, MultiRhsMatchesLoop) {
         for (int r = 0; r < nrhs; ++r) {
           const Agreement g = agreement(c.A, B.data() + static_cast<std::size_t>(r) * ldb,
                                         loop.data() + static_cast<std::size_t>(r) * n);
-          EXPECT_TRUE(g.within(1e-14, 10.0 * backward_error(c.A, loop.data() + static_cast<std::size_t>(r) * n, r))) << "nrhs " << nrhs << " cache " << cache << " column " << r
+          const bool ok =
+              floor_case("MultiRhs", c.name)
+                  ? g.within_floor(1e-14, 10.0 * backward_error(c.A, loop.data() + static_cast<std::size_t>(r) * n, r))
+                  : g.within(1e-14);
+          EXPECT_TRUE(ok) << threads << " threads, nrhs " << nrhs << " cache " << cache << " column " << r
                                        << ": solution " << g.solution << " residual " << g.residual;
           worst.solution = std::max(worst.solution, g.solution);
           worst.residual = std::max(worst.residual, g.residual);
         }
-        if (nrhs == 32)
-          std::printf("[ multirhs ] %-22s cache %d: solution %.2e residual %.2e\n", c.name.c_str(),
-                      cache ? 1 : 0, worst.solution, worst.residual);
+        if (nrhs == 32 || threads > 1)
+          std::printf("[ multirhs ] %-22s thr %d cache %d: solution %.2e residual %.2e\n", c.name.c_str(),
+                      threads, cache ? 1 : 0, worst.solution, worst.residual);
         // The padding rows between columns are untouched.
         for (int r = 0; r < nrhs; ++r)
           for (int i = n; i < ldb; ++i)
