@@ -1,9 +1,15 @@
 #include <gtest/gtest.h>
 
+#include "smf/csc_matrix.hpp"
+#include "smf/matrix_market.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -600,4 +606,273 @@ TEST(Ma97PluginRuntime, StaleReusedScaleIsRefreshedOnSpuriousSingularity) {
     EXPECT_EQ(info.matrix_rank, 2);
 
     sym.finalise(&akeep, &fkeep);
+}
+
+namespace {
+
+// A KKT matrix [H J^T; J 0] in 0-based lower CSC: H tridiagonal (diagonal
+// 2 + 0.01 (i mod 7), off-diagonal -0.5) on nx primal rows, and m
+// constraints, constraint k coupling x[2k] (1), x[2k + 1] (-1) and
+// x[(2k + 37) mod nx] (0.25). Constraint rows have no diagonal entry.
+struct ChainKkt {
+    int n = 0;
+    int m = 0;
+    std::vector<int> ptr, row;
+    std::vector<double> val;
+    ChainKkt(int nx, int nc) : n(nx + nc), m(nc) {
+        std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+        for (int i = 0; i < nx; ++i) {
+            cols[i].push_back({i, 2.0 + 0.01 * (i % 7)});
+            if (i + 1 < nx) cols[i].push_back({i + 1, -0.5});
+        }
+        for (int k = 0; k < nc; ++k) {
+            const int c = nx + k;
+            cols[2 * k].push_back({c, 1.0});
+            cols[2 * k + 1].push_back({c, -1.0});
+            const int away = (2 * k + 37) % nx;
+            if (away != 2 * k && away != 2 * k + 1) cols[away].push_back({c, 0.25});
+        }
+        ptr.push_back(0);
+        for (auto &col : cols) {
+            std::sort(col.begin(), col.end());
+            for (const auto &[i, x] : col) {
+                row.push_back(i);
+                val.push_back(x);
+            }
+            ptr.push_back(static_cast<int>(row.size()));
+        }
+    }
+    std::vector<double> rhs_of_ones() const {
+        std::vector<double> b(static_cast<std::size_t>(n), 0.0);
+        for (int j = 0; j < n; ++j)
+            for (int p = ptr[j]; p < ptr[j + 1]; ++p) {
+                b[row[p]] += val[p];
+                if (row[p] != j) b[j] += val[p];
+            }
+        return b;
+    }
+};
+
+// IPOPT's dynamic MA97 scaling on `kkt`: an unscaled factorization (which
+// runs the deferred analysis), an MC64 request (scaling = 1, returned in
+// `scale`), then the returned scale reused (scaling = 0). Every solve of
+// A x = A 1 must give x = 1 and every factor m negative pivots. Returns the
+// scale and the analysis' ordering (MA97 info.ordering).
+template <class Kkt>
+std::vector<double> mc64_request_sequence(PluginSymbols &sym, const Kkt &kkt, int expect_neg,
+                                          int &ordering) {
+    const int n = kkt.n;
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 0;
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, kkt.ptr.data(), kkt.row.data(), nullptr, &akeep, &ctrl, &info, nullptr);
+    EXPECT_EQ(info.flag, 0);
+    const auto solve_ones = [&](const char *what) {
+        std::vector<double> x = kkt.rhs_of_ones();
+        sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+        EXPECT_EQ(info.flag, 0) << what;
+        double err = 0.0;
+        for (double xi : x) err = std::max(err, std::abs(xi - 1.0));
+        EXPECT_LT(err, 1e-9) << what;
+    };
+    std::vector<double> scale(static_cast<std::size_t>(n), -3.0);
+    for (int call = 0; call < 3; ++call) {
+        ctrl.scaling = call == 1 ? 1 : 0;
+        sym.factor(4, kkt.ptr.data(), kkt.row.data(), kkt.val.data(), &akeep, &fkeep, &ctrl, &info,
+                   call == 0 ? nullptr : scale.data());
+        EXPECT_EQ(info.flag, 0) << "call " << call;
+        EXPECT_EQ(info.num_neg, expect_neg) << "call " << call;
+        ordering = info.ordering;
+        ctrl.scaling = 0;
+        solve_ones(call == 0 ? "none" : call == 1 ? "mc64 request" : "reuse");
+    }
+    sym.finalise(&akeep, &fkeep);
+    return scale;
+}
+
+} // namespace
+
+// IPOPT asks for MC64 scaling (scaling = 1) after the pattern was analysed.
+// When the analysis computed the matching ordering and kept AMD (n above the
+// auto matching's minimum, zero-diagonal constraint rows), the plugin
+// follows ScalingMethod::Auto: the request is answered with the unit scale,
+// which IPOPT then passes back for reuse. A pattern the analysis did not try
+// the matching on (n below that minimum) still gets the matching scaling.
+TEST(Ma97PluginRuntime, Mc64RequestAfterRejectedMatchingReturnsUnitScale) {
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+
+    int ordering = -1;
+    const ChainKkt large(9000, 4500);
+    const std::vector<double> unit = mc64_request_sequence(sym, large, large.m, ordering);
+    ASSERT_NE(ordering, 5) << "the matching ordering was adopted: no rejection to test";
+    for (double s : unit) ASSERT_EQ(s, 1.0);
+
+    const SmallKkt small(false);
+    const std::vector<double> mc64 = mc64_request_sequence(sym, small, 18, ordering);
+    EXPECT_FALSE(std::all_of(mc64.begin(), mc64.end(), [](double s) { return s == 1.0; }));
+    for (double s : mc64) EXPECT_GT(s, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Task 17: PGLib AC-OPF IPOPT captures replayed through the plugin.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Backward errors of x for A x = b (A symmetric, lower CSC, 0-based), as the
+// replay harness gates them: normwise eta = ||r||inf / (||A||inf ||x||inf +
+// ||b||inf) and componentwise omega = max_i |r_i| / ((|A||x|)_i + |b_i|).
+// r is left holding b - A x.
+struct BackwardError {
+    double eta = 0.0;
+    double omega = 0.0;
+};
+
+BackwardError backward_error(const smf::CscLower &A, const std::vector<double> &vals,
+                             const std::vector<double> &b, const std::vector<double> &x,
+                             std::vector<double> &r) {
+    const std::size_t n = static_cast<std::size_t>(A.n);
+    std::vector<double> ax(n, 0.0), aax(n, 0.0), rowsum(n, 0.0);
+    for (std::size_t j = 0; j < n; ++j) {
+        for (smf::Int k = A.col_ptr[j]; k < A.col_ptr[j + 1]; ++k) {
+            const std::size_t i = static_cast<std::size_t>(A.row_idx[static_cast<std::size_t>(k)]);
+            const double a = vals[static_cast<std::size_t>(k)];
+            ax[i] += a * x[j];
+            aax[i] += std::abs(a) * std::abs(x[j]);
+            rowsum[i] += std::abs(a);
+            if (i != j) {
+                ax[j] += a * x[i];
+                aax[j] += std::abs(a) * std::abs(x[i]);
+                rowsum[j] += std::abs(a);
+            }
+        }
+    }
+    double anorm = 0.0, rnorm = 0.0, xnorm = 0.0, bnorm = 0.0;
+    BackwardError e;
+    r.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        r[i] = b[i] - ax[i];
+        anorm = std::max(anorm, rowsum[i]);
+        rnorm = std::max(rnorm, std::abs(r[i]));
+        xnorm = std::max(xnorm, std::abs(x[i]));
+        bnorm = std::max(bnorm, std::abs(b[i]));
+        const double den = aax[i] + std::abs(b[i]);
+        if (den > 0.0) e.omega = std::max(e.omega, std::abs(r[i]) / den);
+        else if (r[i] != 0.0) e.omega = HUGE_VAL;
+    }
+    e.eta = rnorm / (anorm * xnorm + bnorm);
+    return e;
+}
+
+struct PglibCapture {
+    const char *name;
+    // MA27's negative-pivot count. It is the same at every stored
+    // factorization of these captures, with no zero pivots. Ruling R39: the
+    // captures record no inertia, so it was computed once with
+    //   bench_replay --solver ma27 --track ipopt --seq-steps all --print-steps
+    // on the same fixtures and is kept here.
+    int ma27_neg;
+};
+
+} // namespace
+
+// The three largest PGLib tuning captures (benchmarks/manifests/ipopt_hard.json)
+// replayed factorization by factorization through the plugin, the way IPOPT
+// drives it: u = 1e-8, MA97 scaling as IPOPT requests it by default (below),
+// every solve wrapped in up to 3 refinement steps.
+// Every stored step must factor with MA27's inertia and solve to the replay
+// harness's gate (eta <= 1e-10, omega <= 1e-8). Skipped when the fixtures
+// (untracked, benchmarks/fixtures/ipopt_hard) are absent.
+TEST(IpoptPluginRuntime, PglibReplayAccurate) {
+    namespace fs = std::filesystem;
+    const fs::path dir =
+        fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" / "ipopt_hard";
+    const PglibCapture captures[] = {
+        {"pglib_opf_case500_goc__api", 9274},
+        {"pglib_opf_case2869_pegase", 57173},
+        {"pglib_opf_case4661_sdet", 79212},
+    };
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+    int replayed = 0;
+    for (const PglibCapture &cap : captures) {
+        const fs::path mtx = dir / cap.name / (std::string(cap.name) + ".mtx");
+        const fs::path vals_path = dir / cap.name / (std::string(cap.name) + ".mtx.vals");
+        if (!fs::exists(mtx) || !fs::exists(vals_path)) {
+            std::printf("[ NOTE     ] %s: fixture missing, skipped\n", cap.name);
+            continue;
+        }
+        auto mm = smf::read_matrix_market(mtx.string());
+        ASSERT_TRUE(mm.ok) << cap.name << ": " << mm.error_message;
+        const smf::CscLower A = std::move(mm.matrix);
+        const int n = static_cast<int>(A.n);
+        const std::size_t nnz = A.values.size();
+        std::ifstream in(vals_path, std::ios::binary | std::ios::ate);
+        const std::size_t steps = static_cast<std::size_t>(in.tellg()) / (nnz * sizeof(double));
+        ASSERT_GT(steps, 0u) << cap.name;
+        in.seekg(0);
+
+        // 1-based CSC (f_arrays = 1), as IPOPT passes it.
+        std::vector<int> ptr(static_cast<std::size_t>(n) + 1), row(nnz);
+        for (std::size_t j = 0; j <= static_cast<std::size_t>(n); ++j)
+            ptr[j] = static_cast<int>(A.col_ptr[j]) + 1;
+        for (std::size_t k = 0; k < nnz; ++k) row[k] = static_cast<int>(A.row_idx[k]) + 1;
+
+        ma97_control_d ctrl{};
+        sym.default_control(&ctrl);
+        ctrl.f_arrays = 1;
+        ctrl.u = 1e-8;
+        ctrl.scaling = 0;
+        void *akeep = nullptr;
+        void *fkeep = nullptr;
+        ma97_info_d info{};
+        sym.analyse(1, n, ptr.data(), row.data(), nullptr, &akeep, &ctrl, &info, nullptr);
+        ASSERT_EQ(info.flag, 0) << cap.name;
+
+        std::vector<double> vals(nnz), scale(static_cast<std::size_t>(n), 1.0);
+        const std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+        std::vector<double> x, r;
+        int failing = 0, wrong_inertia = 0;
+        for (std::size_t s = 0; s < steps; ++s) {
+            in.read(reinterpret_cast<char *>(vals.data()),
+                    static_cast<std::streamsize>(nnz * sizeof(double)));
+            ASSERT_TRUE(static_cast<bool>(in)) << cap.name << " step " << s;
+            // IPOPT's default MA97 scaling ("dynamic", switch od_hd_reuse):
+            // none at first, then MC64 scaling computed once (scaling = 1,
+            // returned in `scale`) and passed back for reuse (scaling = 0).
+            ctrl.scaling = s == 1 ? 1 : 0;
+            sym.factor(4, ptr.data(), row.data(), vals.data(), &akeep, &fkeep, &ctrl, &info,
+                       s == 0 ? nullptr : scale.data());
+            ctrl.scaling = 0;
+            ASSERT_EQ(info.flag, 0) << cap.name << " step " << s;
+            if (info.num_neg != cap.ma27_neg || info.matrix_rank != n) {
+                ++wrong_inertia;
+                ADD_FAILURE() << cap.name << " step " << s << ": num_neg " << info.num_neg << " (MA27 "
+                              << cap.ma27_neg << "), rank " << info.matrix_rank << " of " << n;
+            }
+            x = b;
+            sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+            ASSERT_EQ(info.flag, 0) << cap.name << " step " << s;
+            BackwardError e = backward_error(A, vals, b, x, r);
+            for (int it = 0; it < 3 && !(e.eta <= 1e-14 && e.omega <= 1e-10); ++it) {
+                sym.solve(0, 1, r.data(), n, &akeep, &fkeep, &ctrl, &info);
+                ASSERT_EQ(info.flag, 0) << cap.name << " step " << s;
+                for (std::size_t i = 0; i < static_cast<std::size_t>(n); ++i) x[i] += r[i];
+                e = backward_error(A, vals, b, x, r);
+            }
+            if (!(e.eta <= 1e-10 && e.omega <= 1e-8)) {
+                ++failing;
+                ADD_FAILURE() << cap.name << " step " << s << ": eta " << e.eta << " omega " << e.omega;
+            }
+        }
+        std::printf("[ PGLIB    ] %s: %zu steps, %d failing, %d with wrong inertia\n", cap.name, steps,
+                    failing, wrong_inertia);
+        sym.finalise(&akeep, &fkeep);
+        ++replayed;
+    }
+    if (replayed == 0) GTEST_SKIP() << "no PGLib capture under " << dir.string();
 }

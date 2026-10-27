@@ -16,6 +16,9 @@
 // The --sample mode loops one phase of one case through the smf adapter
 // under an in-process sampling profiler (Windows; build with /Zi and link
 // with /DEBUG for symbols) and prints the hottest functions or lines.
+// A case with a recorded value sequence (manifest seq_values_path, e.g. the
+// IPOPT captures in ipopt_hard.json) cycles through its stored steps, and an
+// "ipopt" track case uses IPOPT's pivot threshold u = 1e-8 (as bench_replay).
 
 #include "adapters/adapter.hpp"
 #include "smf/control.hpp"
@@ -41,6 +44,8 @@ struct Case {
     std::string mtx;
     bool spd = false;
     bool warm = false;
+    std::string seq_values;  // recorded value sequence (raw doubles, nnz per step)
+    std::string track;
 };
 
 std::string json_field(const std::string &obj, const std::string &key) {
@@ -70,6 +75,8 @@ std::vector<Case> load_manifest(const std::string &path) {
         c.mtx = json_field(obj, "mtx_path");
         c.spd = json_field(obj, "matrix_type") == "spd";
         c.warm = json_field(obj, "mode") == "warm_sequence";
+        c.seq_values = json_field(obj, "seq_values_path");
+        c.track = json_field(obj, "track");
         if (!c.id.empty()) cases.push_back(c);
         pos = e + 1;
         if (s.find('{', pos) == std::string::npos) break;
@@ -197,11 +204,28 @@ int main(int argc, char **argv) {
             ctrl.deterministic = deterministic;
             if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;
             if (tile_nb > 0) ctrl.top_tile_nb = tile_nb;
+            const bool ipopt_track = c.track == "ipopt";
+            if (ipopt_track && pivot_u < 0.0) ctrl.pivot_u = 1e-8;
+            // Recorded steps (all of them), cycled by the factor loop.
+            std::vector<std::vector<double>> steps;
+            if (!c.seq_values.empty()) {
+                std::ifstream in(c.seq_values, std::ios::binary | std::ios::ate);
+                const std::size_t step_bytes = A.values.size() * sizeof(double);
+                const std::size_t nsteps = in ? static_cast<std::size_t>(in.tellg()) / step_bytes : 0;
+                in.seekg(0);
+                for (std::size_t k = 0; k < nsteps; ++k) {
+                    steps.emplace_back(A.values.size());
+                    in.read(reinterpret_cast<char *>(steps.back().data()),
+                            static_cast<std::streamsize>(step_bytes));
+                }
+                if (!in) steps.clear();
+            }
+            if (steps.empty()) steps.push_back(A.values);
             auto ad = smf::bench::make_solver_adapter("smf");
-            ad->configure(ctrl, "recommended");
+            ad->configure(ctrl, ipopt_track ? "ipopt" : "recommended");
             std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
             ad->analyse(A);
-            ad->factor(A.values);
+            ad->factor(steps[0]);
             ad->solve(x, 1);
             smf::bench::Sampler sampler;
             long iters = 0;
@@ -210,7 +234,8 @@ int main(int argc, char **argv) {
             while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() <
                    sample_seconds) {
                 if (sample_phase == "analyse" || sample_phase == "all") ad->analyse(A);
-                if (sample_phase == "factor" || sample_phase == "all") ad->factor(A.values);
+                if (sample_phase == "factor" || sample_phase == "all")
+                    ad->factor(steps[static_cast<std::size_t>(iters) % steps.size()]);
                 if (sample_phase == "solve" || sample_phase == "all") {
                     std::fill(x.begin(), x.end(), 1.0);
                     ad->solve(x, 1);
@@ -218,7 +243,8 @@ int main(int argc, char **argv) {
                 ++iters;
             }
             sampler.stop();
-            std::printf("%s: %ld iterations of %s\n", c.id.c_str(), iters, sample_phase.c_str());
+            std::printf("%s: %ld iterations of %s (%zu value steps, u=%g)\n", c.id.c_str(), iters,
+                        sample_phase.c_str(), steps.size(), ctrl.pivot_u);
             sampler.report(sample_lines);
             return 0;
         }

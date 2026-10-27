@@ -145,10 +145,26 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
         res.status = gerr;
         return res;
     }
-    auto &row_to_col = res.row_to_col;
     auto &col_to_row = res.col_to_row;
-    const auto col_begin = [&](int j) { return g.ptr[static_cast<std::size_t>(j)]; };
-    const auto col_end = [&](int j) { return g.ptr[static_cast<std::size_t>(j) + 1]; };
+    const Int *const gptr = g.ptr.data();
+    const int *const grow = g.row.data();
+    const double *const gcost = g.cost.data();
+
+    // Per-row state of the searches, packed so that relaxing an edge touches
+    // one cache line of its row instead of five arrays (the searches are
+    // bound by these random row accesses). `match` is the row's matched
+    // column (-1: free); `done` and `dense` are flags.
+    struct RowState {
+        double u;      // row dual
+        double dist;   // tentative search distance (inf when untouched)
+        int match;     // matched column, or -1
+        int parent;    // column the search reached the row from
+        std::uint8_t done;
+        std::uint8_t dense;
+    };
+    const double inf = std::numeric_limits<double>::infinity();
+    std::vector<RowState> rs(static_cast<std::size_t>(n), RowState{inf, inf, -1, -1, 0, 0});
+    RowState *const R = rs.data();
 
     // Dense rows/columns (AMD's threshold, 10 sqrt(n) entries) are where
     // almost every column's cheapest entry lives in KKT systems with a few
@@ -158,62 +174,56 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
     // them feasible duals, and phase 3 completes the matching on the full
     // graph. Duals stay feasible and matched edges tight throughout, so the
     // result is still the optimal matching.
-    const double inf = std::numeric_limits<double>::infinity();
-    std::vector<std::uint8_t> dense(static_cast<std::size_t>(n), 0);
     bool any_dense = false;
     if (n > 50) {
         const double threshold = std::max(16.0, 10.0 * std::sqrt(static_cast<double>(n)));
         for (int j = 0; j < n; ++j) {
-            if (static_cast<double>(col_end(j) - col_begin(j)) > threshold) {
-                dense[static_cast<std::size_t>(j)] = 1;
+            if (static_cast<double>(gptr[j + 1] - gptr[j]) > threshold) {
+                R[j].dense = 1;
                 any_dense = true;
             }
         }
     }
-    const auto is_dense = [&](int i) { return dense[static_cast<std::size_t>(i)] != 0; };
+    const auto is_dense = [R](int i) { return R[i].dense != 0; };
 
     // Initial duals on the sparse part: u[i] = min_j cost(i, j);
     // v[j] = min_i cost(i, j) - u[i]. Rows or columns without sparse entries
     // start at 0 (phase 2 makes their edges feasible).
-    std::vector<double> u(static_cast<std::size_t>(n), inf);
     std::vector<double> v(static_cast<std::size_t>(n), inf);
     for (int j = 0; j < n; ++j) {
         if (is_dense(j)) continue;
-        for (Int q = col_begin(j); q < col_end(j); ++q) {
-            const int i = g.row[static_cast<std::size_t>(q)];
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            const int i = grow[q];
             if (is_dense(i)) continue;
-            double &ui = u[static_cast<std::size_t>(i)];
-            ui = std::min(ui, g.cost[static_cast<std::size_t>(q)]);
+            R[i].u = std::min(R[i].u, gcost[q]);
         }
     }
-    for (double &ui : u) {
-        if (ui == inf) ui = 0.0;
+    for (int i = 0; i < n; ++i) {
+        if (R[i].u == inf) R[i].u = 0.0;
     }
     for (int j = 0; j < n; ++j) {
         double vj = inf;
         if (!is_dense(j)) {
-            for (Int q = col_begin(j); q < col_end(j); ++q) {
-                const int i = g.row[static_cast<std::size_t>(q)];
+            for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                const int i = grow[q];
                 if (is_dense(i)) continue;
-                vj = std::min(vj, g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(i)]);
+                vj = std::min(vj, gcost[q] - R[i].u);
             }
         }
         v[static_cast<std::size_t>(j)] = (vj == inf) ? 0.0 : vj;
     }
     const auto reduced = [&](Int q, int j) {
-        return g.cost[static_cast<std::size_t>(q)] -
-               u[static_cast<std::size_t>(g.row[static_cast<std::size_t>(q)])] -
-               v[static_cast<std::size_t>(j)];
+        return gcost[q] - R[grow[q]].u - v[static_cast<std::size_t>(j)];
     };
 
     // Greedy: match each sparse column to a free sparse row along a tight edge.
     int matched = 0;
     for (int j = 0; j < n; ++j) {
         if (is_dense(j)) continue;
-        for (Int q = col_begin(j); q < col_end(j); ++q) {
-            const int i = g.row[static_cast<std::size_t>(q)];
-            if (!is_dense(i) && row_to_col[static_cast<std::size_t>(i)] < 0 && reduced(q, j) <= 0.0) {
-                row_to_col[static_cast<std::size_t>(i)] = j;
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            const int i = grow[q];
+            if (!is_dense(i) && R[i].match < 0 && reduced(q, j) <= 0.0) {
+                R[i].match = j;
                 col_to_row[static_cast<std::size_t>(j)] = i;
                 ++matched;
                 break;
@@ -226,25 +236,25 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
     std::vector<Int> cursor(g.ptr.begin(), g.ptr.end() - 1);
     for (int j = 0; j < n && matched < n; ++j) {
         if (is_dense(j) || col_to_row[static_cast<std::size_t>(j)] >= 0) continue;
-        for (Int q = col_begin(j); q < col_end(j); ++q) {
-            const int i = g.row[static_cast<std::size_t>(q)];
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            const int i = grow[q];
             if (is_dense(i) || reduced(q, j) > 0.0) continue;
-            const int jj = static_cast<int>(row_to_col[static_cast<std::size_t>(i)]);
+            const int jj = R[i].match;
             if (jj < 0) continue;
             Int &c = cursor[static_cast<std::size_t>(jj)];
             int free_row = -1;
-            for (; c < col_end(jj); ++c) {
-                const int k = g.row[static_cast<std::size_t>(c)];
-                if (!is_dense(k) && row_to_col[static_cast<std::size_t>(k)] < 0 && reduced(c, jj) <= 0.0) {
+            for (; c < gptr[jj + 1]; ++c) {
+                const int k = grow[c];
+                if (!is_dense(k) && R[k].match < 0 && reduced(c, jj) <= 0.0) {
                     free_row = k;
                     ++c;
                     break;
                 }
             }
             if (free_row < 0) continue;
-            row_to_col[static_cast<std::size_t>(free_row)] = jj;
+            R[free_row].match = jj;
             col_to_row[static_cast<std::size_t>(jj)] = free_row;
-            row_to_col[static_cast<std::size_t>(i)] = j;
+            R[i].match = j;
             col_to_row[static_cast<std::size_t>(j)] = i;
             ++matched;
             break;
@@ -254,9 +264,6 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
     // Shortest augmenting path from a free column (Dijkstra on reduced
     // costs); on success the duals are updated and the matching augmented.
     // With sparse_only, dense rows are invisible.
-    std::vector<double> dist(static_cast<std::size_t>(n), inf);
-    std::vector<int> parent_col(static_cast<std::size_t>(n), -1);
-    std::vector<std::uint8_t> done(static_cast<std::size_t>(n), 0);
     std::vector<int> touched;
     std::vector<int> finalized;
     using HeapItem = std::pair<double, int>;
@@ -278,16 +285,18 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
         int free_row = -1;
         double path_len = inf;
         const auto relax = [&](int j, double base) {
-            for (Int q = col_begin(j); q < col_end(j); ++q) {
-                const int i = g.row[static_cast<std::size_t>(q)];
-                if (done[static_cast<std::size_t>(i)] || (sparse_only && is_dense(i))) continue;
-                const double nd = base + std::max(0.0, reduced(q, j));
-                double &di = dist[static_cast<std::size_t>(i)];
-                if (nd < di) {
-                    if (di == inf) touched.push_back(i);
-                    di = nd;
-                    parent_col[static_cast<std::size_t>(i)] = j;
-                    if (row_to_col[static_cast<std::size_t>(i)] < 0) {
+            const double vj = v[static_cast<std::size_t>(j)];
+            const Int qend = gptr[j + 1];
+            for (Int q = gptr[j]; q < qend; ++q) {
+                const int i = grow[q];
+                RowState &ri = R[i];
+                if (ri.done || (sparse_only && ri.dense)) continue;
+                const double nd = base + std::max(0.0, gcost[q] - ri.u - vj);
+                if (nd < ri.dist) {
+                    if (ri.dist == inf) touched.push_back(i);
+                    ri.dist = nd;
+                    ri.parent = j;
+                    if (ri.match < 0) {
                         if (nd < path_len) {
                             free_row = i;
                             path_len = nd;
@@ -312,7 +321,7 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
             if (level_head < level.size()) {
                 if (base >= path_len) break;
                 i = level[level_head++];
-                if (done[static_cast<std::size_t>(i)]) continue;
+                if (R[i].done) continue;
             } else {
                 level.clear();
                 level_head = 0;
@@ -320,13 +329,13 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
                 std::pop_heap(heap.begin(), heap.end(), heap_cmp);
                 const auto [d, hi] = heap.back();
                 heap.pop_back();
-                if (done[static_cast<std::size_t>(hi)] || d > dist[static_cast<std::size_t>(hi)]) continue;
+                if (R[hi].done || d > R[hi].dist) continue;
                 i = hi;
                 base = d;
             }
-            done[static_cast<std::size_t>(i)] = 1;
+            R[i].done = 1;
             finalized.push_back(i);
-            relax(static_cast<int>(row_to_col[static_cast<std::size_t>(i)]), base);
+            relax(R[i].match, base);
         }
 
         if (free_row >= 0) {
@@ -335,9 +344,9 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
             // path tight.
             v[static_cast<std::size_t>(start_col)] += path_len;
             for (int i : finalized) {
-                const double delta = path_len - dist[static_cast<std::size_t>(i)];
-                u[static_cast<std::size_t>(i)] -= delta;
-                const int mc = static_cast<int>(row_to_col[static_cast<std::size_t>(i)]);
+                const double delta = path_len - R[i].dist;
+                R[i].u -= delta;
+                const int mc = R[i].match;
                 if (mc >= 0) {
                     v[static_cast<std::size_t>(mc)] += delta;
                 }
@@ -346,9 +355,9 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
             // Augment along the path from free_row back to start_col.
             int r = free_row;
             while (r >= 0) {
-                const int c = parent_col[static_cast<std::size_t>(r)];
+                const int c = R[r].parent;
                 const int prev_r = (c == start_col) ? -1 : static_cast<int>(col_to_row[static_cast<std::size_t>(c)]);
-                row_to_col[static_cast<std::size_t>(r)] = c;
+                R[r].match = c;
                 col_to_row[static_cast<std::size_t>(c)] = r;
                 r = prev_r;
             }
@@ -356,8 +365,8 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
         }
 
         for (int i : touched) {
-            dist[static_cast<std::size_t>(i)] = inf;
-            done[static_cast<std::size_t>(i)] = 0;
+            R[i].dist = inf;
+            R[i].done = 0;
         }
         return free_row >= 0;
     };
@@ -373,47 +382,49 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
     // v, that keep every reduced cost >= 0.
     if (any_dense) {
         for (int j = 0; j < n; ++j) {
-            if (is_dense(j)) u[static_cast<std::size_t>(j)] = inf;
+            if (is_dense(j)) R[j].u = inf;
         }
         for (int j = 0; j < n; ++j) {
             if (is_dense(j)) continue;
-            for (Int q = col_begin(j); q < col_end(j); ++q) {
-                const int i = g.row[static_cast<std::size_t>(q)];
+            for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                const int i = grow[q];
                 if (!is_dense(i)) continue;
-                double &ui = u[static_cast<std::size_t>(i)];
-                ui = std::min(ui, g.cost[static_cast<std::size_t>(q)] - v[static_cast<std::size_t>(j)]);
+                R[i].u = std::min(R[i].u, gcost[q] - v[static_cast<std::size_t>(j)]);
             }
         }
         for (int j = 0; j < n; ++j) {
-            if (is_dense(j) && u[static_cast<std::size_t>(j)] == inf) u[static_cast<std::size_t>(j)] = 0.0;
+            if (is_dense(j) && R[j].u == inf) R[j].u = 0.0;
         }
         for (int j = 0; j < n; ++j) {
             if (!is_dense(j)) continue;
             double vj = inf;
-            for (Int q = col_begin(j); q < col_end(j); ++q) {
-                vj = std::min(vj, g.cost[static_cast<std::size_t>(q)] -
-                                      u[static_cast<std::size_t>(g.row[static_cast<std::size_t>(q)])]);
+            for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                vj = std::min(vj, gcost[q] - R[grow[q]].u);
             }
             v[static_cast<std::size_t>(j)] = vj;
         }
     }
+    const auto copy_rows_out = [&] {
+        for (int i = 0; i < n; ++i) res.row_to_col[static_cast<std::size_t>(i)] = R[i].match;
+    };
     // Phase 3: every column still free, on the full graph.
     for (int j = 0; j < n && matched < n; ++j) {
         if (col_to_row[static_cast<std::size_t>(j)] < 0 && !search(j, false)) {
+            copy_rows_out();
             res.matched_rank = matched;
             res.status = ErrorCode::SingularMatrix;
             return res;
         }
     }
+    copy_rows_out();
     res.matched_rank = matched;
 
     // Recompute exact dual v[j] = cost(match[j], j) - u[match[j]] for tight equality
     for (int j = 0; j < n; ++j) {
         const int r = static_cast<int>(col_to_row[static_cast<std::size_t>(j)]);
-        for (Int q = col_begin(j); q < col_end(j); ++q) {
-            if (g.row[static_cast<std::size_t>(q)] == r) {
-                v[static_cast<std::size_t>(j)] =
-                    g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            if (grow[q] == r) {
+                v[static_cast<std::size_t>(j)] = gcost[q] - R[r].u;
                 break;
             }
         }
@@ -423,7 +434,7 @@ MatchingResult compute_symmetric_matching(const CscLower &A) {
     // s_row[i] = exp(u[i]), s_col[i] = exp(v[i]) / col_max[i],
     // scale[i] = sqrt(s_row[i] * s_col[i]) = exp(0.5 * (u[i] + v[i])) / sqrt(col_max[i]).
     for (int i = 0; i < n; ++i) {
-        const double log_s = 0.5 * (u[static_cast<std::size_t>(i)] + v[static_cast<std::size_t>(i)] -
+        const double log_s = 0.5 * (R[i].u + v[static_cast<std::size_t>(i)] -
                                     std::log(g.col_max[static_cast<std::size_t>(i)]));
         const double clamped_log = std::clamp(log_s, -340.0, 340.0);
         res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);

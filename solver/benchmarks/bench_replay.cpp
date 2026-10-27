@@ -335,9 +335,12 @@ int main(int argc, char **argv) {
     // solver runs through smf::IpmSession with that static mode, as the MA97
     // plugin does inside IPOPT (make_smf_ipm_adapter); per-step lines go to
     // stderr. --seq-steps N|all: warm_sequence replays N evenly spaced
-    // recorded factorizations (default 5) or every one.
+    // recorded factorizations (default 5) or every one. --print-steps: the
+    // per-step stderr lines (inertia, delays) for any solver, e.g. MA27's
+    // reference inertia of a recorded sequence.
     std::string ipm_static;
     bool ipm_static_zero = false;
+    bool print_steps = false;
     int seq_steps = 5;
     // --export-mtx PATH: write the case's matrix (a built-in fixture or --mtx)
     // as Matrix Market, print "mtype=spd|indefinite", and exit. run_wsl.py uses
@@ -367,6 +370,7 @@ int main(int argc, char **argv) {
         else if (arg == "--refine-steps" && i + 1 < argc) refine_steps = std::max(0, std::atoi(argv[++i]));
         else if (arg == "--ipm-static" && i + 1 < argc) ipm_static = argv[++i];
         else if (arg == "--ipm-static-zero") ipm_static_zero = true;
+        else if (arg == "--print-steps") print_steps = true;
         else if (arg == "--export-mtx" && i + 1 < argc) export_mtx = argv[++i];
         else if (arg == "--seq-steps" && i + 1 < argc) {
             const std::string v = argv[++i];
@@ -684,7 +688,7 @@ int main(int argc, char **argv) {
                     total_refine_ms += std::chrono::duration<double, std::milli>(
                                            std::chrono::steady_clock::now() - tr0).count();
                 }
-                if (!ipm_static.empty()) {
+                if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
                     std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d inertia=%d/%d/%d\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),

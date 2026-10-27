@@ -410,7 +410,9 @@ if(SMF_BUILD_MA97_PLUGIN)
     add_dependencies(test_ipopt_plugin_runtime smf_ma97)
     target_compile_definitions(test_ipopt_plugin_runtime PRIVATE
         SMF_MA97_PLUGIN_PATH="$<TARGET_FILE:smf_ma97>")
-    add_test(NAME Ma97PluginRuntime COMMAND test_ipopt_plugin_runtime)
+    add_test(NAME Ma97PluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginRuntime.*)
+    # Task 17: PGLib IPOPT captures replayed through the plugin (skips without fixtures).
+    add_test(NAME IpoptPluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=IpoptPluginRuntime.*)
 endif()
 
 # --- Task 10: Native portfolio dispatch policy tests ---

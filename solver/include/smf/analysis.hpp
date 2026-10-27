@@ -41,6 +41,10 @@ struct AnalysisKeep {
     std::vector<Int>         postorder;         ///< supernode postorder: postorder[i] = s means supernode s is i-th in children-before-parents order
     std::vector<Int>         solve_postorder;   ///< supernode postorder reused by triangular solves
     std::vector<double>      matching_scale;    ///< Matching ordering: its matching's scaling of the analysed values (else empty)
+    /// The auto ordering computed the matching ordering (a KKT-like matrix)
+    /// and kept AMD or METIS: the matching's scaling would not pay off
+    /// without its ordering (ScalingMethod::Auto applies none).
+    bool                     matching_rejected = false;
     Int                      n = 0;             ///< matrix order (= cleaned.n)
     /// Auto ordering of an indefinite matrix with values that did not end
     /// up with the matching ordering: factor() may re-analyse with it

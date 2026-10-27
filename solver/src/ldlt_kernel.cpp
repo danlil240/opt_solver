@@ -32,6 +32,12 @@ struct PivotChoice {
     int b = -1;
 };
 
+// A 1x1 pivot that passes the threshold test with |d| below this fraction
+// of its column's largest off-diagonal entry is "weak": it puts entries
+// above 1 / kWeakPivotRatio into L. Only IPOPT's tiny u (1e-8) admits such
+// pivots; for u >= kWeakPivotRatio the rule below never fires.
+constexpr double kWeakPivotRatio = 1e-6;
+
 // Element (i, j) of the symmetric front from its lower-triangle storage.
 inline double sym_at(const double *F, std::size_t ld, int i, int j) noexcept {
     return (i >= j) ? F[static_cast<std::size_t>(j) * ld + i]
@@ -43,9 +49,13 @@ inline double sym_at(const double *F, std::size_t ld, int i, int j) noexcept {
 // |det|. m2 is the largest eligible entry of column cand other than r, off1
 // the largest entry of column r other than cand, and rows from ext0 on are
 // the non-eligible rows of column cand.
+//
+// On success, *growth (if given) receives the pivot's growth bound
+// max(bound0, bound1) / |det|: the largest entry it can put into L relative
+// to the off-diagonal entries, comparable to a 1x1's max|a(i, c)| / |a_cc|.
 bool two_by_two_ok(const double *F, std::size_t ld, int f, int cand, int r, const double *col,
                    const double *col_r, double m2, double off1, int ext0,
-                   const LdltKernelParams &prm) noexcept {
+                   const LdltKernelParams &prm, double *growth = nullptr) noexcept {
     const double d00 = col[cand];
     const double d10 = sym_at(F, ld, r, cand);
     const double d11 = col_r[r];
@@ -59,11 +69,14 @@ bool two_by_two_ok(const double *F, std::size_t ld, int f, int cand, int r, cons
 
     double off0 = m2;
     for (int i = ext0; i < f; ++i) off0 = std::max(off0, std::abs(col[i]));
+    double g = 0.0;
     if (off0 > 0.0 || off1 > 0.0) {
         const double bound0 = (std::abs(c) * off0 + std::abs(b) * off1) / s2;
         const double bound1 = (std::abs(b) * off0 + std::abs(a) * off1) / s2;
         if (prm.u * std::max(bound0, bound1) > std::abs(det_s)) return false;
+        g = std::max(bound0, bound1) / std::abs(det_s);
     }
+    if (growth != nullptr) *growth = g;
     return true;
 }
 
@@ -117,19 +130,32 @@ PivotChoice select_pivot(const double *F, std::size_t ld, int f, int k, int num_
 
         // 1x1 on cand: a_cand >= u * max|a(i, cand)|. The remaining rows are
         // only scanned when the diagonal can pass, and the scan stops at the
-        // first entry that makes the test fail.
+        // first entry that makes the test fail. A weak 1x1 (below) is kept
+        // in hand while the 2x2 with the partner is tried.
+        bool weak_1x1 = false;
+        double weak_growth = 0.0;
         if (a_cand >= prm.eff_small && !(prm.u * m1 > a_cand)) {
             bool ok = true;
+            double colmax = m1;
             for (int i = ext0; i < f; ++i) {
-                if (prm.u * std::abs(col[i]) > a_cand) {
+                const double v = std::abs(col[i]);
+                if (prm.u * v > a_cand) {
                     ok = false;
                     break;
                 }
+                colmax = std::max(colmax, v);
             }
-            if (ok) return {1, cand, -1};
+            if (ok) {
+                if (!(a_cand < kWeakPivotRatio * colmax)) return {1, cand, -1};
+                weak_1x1 = true;
+                weak_growth = colmax / a_cand;
+            }
         }
 
-        if (r_best < k || r_best >= limit || m1 <= 0.0) continue;
+        if (r_best < k || r_best >= limit || m1 <= 0.0) {
+            if (weak_1x1) return {1, cand, -1};
+            continue;
+        }
 
         // One pass over column r_best: max excluding r_best (1x1 test on the
         // partner) and max excluding cand as well (2x2 bound).
@@ -150,8 +176,16 @@ PivotChoice select_pivot(const double *F, std::size_t ld, int f, int k, int num_
         // MA27: at a tiny u (IPOPT's 1e-8) a near-null partner diagonal passes
         // the 1x1 test and puts entries up to 1/u into L, where the 2x2 would
         // have been stable.
-        if (k + 1 < limit && two_by_two_ok(F, ld, f, cand, r_best, col, col_r, m2, off1, ext0, prm))
+        // A weak 1x1 on cand gives way to the 2x2 when that pivot's growth
+        // bound is smaller (case500_goc at u = 1e-8: a 1x1 with |d| ~ 5e-8
+        // of its column left a row with omega ~ 1 that 3 refinement steps
+        // could not repair; MA27 pivots that column in a 2x2).
+        double growth2 = 0.0;
+        if (k + 1 < limit &&
+            two_by_two_ok(F, ld, f, cand, r_best, col, col_r, m2, off1, ext0, prm, &growth2) &&
+            (!weak_1x1 || growth2 < weak_growth))
             return {2, cand, r_best};
+        if (weak_1x1) return {1, cand, -1};
 
         const double a_r = std::abs(col_r[r_best]);
         if (a_r >= prm.eff_small && (om2 == 0.0 || a_r >= prm.u * om2)) {

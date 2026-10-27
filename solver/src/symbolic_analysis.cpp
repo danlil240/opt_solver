@@ -626,6 +626,8 @@ namespace smf
         // factor less accurate, so ScalingMethod::Auto then applies none.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+        keep->matching_rejected =
+            auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching);
         keep->matching_trigger_eligible =
             auto_order && !use_identity_ordering &&
             control.matrix_type == MatrixType::RealSymmetricIndefinite &&

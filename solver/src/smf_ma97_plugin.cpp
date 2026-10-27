@@ -520,11 +520,36 @@ extern "C"
             info->flag = -6;
             return;
         }
+        // IPOPT's MC64 request (scaling = 1) once the pattern is analysed:
+        // when the analysis computed the matching ordering and rejected it
+        // (kept AMD or METIS), the matching scaling is not applied, as under
+        // ScalingMethod::Auto. Without its ordering it makes the factor less
+        // accurate (triage-case9241-notes.md; on PGLib case2869 / case4661 a
+        // reused matching scale gives wrong inertia and omega up to 1 on most
+        // steps), and recomputing it costs ~10x a refactorization. The
+        // request is then answered with the unit scale, which IPOPT stores
+        // and passes back. Patterns the analysis did not try the matching on
+        // (n below its minimum, no zero/small diagonal) keep the matching
+        // scaling, which helps there (COPS elec / chain iteration counts).
+        // SMF_PLUGIN_MC64=always restores the matching scaling on every
+        // request.
+        static const bool mc64_always = [] {
+            const char* v = std::getenv("SMF_PLUGIN_MC64");
+            return v != nullptr && std::strcmp(v, "always") == 0;
+        }();
+        const smf::AnalysisKeep* analysed = ak->session->analysis_keep();
+        const bool unit_scale = !mc64_always && ak->ctrl.scaling == smf::ScalingMethod::Matching &&
+                                analysed != nullptr && analysed->matching_rejected;
+        if (unit_scale)
+            ak->ctrl.scaling = smf::ScalingMethod::None;
         // IPOPT's "reuse" scaling strategies compute MC64 scaling once
         // (scaling = 1, returned in `scale`) and pass it back with
-        // scaling = 0 on later factorizations.
+        // scaling = 0 on later factorizations. A unit scale passed back is
+        // no scaling.
         bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
-        const bool reuse_scaling = !computed_scaling && scale;
+        const bool reuse_scaling =
+            !computed_scaling && !unit_scale && scale &&
+            !std::all_of(scale, scale + ak->n, [](double s) { return s == 1.0; });
         if (reuse_scaling)
             ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
 
@@ -623,7 +648,7 @@ extern "C"
                          si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
                          pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
-                         ctrl ? ctrl->scaling : -1, computed_scaling ? "out" : (scale ? "in" : "-"),
+                         ctrl ? ctrl->scaling : -1, unit_scale ? "unit" : computed_scaling ? "out" : (reuse_scaling ? "in" : "-"),
                          ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
                          static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
                                                         [](const auto& de) { return de.tag == 2; })),
@@ -647,6 +672,8 @@ extern "C"
         {
             if (computed_scaling && scale && !fk.scale.empty())
                 std::copy(fk.scale.begin(), fk.scale.end(), scale);
+            if (unit_scale && scale)
+                std::fill(scale, scale + ak->n, 1.0);
             fw->num_neg = si.num_negative;
             fw->num_two = 0;
             fw->aborted = true;
@@ -709,6 +736,8 @@ extern "C"
         {
             std::copy(fk.scale.begin(), fk.scale.end(), scale);
         }
+        if (unit_scale && scale)
+            std::fill(scale, scale + ak->n, 1.0);
 
         if (status == smf::IpmFactorStatus::Singular)
         {
