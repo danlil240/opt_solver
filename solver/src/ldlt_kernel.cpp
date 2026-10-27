@@ -74,7 +74,7 @@ bool two_by_two_ok(const double *F, std::size_t ld, int f, int cand, int r, cons
         const double bound0 = (std::abs(c) * off0 + std::abs(b) * off1) / s2;
         const double bound1 = (std::abs(b) * off0 + std::abs(a) * off1) / s2;
         if (prm.u * std::max(bound0, bound1) > std::abs(det_s)) return false;
-        g = std::max(bound0, bound1) / std::abs(det_s);
+        if (growth != nullptr) g = std::max(bound0, bound1) / std::abs(det_s);
     }
     if (growth != nullptr) *growth = g;
     return true;

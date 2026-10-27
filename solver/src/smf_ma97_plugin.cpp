@@ -533,6 +533,12 @@ extern "C"
         // scaling, which helps there (COPS elec / chain iteration counts).
         // SMF_PLUGIN_MC64=always restores the matching scaling on every
         // request.
+        // Known limitation: a request on the very first factorization (no
+        // analysis yet; the analysis is deferred into session.factor below)
+        // still gets the matching scaling. IPOPT's default ma97_scaling
+        // (dynamic) factors unscaled first, so its requests always come after
+        // the analysis; with ma97_scaling = mc64 the first scale is matching
+        // and its reuse keeps it, the pre-Task-17 behaviour.
         static const bool mc64_always = [] {
             const char* v = std::getenv("SMF_PLUGIN_MC64");
             return v != nullptr && std::strcmp(v, "always") == 0;

@@ -626,6 +626,9 @@ namespace smf
         // factor less accurate, so ScalingMethod::Auto then applies none.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+        // Evaluated after the final ordering decision (the METIS trial and
+        // the auto matching comparison above), so it reflects the ordering
+        // the analysis actually kept.
         keep->matching_rejected =
             auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching);
         keep->matching_trigger_eligible =
