@@ -57,6 +57,18 @@ class TestPinnedSplits(unittest.TestCase):
             if key in on_disk:
                 self.assertEqual(c["split"], on_disk[key], key)
 
+    def test_ipopt_track_has_no_ordering_override(self):
+        # R41: the ipopt track runs smf with its defaults (AutoParallel + Predicted
+        # auto-matching), the same configuration the MA97 plugin ships to IPOPT.
+        path = ff.ROOT / "benchmarks" / "manifests" / "fronttier.json"
+        on_disk = json.loads(path.read_text(encoding="utf-8"))["cases"]
+        regen = ff.collect(pathlib.Path(tempfile.mkdtemp()), do_fetch=False, budget_mb=0)["cases"]
+        for cases, where in ((on_disk, "manifest"), (regen, "generator")):
+            ipopt = [c for c in cases if c["track"] == "ipopt"]
+            self.assertTrue(ipopt, where)
+            for c in ipopt:
+                self.assertNotIn("ordering", c, f"{where}: {c['matrix_id']}")
+
     def test_pinned_wins_and_only_new_ids_are_drawn(self):
         pinned = {"m%d" % i: ("heldout" if i % 2 else "tuning") for i in range(10)}
         s = ff.assign_splits(list(pinned) + ["new1", "new2"], fixed=pinned)

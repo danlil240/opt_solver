@@ -44,7 +44,7 @@ class TestScore(unittest.TestCase):
         m = manifest([case("a", "hard_indef", "tuning")])
         records = [
             rec("a", "smf", 100.0),
-            rec("a", "ma27", 200.0),
+            rec("a", "ma57", 200.0),
             # faster but inaccurate: must not be "best"
             rec("a", "mkl_pardiso", 10.0, eta=1e-5),
             # smf itself is excluded from the competitor set even if it is fastest
@@ -53,13 +53,13 @@ class TestScore(unittest.TestCase):
         row = res["hard_indef"]["recommended"][1]["ratio"]
         self.assertEqual(row["n"], 1)
         self.assertTrue(math.isclose(row["geomean"], (100.0 + 10.0) / (200.0 + 10.0)))
-        self.assertEqual(row["best_solver_counts"], {"ma27": 1})
+        self.assertEqual(row["best_solver_counts"], {"ma57": 1})
 
 
     def test_split_filter(self):
         m = manifest([case("a", "spd", "tuning"), case("b", "spd", "heldout")])
-        records = [rec("a", "smf", 10.0), rec("a", "ma27", 20.0),
-                   rec("b", "smf", 40.0), rec("b", "ma27", 20.0)]
+        records = [rec("a", "smf", 10.0), rec("a", "cholmod", 20.0),
+                   rec("b", "smf", 40.0), rec("b", "cholmod", 20.0)]
         tuning = score.score(records, m, split="tuning", shift_ms=10.0)
         held = score.score(records, m, split="heldout", shift_ms=10.0)
         both = score.score(records, m, split="all", shift_ms=10.0)
@@ -156,8 +156,8 @@ class TestScore(unittest.TestCase):
     def test_report_only_excluded_from_gates_ratio_and_listed(self):
         m = manifest([case("a", "hard_indef", "tuning"),
                       dict(case("sing", "hard_indef", "tuning"), report_only=True)])
-        records = [rec("a", "smf", 100.0), rec("a", "ma27", 200.0),
-                   rec("sing", "smf", 5.0, eta=1e-3), rec("sing", "ma27", 6.0)]
+        records = [rec("a", "smf", 100.0), rec("a", "ma57", 200.0),
+                   rec("sing", "smf", 5.0, eta=1e-3), rec("sing", "ma57", 6.0)]
         res = score.score(records, m, split="all")
         g = res["hard_indef"]["recommended"][1]
         self.assertEqual(g["solvers"]["smf"]["total"], 1)
@@ -168,10 +168,59 @@ class TestScore(unittest.TestCase):
         self.assertNotIn("sing", g["times"]["smf"])
         self.assertIn("sing", score.render(res, "all"))
 
+    # R43: fixed best-competitor set per class, independent of thread count.
+    def test_ma27_and_cudss_are_reference_only(self):
+        m = manifest([case("a", "small_kkt", "tuning"), case("b", "spd", "tuning")])
+        records = [rec("a", "smf", 100.0), rec("a", "ma27", 10.0), rec("a", "cudss", 5.0),
+                   rec("a", "ma57", 200.0),
+                   rec("b", "smf", 100.0), rec("b", "ma27", 10.0), rec("b", "cudss", 5.0),
+                   rec("b", "cholmod", 50.0)]
+        res = score.score(records, m, split="all", shift_ms=10.0)
+        r = res["small_kkt"]["recommended"][1]["ratio"]
+        self.assertEqual(r["best_solver_counts"], {"ma57": 1})
+        self.assertTrue(math.isclose(r["geomean"], 110.0 / 210.0))
+        r = res["spd"]["recommended"][1]["ratio"]
+        self.assertEqual(r["best_solver_counts"], {"cholmod": 1})
+        # reference columns still listed
+        self.assertIn("ma27", res["small_kkt"]["recommended"][1]["solvers"])
+
+    def test_competitor_set_per_class(self):
+        self.assertEqual(set(score.competitor_set("small_kkt")),
+                         {"ma57", "ma97", "ssids", "mkl_pardiso", "mumps"})
+        self.assertEqual(set(score.competitor_set("large_kkt")), set(score.competitor_set("hard_indef")))
+        self.assertEqual(set(score.competitor_set("hard_indef")),
+                         {"ma57", "ma97", "ssids", "mkl_pardiso", "mumps"})
+        self.assertEqual(set(score.competitor_set("spd")),
+                         {"cholmod", "mkl_pardiso", "ma57", "ma97", "ssids", "mumps"})
+        # cholmod on an indefinite class is never best
+        m = manifest([case("a", "hard_indef", "tuning")])
+        res = score.score([rec("a", "smf", 100.0), rec("a", "cholmod", 1.0),
+                           rec("a", "mumps", 300.0)], m, split="all", shift_ms=10.0)
+        self.assertEqual(res["hard_indef"]["recommended"][1]["ratio"]["best_solver_counts"],
+                         {"mumps": 1})
+
+    def test_missing_competitor_reported_per_thread_table(self):
+        m = manifest([case("a", "hard_indef", "tuning")])
+        records = [rec("a", "smf", 100.0), rec("a", "ma57", 50.0), rec("a", "ma97", 80.0),
+                   rec("a", "ma27", 10.0),
+                   rec("a", "smf", 40.0, threads=8), rec("a", "ma97", 30.0, threads=8)]
+        res = score.score(records, m, split="all", shift_ms=10.0)
+        t1 = res["hard_indef"]["recommended"][1]["ratio"]
+        t8 = res["hard_indef"]["recommended"][8]["ratio"]
+        self.assertEqual(t1["competitor_set"], t8["competitor_set"])
+        self.assertEqual(set(t1["missing_competitors"]), {"ssids", "mkl_pardiso", "mumps"})
+        self.assertEqual(set(t8["missing_competitors"]),
+                         {"ma57", "ssids", "mkl_pardiso", "mumps"})
+        self.assertEqual(t1["best_solver_counts"], {"ma57": 1})
+        self.assertEqual(t8["best_solver_counts"], {"ma97": 1})
+        text = score.render(res, "all")
+        self.assertIn("missing", text)
+        self.assertIn("ma57", text.split("## hard_indef / recommended / 8")[1])
+
     def test_dropped_for_no_accurate_competitor_is_counted(self):
         m = manifest([case("a", "spd", "tuning"), case("b", "spd", "tuning")])
-        records = [rec("a", "smf", 10.0), rec("a", "ma27", 20.0),
-                   rec("b", "smf", 10.0), rec("b", "ma27", 20.0, eta=1e-3)]
+        records = [rec("a", "smf", 10.0), rec("a", "cholmod", 20.0),
+                   rec("b", "smf", 10.0), rec("b", "cholmod", 20.0, eta=1e-3)]
         res = score.score(records, m, split="all")
         r = res["spd"]["recommended"][1]["ratio"]
         self.assertEqual((r["n"], r["no_accurate_competitor"]), (1, 1))

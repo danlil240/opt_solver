@@ -80,8 +80,9 @@ def find_replay_binary(build_dir: pathlib.Path, explicit_binary: Optional[str]) 
 
 def replay_override_args(case: dict) -> List[str]:
     """Per-case bench_replay overrides. The `ipopt` track only implies u = 1e-8;
-    a case may additionally pin the ordering (front-tier manifest uses
-    "ordering": "matching" on the ipopt track)."""
+    a case may additionally pin the smf ordering via a per-case "ordering"
+    field (ad-hoc experiments only: the front-tier manifest carries no pin, so
+    smf runs its plugin-equivalent defaults on the ipopt track, ruling R41)."""
     args: List[str] = []
     if case.get("ordering"):
         args += ["--ordering", str(case["ordering"])]

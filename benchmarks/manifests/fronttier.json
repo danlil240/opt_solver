@@ -5,7 +5,7 @@
   "heldout_fraction": 0.3,
   "tracks": {
     "recommended": "pivot u = 0.01, default ordering",
-    "ipopt": "pivot u = 1e-8 (bench_replay track), ordering = matching (per-case override)"
+    "ipopt": "pivot u = 1e-8 (bench_replay track), smf default ordering (AutoParallel + Predicted matching, as the plugin)"
   },
   "solvers": [
     "smf",
@@ -34,8 +34,7 @@
       "nnz_lower": 577,
       "class": "small_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_lqr_h20",
@@ -69,8 +68,7 @@
       "nnz_lower": 1764,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_nmpc_h30",
@@ -104,8 +102,7 @@
       "nnz_lower": 1874,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_contact_h40",
@@ -139,8 +136,7 @@
       "nnz_lower": 4164,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_ineq_slack",
@@ -174,8 +170,7 @@
       "nnz_lower": 5845,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_ipm_late",
@@ -209,8 +204,7 @@
       "nnz_lower": 2472,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_auglag",
@@ -244,8 +238,7 @@
       "nnz_lower": 12221,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_eq_qp",
@@ -279,8 +272,7 @@
       "nnz_lower": 5797,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_lqr_h200",
@@ -314,8 +306,7 @@
       "nnz_lower": 46093,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_pde_opt",
@@ -349,8 +340,7 @@
       "nnz_lower": 7558,
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "kkt_network_flow",
@@ -390,8 +380,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case118_ieee",
@@ -437,8 +426,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case300_ieee",
@@ -484,8 +472,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case500_goc__api",
@@ -531,8 +518,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case1354_pegase",
@@ -578,8 +564,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case2000_goc__sad",
@@ -625,8 +610,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case2869_pegase",
@@ -672,8 +656,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case4661_sdet",
@@ -719,8 +702,7 @@
       "mode": "warm_sequence",
       "class": "small_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pglib_opf_case9241_pegase",
@@ -766,8 +748,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_elec_200",
@@ -813,8 +794,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_glider_400",
@@ -860,8 +840,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_chain_800",
@@ -907,8 +886,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_rocket_800",
@@ -954,8 +932,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_steering_800",
@@ -1001,8 +978,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_catmix_800",
@@ -1048,8 +1024,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_pinene_400",
@@ -1089,8 +1064,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "portfolio_20k",
@@ -1124,8 +1098,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "acopf_grid_80",
@@ -1159,8 +1132,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "obstacle_surface_200",
@@ -1200,8 +1172,7 @@
       "mode": "warm_sequence",
       "class": "large_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cops_polygon_200",
@@ -1241,8 +1212,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pde_control_120",
@@ -1276,8 +1246,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "acopf_grid_160",
@@ -1311,8 +1280,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "robot_arm_8k",
@@ -1346,8 +1314,7 @@
       "expected_outcome": "Success",
       "class": "large_kkt",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "pde_control_250",
@@ -1380,8 +1347,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b162_c1",
@@ -1413,8 +1379,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "ncvxqp1",
@@ -1446,8 +1411,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "ncvxqp9",
@@ -1479,8 +1443,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cvxqp3",
@@ -1512,8 +1475,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "bratu3d",
@@ -1545,8 +1507,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b39_c7",
@@ -1578,8 +1539,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b300",
@@ -1611,8 +1571,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b300_c1",
@@ -1644,8 +1603,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b162_c3",
@@ -1677,8 +1635,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "helm3d01",
@@ -1710,8 +1667,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "aug3dcqp",
@@ -1743,8 +1699,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "case39",
@@ -1776,8 +1731,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b162_c4",
@@ -1809,8 +1763,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "stokes128",
@@ -1842,8 +1795,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "dawson5",
@@ -1875,8 +1827,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "copter2",
@@ -1908,8 +1859,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b300_c2",
@@ -1941,8 +1891,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "blockqp1",
@@ -1974,8 +1923,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "ncvxqp5",
@@ -2007,8 +1955,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "ncvxqp3",
@@ -2040,8 +1987,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b39_c19",
@@ -2073,8 +2019,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cont-201",
@@ -2106,8 +2051,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b300_c3",
@@ -2139,8 +2083,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "ncvxqp7",
@@ -2172,8 +2115,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "boyd1",
@@ -2205,8 +2147,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "TSOPF_FS_b39_c30",
@@ -2238,8 +2179,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "cont-300",
@@ -2272,8 +2212,7 @@
       "class": "hard_indef",
       "split": "tuning",
       "track": "ipopt",
-      "report_only": true,
-      "ordering": "matching"
+      "report_only": true
     },
     {
       "matrix_id": "d_pretok",
@@ -2307,8 +2246,7 @@
       "class": "hard_indef",
       "split": "tuning",
       "track": "ipopt",
-      "report_only": true,
-      "ordering": "matching"
+      "report_only": true
     },
     {
       "matrix_id": "turon_m",
@@ -2341,8 +2279,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "c-big",
@@ -2374,8 +2311,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "darcy003",
@@ -2407,8 +2343,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "mario002",
@@ -2440,8 +2375,7 @@
       "expected_outcome": "Success",
       "class": "hard_indef",
       "split": "tuning",
-      "track": "ipopt",
-      "ordering": "matching"
+      "track": "ipopt"
     },
     {
       "matrix_id": "boyd2",

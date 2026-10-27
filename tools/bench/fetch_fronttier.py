@@ -9,8 +9,9 @@ Classes
   large_kkt  : the 7 ipopt_kkt.json models
   spd        : large.json SPD matrices
 Every indefinite case appears on two tracks: "recommended" (u = 0.01, default
-ordering) and "ipopt" (u = 1e-8, matching ordering via the per-case "ordering"
-override). SPD cases are on "recommended" only. The tuning/heldout split is
+ordering) and "ipopt" (u = 1e-8, smf defaults: AutoParallel ordering + Predicted
+auto-matching, i.e. what the MA97 plugin runs inside IPOPT; no per-case
+"ordering" override, ruling R41). SPD cases are on "recommended" only. The tuning/heldout split is
 drawn per class at matrix level (both tracks share it) with a fixed seed.
 
 Usage:
@@ -257,8 +258,9 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
             e["track"] = track
             if c["matrix_id"] in REPORT_ONLY:
                 e["report_only"] = True   # singular: robustness reporting only
-            if track == "ipopt":
-                e["ordering"] = "matching"   # run.py -> bench_replay --ordering
+            # R41: no "ordering" pin on the ipopt track -- smf runs its defaults there,
+            # as the plugin does. run.py still honours a per-case "ordering" field.
+            e.pop("ordering", None)
             cases.append(e)
     cases.sort(key=lambda e: (["small_kkt", "large_kkt", "hard_indef", "spd"].index(e["class"]),
                               e["n"], e["matrix_id"], e["track"]))
@@ -269,7 +271,7 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
         "heldout_fraction": HELDOUT_FRACTION,
         "tracks": {
             "recommended": "pivot u = 0.01, default ordering",
-            "ipopt": "pivot u = 1e-8 (bench_replay track), ordering = matching (per-case override)",
+            "ipopt": "pivot u = 1e-8 (bench_replay track), smf default ordering (AutoParallel + Predicted matching, as the plugin)",
         },
         "solvers": ["smf", "ma27", "mumps", "mkl_pardiso", "cholmod", "ma57", "ma97", "ssids"],
         "required_baselines": [],

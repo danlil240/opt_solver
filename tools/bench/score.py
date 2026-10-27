@@ -4,7 +4,14 @@
 Per (class, track, thread count) it reports, for a chosen split:
   * shifted geometric mean of subject-time / best-accurate-competitor-time
     (shift 10 ms; the subject itself and any record failing the accuracy gate
-    are never the "best competitor"),
+    are never the "best competitor"). The competitor set is fixed per class and
+    does not depend on the thread count (ruling R43):
+      indefinite (small_kkt, large_kkt, hard_indef): ma57, ma97, ssids,
+        mkl_pardiso, mumps
+      spd: cholmod, mkl_pardiso, ma57, ma97, ssids, mumps
+    Other solvers (ma27, cudss, ...) are reference columns only. A set member
+    with no record in a thread-count table (e.g. a serial-only solver in the
+    8-thread table) is reported as missing for that table,
   * solved counts, accuracy failures and hard failures per solver,
   * backward error after refinement (worst eta_inf / omega),
   * median time per phase: analyse, first factorization, warm refactorization,
@@ -39,6 +46,14 @@ OMEGA_GATE = 1e-8
 DEFAULT_SHIFT_MS = 10.0
 DEFAULT_TAUS = [1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]
 CLASS_ORDER = ["small_kkt", "large_kkt", "hard_indef", "spd"]
+INDEF_COMPETITORS = ("ma57", "ma97", "ssids", "mkl_pardiso", "mumps")
+SPD_COMPETITORS = ("cholmod", "mkl_pardiso", "ma57", "ma97", "ssids", "mumps")
+
+
+def competitor_set(cls: str) -> tuple[str, ...]:
+    """Solvers eligible as "best competitor" for a class (R43). Fixed per class,
+    independent of thread count; ma27 / cudss are reference columns only."""
+    return SPD_COMPETITORS if cls == "spd" else INDEF_COMPETITORS
 TRACK_ORDER = ["recommended", "ipopt"]
 
 
@@ -270,6 +285,8 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
     for (cls, track, threads), per_case in tables.items():
         solver_ids = sorted({s for per in per_case.values() for s in per},
                             key=lambda s: (s != subject, s))
+        eligible = [s for s in competitor_set(cls) if s != subject]
+        missing_competitors = [s for s in eligible if s not in solver_ids]
         stats = {s: {"total": 0, "solved": 0, "inaccurate": 0, "failed": 0,
                      "unavailable": 0, "inertia_pass": 0, "inertia_checked": 0,
                      "eta_max": None, "omega_max": None,
@@ -318,7 +335,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
 
             subj = per.get(subject)
             comp = [(a["wall_ms"], sid) for sid, a in per.items()
-                    if sid != subject and a["status"] == "ok" and a["wall_ms"] is not None]
+                    if sid in eligible and a["status"] == "ok" and a["wall_ms"] is not None]
             if subj is None or subj["status"] == "unavailable":
                 continue
             if subj["status"] != "ok":
@@ -344,6 +361,8 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 "best_solver_counts": dict(best_counts),
                 "subject_unsolved": unsolved_subject,
                 "no_accurate_competitor": no_competitor,
+                "competitor_set": eligible,
+                "missing_competitors": missing_competitors,
             },
             "report_only": report_only,
             "times": times,
@@ -385,6 +404,12 @@ def render(result: dict[str, Any], split: str) -> str:
                     f"{ratio['subject']} unsolved on {ratio['subject_unsolved']}; "
                     f"dropped for no accurate competitor: {ratio['no_accurate_competitor']}; "
                     f"best competitor counts: {ratio['best_solver_counts'] or '-'}")
+                out.append("")
+                missing = ratio.get("missing_competitors") or []
+                out.append(
+                    f"Competitor set ({cls}): {', '.join(ratio.get('competitor_set', [])) or '-'}; "
+                    f"missing in this table: {', '.join(missing) if missing else 'none'}"
+                    + (" (ratio is against the competitors present only)" if missing else ""))
                 out.append("")
                 ip = track == "ipopt"
                 out.append("| solver | solved/total | inaccurate | failed | unavail | "
