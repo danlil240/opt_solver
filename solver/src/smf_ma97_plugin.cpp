@@ -632,6 +632,10 @@ extern "C"
         }
         g_stats.last_call_was_factor = true;
 
+        // This early return comes before the inexact-inertia guard below on
+        // purpose: an aborted factor (SMF_IPM_ABORT only, off by default)
+        // is already rejected by IPOPT through its num_neg (above the
+        // learned expectation), and the solve that completes it refactors.
         // Wrong inertia: the factorization stopped once its negative pivots
         // exceeded the learned expectation. MA97 has no status for it, so it
         // is a successful factor whose num_neg (the partial count, already

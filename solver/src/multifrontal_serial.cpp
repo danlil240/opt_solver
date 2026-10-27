@@ -280,6 +280,18 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   std::size_t new_cv_top = P.cv_top;
   std::size_t new_cr_top = P.cr_top;
   Int *cm = P.cmap->data();
+  // Without `pop`, children's blocks live in node buffers: back to the pool
+  // once this front no longer reads them (after its kernel, or on failure).
+  const auto release_child_blocks = [&] {
+    if (pop) return;
+    for (const Int c : kids) {
+      const std::size_t ci = static_cast<std::size_t>(c);
+      if (ws.cb_size[ci] > 0 && ws.cb_owner[ci] < 0) {
+        NodeBlock &nb = (*cx.node_blocks)[ci];
+        cx.pool->release(std::move(nb.values), nb.cap);
+      }
+    }
+  };
   LdltKernelResult kr;
   int aptp_failed = 0;
   // Assemble and factor; at most twice. Children's contribution blocks (the
@@ -345,6 +357,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       if (work[need] != kWorkCanary) {
         assert(false && "APTP front kernel overran its workspace");
         for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+        release_child_blocks();
         return ErrorCode::InternalError;
       }
       aptp_failed = ar.num_failed;
@@ -371,21 +384,19 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     budget_front = true;
     prm = &budget_prm;
     aprm = nullptr;
+    ++P.st.budget_retries;
+    // The kernels permuted rows[] into pivot order (sym_swap / view_swap)
+    // but not pos[], which assembly scatters through: put rows[] back in
+    // assembly order, rows[pos[r]] = r, with the child map as scratch.
+    for (int t = 0; t < f; ++t) cm[pos[rows[t]]] = rows[t];
+    std::copy(cm, cm + f, rows);
   }
   st.aptp_failed += aptp_failed;
   const int p = kr.num_accepted;
   if (budget_on && !is_root) bs->count += num_elig - p;
   P.cv_top = new_cv_top;
   P.cr_top = new_cr_top;
-  if (!pop) {
-    for (const Int c : kids) {
-      const std::size_t ci = static_cast<std::size_t>(c);
-      if (ws.cb_size[ci] > 0 && ws.cb_owner[ci] < 0) {
-        NodeBlock &nb = (*cx.node_blocks)[ci];
-        cx.pool->release(std::move(nb.values), nb.cap);
-      }
-    }
-  }
+  release_child_blocks();
   st.inertia.positive += kr.inertia.positive;
   st.inertia.negative += kr.inertia.negative;
   st.inertia.zero += kr.inertia.zero;
@@ -516,6 +527,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.delayed += from.delayed;
   to.static_pivots += from.static_pivots;
   to.aptp_failed += from.aptp_failed;
+  to.budget_retries += from.budget_retries;
   to.flops += from.flops;
   to.max_front = std::max(to.max_front, from.max_front);
 }
@@ -530,6 +542,11 @@ double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
 
 // Below this much front work (sum of f^2 p) thread start-up is not repaid.
 constexpr double kTreeParallelMinWork = 2e7;
+
+// Control::delay_budget counts delays per region of a tree partition made
+// with this nominal thread count, whatever Control::num_threads is, so every
+// thread count makes the same static/threshold choice per front.
+constexpr int kBudgetNominalThreads = 16;
 
 // Tree parallelism: split the assembly tree into independent subtrees of
 // bounded work (largest-first, the heaviest subtree root moves to the top
@@ -734,25 +751,70 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Tree-parallel when there are threads to use and at least two subtrees.
   // Plain std::threads, not OpenMP: MSVC's OpenMP runtime would be loaded
   // next to the ones MKL / CHOLMOD / OpenBLAS bring, which aborts.
+  //
+  // With a delay budget the partition is the budget's (kBudgetNominalThreads),
+  // for every num_threads including 1: its subtrees are the budget's counting
+  // regions, so scheduling uses them as they are.
   int threads = 1;
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
   std::vector<std::uint8_t> top;
-  if (ctrl.num_threads > 1 && ns >= 2) {
+  if (delay_budget >= 0 && ns >= 2) {
+    subtrees = partition_subtrees(keep, kBudgetNominalThreads, top);
+  } else if (ctrl.num_threads > 1 && ns >= 2) {
     subtrees = partition_subtrees(keep, ctrl.num_threads, top);
-    if (subtrees.size() >= 2)
-      threads = std::min<int>(ctrl.num_threads, static_cast<int>(subtrees.size()));
   }
+  if (ctrl.num_threads > 1 && subtrees.size() >= 2)
+    threads = std::min<int>(ctrl.num_threads, static_cast<int>(subtrees.size()));
+
+  // Delay budget regions (Control::delay_budget). Without a partition (a
+  // tree too light to split): one running count over the whole postorder.
+  // Otherwise each subtree counts from zero over its own postorder, and a
+  // top front starts from what its children ended with (counts summed,
+  // spent if any child was): node_budget holds that end state of every
+  // subtree root and top front. All of it depends on the tree alone.
+  const bool budget_regions = delay_budget >= 0 && !subtrees.empty();
+  std::vector<BudgetState> node_budget;
+  if (budget_regions) node_budget.assign(ns, BudgetState{});
+  const auto top_in_state = [&](Int s) {
+    BudgetState in;
+    for (const Int c : keep.children(s)) {
+      const BudgetState &cb = node_budget[static_cast<std::size_t>(c)];
+      in.count += cb.count;
+      in.spent = in.spent || cb.spent;
+    }
+    return in;
+  };
 
   if (threads <= 1) {
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static};
-    // One running budget over the whole postorder.
-    BudgetState budget;
+    // The budget regions in postorder: subtree ranges are contiguous.
+    std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
+    constexpr std::size_t npos = static_cast<std::size_t>(-1);
+    if (budget_regions) {
+      region_end.assign(keep.postorder.size(), npos);
+      for (const auto &[lo, hi] : subtrees)
+        for (std::size_t k = lo; k <= hi; ++k) region_end[k] = hi;
+    }
+    BudgetState budget;  // the running state of the current region
     std::size_t k = 0;
     for (; k < keep.postorder.size(); ++k) {
-      status = process_front(cx, main, 0, keep.postorder[k], true, &budget);
+      const Int sk = keep.postorder[k];
+      BudgetState top_state;
+      BudgetState *bs = &budget;
+      if (budget_regions) {
+        if (region_end[k] == npos) {
+          top_state = top_in_state(sk);
+          bs = &top_state;
+        } else if (k == 0 || region_end[k - 1] != region_end[k]) {
+          budget = BudgetState{};  // first front of a subtree
+        }
+      }
+      status = process_front(cx, main, 0, sk, true, bs);
+      if (budget_regions && (region_end[k] == npos || region_end[k] == k))
+        node_budget[static_cast<std::size_t>(sk)] = *bs;
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
         status = ErrorCode::InertiaExceeded;
       if (status != ErrorCode::Success) break;
@@ -830,18 +892,24 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         // Delay budget: each subtree from zero over its own postorder, so the
         // outcome does not depend on which thread takes it or when.
         BudgetState budget;
+        bool complete = true;
         for (std::size_t k = lo; k <= hi; ++k) {
           if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
             break;
           const int neg0 = P.st.inertia.negative;
-          const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true, &budget);
+          const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
+                                            budget_regions ? &budget : nullptr);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
+            complete = false;
             break;
           }
           P.diag_marks.emplace_back(keep.postorder[k], P.diag->size());
           if (armed) count_negatives(P.st.inertia.negative - neg0);
         }
+        // The subtree root's end state, read by the top part after the join.
+        if (budget_regions && complete)
+          node_budget[static_cast<std::size_t>(keep.postorder[hi])] = budget;
         subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
       }
     });
@@ -876,23 +944,15 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::mutex mtx;
     std::condition_variable cv;
     int free_threads = threads;
-    // Delay budget of the top part: a front starts from the delays of every
-    // subtree plus those of its top-part descendants (and is spent if any of
-    // them spent it). Children finish before their parent becomes ready and
-    // pass their state up under the mutex, so the state a front sees is
-    // fixed by the partition, whatever the completion order.
-    std::vector<BudgetState> top_budget;
-    int top_base = 0;
-    if (delay_budget >= 0) {
-      for (int t = 0; t < threads; ++t) top_base += tpass[static_cast<std::size_t>(t)].st.delayed;
-      top_budget.assign(ns, BudgetState{top_base, false});
-    }
     if (failed.load() == static_cast<int>(ErrorCode::Success)) {
       run_pool([&](int tid) {
         FrontPass &P = tpass[static_cast<std::size_t>(tid)];
         for (;;) {
           Int s = -1;
           int blas_threads = 1;
+          // Delay budget of a top front: its children's end states, all final
+          // (and published under the mutex) once it is ready.
+          BudgetState top_state;
           {
             std::unique_lock<std::mutex> lk(mtx);
             cv.wait(lk, [&] {
@@ -904,11 +964,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             ready.pop_back();
             blas_threads = std::max(1, free_threads / static_cast<int>(ready.size() + 1));
             free_threads -= blas_threads;
+            if (budget_regions) top_state = top_in_state(s);
           }
           ErrorCode e;
           const int neg0 = P.st.inertia.negative;
-          // Ready means every child has finished: s's own state is final.
-          BudgetState *bs = top_budget.empty() ? nullptr : &top_budget[static_cast<std::size_t>(s)];
+          BudgetState *bs = budget_regions ? &top_state : nullptr;
           {
             BlasThreadGuard blas(blas_threads);
             e = process_front(cx, P, 1 + tid, s, false, bs);
@@ -924,13 +984,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             done_order.push_back({tid, P.steps->size() - 1, s});
             P.diag_marks.emplace_back(s, P.diag->size());
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
-            if (bs != nullptr && parent >= 0 && top[static_cast<std::size_t>(parent)]) {
-              // Pass the delays of this front and its top-part descendants
-              // (its count above the shared base) and its spent flag up.
-              BudgetState &pb = top_budget[static_cast<std::size_t>(parent)];
-              pb.count += bs->count - top_base;
-              pb.spent = pb.spent || bs->spent;
-            }
+            if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
             if (parent >= 0 && top[static_cast<std::size_t>(parent)] &&
                 --pending[static_cast<std::size_t>(parent)] == 0)
               ready.push_back(parent);

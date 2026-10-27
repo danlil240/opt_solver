@@ -685,31 +685,33 @@ TEST(DelayedPivots, BudgetResetsOnRefactor) {
         << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
 }
 
-// Tree-parallel engine: the budget is evaluated per subtree (each subtree's
-// fronts in postorder, from zero) and, at the top of the tree, from the
-// subtrees' total plus the front's own top-part descendants. Both are fixed
-// by the partition, so repeated runs agree exactly.
+// The budget counts per region of a tree partition fixed by the tree alone
+// (each subtree from zero over its postorder; a top front from its
+// children's end states), for every num_threads, 1 included: 1, 2 and 8
+// threads make the same static/threshold choice on every front.
 TEST(DelayedPivots, BudgetDeterministicUnderThreads) {
     const CscLower A = delayed_kkt3d(22, 1000, 8.0);
     const int n = A.n;
     Control ctrl = budget_control();
     ctrl.delay_budget = 25;
-    ctrl.num_threads = 4;
     Solver solver;
     Info info;
     auto ak = solver.analyse(A, ctrl, info);
     ASSERT_NE(ak.get(), nullptr);
     std::vector<double> b(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = std::sin(0.01 * i) + 1.0;
-    int delays_ref = -1, static_ref = -1, neg_ref = -1;
-    for (int rep = 0; rep < 3; ++rep) {
+    std::vector<double> x_ref;
+    Info ref;
+    for (int threads : {1, 2, 8, 2}) {
+        ctrl.num_threads = threads;
         NumericWorkspace ws;
         FactorKeep fk;
         Info ri;
         ASSERT_EQ(solver.factor(*ak, A, ctrl, ri, fk, ws), FactorStatus::Success);
-        std::printf("[Budget threads] rep %d: subtrees=%d delays=%d static=%d neg=%d\n", rep,
-                    ri.parallel_subtrees, ri.delayed_pivots, ri.static_pivots, ri.num_negative);
-        EXPECT_GT(ri.parallel_subtrees, 0);
+        std::printf("[Budget threads] %d threads: subtrees=%d delays=%d static=%d retries=%d neg=%d\n",
+                    threads, ri.parallel_subtrees, ri.delayed_pivots, ri.static_pivots,
+                    ri.delay_budget_retries, ri.num_negative);
+        if (threads > 1) EXPECT_GT(ri.parallel_subtrees, 0);
         EXPECT_GT(ri.static_pivots, 0);
         EXPECT_FALSE(ri.inertia_exact);
         std::vector<double> x = b;
@@ -719,14 +721,108 @@ TEST(DelayedPivots, BudgetDeterministicUnderThreads) {
         const auto val = smf::bench::validate(A, b, x, 1);
         EXPECT_TRUE(smf::bench::is_qualified_validation(val))
             << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
-        if (rep == 0) {
-            delays_ref = ri.delayed_pivots;
-            static_ref = ri.static_pivots;
-            neg_ref = ri.num_negative;
-        } else {
-            EXPECT_EQ(ri.delayed_pivots, delays_ref);
-            EXPECT_EQ(ri.static_pivots, static_ref);
-            EXPECT_EQ(ri.num_negative, neg_ref);
+        if (x_ref.empty()) {
+            x_ref = x;
+            ref = ri;
+            continue;
         }
+        EXPECT_EQ(ri.delayed_pivots, ref.delayed_pivots) << threads;
+        EXPECT_EQ(ri.static_pivots, ref.static_pivots) << threads;
+        EXPECT_EQ(ri.delay_budget_retries, ref.delay_budget_retries) << threads;
+        EXPECT_EQ(ri.num_positive, ref.num_positive) << threads;
+        EXPECT_EQ(ri.num_negative, ref.num_negative) << threads;
+        EXPECT_EQ(ri.num_zero, ref.num_zero) << threads;
+        // Same factor up to BLAS rounding (threaded in the top part).
+        double diff = 0.0, mag = 0.0;
+        for (int i = 0; i < n; ++i) {
+            diff = std::max(diff, std::abs(x[static_cast<std::size_t>(i)] - x_ref[static_cast<std::size_t>(i)]));
+            mag = std::max(mag, std::abs(x_ref[static_cast<std::size_t>(i)]));
+        }
+        EXPECT_LE(diff, 1e-10 * mag) << threads;
     }
+}
+
+namespace {
+
+// Children A = [0, 4) and B = [4, 8) of a root C = [8, 10), identity order,
+// each block structurally dense, every A / B column coupled to both C rows.
+// In A, columns 0 and 1 have d = 0.01, no coupling inside A and a 1.0 to C
+// row 8 / 9: at u = 0.1 no 1x1 or 2x2 pivot accepts them, so A's kernel
+// pivots columns 2 and 3 first (permuting the front's rows) and delays 0
+// and 1. As 1x1 pivots they are harmless (|d| = 0.01, L = 100).
+CscLower overshoot_matrix() {
+    const Int n = 10;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    const auto add = [&](Int i, double v) {
+        A.row_idx.push_back(i);
+        A.values.push_back(v);
+    };
+    for (Int j = 0; j < n; ++j) {
+        if (j < 8) {
+            const Int blk_end = j < 4 ? 4 : 8;
+            for (Int i = j; i < blk_end; ++i) {
+                double v;
+                if (i == j) v = (j == 0 || j == 1) ? 0.01 : (j % 2 == 0 ? 4.0 : -3.0) + 0.1 * j;
+                else v = (j < 2 || i < 2) ? 0.0 : 0.5;
+                add(i, v);
+            }
+            add(8, j == 0 ? 1.0 : (j == 1 ? 0.0 : 0.1 * (j + 1)));
+            add(9, j == 1 ? 1.0 : (j == 0 ? 0.0 : -0.05 * (j + 1)));
+        } else {
+            add(j, j == 8 ? 5.0 : -6.0);
+            if (j == 8) add(9, 0.3);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+} // namespace
+
+// The overshoot retry: the front that would take the count past the budget
+// is assembled again and static-pivoted. Its first attempt left the front's
+// rows in the kernel's pivot order; the retry must label the reassembled
+// rows correctly (an exact factor: no pivot is raised, so the solve is
+// qualified without refinement).
+TEST(DelayedPivots, BudgetOvershootRetryKeepsRowLabels) {
+    const CscLower A = overshoot_matrix();
+    std::vector<Int> perm(static_cast<std::size_t>(A.n));
+    std::iota(perm.begin(), perm.end(), Int{0});
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::UserSupplied;
+    ctrl.user_perm = perm.data();
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.nemin = 1;
+    ctrl.pivot_u = 0.1;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_GE(ak->supernodes.size(), 3u);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = 1.0 + 0.3 * static_cast<double>(i);
+
+    // Unlimited: A delays its two columns to C.
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(info.delayed_pivots, 2);
+    const int pos_ref = info.num_positive, neg_ref = info.num_negative;
+
+    ctrl.delay_budget = 1;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.delay_budget_retries, 1);
+    EXPECT_LE(info.delayed_pivots, 1);
+    EXPECT_EQ(info.static_pivots, 0);  // |d| = 0.01 is above the static tolerance
+    EXPECT_TRUE(info.inertia_exact);
+    EXPECT_EQ(info.num_positive, pos_ref);
+    EXPECT_EQ(info.num_negative, neg_ref);
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1), 0);
+    const auto val = smf::bench::validate(A, b, x, 1);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
 }

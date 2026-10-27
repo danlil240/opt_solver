@@ -62,6 +62,9 @@ struct Info {
     /// fallback_static_pivot_tol): the inertia counts are then those of a
     /// perturbed matrix, not necessarily of A.
     bool         inertia_exact          = true;
+    /// Control::delay_budget: fronts factored a second time, with the static
+    /// path, because their delays would have taken the count past the budget.
+    int          delay_budget_retries   = 0;
     /// Fully summed columns the APTP front kernel failed (summed over
     /// fronts, before the TPP fallback; Control::front_kernel). Those the
     /// fallback could not pivot either are also in delayed_pivots.
