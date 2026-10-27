@@ -35,6 +35,8 @@ struct AdapterStats {
     Outcome outcome = Outcome::Failed;
     std::string reason;
     double analyse_ms = 0.0;
+    bool has_analyse_phases = false;  // smf adapters: Info::analyse_phases of the last analyse
+    AnalysePhaseSeconds analyse_phases;
     double factor_ms = 0.0;
     double solve_ms = 0.0;
     int inertia_pos = 0;

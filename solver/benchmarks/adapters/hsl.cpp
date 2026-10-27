@@ -297,6 +297,8 @@ public:
         ak_ = solver_.analyse(A, ctrl_, info);
         const auto t1 = Clock::now();
         stats_.analyse_ms = ms_since(t0, t1);
+        stats_.has_analyse_phases = true;
+        stats_.analyse_phases = info.analyse_phases;
         if (!ak_ || info.status != ErrorCode::Success) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "smf::Solver::analyse failed";
@@ -479,6 +481,10 @@ public:
         const double analyse_ms = analysed_ ? 0.0 : 1e3 * info.analyse_seconds;
         analysed_ = analysed_ || session_.analysis_keep() != nullptr;
         stats_.analyse_ms += analyse_ms;
+        if (analyse_ms > 0.0) {
+            stats_.has_analyse_phases = true;
+            stats_.analyse_phases = info.analyse_phases;
+        }
         stats_.factor_ms = ms - analyse_ms;
         const InertiaCounts in = session_.inertia();
         stats_.inertia_pos = in.positive;

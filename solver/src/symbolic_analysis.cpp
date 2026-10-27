@@ -116,6 +116,14 @@ namespace smf
     std::unique_ptr<AnalysisKeep> Solver::analyse(const CscLower &A, const Control &control, Info &info)
     {
         const auto t0 = std::chrono::steady_clock::now();
+        // Phase timing: lap(slot) charges the time since the previous lap.
+        AnalysePhaseSeconds phases;
+        auto t_lap = t0;
+        const auto lap = [&](double &slot) {
+            const auto now = std::chrono::steady_clock::now();
+            slot += std::chrono::duration<double>(now - t_lap).count();
+            t_lap = now;
+        };
 
         info = Info{}; // zero-initialise
         info.status = ErrorCode::Success;
@@ -167,10 +175,14 @@ namespace smf
             keep->orig_col_ptr = A.col_ptr;
             keep->orig_row_idx = A.row_idx;
             keep->cleaned = std::move(cleaned.clean);
-            const auto t1 = std::chrono::steady_clock::now();
+            lap(phases.check);
+            const auto t1 = t_lap;
             info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
+            info.analyse_phases = phases;
             return keep;
         }
+
+        lap(phases.check);
 
         // Step 2: choose ordering strategy.
         // Identity ordering is optimal for genuinely banded matrices (the
@@ -200,6 +212,7 @@ namespace smf
         // off-diagonal. Indefinite PDE matrices have under 1% such columns.
         const CscLower &C = cleaned.clean;
         bool auto_matching = false;
+        lap(phases.ordering);
         if (auto_order && !use_identity_ordering && n >= kAutoMatchingMinN &&
             control.matrix_type == MatrixType::RealSymmetricIndefinite &&
             C.values.size() == C.row_idx.size())
@@ -233,6 +246,7 @@ namespace smf
         if (auto_matching)
             auto_matching = matching_order_lower_csc(C, kMatchingPairTol, matching_perm,
                                                      analyse_scratch_, &matching_stats);
+        lap(phases.matching);
 
         if (user_order)
         {
@@ -255,10 +269,12 @@ namespace smf
             // looks expensive.
             // Matching falls back to plain AMD when it cannot run (no values,
             // structurally singular).
+            lap(phases.ordering);
             const bool matching_ordered =
                 control.ordering == OrderingMethod::Matching &&
                 matching_order_lower_csc(C, kMatchingPairTol, perm,
                                          analyse_scratch_, &matching_stats);
+            lap(phases.matching);
             const bool amd_backend =
                 control.ordering == OrderingMethod::AutoSerial ||
                 control.ordering == OrderingMethod::AMD ||
@@ -297,6 +313,8 @@ namespace smf
                 info.ordering_used = static_cast<int>(used);
             }
         }
+
+        lap(phases.ordering);
 
         // Temporaries live in a solver-owned buffer reused across analyses
         // (fresh allocations are dominated by page faults at these sizes).
@@ -338,6 +356,7 @@ namespace smf
         std::vector<Int> parentf(sn_sz);
         // Step 5: elimination tree and exact column counts of the ordering.
         symbolic_counts(perm, etree0, colcount0);
+        lap(phases.etree_counts);
 
         // AutoParallel on large matrices: METIS costs several us per vertex
         // (up to ~85% of analysis) and only pays off when AMD's factor is
@@ -368,6 +387,8 @@ namespace smf
             }
         }
 
+        lap(phases.ordering);
+
         // Auto matching: the compressed ordering keeps 2x2 pivot pairs
         // together, which AMD's lower predicted fill ignores (AMD's factor
         // then delays pivots by the thousand). Prefer it unless its exact
@@ -385,6 +406,8 @@ namespace smf
                 info.ordering_used = static_cast<int>(OrderingMethod::Matching);
             }
         }
+
+        lap(phases.matching);
 
         // Step 6: relabel by the etree postorder (fundamental supernodes
         // become contiguous), then relaxed amalgamation, which returns a
@@ -450,6 +473,8 @@ namespace smf
         etree.postorder.assign(inv_order, inv_order + n);
         etree.max_depth = etree0.max_depth;
 
+        lap(phases.amalgamate);
+
         // Step 7: permuted pattern by double transpose. Walking the final
         // row form in increasing row order emits every permuted column
         // already sorted and records where each cleaned entry lands (otp).
@@ -492,9 +517,7 @@ namespace smf
             std::reverse(ch.begin(), ch.end());
         }
 
-        // Step 9: record timing
-        const auto t1 = std::chrono::steady_clock::now();
-        info.analyse_seconds = std::chrono::duration<double>(t1 - t0).count();
+        lap(phases.assembly_tree);
 
         // Step 10: assemble AnalysisKeep
         auto keep = std::make_unique<AnalysisKeep>();
@@ -530,6 +553,12 @@ namespace smf
         // factor less accurate, so ScalingMethod::Auto then applies none.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+
+        // Step 9: record timing (after the keep is assembled, so the phases
+        // partition analyse_seconds).
+        lap(phases.keep_build);
+        info.analyse_seconds = std::chrono::duration<double>(t_lap - t0).count();
+        info.analyse_phases = phases;
 
         return keep;
     }

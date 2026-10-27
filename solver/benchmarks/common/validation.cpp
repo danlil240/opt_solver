@@ -129,6 +129,22 @@ std::string RunRecord::to_json_line() const {
         << "\"reason\":\"" << json_escape(reason) << "\","
         << "\"analyse_ms\":";
     write_json_double(oss, analyse_ms);
+    if (has_analyse_phases) {
+        const auto ms = [&](const char *key, double sec) {
+            oss << ",\"" << key << "\":";
+            write_json_double(oss, 1e3 * sec);
+        };
+        oss << ",\"analyse_phases\":{";
+        oss << "\"check\":";
+        write_json_double(oss, 1e3 * analyse_phases.check);
+        ms("ordering", analyse_phases.ordering);
+        ms("matching", analyse_phases.matching);
+        ms("etree_counts", analyse_phases.etree_counts);
+        ms("amalgamate", analyse_phases.amalgamate);
+        ms("assembly_tree", analyse_phases.assembly_tree);
+        ms("keep_build", analyse_phases.keep_build);
+        oss << "}";
+    }
     oss << ",\"factor_ms\":";
     write_json_double(oss, factor_ms);
     oss << ",\"solve_ms\":";

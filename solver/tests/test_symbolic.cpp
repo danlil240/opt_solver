@@ -162,4 +162,41 @@ TEST(Symbolic, AutoMatchingScaleOnlyWithMatchingOrdering) {
     EXPECT_TRUE(ak->matching_scale.empty());
 }
 
+// Per-step analyse timing: every phase is non-negative, ordering is measured,
+// and the phases account for (nearly) all of analyse_seconds.
+TEST(Symbolic, AnalysePhasesSumToTotal) {
+    const Int g = 60, n = g * g;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (Int j = 0; j < n; ++j) {
+        const Int x = j % g, y = j / g;
+        A.row_idx.push_back(j);
+        A.values.push_back(4.0);
+        if (x + 1 < g) { A.row_idx.push_back(j + 1); A.values.push_back(-1.0); }
+        if (y + 1 < g) { A.row_idx.push_back(j + g); A.values.push_back(-1.0); }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    Info info;
+    Solver solver;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak, nullptr);
+    const AnalysePhaseSeconds &p = info.analyse_phases;
+    EXPECT_GE(p.check, 0.0);
+    EXPECT_GT(p.ordering, 0.0);
+    EXPECT_GE(p.matching, 0.0);
+    EXPECT_GE(p.etree_counts, 0.0);
+    EXPECT_GE(p.amalgamate, 0.0);
+    EXPECT_GE(p.assembly_tree, 0.0);
+    EXPECT_GE(p.keep_build, 0.0);
+    const double sum = p.check + p.ordering + p.matching + p.etree_counts +
+                       p.amalgamate + p.assembly_tree + p.keep_build;
+    ASSERT_GT(info.analyse_seconds, 0.0);
+    EXPECT_LE(sum, info.analyse_seconds * 1.0000001);
+    EXPECT_GE(sum, 0.8 * info.analyse_seconds);
+}
+
 } // namespace smf

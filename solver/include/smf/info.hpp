@@ -4,6 +4,23 @@
 
 namespace smf {
 
+/// Wall time of each analyse phase (seconds). The phases partition
+/// Info::analyse_seconds: matching covers the maximum-product matching
+/// ordering/scaling work (including the auto-matching trial), ordering the
+/// rest of the ordering choice (AMD/METIS/identity), etree_counts the
+/// elimination tree and column counts, amalgamate the postorder relabelling
+/// and relaxed amalgamation, assembly_tree the permuted pattern plus
+/// assembly tree, keep_build the AnalysisKeep assembly.
+struct AnalysePhaseSeconds {
+    double check         = 0.0;
+    double ordering      = 0.0;
+    double matching      = 0.0;
+    double etree_counts  = 0.0;
+    double amalgamate    = 0.0;
+    double assembly_tree = 0.0;
+    double keep_build    = 0.0;
+};
+
 struct Info {
     // Top-level status
     ErrorCode    status              = ErrorCode::Success;
@@ -48,6 +65,7 @@ struct Info {
 
     // Timings (seconds)
     double       analyse_seconds        = 0.0;
+    AnalysePhaseSeconds analyse_phases;
     double       factor_seconds         = 0.0;
     double       solve_seconds          = 0.0;
     double       refinement_seconds     = 0.0;

@@ -2,9 +2,11 @@
 
 #if __has_include("smf/csc_matrix.hpp")
 #include "smf/csc_matrix.hpp"
+#include "smf/info.hpp"
 #include "smf/types.hpp"
 #else
 #include "../../include/smf/csc_matrix.hpp"
+#include "../../include/smf/info.hpp"
 #include "../../include/smf/types.hpp"
 #endif
 
@@ -58,6 +60,8 @@ struct RunRecord {
     Outcome outcome = Outcome::Failed;
     std::string reason;
     double analyse_ms = 0.0;
+    bool has_analyse_phases = false;  // smf solvers only
+    AnalysePhaseSeconds analyse_phases;  // seconds, as Info::analyse_phases
     double factor_ms = 0.0;
     double solve_ms = 0.0;
     double refine_ms = 0.0;

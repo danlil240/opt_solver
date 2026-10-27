@@ -572,10 +572,17 @@ int main(int argc, char **argv) {
         const auto t0 = std::chrono::steady_clock::now();
         out_a = adapter->analyse(A);
         const double analyse_ms = adapter->stats().analyse_ms;
+        bool has_phases = adapter->stats().has_analyse_phases;
+        smf::AnalysePhaseSeconds phases = adapter->stats().analyse_phases;
         if (out_a == smf::bench::Outcome::Success) {
             for (int step = 0; step < kSeqSteps; ++step) {
                 out_f = adapter->factor(seq_values[step]);
                 total_factor_ms += adapter->stats().factor_ms;
+                // The IpmSession adapter runs the deferred analysis in factor().
+                if (step == 0 && !has_phases && adapter->stats().has_analyse_phases) {
+                    has_phases = true;
+                    phases = adapter->stats().analyse_phases;
+                }
                 if (!ipm_static.empty() && out_f == smf::bench::Outcome::Singular) {
                     const auto fst = adapter->stats();
                     skipped[static_cast<std::size_t>(step)] = 1;
@@ -628,6 +635,8 @@ int main(int argc, char **argv) {
 
         const auto st = adapter->stats();
         rec.analyse_ms = analyse_ms;
+        rec.has_analyse_phases = has_phases;
+        rec.analyse_phases = phases;
         rec.factor_ms = total_factor_ms;
         rec.solve_ms = total_solve_ms;
         rec.refine_ms = total_refine_ms;
@@ -697,6 +706,8 @@ int main(int argc, char **argv) {
         const auto st = adapter->stats();
         const double inv_batch = 1.0 / static_cast<double>(batch_count);
         rec.analyse_ms = sum_a * inv_batch;
+        rec.has_analyse_phases = st.has_analyse_phases;  // last repetition's phases
+        rec.analyse_phases = st.analyse_phases;
         rec.factor_ms = sum_f * inv_batch;
         rec.solve_ms = sum_s * inv_batch;
         rec.wall_ms =
