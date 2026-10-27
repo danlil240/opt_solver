@@ -87,10 +87,15 @@ struct Control {
     // count over the postorder): there delayed_pivots <= delay_budget.
     // Otherwise each subtree of the partition counts from zero over its own
     // postorder and a front above them starts from the sum of its
-    // children's end counts (spent if any child's budget was), so 1, 2 or 8
-    // threads make the same choice on every front; but delayed_pivots can
-    // then exceed delay_budget (each subtree, and each branch above them,
-    // has its own budget), with any num_threads, 1 included.
+    // children's end counts (spent if any child's budget was). The regions
+    // do not depend on num_threads, but the delays counted in them do
+    // whenever the front kernel does: with top_tiles on (pivot_u >= 1e-6),
+    // the large top fronts use the tile kernel at num_threads > 1 and TPP at
+    // 1 thread, so "the same choice on every front at 1, 2 or 8 threads"
+    // holds only in deterministic mode (tiles at every thread count) or when
+    // no front is tiled. delayed_pivots can exceed delay_budget (each
+    // subtree, and each branch above them, has its own budget), with any
+    // num_threads, 1 included.
     int            delay_budget  = -1;
     // Diagonal regularization, off while reg_diag_sign is null (indefinite
     // only): after scaling, diagonal entry i gets
@@ -140,8 +145,10 @@ struct Control {
     // with num_threads BLAS threads. tree_parallel opts into the older
     // task-parallel engine instead, which measured slower everywhere.
     int            num_threads   = 1;
-    // num_threads > 1: fronts of at least 512 rows at the top of the tree
-    // that pivot with plain threshold pivoting (indefinite, no static or
+    // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
+    // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
+    // TPP at every thread count): fronts of at least 512 rows at the top of
+    // the tree that pivot with plain threshold pivoting (indefinite, no static or
     // in-order pivoting, not a fallback / delay-budget static front) are
     // factored as 2D tile tasks on the tree-parallel thread pool, serial
     // BLAS per task (APTP block-column structure, whatever front_kernel
@@ -153,8 +160,11 @@ struct Control {
     // Deterministic mode (determinism.hpp; also always on in an
     // SMF_DETERMINISTIC build): bitwise-identical ordering, factor, inertia
     // and solutions across runs and across num_threads. Costs serial BLAS
-    // per front, tiled large fronts at every thread count and a serial
-    // solve; tree_parallel is ignored.
+    // per front, tiled large fronts at every thread count (pivot_u >= 1e-6;
+    // below it no front is tiled) and a serial solve; tree_parallel is
+    // ignored. Exception: on a factorization aborted early
+    // (max_negative_pivots, InertiaExceeded) the status is deterministic but
+    // the partial inertia reported can depend on thread timing.
     bool           deterministic = false;
     uint64_t       memory_budget_bytes = 0; // 0 = unbounded
     int64_t        factor_parallel_min_flops = 10000;
@@ -188,7 +198,8 @@ struct Control {
     // every column's rows sorted, unique and in [j, n) (AnalysisKeep::
     // input_clean of an earlier analyse of the same pattern says so); only
     // the O(n) shape checks and the missing-diagonal count remain. Unclean
-    // input with false gives an undefined analysis.
+    // input with false is undefined behaviour: unsorted, duplicate or
+    // out-of-range rows lead to out-of-bounds writes and may corrupt memory.
     bool           check_input   = true;
 
     // Diagnostics / logging

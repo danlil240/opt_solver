@@ -11,12 +11,17 @@
 //     assembly-tree order (never completion order), every BLAS call runs on
 //     one thread, and the plain threshold fronts of >= 512 rows are factored
 //     as 2D tile tasks wherever they sit in the tree and whatever num_threads
-//     is (the tile kernel's result does not depend on its thread count); the
-//     top of the tree is laid out in postorder, not completion order;
+//     is (the tile kernel's result does not depend on its thread count) when
+//     pivot_u >= 1e-6 -- below it (IPOPT's 1e-8) no front is tiled at any
+//     thread count; the top of the tree is laid out in postorder, not
+//     completion order;
 //   - solve: one thread, fronts in postorder;
 //   - MKL builds: conditional numerical reproducibility,
 //     mkl_cbwr_set(MKL_CBWR_AVX2), once at first use (process-wide); on CPUs
 //     where MKL rejects that branch (non-Intel), MKL_CBWR_AUTO.
+// Exception: a factorization aborted early by Control::max_negative_pivots
+// (InertiaExceeded) has a deterministic status, but the partial inertia it
+// reports depends on which fronts finished first, i.e. on thread timing.
 // Default off.
 #pragma once
 #include "smf/control.hpp"

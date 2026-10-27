@@ -32,11 +32,7 @@ struct PivotChoice {
     int b = -1;
 };
 
-// A 1x1 pivot that passes the threshold test with |d| below this fraction
-// of its column's largest off-diagonal entry is "weak": it puts entries
-// above 1 / kWeakPivotRatio into L. Only IPOPT's tiny u (1e-8) admits such
-// pivots; for u >= kWeakPivotRatio the rule below never fires.
-constexpr double kWeakPivotRatio = 1e-6;
+// Weak 1x1 pivots: see kWeakPivotRatio (ldlt_kernel.hpp).
 
 // Element (i, j) of the symmetric front from its lower-triangle storage.
 inline double sym_at(const double *F, std::size_t ld, int i, int j) noexcept {

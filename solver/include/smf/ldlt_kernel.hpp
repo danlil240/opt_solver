@@ -64,6 +64,15 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
                                    double *work, int first = 0);
 
+/// A 1x1 pivot that passes the threshold test with |d| below this fraction
+/// of its column's largest off-diagonal entry is "weak": it puts entries
+/// above 1 / kWeakPivotRatio into L. The TPP and small-front kernels reject
+/// it in favour of a 2x2 / delay (select_pivot); only IPOPT's tiny u (1e-8)
+/// admits such pivots, for u >= kWeakPivotRatio the rule never fires. The
+/// APTP / tile kernels have no such rule, so the top-of-tree tiles
+/// (Control::top_tiles) are off below this u.
+inline constexpr double kWeakPivotRatio = 1e-6;
+
 /// Largest front the small-front kernels (ldlt_factor_small_front) take.
 inline constexpr int kSmallFrontMax = 32;
 

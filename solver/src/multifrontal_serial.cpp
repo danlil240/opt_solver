@@ -806,12 +806,18 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // every such front of >= kTopTileMinFront rows is tiled, wherever it sits
   // in the tree and whatever num_threads is (1 included); BLAS runs on one
   // thread everywhere, and the factor is laid out in postorder.
+  //
+  // Below pivot u = kWeakPivotRatio (1e-6; IPOPT's u = 1e-8) no front is
+  // tiled, at any thread count and in deterministic mode too: the tile
+  // (APTP) kernel lacks TPP's weak-1x1 rule, so those fronts keep the TPP
+  // kernel, the same one the 1-thread run uses (ruling R42).
   const bool det = deterministic_mode(ctrl);
   if (det) enable_blas_reproducibility();
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = ctrl.top_tiles && (ctrl.num_threads > 1 || det) && !posdef &&
-                        prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0 && ctrl.pivot_u > 0.0;
+                        prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0 &&
+                        ctrl.pivot_u >= kWeakPivotRatio;
   // Deterministic mode: the tile context of the fronts outside the top
   // phase (one thread, no helpers).
   const TileCtx serial_tc{};

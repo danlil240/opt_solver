@@ -21,13 +21,17 @@ namespace smf::bench {
 
 namespace {
 
+// |v| in long double. std::fabsl is declared by libstdc++ only from GCC 14;
+// std::fabs has a long double overload everywhere.
+inline long double abs_ld(long double v) noexcept { return std::fabs(v); }
+
 struct NeumaierSum {
     long double sum = 0.0L;
     long double c = 0.0L;
 
     void add(long double x) noexcept {
         long double t = sum + x;
-        if (std::fabsl(sum) >= std::fabsl(x)) {
+        if (abs_ld(sum) >= abs_ld(x)) {
             c += (sum - t) + x;
         } else {
             c += (x - t) + sum;
@@ -281,7 +285,7 @@ std::vector<Validation> validate_per_rhs(const CscLower& A,
     std::vector<NeumaierSum> row_abs_sum(n);
     NeumaierSum fro_sq_sum;
     for (const auto& e : entries) {
-        const long double av = std::fabsl(e.val);
+        const long double av = abs_ld(e.val);
         const long double sq = e.val * e.val;
         row_abs_sum[static_cast<std::size_t>(e.row)].add(av);
         if (e.row != e.col) {
@@ -316,8 +320,8 @@ std::vector<Validation> validate_per_rhs(const CscLower& A,
             }
             const long double bi = static_cast<long double>(b_col[i]);
             const long double xi = static_cast<long double>(x_col[i]);
-            norm_b_inf = std::max(norm_b_inf, std::fabsl(bi));
-            norm_x_inf = std::max(norm_x_inf, std::fabsl(xi));
+            norm_b_inf = std::max(norm_b_inf, abs_ld(bi));
+            norm_x_inf = std::max(norm_x_inf, abs_ld(xi));
             norm_b_sq.add(bi * bi);
             norm_x_sq.add(xi * xi);
         }
@@ -333,14 +337,14 @@ std::vector<Validation> validate_per_rhs(const CscLower& A,
             const std::size_t row = static_cast<std::size_t>(e.row);
             const std::size_t col = static_cast<std::size_t>(e.col);
             const long double v = e.val;
-            const long double av = std::fabsl(v);
+            const long double av = abs_ld(v);
             const long double x_c = static_cast<long double>(x_col[col]);
             const long double x_r = static_cast<long double>(x_col[row]);
             ax_sum[row].add(v * x_c);
-            abs_ax_sum[row].add(av * std::fabsl(x_c));
+            abs_ax_sum[row].add(av * abs_ld(x_c));
             if (row != col) {
                 ax_sum[col].add(v * x_r);
-                abs_ax_sum[col].add(av * std::fabsl(x_r));
+                abs_ax_sum[col].add(av * abs_ld(x_r));
             }
         }
 
@@ -352,11 +356,11 @@ std::vector<Validation> validate_per_rhs(const CscLower& A,
         for (std::size_t i = 0; i < n; ++i) {
             const long double bi = static_cast<long double>(b_col[i]);
             const long double res_i = bi - ax_sum[i].result();
-            const long double abs_res_i = std::fabsl(res_i);
+            const long double abs_res_i = abs_ld(res_i);
             norm_res_inf = std::max(norm_res_inf, abs_res_i);
             norm_res_sq.add(res_i * res_i);
 
-            const long double comp_denom = abs_ax_sum[i].result() + std::fabsl(bi);
+            const long double comp_denom = abs_ax_sum[i].result() + abs_ld(bi);
             long double omega_i = 0.0L;
             if (comp_denom > 0.0L) {
                 omega_i = abs_res_i / comp_denom;

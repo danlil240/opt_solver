@@ -10,13 +10,17 @@ namespace smf {
 
 namespace {
 
+// |v| in long double. std::fabsl is declared by libstdc++ only from GCC 14;
+// std::fabs has a long double overload everywhere.
+inline long double abs_ld(long double v) noexcept { return std::fabs(v); }
+
 struct NeumaierAcc {
     long double sum = 0.0L;
     long double c = 0.0L;
 
     void add(long double val) noexcept {
         long double t = sum + val;
-        if (std::fabsl(sum) >= std::fabsl(val)) {
+        if (abs_ld(sum) >= abs_ld(val)) {
             c += (sum - t) + val;
         } else {
             c += (val - t) + sum;
@@ -60,8 +64,8 @@ bool compute_residual_and_backward_error(
                 omega_out = inf;
                 return false;
             }
-            norm_b_inf = std::max(norm_b_inf, std::fabsl(static_cast<long double>(b_col[i])));
-            norm_x_inf = std::max(norm_x_inf, std::fabsl(static_cast<long double>(x_col[i])));
+            norm_b_inf = std::max(norm_b_inf, abs_ld(static_cast<long double>(b_col[i])));
+            norm_x_inf = std::max(norm_x_inf, abs_ld(static_cast<long double>(x_col[i])));
         }
 
         std::vector<NeumaierAcc> ax(static_cast<std::size_t>(n));
@@ -71,14 +75,14 @@ bool compute_residual_and_backward_error(
             const std::size_t r = static_cast<std::size_t>(e.row);
             const std::size_t c = static_cast<std::size_t>(e.col);
             const long double v = e.val;
-            const long double av = std::fabsl(v);
+            const long double av = abs_ld(v);
             const long double xc = static_cast<long double>(x_col[c]);
             const long double xr = static_cast<long double>(x_col[r]);
             ax[r].add(v * xc);
-            abs_ax[r].add(av * std::fabsl(xc));
+            abs_ax[r].add(av * abs_ld(xc));
             if (r != c) {
                 ax[c].add(v * xr);
-                abs_ax[c].add(av * std::fabsl(xr));
+                abs_ax[c].add(av * abs_ld(xr));
             }
         }
 
@@ -89,10 +93,10 @@ bool compute_residual_and_backward_error(
             const long double bi = static_cast<long double>(b_col[i]);
             const long double res_i = bi - ax[idx].result();
             r_col[i] = static_cast<double>(res_i);
-            const long double abs_res = std::fabsl(res_i);
+            const long double abs_res = abs_ld(res_i);
             col_res_inf = std::max(col_res_inf, abs_res);
 
-            const long double comp_denom = abs_ax[idx].result() + std::fabsl(bi);
+            const long double comp_denom = abs_ax[idx].result() + abs_ld(bi);
             long double om_i = 0.0L;
             if (comp_denom > 0.0L) {
                 om_i = abs_res / comp_denom;
@@ -128,7 +132,7 @@ bool compute_residual_and_backward_error(
 long double norm_inf_of(int n, const std::vector<RefineEntry> &entries) {
     std::vector<NeumaierAcc> row_abs(static_cast<std::size_t>(n));
     for (const auto &e : entries) {
-        const long double av = std::fabsl(e.val);
+        const long double av = abs_ld(e.val);
         row_abs[static_cast<std::size_t>(e.row)].add(av);
         if (e.row != e.col) {
             row_abs[static_cast<std::size_t>(e.col)].add(av);

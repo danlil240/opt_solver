@@ -7,6 +7,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/determinism.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/solver.hpp"
@@ -159,8 +160,14 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
     FactorKeep fk;
     ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
     if (expect_delays) ASSERT_GT(info.delayed_pivots, 0);
-    ASSERT_GE(fk.solve_subtrees.size(), 2u) << "no parallel solve layout";
-    ASSERT_FALSE(fk.solve_top_rows.empty());
+    if (deterministic_mode(ctrl)) {
+        // Deterministic mode lays every front out in postorder and solves
+        // serially: no parallel solve layout. The checks below still hold.
+        EXPECT_TRUE(fk.solve_subtrees.empty()) << "deterministic mode: parallel solve layout";
+    } else {
+        ASSERT_GE(fk.solve_subtrees.size(), 2u) << "no parallel solve layout";
+        ASSERT_FALSE(fk.solve_top_rows.empty());
+    }
 
     const int n = static_cast<int>(A.n), nrhs = 3;
     std::vector<double> b(static_cast<std::size_t>(n) * nrhs);
@@ -314,7 +321,12 @@ TEST(TreeParallel, TileTasksMatchSerial) {
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     const RefinedRun serial = factor_refined(A, ctrl, 1);
     ASSERT_GT(serial.info.num_negative, 0) << "not indefinite";
-    EXPECT_EQ(serial.info.top_tile_fronts, 0);
+    // Deterministic mode (Control::deterministic or an SMF_DETERMINISTIC
+    // build) tiles the large plain fronts at every thread count, 1 included.
+    if (deterministic_mode(ctrl))
+        EXPECT_GT(serial.info.top_tile_fronts, 0) << "deterministic mode: no tile front at 1 thread";
+    else
+        EXPECT_EQ(serial.info.top_tile_fronts, 0);
     const RefinedRun par = factor_refined(A, ctrl, 8);
     ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
     EXPECT_GT(par.info.top_tile_fronts, 0) << "no front factored as tile tasks";
@@ -329,6 +341,39 @@ TEST(TreeParallel, TileTasksMatchSerial) {
     const RefinedRun off = factor_refined(A, ctrl, 8);
     EXPECT_EQ(off.info.top_tile_fronts, 0);
     EXPECT_EQ(off.info.num_negative, serial.info.num_negative);
+}
+
+// R42: tile tasks (APTP structure) lack TPP's weak-1x1 rule, so below
+// pivot u = 1e-6 (kWeakPivotRatio; IPOPT's u = 1e-8) no front is tiled at
+// any thread count, deterministic mode included: those fronts keep the TPP
+// kernel. At u = 1e-6 tiles are still on.
+TEST(TreeParallel, NoTilesBelowWeakPivotU) {
+    std::string name;
+    const CscLower A = helmholtz_case(name);
+    SCOPED_TRACE(name);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.pivot_u = 1e-8;
+    const RefinedRun par = factor_refined(A, ctrl, 4);
+    ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
+    EXPECT_EQ(par.info.top_tile_fronts, 0) << "u = 1e-8, 4 threads: a front was tiled";
+    EXPECT_LE(par.eta, 1e-12);
+    const RefinedRun serial = factor_refined(A, ctrl, 1);
+    EXPECT_EQ(serial.info.top_tile_fronts, 0);
+    EXPECT_EQ(par.info.num_negative, serial.info.num_negative);
+    EXPECT_EQ(par.info.num_positive, serial.info.num_positive);
+
+    ctrl.deterministic = true;
+    for (const int threads : {1, 4}) {
+        const RefinedRun det = factor_refined(A, ctrl, threads);
+        EXPECT_EQ(det.info.top_tile_fronts, 0) << "deterministic, " << threads << " threads";
+        EXPECT_EQ(det.info.num_negative, serial.info.num_negative) << threads << " threads";
+    }
+
+    ctrl.deterministic = false;
+    ctrl.pivot_u = 1e-6;  // the gate is inclusive
+    const RefinedRun on = factor_refined(A, ctrl, 4);
+    EXPECT_GT(on.info.top_tile_fronts, 0) << "u = 1e-6, 4 threads: tiles off";
 }
 
 // The BLAS threads in use (BlasThreadGuard accounting) never exceed
