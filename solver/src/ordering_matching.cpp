@@ -1,5 +1,8 @@
 #include "smf/ordering.hpp"
+#include "smf/etree.hpp"
+#include "smf/ordering_metis.hpp"
 #include "smf/scaling_matching.hpp"
+#include "smf/supernode.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,10 +18,12 @@ namespace smf {
 // pivoted with, so the factorization delays it, front after front. Here
 // the cycles of the maximum-product matching are split into 2x2 pivot
 // candidates; each pair whose diagonal cannot carry a 1x1 pivot becomes one
-// node of a compressed graph, AMD orders that graph, and the expanded order
-// keeps both members of a pair adjacent.
+// node of a compressed graph, AMD and/or METIS (vertex weight = pair size,
+// as MA97 ordering 8) order that graph, and the expanded order keeps both
+// members of a pair adjacent.
 bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<Int> &perm,
-                              std::vector<Int> &amd_work, MatchingOrderStats *stats) {
+                              std::vector<Int> &amd_work, MatchingOrderStats *stats,
+                              CompressedOrder how, int expected_refactors) {
     const Int n = A.n;
     const auto sn = static_cast<std::size_t>(n);
     if (n == 0 || A.values.size() != A.row_idx.size()) return false;
@@ -127,21 +132,94 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
     cptr[static_cast<std::size_t>(nnodes)] = out;
     ridx.resize(static_cast<std::size_t>(out));
 
-    std::vector<Int> node_perm;
-    if (!amd_order_lower_csc(nnodes, cptr, ridx, node_perm, amd_work)) return false;
+    // The compressed graph's symmetric adjacency, built once: AMD reads a
+    // copy of it (amd_order_adjacency), METIS reads it directly.
+    const auto snodes = static_cast<std::size_t>(nnodes);
+    std::vector<Int> cxadj(snodes + 1), cadj(2 * static_cast<std::size_t>(out));
+    lower_csc_adjacency(nnodes, cptr.data(), ridx.data(), cxadj.data(), cadj.data());
 
-    perm.clear();
-    perm.reserve(sn);
-    for (Int J : node_perm) {
-        const Int a = first_of[static_cast<std::size_t>(J)];
-        perm.push_back(a);
-        const Int b = partner[static_cast<std::size_t>(a)];
-        if (b >= 0) perm.push_back(b);
+    // A compressed order expanded to A's numbering, pairs adjacent.
+    const auto expand = [&](const std::vector<Int> &node_perm, std::vector<Int> &out_perm) {
+        out_perm.clear();
+        out_perm.reserve(sn);
+        for (Int J : node_perm) {
+            const Int a = first_of[static_cast<std::size_t>(J)];
+            out_perm.push_back(a);
+            const Int b = partner[static_cast<std::size_t>(a)];
+            if (b >= 0) out_perm.push_back(b);
+        }
+    };
+
+    // Predicted flops (sum of exact column counts squared) of an ordering
+    // of A, from A's symmetric adjacency (built on first use).
+    std::vector<Int> axadj, aadj, sym;
+    const auto predicted_flops = [&](const std::vector<Int> &p) {
+        if (axadj.empty()) {
+            axadj.resize(sn + 1);
+            aadj.resize(lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+            lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), axadj.data(), aadj.data());
+            sym.resize(8 * sn + 1);
+        }
+        Int *iperm = sym.data();
+        Int *parent = iperm + sn;
+        Int *post = parent + sn;
+        Int *cc = post + sn;
+        Int *work = cc + sn;  // 4n + 1
+        for (Int i = 0; i < n; ++i) iperm[p[static_cast<std::size_t>(i)]] = i;
+        etree_from_adjacency(n, axadj.data(), aadj.data(), p.data(), iperm, parent, work);
+        etree_postorder(n, parent, post, work);
+        filled_column_counts_from_adjacency(n, axadj.data(), aadj.data(), p.data(), iperm, parent,
+                                            post, cc, work);
+        double fl = 0.0;
+        for (Int j = 0; j < n; ++j) {
+            const double c = static_cast<double>(cc[j]);
+            fl += c * c;
+        }
+        return fl;
+    };
+
+    // AMD on the compressed graph (always: it is the fallback for METIS).
+    std::vector<Int> node_perm(snodes);
+    const std::size_t amd_need = amd_adjacency_work_size(nnodes, cadj.size());
+    if (amd_work.size() < amd_need) amd_work.resize(amd_need);
+    if (!amd_order_adjacency(nnodes, cxadj.data(), cadj.data(), node_perm.data(), amd_work.data()))
+        return false;
+    expand(node_perm, perm);
+    CompressedOrder used = CompressedOrder::Amd;
+    const bool need_flops = stats != nullptr || how == CompressedOrder::Auto;
+    double flops = need_flops ? predicted_flops(perm) : 0.0;
+
+    // METIS nested dissection on the same compressed graph, a pair weighing
+    // two vertices. Auto tries it only where AMD's factor is expensive per
+    // row (the AutoParallel rule of analyse()) and keeps the cheaper one.
+    bool try_metis = how == CompressedOrder::Metis;
+    if (how == CompressedOrder::Auto)
+        try_metis = flops * static_cast<double>(std::max(1, expected_refactors)) >=
+                    kMetisFlopsPerRow * static_cast<double>(n);
+    if (try_metis && !cadj.empty()) {
+        std::vector<Int> vwgt(snodes), mperm(snodes), miperm(snodes);
+        for (Int J = 0; J < nnodes; ++J)
+            vwgt[static_cast<std::size_t>(J)] =
+                partner[static_cast<std::size_t>(first_of[static_cast<std::size_t>(J)])] >= 0 ? 2 : 1;
+        if (metis_node_nd(nnodes, cxadj.data(), cadj.data(), vwgt.data(), mperm.data(),
+                          miperm.data())) {
+            std::vector<Int> metis_perm;
+            expand(mperm, metis_perm);
+            const double mflops = need_flops ? predicted_flops(metis_perm) : 0.0;
+            if (how == CompressedOrder::Metis || mflops < flops) {
+                perm = std::move(metis_perm);
+                flops = mflops;
+                used = CompressedOrder::Metis;
+            }
+        }
     }
+
     if (stats) {
         stats->pairs = npaired;
         stats->nodes = nnodes;
         stats->scale = mr.scale;
+        stats->flops = flops;
+        stats->used = used;
     }
     return true;
 }

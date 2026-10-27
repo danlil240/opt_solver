@@ -64,21 +64,46 @@ std::size_t amd_adjacency_work_size(Int n, std::size_t nz);
 /// not compiled in.
 bool amd_order_adjacency(Int n, const Int *xadj, const Int *adj, Int *perm, Int *work);
 
+/// How matching_order_lower_csc orders its compressed graph.
+///   Amd   - AMD.
+///   Metis - METIS nested dissection, vertex weight = pair size (AMD when
+///           METIS is not compiled in or fails).
+///   Auto  - AMD, plus METIS when AMD's predicted flops times the expected
+///           refactors reach kMetisFlopsPerRow per row; the one with fewer
+///           predicted flops is kept (MA97 ordering 8 parity).
+enum class CompressedOrder { Amd, Metis, Auto };
+
+/// Predicted factor flops per row from which METIS is worth trying instead
+/// of AMD. One-off SuiteSparse SPD factorizations: METIS won at 8.8e5-1.1e6
+/// (bmwcra_1, cfd2), tied at 2.1e5 (pwtk) and lost at 1.3e5-4.0e5
+/// (af_shell7, G3_circuit, apache2).
+inline constexpr double kMetisFlopsPerRow = 4.5e5;
+
 struct MatchingOrderStats {
     Int pairs = 0;              ///< 2x2 pivot pairs kept adjacent
     Int nodes = 0;              ///< nodes of the compressed graph
     std::vector<double> scale;  ///< the matching's symmetric scaling
+    /// Predicted factor flops (sum of exact column counts squared) of the
+    /// returned ordering of A.
+    double flops = 0.0;
+    /// The compressed-graph ordering that was kept (Amd or Metis).
+    CompressedOrder used = CompressedOrder::Amd;
 };
 
 /// Matching-based compressed ordering for symmetric indefinite matrices:
 /// maximum-product matching, its cycles split into 2x2 pivot pairs (kept
-/// when either scaled diagonal is below `pair_tol`), AMD on the graph with
-/// each pair compressed to one node, pairs adjacent in the result.
-/// Needs values; returns false (caller falls back) when the matrix is
-/// structurally singular or AMD is unavailable. perm[new] = old.
+/// when either scaled diagonal is below `pair_tol`), the graph with each
+/// pair compressed to one node ordered as `how` says (see CompressedOrder;
+/// the compressed graph is built once and shared by AMD and METIS), pairs
+/// adjacent in the result. A must be cleaned (rows sorted and unique,
+/// diagonal first). Needs values; returns false (caller falls back) when the
+/// matrix is structurally singular or AMD is unavailable. perm[new] = old.
+/// expected_refactors scales AMD's flops in the Auto rule for METIS.
 bool matching_order_lower_csc(const CscLower& A, double pair_tol,
                               std::vector<Int>& perm, std::vector<Int>& amd_work,
-                              MatchingOrderStats* stats = nullptr);
+                              MatchingOrderStats* stats = nullptr,
+                              CompressedOrder how = CompressedOrder::Auto,
+                              int expected_refactors = 1);
 
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.

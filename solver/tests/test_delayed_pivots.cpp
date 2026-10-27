@@ -4,10 +4,15 @@
 #include "smf/info.hpp"
 #include "smf/numeric_front.hpp"
 #include "smf/solver.hpp"
+#include "smf/workspace.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <span>
+#include <utility>
 #include <vector>
 
 using namespace smf;
@@ -259,4 +264,128 @@ TEST(DelayedPivots, ParallelThreadsConsistency) {
             }
         }
     }
+}
+
+namespace {
+
+// KKT [H B^T; B 0] (H: 5-point Laplacian of a g x g grid with diagonal
+// hdiag; m zero-diagonal constraint rows, row c coupling variables
+// 3c, 3c+1, 3c+2 mod g^2). AMD eliminates the degree-3 constraint rows
+// early, where they cannot pivot, so its factorization delays them.
+CscLower delayed_kkt(int g, int m, double hdiag)
+{
+    const int nx = g * g, n = nx + m;
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+    for (int y = 0; y < g; ++y)
+        for (int x = 0; x < g; ++x) {
+            const int j = y * g + x;
+            auto &c = cols[static_cast<std::size_t>(j)];
+            c.push_back({j, hdiag});
+            if (x + 1 < g) c.push_back({j + 1, -1.0});
+            if (y + 1 < g) c.push_back({j + g, -1.0});
+        }
+    const double coef[3] = {1.0, -0.5, 0.25};
+    for (int k = 0; k < m; ++k) {
+        const int row = nx + k;
+        for (int t = 0; t < 3; ++t)
+            cols[static_cast<std::size_t>((3 * k + t) % nx)].push_back({row, coef[t]});
+        cols[static_cast<std::size_t>(row)].push_back({row, 0.0});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (auto [i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+} // namespace
+
+TEST(DelayedPivots, RealizedDelayTriggerReanalysesOnce) {
+    const int g = 30, m = 300;
+    const CscLower A = delayed_kkt(g, m, 4.0);
+    const int n = A.n;
+
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.nemin = 1;  // no amalgamation: a constraint row keeps its own front
+
+    // Precondition: the AMD factorization delays more than 5% of n.
+    {
+        Solver s0;
+        Info i0;
+        Control c0 = ctrl;
+        c0.ordering = OrderingMethod::AMD;
+        auto a0 = s0.analyse(A, c0, i0);
+        ASSERT_NE(a0.get(), nullptr);
+        FactorKeep f0;
+        ASSERT_EQ(s0.factor(*a0, c0, i0, f0), FactorStatus::Success);
+        std::printf("[RealizedDelay] AMD factor: %d delays, n = %d\n", i0.delayed_pivots, n);
+        ASSERT_GT(i0.delayed_pivots, n / 20);
+    }
+
+    ctrl.matching_trigger = MatchingTrigger::RealizedDelays;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    EXPECT_EQ(info.ordering_used, static_cast<int>(OrderingMethod::AMD));
+
+    // First factor: delays > 5% of n, so it re-analyses with the matching
+    // ordering and factors again.
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(solver.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+              FactorStatus::Success);
+    std::printf("[RealizedDelay] after re-analysis: %d delays\n", i1.delayed_pivots);
+    EXPECT_EQ(i1.matching_reanalyses, 1);
+    EXPECT_EQ(i1.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_LE(i1.delayed_pivots, n / 20);
+    EXPECT_EQ(i1.num_positive, g * g);
+    EXPECT_EQ(i1.num_negative, m);
+    {
+        std::vector<double> b(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * i;
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk, ctrl, i1, x.data(), n, 1), 0);
+        auto val = smf::bench::validate(A, b, x, 1);
+        EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+            << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+    }
+
+    // Second factor, new values (same pattern): keeps the matching analysis,
+    // no further re-analysis.
+    const CscLower A2 = delayed_kkt(g, m, 5.0);
+    Info i2;
+    FactorKeep fk2;
+    ASSERT_EQ(solver.factor(*ak, A2, ctrl, i2, fk2, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.matching_reanalyses, 0);
+    EXPECT_EQ(i2.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_LE(i2.delayed_pivots, n / 20);
+    {
+        std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+        std::vector<double> x = b;
+        ASSERT_EQ(solver.solve(fk2, ctrl, i2, x.data(), n, 1), 0);
+        auto val = smf::bench::validate(A2, b, x, 1);
+        EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+            << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+    }
+
+    // Predicted (the default) never re-analyses inside factor().
+    Control pc;
+    pc.matrix_type = MatrixType::RealSymmetricIndefinite;
+    Solver ps;
+    Info pi;
+    auto pak = ps.analyse(A, pc, pi);
+    ASSERT_NE(pak.get(), nullptr);
+    FactorKeep pfk;
+    ASSERT_EQ(ps.factor(*pak, pc, pi, pfk), FactorStatus::Success);
+    EXPECT_EQ(pi.matching_reanalyses, 0);
 }

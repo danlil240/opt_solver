@@ -56,6 +56,19 @@ enum class OrderingMethod {
     Matching     = 5    // matching-based compressed AMD (indefinite, needs values)
 };
 
+// When an auto ordering of an indefinite matrix switches to the matching
+// ordering (OrderingMethod::Matching).
+//   Predicted      - in analyse(), when the matching ordering's predicted
+//                    flops are within a constant factor of AMD's.
+//   RealizedDelays - analyse() keeps AMD; a factor() that delays more than
+//                    5% of n pivots re-analyses once with the matching
+//                    ordering, and later factor() calls with that analysis
+//                    use it (IPOPT's MA97 od_hd_reuse rule).
+enum class MatchingTrigger {
+    Predicted      = 0,
+    RealizedDelays = 1
+};
+
 enum class ScalingMethod {
     None         = 0,
     Equilibration = 1,

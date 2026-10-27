@@ -44,10 +44,8 @@ namespace smf
     static constexpr double kSmallDiagonal = 0.01;
     static constexpr double kKktSmallDiagonalShare = 0.05;
     // AutoParallel tries METIS when AMD's predicted factor flops (times
-    // Control::expected_refactors) reach this many per row. One-off SuiteSparse
-    // SPD factorizations: METIS won at 8.8e5-1.1e6 (bmwcra_1, cfd2), tied at
-    // 2.1e5 (pwtk) and lost at 1.3e5-4.0e5 (af_shell7, G3_circuit, apache2).
-    static constexpr double kMetisFlopsPerRow = 4.5e5;
+    // Control::expected_refactors) reach kMetisFlopsPerRow (ordering.hpp)
+    // per row.
 
     // Below this order delays stay cheap (fronts are bounded by n) and the
     // matching's fixed cost would dominate (optim20: n <= 4000).
@@ -267,7 +265,10 @@ namespace smf
 
         bool auto_matching = false;
         lap(phases.ordering);
+        // RealizedDelays keeps plain AMD here (matching only when needed,
+        // Hogg-Scott-Thorne): factor() re-analyses when AMD's factor delays.
         if (auto_order && !use_identity_ordering && n >= kAutoMatchingMinN &&
+            control.matching_trigger == MatchingTrigger::Predicted &&
             control.matrix_type == MatrixType::RealSymmetricIndefinite &&
             C.values.size() == C.row_idx.size())
         {
@@ -299,7 +300,9 @@ namespace smf
         std::vector<Int> matching_perm;
         if (auto_matching)
             auto_matching = matching_order_lower_csc(C, kMatchingPairTol, matching_perm,
-                                                     analyse_scratch_, &matching_stats);
+                                                     analyse_scratch_, &matching_stats,
+                                                     CompressedOrder::Auto,
+                                                     control.expected_refactors);
         lap(phases.matching);
 
         if (user_order)
@@ -327,7 +330,8 @@ namespace smf
             const bool matching_ordered =
                 control.ordering == OrderingMethod::Matching &&
                 matching_order_lower_csc(C, kMatchingPairTol, perm,
-                                         analyse_scratch_, &matching_stats);
+                                         analyse_scratch_, &matching_stats,
+                                         CompressedOrder::Auto, control.expected_refactors);
             lap(phases.matching);
             const bool amd_backend =
                 control.ordering == OrderingMethod::AutoSerial ||
@@ -616,6 +620,11 @@ namespace smf
         // factor less accurate, so ScalingMethod::Auto then applies none.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+        keep->matching_trigger_eligible =
+            auto_order && !use_identity_ordering &&
+            control.matrix_type == MatrixType::RealSymmetricIndefinite &&
+            keep->cleaned.values.size() == keep->cleaned.row_idx.size() &&
+            info.ordering_used != static_cast<int>(OrderingMethod::Matching);
 
         // Step 9: record timing (after the keep is assembled, so the phases
         // partition analyse_seconds).

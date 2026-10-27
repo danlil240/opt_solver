@@ -323,11 +323,13 @@ int main(int argc, char **argv) {
     bool is_warmup = false;
     // Control overrides for bisecting an accuracy failure (applied after the
     // track defaults): --pivot-u X, --scaling none|equil|matching|auto,
-    // --ordering auto|auto_parallel|amd|metis|matching, --refine-steps N
+    // --ordering auto|auto_parallel|amd|metis|matching, --refine-steps N,
+    // --matching-trigger predicted|realized
     // (harness refinement).
     double pivot_u_override = -1.0;
     std::string scaling_override;
     std::string ordering_override;
+    std::string matching_trigger;  // predicted | realized (smf auto orderings)
     int refine_steps = 3;
     // --ipm-static off|fallback|regularized [--ipm-static-zero]: the smf
     // solver runs through smf::IpmSession with that static mode, as the MA97
@@ -361,6 +363,7 @@ int main(int argc, char **argv) {
         else if (arg == "--pivot-u" && i + 1 < argc) pivot_u_override = std::atof(argv[++i]);
         else if (arg == "--scaling" && i + 1 < argc) scaling_override = argv[++i];
         else if (arg == "--ordering" && i + 1 < argc) ordering_override = argv[++i];
+        else if (arg == "--matching-trigger" && i + 1 < argc) matching_trigger = argv[++i];
         else if (arg == "--refine-steps" && i + 1 < argc) refine_steps = std::max(0, std::atoi(argv[++i]));
         else if (arg == "--ipm-static" && i + 1 < argc) ipm_static = argv[++i];
         else if (arg == "--ipm-static-zero") ipm_static_zero = true;
@@ -514,6 +517,13 @@ int main(int argc, char **argv) {
     else if (ordering_override == "matching") ctrl.ordering = smf::OrderingMethod::Matching;
     else if (ordering_override == "auto") ctrl.ordering = smf::OrderingMethod::AutoSerial;
     else if (ordering_override == "auto_parallel") ctrl.ordering = smf::OrderingMethod::AutoParallel;
+    // run.py has no per-run flag for it: SMF_BENCH_MATCHING_TRIGGER
+    // (predicted | realized) stands in when --matching-trigger is absent.
+    if (matching_trigger.empty()) {
+        if (const char *e = std::getenv("SMF_BENCH_MATCHING_TRIGGER")) matching_trigger = e;
+    }
+    if (matching_trigger == "realized") ctrl.matching_trigger = smf::MatchingTrigger::RealizedDelays;
+    else if (matching_trigger == "predicted") ctrl.matching_trigger = smf::MatchingTrigger::Predicted;
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =

@@ -40,6 +40,10 @@ struct Info {
     /// OrderingMethod::UserSupplied: user pairs that could not be kept in
     /// one supernode because the second is not the etree parent of the first.
     int          pairs_split         = 0;
+    /// 1 when this factor() re-analysed with the matching ordering
+    /// (Control::matching_trigger = RealizedDelays: the first factorization
+    /// delayed more than 5% of n pivots), else 0.
+    int          matching_reanalyses = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues

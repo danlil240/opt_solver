@@ -5,6 +5,7 @@
 #include "smf/supernode.hpp"
 #include "smf/assembly_tree.hpp"
 #include <cstddef>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -41,6 +42,17 @@ struct AnalysisKeep {
     std::vector<Int>         solve_postorder;   ///< supernode postorder reused by triangular solves
     std::vector<double>      matching_scale;    ///< Matching ordering: its matching's scaling of the analysed values (else empty)
     Int                      n = 0;             ///< matrix order (= cleaned.n)
+    /// Auto ordering of an indefinite matrix with values that did not end
+    /// up with the matching ordering: factor() may re-analyse with it
+    /// (Control::matching_trigger = RealizedDelays).
+    bool                     matching_trigger_eligible = false;
+    /// RealizedDelays: the matching-ordering analysis of this pattern that
+    /// factor() made once a factorization delayed more than 5% of n pivots;
+    /// every later factor() of this keep uses it. Set at most once
+    /// (matching_reanalysis_tried); mutable because factor() takes the keep
+    /// const, so one keep must not be factored from two threads at once.
+    mutable std::shared_ptr<AnalysisKeep> matching_reanalysis;
+    mutable bool             matching_reanalysis_tried = false;
 
     /// Number of supernodes (= supernodes.size()).
     Int num_supernodes() const { return static_cast<Int>(supernodes.size()); }

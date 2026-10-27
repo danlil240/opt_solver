@@ -6,16 +6,116 @@
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 #include <chrono>
+#include <memory>
 #include <vector>
 
 namespace smf {
+
+namespace {
+
+// MatchingTrigger::RealizedDelays fires when a factorization delays more
+// than this share of n pivots (IPOPT's MA97 od_hd_reuse threshold).
+constexpr double kRealizedDelayShare = 0.05;
+
+// `values` in the cleaned entry order of ak.
+std::vector<double> cleaned_values(const AnalysisKeep &ak, const FactorValues &values) {
+  if (!values.original_layout || ak.orig_to_clean_idx.empty())
+    return std::vector<double>(values.data, values.data + values.size);
+  if (values.size != ak.orig_to_clean_idx.size()) return {};
+  std::vector<double> cv(ak.cleaned.row_idx.size(), 0.0);
+  for (std::size_t k = 0; k < values.size; ++k) {
+    const Int c = ak.orig_to_clean_idx[k];
+    if (c >= 0) cv[static_cast<std::size_t>(c)] += values.data[k];
+  }
+  return cv;
+}
+
+// ak's pattern re-analysed with the matching ordering (its matching taken
+// on `cv`, cleaned order), wired to accept the same value layouts as ak:
+// the original input pattern and the cleaned one. Null when the matching
+// ordering cannot be used (structurally singular).
+std::shared_ptr<AnalysisKeep> matching_reanalysis(const AnalysisKeep &ak, std::vector<double> cv,
+                                                  const Control &ctrl) {
+  CscLower C;
+  C.n = ak.n;
+  C.col_ptr = ak.cleaned.col_ptr;
+  C.row_idx = ak.cleaned.row_idx;
+  C.values = std::move(cv);
+  Control c2 = ctrl;
+  c2.ordering = OrderingMethod::Matching;
+  c2.check_input = false;  // the cleaned pattern is clean
+  Solver s;
+  Info i2;
+  std::unique_ptr<AnalysisKeep> re = s.analyse(C, c2, i2);
+  if (!re || i2.status != ErrorCode::Success ||
+      i2.ordering_used != static_cast<int>(OrderingMethod::Matching))
+    return nullptr;
+  // Original-layout values reach the new permuted pattern through ak's
+  // cleaning map, then the new clean-to-permuted map.
+  const std::vector<Int> &c2p = re->orig_to_perm_idx;  // empty: identity
+  std::vector<Int> direct(ak.orig_to_clean_idx.size(), -1);
+  for (std::size_t k = 0; k < direct.size(); ++k) {
+    const Int c = ak.orig_to_clean_idx[k];
+    if (c >= 0) direct[k] = c2p.empty() ? c : c2p[static_cast<std::size_t>(c)];
+  }
+  re->orig_to_perm_direct = std::move(direct);
+  re->orig_col_ptr = ak.orig_col_ptr;
+  re->orig_row_idx = ak.orig_row_idx;
+  re->orig_to_clean_idx = ak.orig_to_clean_idx;
+  re->input_clean = ak.input_clean;
+  re->cleaned.values = ak.cleaned.values;  // what factor(ak, ctrl, ...) factors
+  return std::shared_ptr<AnalysisKeep>(std::move(re));
+}
+
+// Indefinite factor() with the realized-delay matching trigger: `run`
+// factors with a given analysis. A keep that already holds a matching
+// re-analysis factors with it; otherwise, under RealizedDelays, a factor
+// that delays more than kRealizedDelayShare * n pivots re-analyses once with
+// the matching ordering and factors again. `values` (called only then)
+// gives the factored values for that re-analysis. The normal path adds no
+// work.
+template <class Values, class Run>
+FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control &ctrl,
+                                          Info &info, Values &&values, Run &&run) {
+  info.matching_reanalyses = 0;
+  if (ak.matching_reanalysis) {
+    const FactorStatus st = run(*ak.matching_reanalysis);
+    info.ordering_used = static_cast<int>(OrderingMethod::Matching);
+    return st;
+  }
+  const FactorStatus st = run(ak);
+  if (ctrl.matching_trigger != MatchingTrigger::RealizedDelays || !ak.matching_trigger_eligible ||
+      ak.matching_reanalysis_tried || st == FactorStatus::InertiaExceeded ||
+      static_cast<double>(info.delayed_pivots) <= kRealizedDelayShare * static_cast<double>(ak.n))
+    return st;
+  ak.matching_reanalysis_tried = true;
+  const double first_seconds = info.factor_seconds;
+  const auto t0 = std::chrono::steady_clock::now();
+  std::shared_ptr<AnalysisKeep> re = matching_reanalysis(ak, values(), ctrl);
+  const double analyse_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  if (!re) return st;
+  ak.matching_reanalysis = std::move(re);
+  const FactorStatus st2 = run(*ak.matching_reanalysis);
+  // factor_seconds covers the whole call: both factorizations and the
+  // re-analysis between them.
+  info.factor_seconds += first_seconds + analyse_seconds;
+  info.matching_reanalyses = 1;
+  info.ordering_used = static_cast<int>(OrderingMethod::Matching);
+  return st2;
+}
+
+} // namespace
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     return factor_posdef(ak, ctrl, info, fkeep);
   }
-  return factor_indef(ak, ctrl, info, fkeep);
+  return factor_with_matching_trigger(ak, ctrl, info, [&] { return ak.cleaned.values; },
+                                      [&](const AnalysisKeep &k) {
+    return factor_indef(k, ctrl, info, fkeep);
+  });
 }
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
@@ -24,7 +124,13 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     return factor_posdef(ak, updated, ctrl, info, fkeep, ws);
   }
-  return factor_indef(ak, updated, ctrl, info, fkeep, ws);
+  const auto values = [&] {
+    FactorValues fv;
+    return resolve_factor_values(ak, updated, fv) ? cleaned_values(ak, fv) : std::vector<double>{};
+  };
+  return factor_with_matching_trigger(ak, ctrl, info, values, [&](const AnalysisKeep &k) {
+    return factor_indef(k, updated, ctrl, info, fkeep, ws);
+  });
 }
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> values,
@@ -34,7 +140,10 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     return factor_posdef(ak, fv, ctrl, info, fkeep, ws);
   }
-  return factor_indef(ak, fv, ctrl, info, fkeep, ws);
+  return factor_with_matching_trigger(ak, ctrl, info, [&] { return cleaned_values(ak, fv); },
+                                      [&](const AnalysisKeep &k) {
+    return factor_indef(k, fv, ctrl, info, fkeep, ws);
+  });
 }
 
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,

@@ -24,6 +24,11 @@ struct Control {
     // pairs cannot be forced together and are counted in Info::pairs_split.
     const Int*     user_pair_first = nullptr;
     Int            user_num_pairs  = 0;
+    // Auto orderings of indefinite matrices: when to switch to the matching
+    // ordering (see MatchingTrigger). RealizedDelays makes factor() mutate
+    // the analysis it is given (one re-analysis, stored inside it): do not
+    // factor the same AnalysisKeep from two threads at once.
+    MatchingTrigger matching_trigger = MatchingTrigger::Predicted;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;
