@@ -78,6 +78,9 @@ std::unique_ptr<SolverAdapter> make_spral_ssids_adapter();
 std::unique_ptr<SolverAdapter> make_mumps_adapter();
 std::unique_ptr<SolverAdapter> make_pardiso_adapter(const std::string &variant = "mkl_pardiso");
 std::unique_ptr<SolverAdapter> make_cholmod_adapter();
+/// NVIDIA cuDSS (GPU, FP64). Real only with -DSMF_BENCH_CUDSS=ON and a CUDA
+/// device; otherwise an Unavailable stub.
+std::unique_ptr<SolverAdapter> make_cudss_adapter();
 std::unique_ptr<SolverAdapter> make_solver_adapter(const std::string &solver_id);
 std::vector<std::string> all_registered_adapter_ids();
 

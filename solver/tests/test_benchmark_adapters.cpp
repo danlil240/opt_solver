@@ -252,3 +252,89 @@ TEST(BenchmarkAdapters, SmfIpmAdapterRegularizedSolveIsRefined) {
         EXPECT_EQ(reg->stats().inertia_neg, 1);
     }
 }
+
+TEST(BenchmarkAdapters, RecordCarriesFirstFactorAndRefactorOnlyWhenMeasured) {
+    RunRecord rec;
+    EXPECT_EQ(rec.to_json_line().find("first_factor_ms"), std::string::npos);
+    EXPECT_EQ(rec.to_json_line().find("\"refactor_ms\""), std::string::npos);
+    rec.first_factor_ms = 12.5;
+    rec.refactor_ms = 3.25;
+    const std::string line = rec.to_json_line();
+    EXPECT_NE(line.find("\"first_factor_ms\":12.5"), std::string::npos) << line;
+    EXPECT_NE(line.find("\"refactor_ms\":3.25"), std::string::npos) << line;
+}
+
+// ---------------------------------------------------------------------------
+// cuDSS (GPU reference solver), built only with -DSMF_BENCH_CUDSS=ON.
+
+#if defined(SMF_BENCH_CUDSS)
+
+namespace {
+
+// 5-point 2D Poisson on an m x m grid, lower triangle in CSC.
+CscLower make_poisson2d(int m) {
+    CscLower A;
+    A.n = m * m;
+    A.col_ptr.assign(static_cast<std::size_t>(A.n) + 1, 0);
+    for (int j = 0; j < m; ++j) {
+        for (int i = 0; i < m; ++i) {
+            const int col = j * m + i;
+            A.row_idx.push_back(col);
+            A.values.push_back(4.0);
+            if (i + 1 < m) {
+                A.row_idx.push_back(col + 1);
+                A.values.push_back(-1.0);
+            }
+            if (j + 1 < m) {
+                A.row_idx.push_back(col + m);
+                A.values.push_back(-1.0);
+            }
+            A.col_ptr[static_cast<std::size_t>(col) + 1] =
+                static_cast<Int>(A.row_idx.size());
+        }
+    }
+    return A;
+}
+
+} // namespace
+
+TEST(BenchmarkAdapters, CudssSolvesPoisson) {
+    auto adapter = make_solver_adapter("cudss");
+    ASSERT_NE(adapter.get(), nullptr) << "cudss is not a registered adapter";
+    const AdapterIdentity ident = adapter->identity();
+    EXPECT_EQ(ident.solver_id, "cudss");
+    if (!ident.available) GTEST_SKIP() << "no usable CUDA device: " << adapter->stats().reason;
+
+    const CscLower A = make_poisson2d(30);
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = 1.0 + 0.001 * static_cast<double>(i % 17);
+
+    // Both matrix types: SPD (Cholesky) and symmetric indefinite (LDL^T).
+    for (MatrixType mt : {MatrixType::RealSymmetricPositiveDefinite,
+                          MatrixType::RealSymmetricIndefinite}) {
+        SCOPED_TRACE(mt == MatrixType::RealSymmetricIndefinite ? "ldlt" : "spd");
+        Control ctrl;
+        ctrl.matrix_type = mt;
+        adapter->configure(ctrl, "recommended");
+        ASSERT_EQ(adapter->analyse(A), Outcome::Success) << adapter->stats().reason;
+        ASSERT_EQ(adapter->factor(A.values), Outcome::Success) << adapter->stats().reason;
+        std::vector<double> x = b;
+        ASSERT_EQ(adapter->solve(x, 1), Outcome::Success) << adapter->stats().reason;
+        const Validation v = validate(A, b, x, 1);
+        EXPECT_LE(v.eta_inf, 1e-12);
+        EXPECT_TRUE(is_qualified_validation(v));
+        EXPECT_GT(adapter->stats().factor_ms, 0.0);
+
+        // Refactor with changed values on the same analysis (diag scaled by 1.5).
+        CscLower A2 = A;
+        for (Int j = 0; j < A2.n; ++j) {
+            A2.values[static_cast<std::size_t>(A2.col_ptr[static_cast<std::size_t>(j)])] *= 1.5;
+        }
+        ASSERT_EQ(adapter->factor(A2.values), Outcome::Success);
+        std::vector<double> x2 = b;
+        ASSERT_EQ(adapter->solve(x2, 1), Outcome::Success);
+        EXPECT_LE(validate(A2, b, x2, 1).eta_inf, 1e-12);
+    }
+}
+
+#endif // SMF_BENCH_CUDSS

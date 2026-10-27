@@ -8,6 +8,7 @@ add_library(smf_bench_common STATIC
     adapters/mumps.cpp
     adapters/pardiso.cpp
     adapters/cholmod.cpp
+    adapters/cudss_adapter.cpp
 )
 target_link_libraries(smf_bench_common PUBLIC smf smf_bench_baselines)
 target_include_directories(smf_bench_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

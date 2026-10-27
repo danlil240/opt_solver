@@ -629,6 +629,7 @@ std::unique_ptr<SolverAdapter> make_solver_adapter(const std::string &solver_id)
         return make_pardiso_adapter(solver_id);
     }
     if (solver_id == "cholmod") return make_cholmod_adapter();
+    if (solver_id == "cudss") return make_cudss_adapter();
     return nullptr;
 }
 
@@ -645,7 +646,8 @@ std::vector<std::string> all_registered_adapter_ids() {
         "mumps",
         "mkl_pardiso",
         "panua_pardiso",
-        "cholmod"
+        "cholmod",
+        "cudss"
     };
 }
 

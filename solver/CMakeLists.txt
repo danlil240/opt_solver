@@ -304,6 +304,35 @@ if(SMF_HAS_MA27 AND COINHSL_LIBRARY)
     target_compile_definitions(smf_bench_baselines INTERFACE SMF_HAS_MA27_IMPL=1)
 endif()
 
+# cuDSS (NVIDIA GPU direct sparse solver) comparison adapter. OFF by default;
+# needs the cuDSS package (SMF_CUDSS_ROOT: include/cudss.h, lib/cudss.lib,
+# bin/cudss64_*.dll) and the CUDA runtime (SMF_CUDA_RUNTIME_ROOT: include/
+# cuda_runtime_api.h + crt/host_defines.h, lib/x64/cudart.lib, bin/x64/
+# cudart64_*.dll, cublas64_*.dll, cublasLt64_*.dll; merge cuda_cudart,
+# cuda_crt and libcublas). Both are
+# available without admin rights as the redistributable archives under
+# developer.download.nvidia.com/compute/{cudss,cuda}/redist. No nvcc needed.
+option(SMF_BENCH_CUDSS "Build the cuDSS (GPU) benchmark adapter" OFF)
+set(SMF_CUDSS_ROOT "" CACHE PATH "cuDSS package root")
+set(SMF_CUDA_RUNTIME_ROOT "" CACHE PATH "CUDA runtime (cudart) package root")
+set(_smf_cuda_dlls "")
+if(SMF_BENCH_CUDSS)
+    find_path(SMF_CUDSS_INCLUDE_DIR cudss.h HINTS "${SMF_CUDSS_ROOT}/include")
+    find_library(SMF_CUDSS_LIBRARY cudss HINTS "${SMF_CUDSS_ROOT}/lib")
+    find_path(SMF_CUDART_INCLUDE_DIR cuda_runtime_api.h HINTS "${SMF_CUDA_RUNTIME_ROOT}/include")
+    find_library(SMF_CUDART_LIBRARY cudart HINTS "${SMF_CUDA_RUNTIME_ROOT}/lib/x64" "${SMF_CUDA_RUNTIME_ROOT}/lib64")
+    if(NOT (SMF_CUDSS_INCLUDE_DIR AND SMF_CUDSS_LIBRARY AND SMF_CUDART_INCLUDE_DIR AND SMF_CUDART_LIBRARY))
+        message(FATAL_ERROR "smf: SMF_BENCH_CUDSS=ON but cuDSS/cudart were not found; set SMF_CUDSS_ROOT and SMF_CUDA_RUNTIME_ROOT")
+    endif()
+    target_link_libraries(smf_bench_baselines INTERFACE ${SMF_CUDSS_LIBRARY} ${SMF_CUDART_LIBRARY})
+    target_include_directories(smf_bench_baselines INTERFACE ${SMF_CUDSS_INCLUDE_DIR} ${SMF_CUDART_INCLUDE_DIR})
+    target_compile_definitions(smf_bench_baselines INTERFACE SMF_BENCH_CUDSS=1)
+    file(GLOB _smf_cuda_dlls
+        "${SMF_CUDSS_ROOT}/bin/*.dll" "${SMF_CUDA_RUNTIME_ROOT}/bin/x64/*.dll"
+        "${SMF_CUDA_RUNTIME_ROOT}/bin/cudart64_*.dll")
+    message(STATUS "smf: cuDSS adapter enabled (${SMF_CUDSS_LIBRARY})")
+endif()
+
 # ---- Runtime dependency DLL staging (Windows) -----------------------------
 # Point SMF_DEPS_DLL_DIR at a directory containing dependency DLLs
 # (e.g. a conda env's Library/bin) and they are copied next to executables
@@ -315,6 +344,12 @@ endif()
 set(SMF_DEPS_DLL_DIR "${_smf_default_dll_dir}" CACHE PATH
     "Directory containing third-party runtime DLLs to stage beside executables")
 function(smf_stage_runtime_dlls target)
+    if(WIN32 AND _smf_cuda_dlls)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${_smf_cuda_dlls} "$<TARGET_FILE_DIR:${target}>"
+            VERBATIM)
+    endif()
     if(NOT (WIN32 AND SMF_DEPS_DLL_DIR AND EXISTS "${SMF_DEPS_DLL_DIR}"))
         return()
     endif()

@@ -345,6 +345,7 @@ add_executable(test_benchmark_adapters
     ../benchmarks/adapters/mumps.cpp
     ../benchmarks/adapters/pardiso.cpp
     ../benchmarks/adapters/cholmod.cpp
+    ../benchmarks/adapters/cudss_adapter.cpp
 )
 target_link_libraries(test_benchmark_adapters PRIVATE
     smf smf_bench_baselines GTest::gtest_main ${CMAKE_DL_LIBS})
