@@ -380,7 +380,11 @@ int main(int argc, char **argv) {
     mkl_set_num_threads(threads);
 #endif
 #if defined(_OPENMP)
-    omp_set_num_threads(threads);
+    // Only smf runs on this binary's own OpenMP runtime (libomp140, /openmp:llvm).
+    // Touching it for another solver would initialise it next to that solver's
+    // runtime (conda MUMPS loads libomp.dll) and abort with "OMP: Error #15".
+    // Those solvers read OMP_NUM_THREADS, which run.py exports.
+    if (solver_id == "smf") omp_set_num_threads(threads);
 #endif
 
     if (sequence_id.empty()) sequence_id = case_id;

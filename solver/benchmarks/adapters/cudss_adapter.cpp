@@ -91,8 +91,10 @@ Outcome map_cudss_status(cudssStatus_t s) {
 //     "reserved for future (not supported yet)", so Bunch-Kaufman cannot be
 //     selected; the pivot strategy stays AUTO.
 //   * SPD: CUDSS_MTYPE_SPD (Cholesky), as the other adapters use their SPD path.
-//   * Iterative refinement inside the solve phase: CUDSS_CONFIG_IR_N_STEPS = 3,
-//     the harness's refinement count.
+//   * Iterative refinement follows the track like every other solver: on the
+//     "ipopt" track with one right-hand side the solve phase runs cuDSS's own
+//     CUDSS_CONFIG_IR_N_STEPS = 3 (the harness's refinement count); otherwise 0.
+//     The IR time is inside solve_ms (it is part of the solve call).
 // Timing: every phase is host wall-clock around the cuDSS calls plus a
 // cudaDeviceSynchronize, and includes the host<->device copies of the matrix
 // structure (analyse), the values (factor) and the right-hand sides / solution
@@ -117,8 +119,9 @@ public:
         return id;
     }
 
-    void configure(const Control &ctrl, const std::string &) override {
+    void configure(const Control &ctrl, const std::string &track) override {
         indefinite_ = (ctrl.matrix_type == MatrixType::RealSymmetricIndefinite);
+        track_ = track;
     }
 
     Outcome analyse(const CscLower &A) override {
@@ -148,10 +151,6 @@ public:
         if (!cudss_ok(cudssCreate(&handle_), "cudssCreate") ||
             !cudss_ok(cudssConfigCreate(&config_), "cudssConfigCreate") ||
             !cudss_ok(cudssDataCreate(handle_, &data_), "cudssDataCreate")) {
-            return stats_.outcome;
-        }
-        const int ir_steps = 3;
-        if (!cudss_ok(cudssConfigSet(config_, CUDSS_CONFIG_IR_N_STEPS, &ir_steps, sizeof(ir_steps)), "set IR steps")) {
             return stats_.outcome;
         }
 
@@ -212,6 +211,10 @@ public:
         if (nrhs <= 0 || b_and_x.size() < total) return fail(Outcome::InvalidInput, "cudss: solve buffer too small");
 
         if (!ensure_rhs(nrhs)) return stats_.outcome;
+        const int ir_steps = (track_ == "ipopt" && nrhs == 1) ? 3 : 0;
+        if (!cudss_ok(cudssConfigSet(config_, CUDSS_CONFIG_IR_N_STEPS, &ir_steps, sizeof(ir_steps)), "set IR steps")) {
+            return stats_.outcome;
+        }
         const auto t0 = Clock::now();
         if (!cuda_ok(cudaMemcpy(d_b_, b_and_x.data(), total * sizeof(double), cudaMemcpyHostToDevice), "copy rhs")) {
             return stats_.outcome;
@@ -367,6 +370,7 @@ private:
     }
 
     bool indefinite_ = true;
+    std::string track_ = "recommended";
     int n_ = 0;
     int nrhs_ = 0;
     bool analysed_ = false;

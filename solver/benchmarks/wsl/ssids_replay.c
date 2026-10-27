@@ -556,9 +556,11 @@ static bool do_factor(Fact *F, bool posdef, const double *vals, Result *r, doubl
 }
 
 static bool do_analyse(Fact *F, const double *vals, Result *r, double *ms) {
-    const double t0 = now_ms();
+    double t0;
+    /* Freeing the previous analysis is not part of the analyse phase. */
     if (F->akeep || F->fkeep) spral_ssids_free(&F->akeep, &F->fkeep);
     F->akeep = F->fkeep = NULL;
+    t0 = now_ms();
     spral_ssids_analyse(false, F->A->n, NULL, F->A->ptr, F->A->row, vals, &F->akeep, F->opt, F->inf);
     *ms = now_ms() - t0;
     if (F->inf->flag < 0) {

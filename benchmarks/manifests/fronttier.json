@@ -1445,7 +1445,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1462,7 +1462,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -1478,7 +1478,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1495,7 +1495,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -1775,7 +1775,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1792,7 +1792,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -1907,7 +1907,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1924,7 +1924,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -1940,7 +1940,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -1957,7 +1957,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -2039,7 +2039,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2056,7 +2056,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -2105,7 +2105,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2122,7 +2122,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "recommended"
     },
     {
@@ -2171,7 +2171,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "tuning",
+      "split": "heldout",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2188,43 +2188,43 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
+      "split": "heldout",
+      "track": "recommended"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b39_c30",
+      "sequence_id": "TSOPF_FS_b39_c30",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
+      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
+      "n": 120216,
+      "nnz_lower": 1575639,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
+      "split": "tuning",
+      "track": "ipopt",
+      "ordering": "matching"
+    },
+    {
+      "matrix_id": "TSOPF_FS_b39_c30",
+      "sequence_id": "TSOPF_FS_b39_c30",
+      "family_id": "power_flow",
+      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
+      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
+      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
+      "n": 120216,
+      "nnz_lower": 1575639,
+      "matrix_type": "indefinite",
+      "mode": "cold",
+      "expected_outcome": "Success",
+      "class": "hard_indef",
       "split": "tuning",
       "track": "recommended"
     },
     {
-      "matrix_id": "TSOPF_FS_b39_c30",
-      "sequence_id": "TSOPF_FS_b39_c30",
-      "family_id": "power_flow",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
-      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
-      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
-      "n": 120216,
-      "nnz_lower": 1575639,
-      "matrix_type": "indefinite",
-      "mode": "cold",
-      "expected_outcome": "Success",
-      "class": "hard_indef",
-      "split": "heldout",
-      "track": "ipopt",
-      "ordering": "matching"
-    },
-    {
-      "matrix_id": "TSOPF_FS_b39_c30",
-      "sequence_id": "TSOPF_FS_b39_c30",
-      "family_id": "power_flow",
-      "source": "SuiteSparse TSOPF/TSOPF_FS_b39_c30",
-      "mtx_path": "benchmarks/fixtures/large/TSOPF_FS_b39_c30/TSOPF_FS_b39_c30.mtx",
-      "matrix_sha256": "05282c8aeaa0b5846a0c863e6e1f7addca0e4c9aa20413b197f6955202581989",
-      "n": 120216,
-      "nnz_lower": 1575639,
-      "matrix_type": "indefinite",
-      "mode": "cold",
-      "expected_outcome": "Success",
-      "class": "hard_indef",
-      "split": "heldout",
-      "track": "recommended"
-    },
-    {
       "matrix_id": "cont-300",
       "sequence_id": "cont-300",
       "family_id": "kkt_qp",
@@ -2237,7 +2237,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "ordering": "matching"
     },
@@ -2254,7 +2254,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended"
     },
     {
@@ -2270,7 +2270,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "report_only": true,
       "ordering": "matching"
@@ -2288,7 +2288,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended",
       "report_only": true
     },
@@ -2305,7 +2305,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "ipopt",
       "report_only": true,
       "ordering": "matching"
@@ -2323,7 +2323,7 @@
       "mode": "cold",
       "expected_outcome": "Success",
       "class": "hard_indef",
-      "split": "heldout",
+      "split": "tuning",
       "track": "recommended",
       "report_only": true
     },

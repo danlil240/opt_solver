@@ -83,6 +83,20 @@ def assign_splits(ids: list[str], seed: int = SEED, fraction: float = HELDOUT_FR
     return out
 
 
+def pinned_splits(manifest: pathlib.Path | None = None) -> dict[str, dict[str, str]]:
+    """class -> matrix_id -> split of the manifest currently on disk. A matrix
+    already in the front-tier manifest keeps its split forever (the committed
+    split is authoritative); only matrices new to it are drawn by the seed."""
+    path = manifest or (ROOT / "benchmarks" / "manifests" / "fronttier.json")
+    if not path.exists():
+        return {}
+    pinned: dict[str, dict[str, str]] = {}
+    for c in json.loads(path.read_text(encoding="utf-8")).get("cases", []):
+        if c.get("split") in ("tuning", "heldout") and c.get("class"):
+            pinned.setdefault(c["class"], {})[c["matrix_id"]] = c["split"]
+    return pinned
+
+
 def _load(name: str) -> dict:
     return json.loads((ROOT / "benchmarks" / "manifests" / f"{name}.json")
                       .read_text(encoding="utf-8"))
@@ -228,9 +242,10 @@ def collect(out: pathlib.Path, do_fetch: bool, budget_mb: float) -> dict:
 
     # split per class at matrix level
     splits: dict[str, dict[str, str]] = {}
+    pinned = pinned_splits()
     for cls in {c for c, _ in base}:
-        splits[cls] = assign_splits([x["matrix_id"] for k, x in base if k == cls],
-                                   fixed=prelabel.get(cls))
+        fixed = {**prelabel.get(cls, {}), **pinned.get(cls, {})}   # on-disk manifest wins
+        splits[cls] = assign_splits([x["matrix_id"] for k, x in base if k == cls], fixed=fixed)
 
     cases = []
     for cls, c in base:

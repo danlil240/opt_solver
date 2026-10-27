@@ -41,3 +41,69 @@ class WslCommandTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClassifyTests(unittest.TestCase):
+    def test_driver_crash_is_failed_not_dead(self):
+        outcome, why, dead = run_wsl.classify_no_record(139, "Segmentation fault")
+        self.assertEqual(outcome, "Failed")
+        self.assertFalse(dead)
+        self.assertIn("139", why)
+
+    def test_oom_kill_and_timeout_are_not_dead(self):
+        self.assertEqual(run_wsl.classify_no_record(137, ""), ("Timeout", "ssids driver killed by timeout (rc=137)", False))
+        self.assertFalse(run_wsl.classify_no_record(124, "")[2])
+
+    def test_missing_wsl_or_driver_is_dead(self):
+        for rc, text in ((0xFFFFFFFF, ""), (-1, ""), (127, ""),
+                         (1, "There is no distribution with the supplied name."),
+                         (1, "execvpe(/root/x) failed: No such file or directory")):
+            outcome, _, dead = run_wsl.classify_no_record(rc, text)
+            self.assertEqual(outcome, "Unavailable", (rc, text))
+            self.assertTrue(dead, (rc, text))
+
+    def test_command_has_timeout_guard(self):
+        cmd = run_wsl.wsl_command(["--case", "c"], threads=1, driver="/d", distro="Ubuntu", timeout_s=57.9)
+        i = cmd.index("/usr/bin/timeout")
+        self.assertEqual(cmd[i:i + 5], ["/usr/bin/timeout", "-k", "5", "57", "/d"])
+
+
+class RunDispatchTests(unittest.TestCase):
+    """run.py --runner wsl: per-case driver failures do not disable ssids."""
+
+    def _run(self, returncode):
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": [{"matrix_id": "c1", "mtx_path": "x.mtx"}]}))
+            calls = []
+
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, returncode, "", "boom")
+
+            patches = (mock.patch.object(run.subprocess, "run", fake),
+                       mock.patch.dict("os.environ", {"SMF_WSL_SSIDS_DRIVER": "/d"}))
+            with patches[0], patches[1]:
+                run.main(["--manifest", str(manifest), "--output", str(td / "o"), "--runner", "wsl",
+                          "--solvers", "ssids", "--trials", "3", "--warmups", "0",
+                          "--allow-short-trials", "--build-dir", str(td / "nobuild")])
+            recs = [json.loads(l) for l in (td / "o" / "records.jsonl").read_text().splitlines()]
+            return len(calls), recs
+
+    def test_driver_crash_keeps_going(self):
+        n, recs = self._run(139)
+        self.assertEqual(n, 3)
+        self.assertEqual({r["outcome"] for r in recs}, {"Failed"})
+
+    def test_missing_wsl_stops_after_first(self):
+        n, recs = self._run(0xFFFFFFFF)
+        self.assertEqual(n, 1)
+        self.assertEqual([r["outcome"] for r in recs], ["Unavailable"])

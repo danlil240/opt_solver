@@ -67,7 +67,7 @@ def driver_path(distro: str = DISTRO) -> str:
 
 
 def wsl_command(args: List[str], threads: int, driver: Optional[str] = None,
-                distro: str = DISTRO) -> List[str]:
+                distro: str = DISTRO, timeout_s: Optional[float] = None) -> List[str]:
     """wsl.exe command running the driver with bench_replay-style `args`
     (the arguments after the binary), Windows paths translated, thread env set."""
     translated: List[str] = []
@@ -77,8 +77,42 @@ def wsl_command(args: List[str], threads: int, driver: Optional[str] = None,
         prev = a
     env = [f"OMP_NUM_THREADS={threads}", f"OPENBLAS_NUM_THREADS={threads}",
            f"MKL_NUM_THREADS={threads}", *_SSIDS_ENV]
-    return ["wsl.exe", "-d", distro, "--exec", "/usr/bin/env", *env,
+    # Killing wsl.exe on a Windows-side timeout does not kill the Linux
+    # process, so the driver runs under coreutils timeout (TERM, then KILL 5 s
+    # later) and dies on its own.
+    guard = ["/usr/bin/timeout", "-k", "5", str(max(1, int(timeout_s)))] if timeout_s else []
+    return ["wsl.exe", "-d", distro, "--exec", "/usr/bin/env", *env, *guard,
             driver or driver_path(distro), *translated]
+
+
+def kill_stray_drivers(distro: str = DISTRO) -> None:
+    """Best-effort: stop any ssids_replay left running inside WSL."""
+    try:
+        subprocess.run(["wsl.exe", "-d", distro, "--exec", "/usr/bin/pkill", "-9", "-f", "ssids_replay"],
+                       capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+_ENV_MARKERS = ("wsl_e_", "there is no distribution", "execvpe", "not a valid distribution",
+                "wsl is not installed", "no such file or directory", "cannot open shared object")
+
+
+def classify_no_record(returncode: int, text: str, guarded: bool = True) -> Tuple[str, str, bool]:
+    """A WSL attempt that produced no record: (outcome, reason, dead).
+
+    dead = the environment is broken (no wsl.exe/distro/driver), so later
+    attempts would only repeat it. A driver crash, OOM kill or timeout is a
+    per-case failure and must not disable the solver for the rest of the run.
+    """
+    text = (text or "").replace(chr(0), "").strip()
+    snippet = text[:300]
+    if guarded and returncode in (124, 137):
+        return "Timeout", f"ssids driver killed by timeout (rc={returncode})", False
+    low = text.lower()
+    if returncode in (-1, 0xFFFFFFFF, 127) or any(m in low for m in _ENV_MARKERS):
+        return "Unavailable", f"wsl driver did not run (rc={returncode}): {snippet}", True
+    return "Failed", f"ssids driver exited without a record (rc={returncode}): {snippet}", False
 
 
 def export_builtin_case(binary: pathlib.Path, case_id: str, cache_dir: pathlib.Path) -> Tuple[pathlib.Path, str]:
@@ -98,7 +132,7 @@ def export_builtin_case(binary: pathlib.Path, case_id: str, cache_dir: pathlib.P
 
 
 def unavailable_record(case: dict, solver_id: str, mode: str, track: str, trial_id: int,
-                       warmup: bool, threads: int, reason: str) -> dict:
+                       warmup: bool, threads: int, reason: str, outcome: str = "Unavailable") -> dict:
     matrix_id = case["matrix_id"]
     return {
         "schema_version": 1,
@@ -106,7 +140,7 @@ def unavailable_record(case: dict, solver_id: str, mode: str, track: str, trial_
         "sequence_id": case.get("sequence_id", matrix_id),
         "family_id": case.get("family_id", case.get("sequence_id", matrix_id)),
         "solver_id": solver_id, "mode": mode, "track": track, "trial_id": trial_id,
-        "warmup": warmup, "threads": threads, "outcome": "Unavailable", "reason": reason,
+        "warmup": warmup, "threads": threads, "outcome": outcome, "reason": reason,
         "wall_ms": 0.0, "peak_rss_bytes": -1,
         "validation": {"finite": False, "eta_inf": None, "omega": None, "relative_residual": None},
     }

@@ -228,7 +228,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                             env[var] = str(threads)
                         lines_before = records_path.read_text(encoding="utf-8").count("\n") if records_path.exists() else 0
                         if use_wsl:
-                            cmd = run_wsl.wsl_command(cmd[1:], threads)
+                            cmd = run_wsl.wsl_command(cmd[1:], threads, timeout_s=max(1.0, args.timeout - 3.0))
                         proc = subprocess.run(
                             cmd,
                             capture_output=True,
@@ -242,18 +242,30 @@ def main(argv: Optional[List[str]] = None) -> int:
                             if any('"outcome":"Unavailable"' in ln for ln in new_lines):
                                 dead.add((solver_id, threads))
                         if use_wsl and not new_lines:
-                            # The driver never ran (no WSL, distro or driver build).
-                            why = (proc.stderr or proc.stdout or "").replace(chr(0), "").strip()[:300]
+                            # No record: environment broken (dead) or a per-case driver failure.
+                            outcome, why, env_dead = run_wsl.classify_no_record(
+                                proc.returncode, proc.stderr or proc.stdout)
                             rec = run_wsl.unavailable_record(
-                                case, solver_id, mode, track, trial_id, is_warmup, threads,
-                                f"wsl driver did not run (rc={proc.returncode}): {why}")
+                                case, solver_id, mode, track, trial_id, is_warmup, threads, why, outcome)
                             with records_path.open("a", encoding="utf-8") as f:
                                 f.write(json.dumps(rec) + "\n")
-                            dead.add((solver_id, threads))
+                            if env_dead:
+                                dead.add((solver_id, threads))
                         if proc.returncode != 0 and not is_warmup:
                             if solver_id == "smf" or solver_id in required_baselines:
                                 any_failure = True
+                    except OSError as exc:
+                        if not use_wsl:
+                            raise
+                        rec = run_wsl.unavailable_record(
+                            case, solver_id, mode, track, trial_id, is_warmup, threads,
+                            f"wsl.exe could not be started: {exc}")
+                        with records_path.open("a", encoding="utf-8") as f:
+                            f.write(json.dumps(rec) + "\n")
+                        dead.add((solver_id, threads))
                     except subprocess.TimeoutExpired:
+                        if use_wsl:
+                            run_wsl.kill_stray_drivers()
                         rec = {
                             "schema_version": 1,
                             "matrix_id": matrix_id,
@@ -278,7 +290,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         }
                         with records_path.open("a", encoding="utf-8") as f:
                             f.write(json.dumps(rec) + "\n")
-                        dead.add((solver_id, threads))
+                        if not use_wsl:
+                            dead.add((solver_id, threads))
                         if not is_warmup and (solver_id == "smf" or solver_id in required_baselines):
                             any_failure = True
                 else:

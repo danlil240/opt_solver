@@ -96,7 +96,10 @@ TEST(BenchmarkAdapters, SmfAdapterAndAllRegisteredAdapters) {
         if (ident.supports_indefinite) {
             Control ctrl;
             ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
-            adapter->configure(ctrl, "recommended");
+            // cuDSS has no 2x2 pivots (static pivoting only) and, as on the
+            // recommended track, does no refinement; its exchange-matrix solve
+            // is only exact with its own iterative refinement (ipopt track).
+            adapter->configure(ctrl, id == "cudss" ? "ipopt" : "recommended");
             CscLower E2 = make_exchange_2x2_indef();
             ASSERT_EQ(adapter->analyse(E2), Outcome::Success);
             ASSERT_EQ(adapter->factor(E2.values), Outcome::Success);
@@ -334,6 +337,14 @@ TEST(BenchmarkAdapters, CudssSolvesPoisson) {
         std::vector<double> x2 = b;
         ASSERT_EQ(adapter->solve(x2, 1), Outcome::Success);
         EXPECT_LE(validate(A2, b, x2, 1).eta_inf, 1e-12);
+
+        // ipopt track, one rhs: cuDSS iterative refinement (3 steps) runs inside solve.
+        adapter->configure(ctrl, "ipopt");
+        ASSERT_EQ(adapter->analyse(A), Outcome::Success);
+        ASSERT_EQ(adapter->factor(A.values), Outcome::Success);
+        std::vector<double> x3 = b;
+        ASSERT_EQ(adapter->solve(x3, 1), Outcome::Success);
+        EXPECT_LE(validate(A, b, x3, 1).eta_inf, 1e-12);
     }
 }
 
