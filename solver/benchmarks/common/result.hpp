@@ -79,6 +79,7 @@ struct RunRecord {
     int inertia_neg = 0;
     int inertia_zero = 0;
     int delayed_pivots = 0;
+    int aptp_failed_columns = -1;  // smf only (Info::aptp_failed_columns); -1 = not reported
     int64_t factor_entries = 0;
     double flops = 0.0;
 

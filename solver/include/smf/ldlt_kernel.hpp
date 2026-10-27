@@ -51,10 +51,18 @@ struct LdltKernelResult {
 /// With prm.posdef the columns are taken in order without any search and the
 /// factorization stops at the first non-positive (or non-finite) pivot.
 ///
+/// `first` > 0 continues a partial factorization: columns [0, first) are
+/// already eliminated (L, D and tags in the layout above) and F[first:f,
+/// first:f] holds their Schur complement, as ldlt_aptp_front leaves it. The
+/// search starts at column `first`; a symmetric swap also permutes the rows
+/// of the earlier L columns. num_accepted is then the end of the eliminated
+/// columns (first plus this call's pivots), while inertia, static_pivots and
+/// flops count this call's pivots only.
+///
 /// `work` must hold at least f * (prm.nb + 2) doubles.
 LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
-                                   double *work);
+                                   double *work, int first = 0);
 
 /// Number of doubles ldlt_factor_front needs in `work` for a front of size f.
 inline std::size_t ldlt_work_size(int f, const LdltKernelParams &prm) {

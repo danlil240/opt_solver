@@ -14,6 +14,7 @@ struct SerialFactorStats {
   InertiaCounts inertia{};
   int delayed = 0;
   int static_pivots = 0;
+  int aptp_failed = 0;  // columns the APTP front kernel failed (before the TPP fallback)
   int parallel_subtrees = 0;
   double flops = 0.0;
   int max_front = 0;

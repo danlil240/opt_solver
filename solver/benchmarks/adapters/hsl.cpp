@@ -332,6 +332,7 @@ public:
         stats_.delayed_pivots = info.delayed_pivots;
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
+        stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
 
@@ -492,6 +493,7 @@ public:
         stats_.inertia_zero = in.zero;
         stats_.delayed_pivots = info.delayed_pivots;
         stats_.static_pivots = info.static_pivots;
+        stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
         switch (st) {

@@ -251,6 +251,43 @@ TEST(LeanEngine, RefactorReusesWorkspace) {
     }
 }
 
+// The same with the APTP front kernel on every front (plus its TPP
+// fallback): the planned workspace covers it, so neither the first factor
+// nor a refactorization grows a buffer.
+TEST(LeanEngine, AptpRefactorReusesWorkspace) {
+    std::mt19937 rng(99);
+    std::uniform_real_distribution<double> scale(0.8, 1.2);
+    const CscLower A0 = make_kkt(120, 50, 0.04, rng);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.front_kernel = FrontKernel::Aptp;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A0, ctrl, info);
+    ASSERT_NE(ak, nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(solver.factor(*ak, A0, ctrl, info, fk, ws), FactorStatus::Success);
+    if (info.delayed_pivots == 0) EXPECT_EQ(ws.capacity_growths_last_call, 0);
+    for (int it = 0; it < 5; ++it) {
+        CscLower A = A0;
+        for (Int j = 0; j < A.n; ++j) {
+            const Int k = A.col_ptr[static_cast<std::size_t>(j)];
+            if (A.row_idx[static_cast<std::size_t>(k)] == j && A.values[static_cast<std::size_t>(k)] != 0.0)
+                A.values[static_cast<std::size_t>(k)] *= scale(rng);
+        }
+        Info finfo;
+        ASSERT_EQ(solver.factor(*ak, A, ctrl, finfo, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(ws.front_heap_allocations_last_call, 0) << "iter " << it;
+        EXPECT_EQ(ws.capacity_growths_last_call, 0) << "iter " << it;
+        std::vector<double> b(static_cast<std::size_t>(A.n), 1.0), x = b;
+        Info sinfo;
+        ASSERT_EQ(solver.solve(fk, ctrl, sinfo, x.data(), static_cast<int>(A.n)), 0);
+        EXPECT_LT(backward_error(A, x, b), 1e-13) << "iter " << it;
+        EXPECT_EQ(finfo.num_negative, 50);
+    }
+}
+
 namespace {
 
 // Largest |L| entry of a lean indefinite factor: each front stores p columns

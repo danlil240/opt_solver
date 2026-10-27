@@ -69,6 +69,25 @@ enum class MatchingTrigger {
     RealizedDelays = 1
 };
 
+// Dense kernel for the fully summed columns of an indefinite front.
+//   Tpp  - threshold partial pivoting (ldlt_factor_front), blocked BLAS-3.
+//   Aptp - a posteriori threshold pivoting (ldlt_aptp_front, SSIDS-style),
+//          with ldlt_factor_front as a fallback on the columns APTP fails;
+//          what still fails is delayed to the parent as with Tpp.
+//   Auto - Aptp on fronts with at least Control::aptp_min_elig (> 0) fully
+//          summed columns, Tpp below. With aptp_min_elig = 0 (the default)
+//          Auto is Tpp: serially APTP measured slower on the tuning split
+//          and did not reduce delays overall (it is meant to pay off with
+//          parallel tiles).
+// Fronts that static-pivot (static_pivot_tol, a fallback front, the
+// in-order quasidefinite mode) or are SPD always use Tpp: APTP has no
+// static-pivot mode.
+enum class FrontKernel {
+    Tpp  = 0,
+    Aptp = 1,
+    Auto = 2
+};
+
 enum class ScalingMethod {
     None         = 0,
     Equilibration = 1,

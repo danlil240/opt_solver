@@ -165,7 +165,9 @@ std::string RunRecord::to_json_line() const {
         << "\"inertia\":{\"pos\":" << inertia_pos
         << ",\"neg\":" << inertia_neg
         << ",\"zero\":" << inertia_zero << "},"
-        << "\"delayed_pivots\":" << delayed_pivots << ","
+        << "\"delayed_pivots\":" << delayed_pivots << ",";
+    if (aptp_failed_columns >= 0) oss << "\"aptp_failed_columns\":" << aptp_failed_columns << ",";
+    oss
         << "\"factor_entries\":" << factor_entries << ","
         << "\"flops\":";
     write_json_double(oss, flops);

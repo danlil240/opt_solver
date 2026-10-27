@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <numeric>
+#include <random>
 #include <span>
 #include <utility>
 #include <vector>
@@ -388,4 +390,146 @@ TEST(DelayedPivots, RealizedDelayTriggerReanalysesOnce) {
     FactorKeep pfk;
     ASSERT_EQ(ps.factor(*pak, pc, pi, pfk), FactorStatus::Success);
     EXPECT_EQ(pi.matching_reanalyses, 0);
+}
+
+namespace {
+
+// Two children A = [0, E) and B = [E, 2E) under a root C = [2E, 2E + R),
+// in identity order: A11 and B11 structurally dense, every A / B column
+// coupled to every C row. With `nasty`, four columns of A are numerically
+// zero inside A11 (diagonal included):
+//  - a = 5 and b = 200 (different 128-wide APTP tiles) see only A(b, a) = 1:
+//    each fails its own tile, so APTP fails both; the TPP fallback takes
+//    them as the 2x2 [[0, 1], [1, 0]].
+//  - z = 7 and z2 = 250 see only C rows (A(2E, z) = A(2E + 1, z2) = 1):
+//    no eligible pivot exists for them in A, so they fail APTP and TPP both
+//    and are delayed to C, where they pivot against those rows.
+// Without `nasty` every diagonal is large: nothing fails or delays.
+CscLower aptp_fallback_matrix(bool nasty) {
+    const Int E = 300, R = 20, n = 2 * E + R;
+    const Int a = 5, b = 200, z = 7, z2 = 250;
+    std::mt19937 rng(4242);
+    std::uniform_real_distribution<double> uni(-1.0, 1.0);
+    const auto special = [&](Int j) { return nasty && (j == a || j == b || j == z || j == z2); };
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (Int j = 0; j < n; ++j) {
+        const bool in_c = j >= 2 * E;
+        const Int blk_end = in_c ? n : (j < E ? E : 2 * E);
+        for (Int i = j; i < blk_end; ++i) {
+            double v;
+            if (i == j) v = (j % 2 == 0 ? 1.0 : -1.0) * (10.0 + uni(rng));
+            else v = 0.05 * uni(rng);
+            if (special(i) || special(j)) v = 0.0;
+            if (nasty && j == a && i == b) v = 1.0;
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        if (!in_c) {
+            for (Int i = 2 * E; i < n; ++i) {
+                double v = special(j) ? 0.0 : 0.01 * uni(rng);
+                if (nasty && j == z && i == 2 * E) v = 1.0;
+                if (nasty && j == z2 && i == 2 * E + 1) v = 1.0;
+                A.row_idx.push_back(i);
+                A.values.push_back(v);
+            }
+        }
+        A.col_ptr[static_cast<std::size_t>(j) + 1] = static_cast<Int>(A.row_idx.size());
+    }
+    return A;
+}
+
+Control aptp_fallback_control(std::vector<Int> &perm, Int n) {
+    perm.resize(static_cast<std::size_t>(n));
+    std::iota(perm.begin(), perm.end(), Int{0});
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::UserSupplied;
+    ctrl.user_perm = perm.data();
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.front_kernel = FrontKernel::Aptp;
+    return ctrl;
+}
+
+} // namespace
+
+// Columns that fail APTP but pass the TPP fallback, and columns that fail
+// both and are delayed to the parent.
+TEST(DelayedPivots, AptpFallbackThenDelay) {
+    const CscLower A = aptp_fallback_matrix(true);
+    std::vector<Int> perm;
+    const Control ctrl = aptp_fallback_control(perm, A.n);
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_GE(ak->supernodes.size(), 3u);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_GE(info.aptp_failed_columns, 4);
+    EXPECT_EQ(info.delayed_pivots, 2);
+    EXPECT_EQ(info.num_zero, 0);
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.1 * static_cast<double>(i));
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1), 0);
+    const auto val = smf::bench::validate(A, b, x, 1);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+
+    // The TPP engine agrees on inertia (and delays the same two columns).
+    Control tc = ctrl;
+    tc.front_kernel = FrontKernel::Tpp;
+    Info ti;
+    FactorKeep tfk;
+    NumericWorkspace tws;
+    ASSERT_EQ(solver.factor(*ak, A, tc, ti, tfk, tws), FactorStatus::Success);
+    EXPECT_EQ(ti.aptp_failed_columns, 0);
+    EXPECT_EQ(ti.delayed_pivots, 2);
+    EXPECT_EQ(ti.num_positive, info.num_positive);
+    EXPECT_EQ(ti.num_negative, info.num_negative);
+
+    // Auto is Tpp by default (aptp_min_elig = 0); with a cutoff the 300-column
+    // front of A (and of B) takes APTP.
+    Control ac = ctrl;
+    ac.front_kernel = FrontKernel::Auto;
+    Info ai;
+    ASSERT_EQ(solver.factor(*ak, A, ac, ai, tfk, tws), FactorStatus::Success);
+    EXPECT_EQ(ai.aptp_failed_columns, 0);
+    ac.aptp_min_elig = 128;
+    ASSERT_EQ(solver.factor(*ak, A, ac, ai, tfk, tws), FactorStatus::Success);
+    EXPECT_EQ(ai.aptp_failed_columns, info.aptp_failed_columns);
+    EXPECT_EQ(ai.delayed_pivots, 2);
+    ac.aptp_min_elig = 301;
+    ASSERT_EQ(solver.factor(*ak, A, ac, ai, tfk, tws), FactorStatus::Success);
+    EXPECT_EQ(ai.aptp_failed_columns, 0);
+}
+
+// A refactorization with benign values starts from clean counters: no
+// APTP failures and no delays left over from the previous factor().
+TEST(DelayedPivots, AptpRefactorStartsClean) {
+    const CscLower A = aptp_fallback_matrix(true);
+    const CscLower A2 = aptp_fallback_matrix(false);
+    std::vector<Int> perm;
+    const Control ctrl = aptp_fallback_control(perm, A.n);
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    ASSERT_GT(info.aptp_failed_columns, 0);
+    ASSERT_GT(info.delayed_pivots, 0);
+    ASSERT_EQ(solver.factor(*ak, A2, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.aptp_failed_columns, 0);
+    EXPECT_EQ(info.delayed_pivots, 0);
+    std::vector<double> b(static_cast<std::size_t>(A2.n), 1.0);
+    std::vector<double> x = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A2.n), 1), 0);
+    const auto val = smf::bench::validate(A2, b, x, 1);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
 }

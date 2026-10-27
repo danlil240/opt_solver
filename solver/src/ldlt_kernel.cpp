@@ -328,13 +328,13 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
 }
 
 // Schur complement of the rows below the eligible block, once and at rank
-// p: F[e:f, e:f] -= L[e:f, 0:p] D L[e:f, 0:p]^T (lower). L D is formed in
-// the front's unused strict upper triangle, F[0:p, e:f], as its transpose.
-void schur_update(double *F, int f, int p, int e, const int8_t *tags) {
+// p - p0: F[e:f, e:f] -= L[e:f, p0:p] D L[e:f, p0:p]^T (lower). L D is formed
+// in the front's unused strict upper triangle, F[p0:p, e:f], as its transpose.
+void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags) {
     const int q = f - e;
-    if (p <= 0 || q <= 0) return;
+    if (p <= p0 || q <= 0) return;
     const std::size_t sf = static_cast<std::size_t>(f);
-    for (int c = 0; c < p; ++c) {
+    for (int c = p0; c < p; ++c) {
         const double *Lc = F + static_cast<std::size_t>(c) * sf;
         if (tags[c] == 2) {
             const double *Lc1 = Lc + sf;
@@ -350,18 +350,18 @@ void schur_update(double *F, int f, int p, int e, const int8_t *tags) {
             for (int i = e; i < f; ++i) F[static_cast<std::size_t>(i) * sf + c] = Lc[i] * d;
         }
     }
-    smf_dgemmt_lower_nn_sub(F + e * sf + e, q, p, F + e, f, F + e * sf, f, f);
+    smf_dgemmt_lower_nn_sub(F + e * sf + e, q, p - p0, F + p0 * sf + e, f, F + e * sf + p0, f, f);
 }
 
 } // namespace
 
 LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
-                                   double *work) {
+                                   double *work, int first) {
     LdltKernelResult res;
-    int k = 0;
+    int k = first;
 
-    if (f < prm.blocked_min_front || prm.nb <= 1) {
+    if (f - first < prm.blocked_min_front || prm.nb <= 1) {
         // Unblocked right-looking: every pivot updates the full trailing
         // triangle. No BLAS calls; fronts this small live in L1/L2.
         while (k < num_elig) {
@@ -413,7 +413,7 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             deferred_update(F, f, ss, k, k, num_elig, W);
         }
     }
-    schur_update(F, f, k, num_elig, tags);
+    schur_update(F, f, first, k, num_elig, tags);
     res.num_accepted = k;
     return res;
 }

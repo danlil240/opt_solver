@@ -46,6 +46,7 @@ struct AdapterStats {
     int64_t factor_entries = 0;
     double flops = 0.0;
     int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
+    int aptp_failed_columns = 0;  // Info::aptp_failed_columns of the last factor (smf adapters)
 };
 
 class SolverAdapter {

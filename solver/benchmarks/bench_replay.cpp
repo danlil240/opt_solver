@@ -524,6 +524,18 @@ int main(int argc, char **argv) {
     }
     if (matching_trigger == "realized") ctrl.matching_trigger = smf::MatchingTrigger::RealizedDelays;
     else if (matching_trigger == "predicted") ctrl.matching_trigger = smf::MatchingTrigger::Predicted;
+    // Front-kernel tuning knobs (run.py has no per-run flags for them):
+    // SMF_BENCH_FRONT_KERNEL = tpp | aptp | auto, SMF_BENCH_APTP_NB,
+    // SMF_BENCH_APTP_IB, SMF_BENCH_APTP_MIN_ELIG (integers).
+    if (const char *e = std::getenv("SMF_BENCH_FRONT_KERNEL")) {
+        const std::string k = e;
+        if (k == "tpp") ctrl.front_kernel = smf::FrontKernel::Tpp;
+        else if (k == "aptp") ctrl.front_kernel = smf::FrontKernel::Aptp;
+        else if (k == "auto") ctrl.front_kernel = smf::FrontKernel::Auto;
+    }
+    if (const char *e = std::getenv("SMF_BENCH_APTP_NB")) ctrl.aptp_nb = std::atoi(e);
+    if (const char *e = std::getenv("SMF_BENCH_APTP_IB")) ctrl.aptp_ib = std::atoi(e);
+    if (const char *e = std::getenv("SMF_BENCH_APTP_MIN_ELIG")) ctrl.aptp_min_elig = std::atoi(e);
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =
@@ -695,6 +707,7 @@ int main(int argc, char **argv) {
         rec.inertia_neg = st.inertia_neg;
         rec.inertia_zero = st.inertia_zero;
         rec.delayed_pivots = st.delayed_pivots;
+        if (solver_id == "smf") rec.aptp_failed_columns = st.aptp_failed_columns;
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
 
@@ -766,6 +779,7 @@ int main(int argc, char **argv) {
         rec.inertia_neg = st.inertia_neg;
         rec.inertia_zero = st.inertia_zero;
         rec.delayed_pivots = st.delayed_pivots;
+        if (solver_id == "smf") rec.aptp_failed_columns = st.aptp_failed_columns;
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
 

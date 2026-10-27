@@ -94,8 +94,11 @@ add_executable(test_factor_posdef test_factor_posdef.cpp)
 target_link_libraries(test_factor_posdef PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorPosdef COMMAND test_factor_posdef)
 
-add_executable(test_factor_indef test_factor_indef.cpp)
+add_executable(test_factor_indef test_factor_indef.cpp ../benchmarks/common/validation.cpp)
 target_link_libraries(test_factor_indef PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_factor_indef PRIVATE psapi)
+endif()
 add_test(NAME FactorIndef COMMAND test_factor_indef)
 
 add_executable(test_diagnostics test_diagnostics.cpp)

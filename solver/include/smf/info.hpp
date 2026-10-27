@@ -57,6 +57,10 @@ struct Info {
     double       actual_flops           = 0.0;
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
+    /// Fully summed columns the APTP front kernel failed (summed over
+    /// fronts, before the TPP fallback; Control::front_kernel). Those the
+    /// fallback could not pivot either are also in delayed_pivots.
+    int          aptp_failed_columns    = 0;
     int          parallel_subtrees      = 0;  ///< subtrees factored concurrently (0 = serial)
     /// After FactorStatus::InertiaExceeded: predicted flops (sum of p f^2,
     /// as predicted_flops) of the fronts that were not factored.

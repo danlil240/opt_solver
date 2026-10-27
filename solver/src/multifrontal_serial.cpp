@@ -1,5 +1,6 @@
 #include "smf/multifrontal_serial.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
 
 #include <algorithm>
@@ -8,6 +9,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -112,7 +115,25 @@ struct FactorContext {
   // Fallback static pivot (absolute; 0 = off): replaces prm.static_pivot in
   // a root front and in a front receiving more delays than its width.
   double fallback_static = 0.0;
+  // APTP front kernel (Control::front_kernel): null = off. Used on fronts
+  // that pivot with prm itself (not a fallback static front) and have at
+  // least aptp_min_elig fully summed columns.
+  const AptpParams *aprm = nullptr;
+  int aptp_min_elig = 0;
 };
+
+// Written one past the APTP kernel's declared workspace and checked after
+// it: catches a kernel that writes beyond aptp_work_size().
+constexpr double kWorkCanary = -1.2345678901234567e-300;
+
+// Kernel workspace (doubles) of a front: ldlt_factor_front's, or with APTP
+// the larger of APTP's plus its canary and the TPP fallback's.
+std::size_t front_work_need(int f, int num_elig, const LdltKernelParams &prm,
+                            const AptpParams *aprm) {
+  const std::size_t tpp = ldlt_work_size(f, prm);
+  if (aprm == nullptr) return tpp;
+  return std::max(tpp, aptp_work_size(f, num_elig, *aprm) + 1);
+}
 
 // Size-as-high-water-mark growth: only the excess beyond the previous size
 // is value-initialised, and capacity grows geometrically.
@@ -196,7 +217,12 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   grow(*P.fv, P.fo + sf * sf, P.growths);
   grow(*P.cmap, sf, P.growths);
   grow(*P.tags, sf, P.growths);
-  grow(*P.work, ldlt_work_size(f, cx.prm), P.growths);
+  // APTP only on plain threshold-pivoting fronts: a fallback static front
+  // (below) keeps the TPP kernel.
+  const bool fallback_front = cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym);
+  const AptpParams *aprm =
+      (cx.aprm != nullptr && !fallback_front && num_elig >= cx.aptp_min_elig) ? cx.aprm : nullptr;
+  grow(*P.work, front_work_need(f, num_elig, cx.prm, aprm), P.growths);
   double *F = P.fv->data() + P.fo;
   for (std::size_t j = 0; j < sf; ++j) {
     std::fill_n(F + j * sf + j, sf - j, 0.0);
@@ -269,7 +295,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // from a nonzero value keeps its sign unless ctrl.static_pivots_as_zero.
   const LdltKernelParams *prm = &cx.prm;
   LdltKernelParams fallback_prm;
-  if (cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym)) {
+  if (fallback_front) {
     fallback_prm = cx.prm;
     fallback_prm.static_pivot = cx.fallback_static;
     fallback_prm.static_zero_stays_zero = true;
@@ -278,10 +304,34 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   }
 
   int8_t *tags = P.tags->data();
-  const LdltKernelResult kr =
-      ldlt_factor_front(F, f, num_elig, rows, *prm, tags, P.work->data());
-  const int p = kr.num_accepted;
   SerialFactorStats &st = P.st;
+  double *const work = P.work->data();
+  LdltKernelResult kr;
+  if (aprm != nullptr) {
+    // APTP, then the blocked TPP kernel on the columns it failed (their
+    // Schur state is current); what TPP fails too is delayed as usual.
+    const std::size_t need = aptp_work_size(f, num_elig, *aprm);
+    work[need] = kWorkCanary;
+    const AptpResult ar = ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
+    if (work[need] != kWorkCanary) {
+      std::fprintf(stderr, "smf: APTP front kernel overran its workspace (f=%d, num_elig=%d)\n", f,
+                   num_elig);
+      std::abort();
+    }
+    st.aptp_failed += ar.num_failed;
+    if (ar.num_failed > 0) {
+      kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, ar.num_eliminated);
+    } else {
+      kr.num_accepted = ar.num_eliminated;
+    }
+    kr.inertia.positive += ar.inertia.positive;
+    kr.inertia.negative += ar.inertia.negative;
+    kr.inertia.zero += ar.inertia.zero;
+    kr.flops += ar.flops;
+  } else {
+    kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
+  }
+  const int p = kr.num_accepted;
   st.inertia.positive += kr.inertia.positive;
   st.inertia.negative += kr.inertia.negative;
   st.inertia.zero += kr.inertia.zero;
@@ -412,6 +462,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.inertia.zero += from.inertia.zero;
   to.delayed += from.delayed;
   to.static_pivots += from.static_pivots;
+  to.aptp_failed += from.aptp_failed;
   to.flops += from.flops;
   to.max_front = std::max(to.max_front, from.max_front);
 }
@@ -509,6 +560,23 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   prm.min_abs_pivot = (prm.static_pivot > 0.0 && ctrl.static_pivot_in_order) ? prm.static_pivot : 0.0;
   const double fallback_static = posdef ? 0.0 : fallback_static_pivot;
 
+  // APTP (Control::front_kernel) on plain threshold-pivoting fronts only: it
+  // has no static-pivot mode, so SPD, static_pivot_tol and in-order fronts
+  // keep the TPP kernel (fallback static fronts are excluded per front).
+  AptpParams aprm;
+  aprm.u = ctrl.pivot_u;
+  aprm.nb = std::max(1, ctrl.aptp_nb);
+  aprm.ib = std::max(1, ctrl.aptp_ib);
+  aprm.small = eff_small;
+  // Auto with aptp_min_elig = 0 (the default) is Tpp.
+  const bool kernel_aptp = ctrl.front_kernel == FrontKernel::Aptp ||
+                           (ctrl.front_kernel == FrontKernel::Auto && ctrl.aptp_min_elig > 0);
+  const bool aptp_on = kernel_aptp && !posdef && prm.static_pivot == 0.0 &&
+                       prm.min_abs_pivot == 0.0 && ctrl.pivot_u > 0.0;
+  const AptpParams *aptp = aptp_on ? &aprm : nullptr;
+  const int aptp_min_elig =
+      ctrl.front_kernel == FrontKernel::Aptp ? 1 : std::max(1, ctrl.aptp_min_elig);
+
   // Early abort once the negative pivots exceed the limit (indefinite only).
   // Pivots are only ever added, so a run whose final count is within the
   // limit never trips it and does exactly the work of an unarmed run.
@@ -518,6 +586,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Symbolic plan: largest front, factor size, and the peak of the
   // contribution stack when no pivot is delayed.
   std::size_t max_f = 1;
+  std::size_t max_work = 1;
   std::size_t pred_factor = 0;
   std::size_t pred_rows = 0;
   ws.cb_value_off.resize(ns);
@@ -533,6 +602,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       const std::size_t f = static_cast<std::size_t>(keep.front_size(static_cast<Int>(si)));
       const std::size_t p = static_cast<std::size_t>(sn.width());
       max_f = std::max(max_f, f);
+      max_work = std::max(
+          max_work, front_work_need(static_cast<int>(f), static_cast<int>(p), prm,
+                                    static_cast<int>(p) >= aptp_min_elig ? aptp : nullptr));
       pred_factor += f * p;
       pred_rows += f;
       for (const Int c : keep.children(s)) {
@@ -563,7 +635,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   reserve_plan(ws.front_rows, max_f);
   reserve_plan(ws.child_map, max_f);
   reserve_plan(ws.pivot_tags, max_f);
-  reserve_plan(ws.kernel_work, ldlt_work_size(static_cast<int>(max_f), prm));
+  reserve_plan(ws.kernel_work, max_work);
 
   auto &fv = fkeep.factor_values;
   auto &sri = fkeep.solve_row_indices;
@@ -614,7 +686,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (threads <= 1) {
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
-                           fallback_static};
+                           fallback_static, aptp,             aptp_min_elig};
     std::size_t k = 0;
     for (; k < keep.postorder.size(); ++k) {
       status = process_front(cx, main, 0, keep.postorder[k], true);
@@ -653,7 +725,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     node_blocks.resize(ns);
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
-                           fallback_static};
+                           fallback_static, aptp,             aptp_min_elig};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

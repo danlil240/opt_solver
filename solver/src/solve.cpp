@@ -88,6 +88,7 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
   // ran to the end (Success, or Singular reported as SingularMatrix; an
   // input or allocation error reports its own ErrorCode) may fire it.
   info.delayed_pivots = 0;
+  info.aptp_failed_columns = 0;
   const FactorStatus st = run(ak);
   const bool ran = st == FactorStatus::Success ||
                    (st == FactorStatus::Singular && info.status == ErrorCode::SingularMatrix);
