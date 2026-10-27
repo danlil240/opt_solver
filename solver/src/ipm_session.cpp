@@ -350,6 +350,9 @@ void IpmSession::prepare_analysis() {
   if (perm.size() != static_cast<std::size_t>(mat_.n)) return;  // cannot re-analyse: rejected
 
   Control actrl = factor_ctrl_;
+  // Same pattern as the analysis it replaces: when that one found the input
+  // clean, the duplicate/out-of-range scan is skipped.
+  actrl.check_input = !(ak_ && ak_->input_clean);
   actrl.ordering = OrderingMethod::UserSupplied;
   actrl.user_perm = perm.data();
   actrl.user_pair_first = pairs.empty() ? nullptr : pairs.data();

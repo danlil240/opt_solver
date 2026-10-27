@@ -374,6 +374,39 @@ void expect_fast_path_matches(const CscLower &A, MatrixType type) {
     }
 }
 
+void expect_same_keep(const AnalysisKeep &a, const AnalysisKeep &b) {
+    EXPECT_EQ(a.n, b.n);
+    EXPECT_EQ(a.cleaned.col_ptr, b.cleaned.col_ptr);
+    EXPECT_EQ(a.cleaned.row_idx, b.cleaned.row_idx);
+    EXPECT_EQ(a.cleaned.values, b.cleaned.values);
+    EXPECT_EQ(a.orig_col_ptr, b.orig_col_ptr);
+    EXPECT_EQ(a.orig_row_idx, b.orig_row_idx);
+    EXPECT_EQ(a.orig_to_clean_idx, b.orig_to_clean_idx);
+    EXPECT_EQ(a.orig_to_perm_direct, b.orig_to_perm_direct);
+    EXPECT_EQ(a.perm_col_ptr, b.perm_col_ptr);
+    EXPECT_EQ(a.perm_row_idx, b.perm_row_idx);
+    EXPECT_EQ(a.orig_to_perm_idx, b.orig_to_perm_idx);
+    EXPECT_EQ(a.perm, b.perm);
+    EXPECT_EQ(a.iperm, b.iperm);
+    EXPECT_EQ(a.etree.parent, b.etree.parent);
+    EXPECT_EQ(a.etree.postorder, b.etree.postorder);
+    EXPECT_EQ(a.etree.max_depth, b.etree.max_depth);
+    ASSERT_EQ(a.supernodes.size(), b.supernodes.size());
+    for (std::size_t s = 0; s < a.supernodes.size(); ++s) {
+        EXPECT_EQ(a.supernodes[s].col_start, b.supernodes[s].col_start);
+        EXPECT_EQ(a.supernodes[s].col_end, b.supernodes[s].col_end);
+        EXPECT_EQ(a.supernodes[s].parent, b.supernodes[s].parent);
+    }
+    EXPECT_EQ(a.child_ptr, b.child_ptr);
+    EXPECT_EQ(a.child_idx, b.child_idx);
+    EXPECT_EQ(a.front_row_ptr, b.front_row_ptr);
+    EXPECT_EQ(a.front_row_idx, b.front_row_idx);
+    EXPECT_EQ(a.postorder, b.postorder);
+    EXPECT_EQ(a.solve_postorder, b.solve_postorder);
+    EXPECT_EQ(a.matching_scale, b.matching_scale);
+    EXPECT_EQ(a.input_clean, b.input_clean);
+}
+
 const char *const kA1Cases[] = {"spd_barrier_800",    "kkt_network_flow", "kkt_auglag",
                                 "indef_helmholtz_50", "spd_mrf_2500",     "spd_poisson2d_60"};
 
@@ -393,6 +426,52 @@ TEST(Symbolic, FastPathMatchesReference) {
     }
     SCOPED_TRACE("random_spd seed 7");
     expect_fast_path_matches(random_spd(3000, 7), MatrixType::RealSymmetricPositiveDefinite);
+}
+
+TEST(Symbolic, CheckInputFalseOnCleanInput) {
+    std::vector<std::pair<std::string, CscLower>> mats;
+    for (const char *name : kA1Cases) {
+        CscLower A;
+        ASSERT_TRUE(load_optim20(name, A)) << "fixture " << name << " missing";
+        mats.emplace_back(name, std::move(A));
+    }
+    mats.emplace_back("random_spd seed 7", random_spd(3000, 7));
+    for (const auto &[name, A] : mats) {
+        SCOPED_TRACE(name);
+        Control on;
+        on.matrix_type = a1_type(name);
+        Control off = on;
+        off.check_input = false;
+        Info info_on, info_off;
+        Solver s_on, s_off;
+        auto k_on = s_on.analyse(A, on, info_on);
+        auto k_off = s_off.analyse(A, off, info_off);
+        ASSERT_NE(k_on, nullptr);
+        ASSERT_NE(k_off, nullptr);
+        EXPECT_TRUE(k_on->input_clean);
+        expect_same_keep(*k_on, *k_off);
+        EXPECT_EQ(info_on.matrix_missing_diag, info_off.matrix_missing_diag);
+        EXPECT_EQ(info_on.matrix_duplicates, info_off.matrix_duplicates);
+        EXPECT_EQ(info_on.matrix_out_of_range, info_off.matrix_out_of_range);
+        EXPECT_EQ(info_on.predicted_factor_entries, info_off.predicted_factor_entries);
+        EXPECT_EQ(info_on.predicted_flops, info_off.predicted_flops);
+    }
+}
+
+// Unsorted input is not clean, and the analysis says so (a caller must not
+// re-analyse it with check_input = false).
+TEST(Symbolic, InputCleanFlagFalseOnUnsortedInput) {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 3, 4, 5};
+    A.row_idx = {0, 2, 1, 1, 2};
+    A.values = {4, 1, 1, 4, 4};
+    Control ctrl;
+    Info info;
+    Solver solver;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak, nullptr);
+    EXPECT_FALSE(ak->input_clean);
 }
 
 } // namespace smf

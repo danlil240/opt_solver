@@ -129,7 +129,7 @@ namespace smf
         info.status = ErrorCode::Success;
 
         // Step 1: clean the input matrix
-        auto cleaned = clean_lower_csc(A, info);
+        auto cleaned = clean_lower_csc(A, info, control.check_input);
         const Int n = cleaned.clean.n;
 
         // UserSupplied: user_perm must be a permutation of 0..n-1 and each
@@ -176,6 +176,7 @@ namespace smf
             keep->front_row_ptr.assign(1, 0);
             keep->orig_col_ptr = A.col_ptr;
             keep->orig_row_idx = A.row_idx;
+            keep->input_clean = cleaned.was_clean;
             keep->cleaned = std::move(cleaned.clean);
             lap(phases.check);
             const auto t1 = t_lap;
@@ -569,6 +570,7 @@ namespace smf
         keep->n = n;
         keep->orig_col_ptr = A.col_ptr;
         keep->orig_row_idx = A.row_idx;
+        keep->input_clean = cleaned.was_clean;
         keep->orig_to_clean_idx = std::move(cleaned.original_to_clean);
         keep->orig_to_perm_direct.resize(keep->orig_to_clean_idx.size(), -1);
         for (std::size_t k = 0; k < keep->orig_to_clean_idx.size(); ++k) {

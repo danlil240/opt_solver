@@ -17,6 +17,7 @@ struct AnalysisKeep {
     std::vector<Int>         orig_row_idx;      ///< original input row_idx for pattern validation
     std::vector<Int>         orig_to_clean_idx; ///< map: original entry k -> slot in cleaned (-1 if out of range)
     std::vector<Int>         orig_to_perm_direct; ///< map: original entry k -> slot in permuted matrix (-1 if out of range)
+    bool                     input_clean = false; ///< input had sorted, unique, in-range rows (re-analyses of this pattern may pass Control::check_input = false)
     std::vector<Int>         perm_col_ptr;      ///< col_ptr of permuted matrix (pattern only, for fast value permutation); empty when ordering is identity
     std::vector<Int>         perm_row_idx;      ///< row_idx of permuted matrix (pattern only, for fast value permutation); empty when ordering is identity
     std::vector<Int>         orig_to_perm_idx;  ///< scatter map: clean entry k → slot in permuted matrix (O(nnz) value permutation); empty when ordering is identity

@@ -107,6 +107,15 @@ struct Control {
     bool           solve_multifrontal_forward     = false;
     int            refinement_max_iters          = 5;
 
+    // Input checking. True (the default): analyse() scans the pattern for
+    // unsorted, duplicate and out-of-range entries and cleans them up.
+    // False skips that O(nnz) scan for callers that guarantee clean input:
+    // every column's rows sorted, unique and in [j, n) (AnalysisKeep::
+    // input_clean of an earlier analyse of the same pattern says so); only
+    // the O(n) shape checks and the missing-diagonal count remain. Unclean
+    // input with false gives an undefined analysis.
+    bool           check_input   = true;
+
     // Diagnostics / logging
     int            print_level   = 0;
 };

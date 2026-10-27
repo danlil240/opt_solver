@@ -6,7 +6,7 @@
 
 namespace smf {
 
-CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
+CleanedPattern clean_lower_csc(const CscLower& A, Info& info, bool check) {
     CleanedPattern result;
 
     // Validate n
@@ -54,7 +54,15 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
     // counted (the slow path does not insert them either).
     bool clean = true;
     int missing_diag = 0;
-    for (Int j = 0; j < n && clean; ++j) {
+    if (!check) {
+        // Clean by contract: sorted rows >= j, so a diagonal is first.
+        for (Int j = 0; j < n; ++j) {
+            const Int k0 = A.col_ptr[static_cast<std::size_t>(j)];
+            const Int k1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
+            if (k0 == k1 || A.row_idx[static_cast<std::size_t>(k0)] != j) ++missing_diag;
+        }
+    }
+    for (Int j = 0; j < n && clean && check; ++j) {
         const Int k0 = A.col_ptr[static_cast<std::size_t>(j)];
         const Int k1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
         Int prev = j - 1;
@@ -80,6 +88,7 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
             result.original_to_clean[static_cast<std::size_t>(k)] = k;
         }
         result.missing_diag = missing_diag;
+        result.was_clean = true;
         info.matrix_duplicates = 0;
         info.matrix_out_of_range = 0;
         info.matrix_missing_diag = missing_diag;
