@@ -458,6 +458,7 @@ add_library(smf STATIC
     src/numeric_front.cpp
     src/blocked_indef.cpp
     src/ldlt_kernel.cpp
+    src/ldlt_aptp.cpp
     src/multifrontal_serial.cpp
     src/factor_stack.cpp
     src/pivoting.cpp

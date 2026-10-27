@@ -416,3 +416,7 @@ add_test(NAME DispatchPolicy COMMAND test_dispatch_policy)
 add_executable(test_lean_engine test_lean_engine.cpp)
 target_link_libraries(test_lean_engine PRIVATE smf GTest::gtest_main)
 add_test(NAME LeanEngine COMMAND test_lean_engine)
+
+add_executable(test_ldlt_aptp test_ldlt_aptp.cpp)
+target_link_libraries(test_ldlt_aptp PRIVATE smf GTest::gtest_main)
+add_test(NAME LdltAptp COMMAND test_ldlt_aptp)
