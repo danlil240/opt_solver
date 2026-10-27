@@ -18,6 +18,7 @@ struct SerialFactorStats {
   int budget_retries = 0;  // fronts refactored static because they overshot Control::delay_budget
   int parallel_subtrees = 0;
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
+  int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   double flops = 0.0;
   int max_front = 0;
   // ErrorCode::InertiaExceeded: predicted flops of the fronts not factored.

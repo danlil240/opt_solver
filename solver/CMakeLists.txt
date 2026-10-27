@@ -506,6 +506,15 @@ target_link_libraries(smf PUBLIC
     ${LAPACK_LIBRARIES}
 )
 
+# ldlt_factor_small_front promises the generic kernel's factor bit for bit:
+# its AVX2 microkernels multiply then add / subtract (no FMA), so the
+# generic loops in the same file must not be contracted into FMAs either.
+# MSVC /fp:precise never contracts; GCC (C++ default -ffp-contract=fast) and
+# Clang (-ffp-contract=on) would under -march=native.
+if(NOT MSVC)
+    set_source_files_properties(src/ldlt_kernel.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+endif()
+
 if(SMF_ENABLE_OPENMP AND TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(smf PUBLIC OpenMP::OpenMP_CXX)
     target_compile_definitions(smf PUBLIC SMF_PARALLEL=1)

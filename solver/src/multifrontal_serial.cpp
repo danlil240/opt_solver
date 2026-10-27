@@ -325,7 +325,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // Small fronts (Control::small_front_kernels; never APTP or tiled): the
   // front is assembled and factored in the small-front buffer not holding a
   // child's block, Fa with leading dimension lda; otherwise Fa = F, lda = f.
-  const bool small = cx.small_fronts && f <= kSmallFrontMax && aprm == nullptr;
+  // Only where ldlt_factor_front would take its unblocked path, whose factor
+  // ldlt_factor_small_front reproduces bit for bit.
+  const bool small = cx.small_fronts && f <= kSmallFrontMax && f < cx.prm.blocked_min_front &&
+                     cx.prm.nb > 1 && aprm == nullptr;
   int sb = -1;
   double *Fa = F;
   std::size_t lda = sf;
@@ -615,6 +618,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     ws.cb_size[si] = q;
     ws.cb_delayed[si] = num_elig - p;
     st.delayed += num_elig - p;
+    ++st.small_front_handovers;
   } else if (!is_root && q > 0) {
     const std::size_t sq = static_cast<std::size_t>(q);
     double *dst;
@@ -667,6 +671,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
   to.top_tile_fronts += from.top_tile_fronts;
+  to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
   to.max_front = std::max(to.max_front, from.max_front);
 }

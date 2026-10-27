@@ -355,6 +355,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.delay_budget_retries = 0;
   info.aptp_failed_columns = 0;
   info.top_tile_fronts = 0;
+  info.small_front_handovers = 0;
   info.aborted_flops_skipped = 0.0;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
@@ -535,6 +536,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.aptp_failed_columns = st.aptp_failed;
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_tile_fronts = st.top_tile_fronts;
+      info.small_front_handovers = st.small_front_handovers;
       info.num_positive = st.inertia.positive;
       info.num_negative = st.inertia.negative;
       info.num_zero = st.inertia.zero;
@@ -560,6 +562,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.aptp_failed_columns = st.aptp_failed;
     info.parallel_subtrees = st.parallel_subtrees;
     info.top_tile_fronts = st.top_tile_fronts;
+    info.small_front_handovers = st.small_front_handovers;
     info.num_positive = st.inertia.positive;
     info.num_negative = st.inertia.negative;
     info.num_zero = st.inertia.zero;

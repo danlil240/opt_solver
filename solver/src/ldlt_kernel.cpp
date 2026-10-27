@@ -2,8 +2,10 @@
 #include "smf/dense_kernel.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <utility>
 
@@ -509,6 +511,8 @@ LdltKernelResult small_front_factor(double *F, int f, int num_elig, Int *rows,
 
 LdltKernelResult ldlt_factor_small_front(double *F, int ld, int f, int num_elig, Int *rows,
                                          const LdltKernelParams &prm, int8_t *tags) {
+    assert(f >= 1 && f <= kSmallFrontMax && ld == small_front_ld(f));
+    assert(reinterpret_cast<std::uintptr_t>(F) % 32 == 0);
     switch (ld) {
     case 4: return small_front_factor<4>(F, f, num_elig, rows, prm, tags);
     case 8: return small_front_factor<8>(F, f, num_elig, rows, prm, tags);

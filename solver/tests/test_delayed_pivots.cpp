@@ -974,6 +974,8 @@ TEST(DelayedPivots, SmallFrontPathMatchesGeneric) {
         ASSERT_EQ(solver.factor(*ak, A, off, i_off, fk_off, ws_off), FactorStatus::Success);
         ASSERT_EQ(solver.factor(*ak, A, on, i_on, fk_on, ws_on), FactorStatus::Success);
         EXPECT_EQ(i_on.delay_budget_retries, 1);
+        EXPECT_GT(i_on.small_front_handovers, 0);  // B's block, read twice by C
+        EXPECT_EQ(i_off.small_front_handovers, 0);
         EXPECT_EQ(i_on.delay_budget_retries, i_off.delay_budget_retries);
         EXPECT_EQ(i_on.delayed_pivots, i_off.delayed_pivots);
         EXPECT_EQ(i_on.static_pivots, i_off.static_pivots);

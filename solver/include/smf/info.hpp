@@ -74,6 +74,9 @@ struct Info {
     /// Fronts factored as 2D tile tasks at the top of the tree
     /// (Control::top_tiles).
     int          top_tile_fronts        = 0;
+    /// Contribution blocks of small fronts handed to their parent in a
+    /// small-front buffer instead of the stack (Control::small_front_kernels).
+    int          small_front_handovers  = 0;
     /// After FactorStatus::InertiaExceeded: predicted flops (sum of p f^2,
     /// as predicted_flops) of the fronts that were not factored.
     double       aborted_flops_skipped  = 0.0;
