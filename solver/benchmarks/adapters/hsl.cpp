@@ -99,6 +99,9 @@ public:
                        ? 0.0
                        : ctrl_.pivot_u;
 
+        // Workspace allocation is timed: a real caller (IPOPT's MA27
+        // interface) allocates it per symbolic phase, as smf's analyse does.
+        const auto t0 = Clock::now();
         liw_ = 2 * nz_ + 3 * n_ + 1;
         iw_.assign(static_cast<std::size_t>(liw_), 0);
         ikeep_.assign(static_cast<std::size_t>(3 * n_), 0);
@@ -108,7 +111,6 @@ public:
         info_[0] = 0;
         double ops = 0.0;
 
-        const auto t0 = Clock::now();
         ma27ad_(&n_, &nz_, irn_.data(), icn_.data(), iw_.data(), &liw_,
                 ikeep_.data(), iw1.data(), &nsteps_, &iflag, icntl_, cntl_,
                 info_, &ops);
