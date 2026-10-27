@@ -85,9 +85,16 @@ void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
 /// 1 always ends up in its etree parent's supernode, regardless of `nemin`
 /// and the zero-fill bound (2x2 pivot pairs). A null pointer gives exactly
 /// the unflagged result.
+///
+/// `work` (optional): amalgamate_relaxed_work_size(n) ints of caller-owned
+/// workspace (contents need not be initialised); null allocates its own.
 void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                         std::vector<Int> &order, std::vector<Supernode> &snodes,
-                        const std::uint8_t *keep_with_parent = nullptr);
+                        const std::uint8_t *keep_with_parent = nullptr,
+                        Int *work = nullptr);
+
+/// Ints of workspace amalgamate_relaxed needs for n columns.
+std::size_t amalgamate_relaxed_work_size(Int n);
 
 /// Amalgamate supernodes using the nemin threshold.
 ///

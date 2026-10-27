@@ -24,9 +24,11 @@ namespace smf {
 ///                       max_front_size, max_supernode_size, max_tree_depth
 /// @param rows_hint      expected total row count (capacity reserved up front;
 ///                       0 = unknown). Only a hint: any value gives the same result.
+/// @param work           optional caller workspace of n + nsn ints (contents
+///                       need not be initialised); null allocates its own.
 void build_assembly_tree(const CscLower &A, std::span<const Supernode> supernodes,
                          std::span<const Int> child_ptr, std::span<const Int> child_idx,
                          std::vector<Int> &front_row_ptr, std::vector<Int> &front_row_idx,
-                         Info &info, std::size_t rows_hint = 0);
+                         Info &info, std::size_t rows_hint = 0, Int *work = nullptr);
 
 } // namespace smf

@@ -104,10 +104,14 @@ public:
                                            double *b, int n, int nrhs = 1);
 
 private:
-  /// Ordering workspace and analysis temporaries reused by successive
-  /// analyse() calls.
+  /// Matching-ordering workspace, reused by successive analyse() calls.
   std::vector<Int> analyse_scratch_;
-  std::vector<Int> analyse_work_;
+  /// The analyse arena: one block, reused by successive analyse() calls,
+  /// for every analysis temporary (adjacency, AMD's arrays, etree and
+  /// counts, amalgamation, assembly tree). Never zero-filled: each user
+  /// initialises what it reads.
+  std::unique_ptr<Int[]> analyse_arena_;
+  std::size_t analyse_arena_size_ = 0;
 };
 
 } // namespace smf

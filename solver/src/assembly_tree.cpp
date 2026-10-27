@@ -7,7 +7,7 @@ namespace smf {
 void build_assembly_tree(const CscLower &A, std::span<const Supernode> supernodes,
                          std::span<const Int> child_ptr, std::span<const Int> child_idx,
                          std::vector<Int> &front_row_ptr, std::vector<Int> &front_row_idx,
-                         Info &info, std::size_t rows_hint)
+                         Info &info, std::size_t rows_hint, Int *work)
 {
     const Int nsn = static_cast<Int>(supernodes.size());
     front_row_ptr.assign(static_cast<std::size_t>(nsn) + 1, 0);
@@ -38,7 +38,14 @@ void build_assembly_tree(const CscLower &A, std::span<const Supernode> supernode
     // front_row_idx while appending is safe.
     if (rows_hint > 0)
         front_row_idx.reserve(rows_hint);
-    std::vector<Int> mark(static_cast<std::size_t>(A.n), -1);
+    std::vector<Int> own;
+    if (work == nullptr) {
+        own.resize(static_cast<std::size_t>(A.n) + static_cast<std::size_t>(nsn));
+        work = own.data();
+    }
+    Int *mark = work;          // n
+    Int *depth = work + A.n;   // nsn
+    std::fill(mark, mark + A.n, -1);
 
     for (Int s = 0; s < nsn; ++s) {
         const Supernode& sn = supernodes[static_cast<std::size_t>(s)];
@@ -96,7 +103,7 @@ void build_assembly_tree(const CscLower &A, std::span<const Supernode> supernode
     // Compute tree depth for each supernode.
     // Supernodes are numbered in column order (postorder), so parent index > child index.
     // Process 0..nsn-1: for each sn, propagate depth[s]+1 to parent.
-    std::vector<int> depth(static_cast<std::size_t>(nsn), 0);
+    std::fill(depth, depth + nsn, 0);
     for (Int s = 0; s < nsn; ++s) {
         const Supernode& sn = supernodes[static_cast<std::size_t>(s)];
         const Int par = sn.parent;

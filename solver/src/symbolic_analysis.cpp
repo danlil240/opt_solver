@@ -222,15 +222,26 @@ namespace smf
         const auto sn_sz = static_cast<std::size_t>(n);
         const std::size_t nnz_c = C.row_idx.size();
         const std::size_t nz_adj = lower_csc_adjacency_size(n, C.col_ptr.data(), C.row_idx.data());
-        const std::size_t work_need = 19 * sn_sz + 3 + nz_adj + 2 * nnz_c;
-        if (analyse_work_.size() < work_need)
-            analyse_work_.resize(work_need);
-        Int *xadj = analyse_work_.data();        // n + 1
+        // Layout: a fixed head (adjacency, iperm, two etree/count blocks),
+        // then a region that holds AMD's arrays during the ordering and every
+        // later temporary afterwards, so the pages AMD touched are reused.
+        const std::size_t head_need = 8 * sn_sz + 1 + nz_adj;
+        const std::size_t amd_need = amd_adjacency_work_size(n, nz_adj);
+        const std::size_t late_need = 34 * sn_sz + 8 + 2 * nnz_c;
+        const std::size_t work_need = head_need + std::max(amd_need, late_need);
+        if (analyse_arena_size_ < work_need)
+        {
+            analyse_arena_.reset(new Int[work_need]);
+            analyse_arena_size_ = work_need;
+        }
+        Int *xadj = analyse_arena_.get();        // n + 1
         Int *adj = xadj + sn_sz + 1;             // nz_adj
         Int *iperm_w = adj + nz_adj;             // n
         Int *sym_a = iperm_w + sn_sz;            // 3n: parent, postorder, counts
         Int *sym_b = sym_a + 3 * sn_sz;          // 3n: a candidate ordering's
-        Int *sym_work = sym_b + 3 * sn_sz;       // 4n + 1
+        Int *region = sym_b + 3 * sn_sz;         // max(amd_need, late_need)
+        Int *amd_work = region;
+        Int *sym_work = region;                  // 4n + 1
         Int *row_ptr = sym_work + 4 * sn_sz + 1; // n + 1
         Int *head = row_ptr + sn_sz + 1;         // n
         Int *col_count = head + sn_sz;           // n
@@ -240,6 +251,8 @@ namespace smf
         Int *inv_order = colcount1 + sn_sz;      // n
         Int *row_col = inv_order + sn_sz;        // nnz
         Int *row_src = row_col + nnz_c;          // nnz
+        Int *amal_work = row_src + nnz_c;        // 16n + 6
+        Int *tree_work = amal_work + amalgamate_relaxed_work_size(n); // 2n
         lower_csc_adjacency(n, C.col_ptr.data(), C.row_idx.data(), xadj, adj);
 
         bool auto_matching = false;
@@ -312,13 +325,7 @@ namespace smf
                 control.ordering == OrderingMethod::AutoParallel ||
                 control.ordering == OrderingMethod::Matching;
             if (!matching_ordered && amd_backend)
-            {
-                const std::size_t amd_need = amd_adjacency_work_size(n, nz_adj);
-                if (analyse_scratch_.size() < amd_need)
-                    analyse_scratch_.resize(amd_need);
-                amd_ordered = amd_order_adjacency(n, xadj, adj, perm.data(),
-                                                  analyse_scratch_.data());
-            }
+                amd_ordered = amd_order_adjacency(n, xadj, adj, perm.data(), amd_work);
             if (!matching_ordered && !amd_ordered)
             {
                 auto backend = make_ordering_backend(control.ordering, n, info);
@@ -468,23 +475,25 @@ namespace smf
         }
         amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
                            order, snodes,
-                           keep_with_parent.empty() ? nullptr : keep_with_parent.data());
+                           keep_with_parent.empty() ? nullptr : keep_with_parent.data(),
+                           amal_work);
 
         // Final permutation and its elimination tree (relabelled, not rebuilt).
         for (Int k = 0; k < n; ++k)
             inv_order[order[static_cast<std::size_t>(k)]] = k;
         bool identity_final = true;
         {
-            const std::vector<Int> perm0 = perm;
+            std::vector<Int> perm_final(sn_sz);
             for (Int k = 0; k < n; ++k)
             {
                 const Int k1 = order[static_cast<std::size_t>(k)];
                 const Int p1 = parent1[k1];
                 parentf[static_cast<std::size_t>(k)] = (p1 >= 0) ? inv_order[p1] : -1;
-                const Int old = perm0[static_cast<std::size_t>(post0[k1])];
-                perm[static_cast<std::size_t>(k)] = old;
+                const Int old = perm[static_cast<std::size_t>(post0[k1])];
+                perm_final[static_cast<std::size_t>(k)] = old;
                 identity_final = identity_final && (old == k);
             }
+            perm = std::move(perm_final);
         }
         for (Int i = 0; i < n; ++i)
             iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
@@ -540,7 +549,7 @@ namespace smf
                           static_cast<std::size_t>(
                               colcount1[order[static_cast<std::size_t>(sn.col_end) - 1]]) - 1;
         build_assembly_tree(identity_final ? C : A_perm, snodes, child_ptr, child_idx,
-                            front_row_ptr, front_row_idx, info, rows_total);
+                            front_row_ptr, front_row_idx, info, rows_total, tree_work);
 
         std::vector<Int> sn_postorder(static_cast<std::size_t>(nsn));
         std::iota(sn_postorder.begin(), sn_postorder.end(), 0);

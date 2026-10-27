@@ -1,5 +1,6 @@
 #include "smf/supernode.hpp"
 #include <algorithm>
+#include <cstdint>
 
 namespace smf
 {
@@ -326,9 +327,14 @@ namespace smf
         return result;
     }
 
+    std::size_t amalgamate_relaxed_work_size(Int n)
+    {
+        return 16 * static_cast<std::size_t>(n) + 6;
+    }
+
     void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                             std::vector<Int> &order, std::vector<Supernode> &snodes,
-                            const std::uint8_t *keep_with_parent)
+                            const std::uint8_t *keep_with_parent, Int *work)
     {
         order.resize(static_cast<std::size_t>(n));
         snodes.clear();
@@ -337,11 +343,18 @@ namespace smf
         const auto sn = static_cast<std::size_t>(n);
 
         // Every size-n / size-nsn temporary lives in one block (two-phase:
-        // nsn is only known after the fundamental pass).
-        std::vector<Int> work(3 * sn + 1, 0);
-        Int *nchildren = work.data();          // n
+        // nsn is only known after the fundamental pass): the caller's, or
+        // an own one. Only the counters below are zeroed.
+        std::vector<Int> own;
+        if (work == nullptr)
+        {
+            own.resize(amalgamate_relaxed_work_size(n));
+            work = own.data();
+        }
+        Int *nchildren = work;                 // n
         Int *snode_of = nchildren + sn;        // n
         Int *first = snode_of + sn;            // nsn + 1 <= n + 1
+        std::fill(nchildren, nchildren + n, 0);
 
         // Fundamental supernodes of the postordered numbering.
         for (Int j = 0; j < n; ++j)
@@ -361,8 +374,8 @@ namespace smf
         }
         first[nsn] = n;
         const auto nsz = static_cast<std::size_t>(nsn);
-        std::vector<Int> swork(11 * nsz + 2, 0);
-        Int *sparent = swork.data();           // nsn
+        Int *swork = first + sn + 1;           // 11 nsn + 2
+        Int *sparent = swork;                  // nsn
         Int *nelim = sparent + nsz;            // nsn
         Int *group = nelim + nsz;              // nsn
         Int *gparent = group + nsz;            // nsn
@@ -373,6 +386,13 @@ namespace smf
         Int *post = new_id + nsz;              // nsn
         Int *stk_node = post + nsz;            // nsn
         Int *stk_ci = stk_node + nsz;          // nsn
+        // Per-group fill (LongInt, nsn), 8-byte aligned past stk_ci.
+        Int *fill_base = stk_ci + nsz;
+        if ((reinterpret_cast<std::uintptr_t>(fill_base) % alignof(LongInt)) != 0)
+            ++fill_base;
+        LongInt *fill = reinterpret_cast<LongInt *>(fill_base);
+        std::fill(ch_ptr, ch_ptr + nsn + 1, 0);
+        std::fill(gcol_ptr, gcol_ptr + nsn + 1, 0);
         std::fill(sparent, sparent + nsn, -1);
         for (Int s = 0; s < nsn; ++s)
         {
@@ -417,7 +437,7 @@ namespace smf
         }
         if (nemin > 1 || !forced.empty())
         {
-            std::vector<LongInt> fill(nsz, 0);
+            std::fill(fill, fill + nsn, LongInt{0});
             for (Int j = 0; j < n; ++j)
                 fill[static_cast<std::size_t>(snode_of[static_cast<std::size_t>(j)])] +=
                     colcount[static_cast<std::size_t>(j)];
