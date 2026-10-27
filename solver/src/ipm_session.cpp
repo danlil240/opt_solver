@@ -42,8 +42,12 @@ ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> v
   solve_info_ = Info{};
   stats_ = IpmStats{};
   ctrl_ = ctrl;
+  // IpmSession does its own re-analysis and checks fk_.analysis == ak_
+  // identity; Solver::factor's RealizedDelays re-analysis would swap the
+  // analysis behind its back, so the session always runs Predicted.
+  ctrl_.matching_trigger = MatchingTrigger::Predicted;
   ipm_ = ipm;
-  factor_ctrl_ = ctrl;
+  factor_ctrl_ = ctrl_;
   factor_scale_.clear();
   expected_neg_.reset();
   user_scale_once_ = false;
@@ -423,6 +427,7 @@ bool IpmSession::row_is_constraint(Int i) const {
 
 void IpmSession::set_control(const Control& ctrl) {
   ctrl_ = ctrl;
+  ctrl_.matching_trigger = MatchingTrigger::Predicted;  // see analyse()
   user_scale_once_ = false;
 }
 

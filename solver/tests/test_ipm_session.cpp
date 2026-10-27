@@ -1120,3 +1120,73 @@ TEST(IpmSession, FallbackModeLeavesANonsingularKktAlone) {
     ASSERT_EQ(s.solve(x.data(), static_cast<int>(A.n), 1), 0);
     EXPECT_LE(eta(A, rhs(A.n), x), 1e-10);
 }
+
+// Control::matching_trigger = RealizedDelays would let Solver::factor swap
+// the analysis inside a factor() call; IpmSession has its own re-analysis and
+// identity checks, so it always factors with Predicted.
+TEST(IpmSession, IgnoresRealizedDelayTrigger) {
+    // KKT whose AMD factorization (nemin 1) delays every constraint row:
+    // H = 30x30 grid Laplacian, 300 zero-diagonal rows coupling 3 variables.
+    const int g = 30, m = 300, nx = g * g, n = nx + m;
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+    for (int y = 0; y < g; ++y)
+        for (int x = 0; x < g; ++x) {
+            const int j = y * g + x;
+            auto &c = cols[static_cast<std::size_t>(j)];
+            c.push_back({j, 4.0});
+            if (x + 1 < g) c.push_back({j + 1, -1.0});
+            if (y + 1 < g) c.push_back({j + g, -1.0});
+        }
+    const double coef[3] = {1.0, -0.5, 0.25};
+    for (int k = 0; k < m; ++k) {
+        for (int t = 0; t < 3; ++t)
+            cols[static_cast<std::size_t>((3 * k + t) % nx)].push_back({nx + k, coef[t]});
+        cols[static_cast<std::size_t>(nx + k)].push_back({nx + k, 0.0});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (auto [i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.nemin = 1;
+    ctrl.matching_trigger = MatchingTrigger::RealizedDelays;
+
+    // A plain Solver with this Control does re-analyse (the trigger fires).
+    {
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        ASSERT_EQ(solver.factor(*ak, std::span<const double>(A.values), ctrl, info, fk, ws),
+                  FactorStatus::Success);
+        ASSERT_EQ(info.matching_reanalyses, 1);
+    }
+
+    IpmSession s;
+    ASSERT_EQ(s.analyse(A, A.values, ctrl, features_off()), ErrorCode::Success);
+    for (int step = 0; step < 2; ++step) {
+        ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+        EXPECT_EQ(s.info().matching_reanalyses, 0);
+        EXPECT_GT(s.info().delayed_pivots, n / 20);  // would have fired
+        ASSERT_NE(s.analysis_keep(), nullptr);
+        EXPECT_EQ(s.analysis_keep()->matching_reanalysis, nullptr);
+        EXPECT_FALSE(s.analysis_keep()->matching_reanalysis_tried);
+        EXPECT_EQ(s.factor_keep().analysis, s.analysis_keep());
+    }
+    // set_control cannot switch it on either.
+    s.set_control(ctrl);
+    ASSERT_EQ(s.factor(A.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(s.info().matching_reanalyses, 0);
+    EXPECT_EQ(s.analysis_keep()->matching_reanalysis, nullptr);
+}

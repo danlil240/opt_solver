@@ -83,9 +83,16 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
     info.ordering_used = static_cast<int>(OrderingMethod::Matching);
     return st;
   }
+  // delayed_pivots is reset at the start of a factorization: an input error
+  // returns before that (status != Success), so only a factorization that
+  // ran to the end (Success, or Singular reported as SingularMatrix; an
+  // input or allocation error reports its own ErrorCode) may fire it.
+  info.delayed_pivots = 0;
   const FactorStatus st = run(ak);
+  const bool ran = st == FactorStatus::Success ||
+                   (st == FactorStatus::Singular && info.status == ErrorCode::SingularMatrix);
   if (ctrl.matching_trigger != MatchingTrigger::RealizedDelays || !ak.matching_trigger_eligible ||
-      ak.matching_reanalysis_tried || st == FactorStatus::InertiaExceeded ||
+      ak.matching_reanalysis_tried || !ran ||
       static_cast<double>(info.delayed_pivots) <= kRealizedDelayShare * static_cast<double>(ak.n))
     return st;
   ak.matching_reanalysis_tried = true;

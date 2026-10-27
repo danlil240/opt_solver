@@ -192,6 +192,8 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
     // METIS nested dissection on the same compressed graph, a pair weighing
     // two vertices. Auto tries it only where AMD's factor is expensive per
     // row (the AutoParallel rule of analyse()) and keeps the cheaper one.
+    // (A 0.8x margin was tried for ncvxqp1's u = 1e-8 accuracy: its METIS
+    // ordering predicts 0.355x AMD's flops, so the margin changed nothing.)
     bool try_metis = how == CompressedOrder::Metis;
     if (how == CompressedOrder::Auto)
         try_metis = flops * static_cast<double>(std::max(1, expected_refactors)) >=

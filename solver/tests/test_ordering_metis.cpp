@@ -108,11 +108,6 @@ TEST(MetisOrdering, FillReduction_Grid)
     EXPECT_TRUE(is_valid_permutation(perm, N));
 }
 
-int main(int argc, char** argv)
-{
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
 
 // ---------------------------------------------------------------------------
 // Matching-based compressed ordering (MA97 ordering 7/8 parity).
@@ -203,6 +198,9 @@ TEST(MetisOrdering, MatchingFallsBackWhenSingular)
 
 TEST(MetisOrdering, MatchingCutsFlopsOnNcvxqp5)
 {
+#if !(defined(SMF_HAS_METIS) && SMF_HAS_METIS)
+    GTEST_SKIP() << "METIS not compiled in";
+#endif
     namespace fs = std::filesystem;
     const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
                          "fixtures" / "large" / "ncvxqp5" / "ncvxqp5.mtx";
@@ -217,7 +215,8 @@ TEST(MetisOrdering, MatchingCutsFlopsOnNcvxqp5)
     smf::MatchingOrderStats amd, metis, autom;
     ASSERT_TRUE(smf::matching_order_lower_csc(A, 0.1, perm, work, &amd, smf::CompressedOrder::Amd));
     ASSERT_TRUE(smf::matching_order_lower_csc(A, 0.1, perm, work, &metis, smf::CompressedOrder::Metis));
-    if (metis.used != smf::CompressedOrder::Metis) GTEST_SKIP() << "METIS not compiled in";
+    // A METIS failure at run time (AMD kept) fails the test below.
+    ASSERT_EQ(metis.used, smf::CompressedOrder::Metis);
     ASSERT_TRUE(smf::matching_order_lower_csc(A, 0.1, perm, work, &autom, smf::CompressedOrder::Auto));
     std::printf("[MatchingCutsFlops] ncvxqp5 flops: amd %.4g metis %.4g auto %.4g (ratio %.3f)\n",
                 amd.flops, metis.flops, autom.flops, metis.flops / amd.flops);
@@ -225,4 +224,10 @@ TEST(MetisOrdering, MatchingCutsFlopsOnNcvxqp5)
     EXPECT_LT(metis.flops, 0.5 * amd.flops);
     EXPECT_EQ(autom.used, smf::CompressedOrder::Metis);
     EXPECT_DOUBLE_EQ(autom.flops, metis.flops);
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
 }
