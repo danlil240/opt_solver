@@ -281,6 +281,10 @@ public:
     void configure(const Control &ctrl, const std::string &track) override {
         ctrl_ = ctrl;
         track_ = track;
+        // SMF_BENCH_REFINE_ALWAYS=1: refine every solve, not only after
+        // static pivots (refinement experiments).
+        const char *ra = std::getenv("SMF_BENCH_REFINE_ALWAYS");
+        refine_always_ = ra != nullptr && ra[0] == '1';
         if (track_ == "recommended" &&
             ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
             ctrl_.ordering == OrderingMethod::AutoSerial) {
@@ -376,12 +380,18 @@ public:
         const auto t0 = Clock::now();
         // A statically pivoted factor is of a perturbed matrix: refine
         // against the true one, as PARDISO does after perturbations.
-        if (static_pivots_ > 0) rhs_copy_.assign(b_and_x.begin(), b_and_x.begin() + static_cast<std::ptrdiff_t>(n) * nrhs);
+        const bool do_refine = static_pivots_ > 0 || refine_always_;
+        if (do_refine) rhs_copy_.assign(b_and_x.begin(), b_and_x.begin() + static_cast<std::ptrdiff_t>(n) * nrhs);
         int rc = solver_.solve(fk_, ctrl_, info, b_and_x.data(), n, nrhs, sws_);
-        if (rc == 0 && static_pivots_ > 0) {
+        stats_.refine_iterations = -1;
+        stats_.refine_fgmres = false;
+        if (rc == 0 && do_refine) {
             CscLower current = *pattern_;
             current.values.assign(values_.begin(), values_.end());
-            refine(current, fk_, ctrl_, rhs_copy_, b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
+            const RefinementResult rr = refine(current, fk_, ctrl_, rhs_copy_,
+                                               b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
+            stats_.refine_iterations = rr.iterations;
+            stats_.refine_fgmres = rr.method_used == RefineMethod::Fgmres;
         }
         const auto t1 = Clock::now();
         stats_.solve_ms = ms_since(t0, t1);
@@ -408,6 +418,7 @@ private:
     SolveWorkspace sws_;
     AdapterStats stats_{};
     int static_pivots_ = 0;
+    bool refine_always_ = false;
     std::vector<double> rhs_copy_;
 };
 

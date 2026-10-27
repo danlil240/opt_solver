@@ -65,6 +65,9 @@ struct FactorKeep {
   std::vector<double> solve_loc; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_ext; ///< legacy scratch (not mutated by const solve)
   bool is_posdef = false;          ///< true if factorization used SPD path (D = I)
+  /// Pivots perturbed by static pivoting (Info::static_pivots of the
+  /// factorization that produced this factor): refine() escalates sooner.
+  int static_pivots = 0;
   /// Indefinite factor whose unit-L fronts keep D in their diagonal slots
   /// (a 2x2 block's off-diagonal at (c, c + 1)): the backward solve applies
   /// D^-1 front by front instead of a separate pass over diag_entries.

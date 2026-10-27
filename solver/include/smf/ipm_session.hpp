@@ -110,7 +110,9 @@ struct IpmStats {
 ///    exact zero, else by its sign (hybrid), or always as a zero with
 ///    IpmControl::static_as_zero;
 ///  - every full solve is refined against the unregularized matrix, up to
-///    Control::refinement_max_iters steps.
+///    Control::refinement_max_iters classical steps (RefineMethod::Classical
+///    whatever Control::refine_method says: the plugin's semantics stay
+///    those of the refinement before FGMRES).
 class IpmSession {
  public:
   /// Store the pattern (lower CSC; its own values are ignored) and start a

@@ -536,6 +536,18 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_APTP_NB")) ctrl.aptp_nb = std::atoi(e);
     if (const char *e = std::getenv("SMF_BENCH_APTP_IB")) ctrl.aptp_ib = std::atoi(e);
     if (const char *e = std::getenv("SMF_BENCH_APTP_MIN_ELIG")) ctrl.aptp_min_elig = std::atoi(e);
+    // Static pivoting / refinement knobs (no run.py flags either):
+    // SMF_BENCH_STATIC_PIVOT_TOL (double), SMF_BENCH_DELAY_BUDGET (int),
+    // SMF_BENCH_REFINE_METHOD = classical | fgmres | auto. The smf adapter
+    // refines with smf::refine whenever its factor has static pivots.
+    if (const char *e = std::getenv("SMF_BENCH_STATIC_PIVOT_TOL")) ctrl.static_pivot_tol = std::atof(e);
+    if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
+    if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
+        const std::string k = e;
+        if (k == "classical") ctrl.refine_method = smf::RefineMethod::Classical;
+        else if (k == "fgmres") ctrl.refine_method = smf::RefineMethod::Fgmres;
+        else if (k == "auto") ctrl.refine_method = smf::RefineMethod::Auto;
+    }
     adapter->configure(ctrl, track);
 
     const std::size_t total_len =
@@ -707,7 +719,12 @@ int main(int argc, char **argv) {
         rec.inertia_neg = st.inertia_neg;
         rec.inertia_zero = st.inertia_zero;
         rec.delayed_pivots = st.delayed_pivots;
-        if (solver_id == "smf") rec.aptp_failed_columns = st.aptp_failed_columns;
+        if (solver_id == "smf") {
+            rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.static_pivots = st.static_pivots;
+            rec.refine_iterations = st.refine_iterations;
+            if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
+        }
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
 
@@ -779,7 +796,12 @@ int main(int argc, char **argv) {
         rec.inertia_neg = st.inertia_neg;
         rec.inertia_zero = st.inertia_zero;
         rec.delayed_pivots = st.delayed_pivots;
-        if (solver_id == "smf") rec.aptp_failed_columns = st.aptp_failed_columns;
+        if (solver_id == "smf") {
+            rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.static_pivots = st.static_pivots;
+            rec.refine_iterations = st.refine_iterations;
+            if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
+        }
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
 

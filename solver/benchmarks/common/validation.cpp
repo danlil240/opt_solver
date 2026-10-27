@@ -167,6 +167,10 @@ std::string RunRecord::to_json_line() const {
         << ",\"zero\":" << inertia_zero << "},"
         << "\"delayed_pivots\":" << delayed_pivots << ",";
     if (aptp_failed_columns >= 0) oss << "\"aptp_failed_columns\":" << aptp_failed_columns << ",";
+    if (static_pivots >= 0) oss << "\"static_pivots\":" << static_pivots << ",";
+    if (refine_iterations >= 0)
+        oss << "\"refine_iterations\":" << refine_iterations << ",\"refine_method\":\"" << refine_method
+            << "\",";
     oss
         << "\"factor_entries\":" << factor_entries << ","
         << "\"flops\":";

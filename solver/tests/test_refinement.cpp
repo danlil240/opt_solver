@@ -841,3 +841,263 @@ TEST(Refinement, Acopf160) {
     EXPECT_TRUE(bench::is_qualified_validation(v))
         << "eta_inf=" << v.eta_inf << " omega=" << v.omega;
 }
+
+// ---------------------------------------------------------------------------
+// FGMRES escalation (RefineMethod::Auto)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Saddle point [[K, G^T], [G, 0]] with a pressure null space: velocities live
+// on the edges of a w x w pressure grid, G is the edge-node incidence
+// (gradient) so every column of G sums to zero and [0; 1] spans the null
+// space. K = 4 I with -0.5 couplings between consecutive edges (SPD).
+CscLower make_singular_stokes(int w) {
+    const int np = w * w;
+    std::vector<std::pair<int, int>> edges;  // (tail, head) pressure nodes
+    for (int r = 0; r < w; ++r) {
+        for (int c = 0; c < w; ++c) {
+            const int p = r * w + c;
+            if (c + 1 < w) edges.push_back({p, p + 1});
+            if (r + 1 < w) edges.push_back({p, p + w});
+        }
+    }
+    const int ne = static_cast<int>(edges.size());
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(ne + np));
+    for (int e = 0; e < ne; ++e) {
+        auto &col = cols[static_cast<std::size_t>(e)];
+        col.push_back({e, 4.0});
+        if (e + 1 < ne) col.push_back({e + 1, -0.5});
+        col.push_back({ne + edges[static_cast<std::size_t>(e)].first, -1.0});
+        col.push_back({ne + edges[static_cast<std::size_t>(e)].second, 1.0});
+    }
+    CscLower A;
+    A.n = ne + np;
+    A.col_ptr.push_back(0);
+    for (auto &c : cols) {
+        std::sort(c.begin(), c.end());
+        for (const auto &[i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// Well-conditioned SPD: 2D 5-point stencil on a g x g grid, diagonal 8.
+CscLower make_spd_laplacian(int g) {
+    CscLower A;
+    A.n = g * g;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < g * g; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(8.0);
+        if ((j % g) + 1 < g) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(-1.0);
+        }
+        if (j + g < g * g) {
+            A.row_idx.push_back(j + g);
+            A.values.push_back(-1.0);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+// Classical refinement steps on ClassicalPathUnchanged's system, recorded
+// with the refinement as it was before FGMRES existed.
+constexpr int kClassicalStepsBeforeFgmres = 1;
+
+// Nonconvex KKT [H J^T; J 0]: H is a tridiagonal (4, -1) block on nv
+// variables plus one 3-variable nonconvex block [[0, 0, 1], [0, 4, 1],
+// [1, 1, -3000]] (which sets max|A| = 3000); J has nc rows with two
+// entries -1 / +1 on distinct variables.
+CscLower make_ncvx_kkt(int nv, int nc, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> pick(0, nv - 1);
+    const int nb = 3;
+    const int n = nb + nv + nc;
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+    cols[0] = {{0, 0.0}, {2, 1.0}};
+    cols[1] = {{1, 4.0}, {2, 1.0}};
+    cols[2] = {{2, -3000.0}};
+    for (int j = 0; j < nv; ++j) {
+        cols[static_cast<std::size_t>(nb + j)].push_back({nb + j, 4.0});
+        if (j + 1 < nv) cols[static_cast<std::size_t>(nb + j)].push_back({nb + j + 1, -1.0});
+    }
+    for (int r = 0; r < nc; ++r) {
+        const int j0 = pick(rng);
+        const int j1 = (j0 + 1 + pick(rng) % (nv - 1)) % nv;
+        cols[static_cast<std::size_t>(nb + j0)].push_back({nb + nv + r, -1.0});
+        cols[static_cast<std::size_t>(nb + j1)].push_back({nb + nv + r, 1.0});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.push_back(0);
+    for (auto &col : cols) {
+        std::sort(col.begin(), col.end());
+        for (const auto &[i, v] : col) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+} // namespace
+
+TEST(Refinement, FgmresRecoversStaticPivots) {
+    // Static pivoting with a deliberately large tolerance and no scaling: the
+    // zero pivots (every constraint row, the nonconvex block's free variable)
+    // are raised to 1e-6 max|A| = 3e-3 against O(1) constraint entries, too
+    // far for classical refinement to recover.
+    CscLower A = make_ncvx_kkt(400, 150, 3);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.scaling = ScalingMethod::None;
+    ctrl.nemin = 1;
+    ctrl.static_pivot_tol = 1e-6;
+    EXPECT_EQ(ctrl.refine_method, RefineMethod::Auto);
+    EXPECT_EQ(ctrl.refine_max_steps, 10);
+    EXPECT_EQ(ctrl.fgmres_restart, 20);
+    Solver solver;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    ASSERT_GT(info.static_pivots, 0);
+    EXPECT_EQ(fk.static_pivots, info.static_pivots);
+
+    const int n = static_cast<int>(A.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.21 * static_cast<double>(i));
+    std::vector<double> x0 = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x0.data(), n, 1, sws), 0);
+
+    Control classical = ctrl;
+    classical.refine_method = RefineMethod::Classical;
+    std::vector<double> xc = x0;
+    const RefinementResult rc = refine(A, fk, classical, b, xc, 1, sws);
+    ASSERT_NE(rc.status, ErrorCode::Success)
+        << "classical refinement must stagnate here: eta=" << rc.eta_inf << " omega=" << rc.omega;
+    EXPECT_EQ(rc.method_used, RefineMethod::Classical);
+
+    std::vector<double> x = x0;
+    const RefinementResult ra = refine(A, fk, ctrl, b, x, 1, sws);
+    EXPECT_EQ(ra.status, ErrorCode::Success)
+        << "iters=" << ra.iterations << " eta=" << ra.eta_inf << " omega=" << ra.omega;
+    EXPECT_EQ(ra.method_used, RefineMethod::Fgmres);
+    EXPECT_LE(ra.iterations, ctrl.refine_max_steps);
+    EXPECT_LE(ra.eta_inf, 1e-10);
+    EXPECT_LE(ra.omega, 1e-8);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(smf::bench::validate(A, b, x, 1)));
+
+    // Fgmres from the start reaches the gate as well.
+    Control fg = ctrl;
+    fg.refine_method = RefineMethod::Fgmres;
+    std::vector<double> xf = x0;
+    const RefinementResult rf = refine(A, fk, fg, b, xf, 1, sws);
+    EXPECT_EQ(rf.status, ErrorCode::Success) << "eta=" << rf.eta_inf << " omega=" << rf.omega;
+    EXPECT_EQ(rf.method_used, RefineMethod::Fgmres);
+    EXPECT_LE(rf.iterations, fg.refine_max_steps);
+}
+
+namespace {
+
+// Factor a singular saddle point with static pivoting (so the factor exists)
+// and refine an inconsistent right-hand side: no x meets the gate.
+void expect_singular_terminates(const CscLower &A, const std::vector<double> &b) {
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.static_pivot_tol = 1e-8;
+    Solver solver;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    const int n = static_cast<int>(A.n);
+    std::vector<double> x0 = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x0.data(), n, 1, sws), 0);
+    for (RefineMethod m : {RefineMethod::Auto, RefineMethod::Fgmres, RefineMethod::Classical}) {
+        Control c = ctrl;
+        c.refine_method = m;
+        std::vector<double> x = x0;
+        const RefinementResult rr = refine(A, fk, c, b, x, 1, sws);
+        EXPECT_NE(rr.status, ErrorCode::Success) << "method " << static_cast<int>(m);
+        EXPECT_LE(rr.iterations, c.refine_max_steps) << "method " << static_cast<int>(m);
+        if (m == RefineMethod::Fgmres) EXPECT_EQ(rr.method_used, RefineMethod::Fgmres);
+        if (m == RefineMethod::Classical) EXPECT_EQ(rr.method_used, RefineMethod::Classical);
+        bool finite = true;
+        for (double v : x) finite = finite && std::isfinite(v);
+        EXPECT_TRUE(finite) << "method " << static_cast<int>(m);
+    }
+}
+
+} // namespace
+
+TEST(Refinement, SingularDoesNotLoop) {
+    // Generated pressure-null-space Stokes; b has a component along [0; 1].
+    CscLower A = make_singular_stokes(20);
+    std::vector<double> b(static_cast<std::size_t>(A.n), 1.0);
+    expect_singular_terminates(A, b);
+}
+
+TEST(Refinement, SingularDoesNotLoopTuronM) {
+    namespace fs = std::filesystem;
+    const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" /
+                         "large" / "turon_m" / "turon_m.mtx";
+    std::error_code ec;
+    if (!fs::exists(mtx, ec)) GTEST_SKIP() << "fixture not present: " << mtx.string();
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok) << mm.error_message;
+    std::vector<double> b(static_cast<std::size_t>(mm.matrix.n), 1.0);
+    expect_singular_terminates(mm.matrix, b);
+}
+
+TEST(Refinement, ClassicalPathUnchanged) {
+    // Well-conditioned SPD: Auto never escalates and takes exactly the steps
+    // classical refinement took before FGMRES existed.
+    CscLower A = make_spd_laplacian(30);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    Solver solver;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    const int n = static_cast<int>(A.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = std::sin(0.37 * i) + 0.5;
+    std::vector<double> x0 = b;
+    ASSERT_EQ(solver.solve(fk, ctrl, info, x0.data(), n, 1, sws), 0);
+    // Perturb so that refinement has to take steps.
+    for (int i = 0; i < n; ++i) x0[static_cast<std::size_t>(i)] *= 1.0 + 1e-6 * std::cos(1.3 * i);
+
+    Control classical = ctrl;
+    classical.refine_method = RefineMethod::Classical;
+    std::vector<double> xc = x0;
+    const RefinementResult rc = refine(A, fk, classical, b, xc, 1, sws);
+    std::vector<double> xa = x0;
+    const RefinementResult ra = refine(A, fk, ctrl, b, xa, 1, sws);
+
+    EXPECT_EQ(rc.status, ErrorCode::Success);
+    EXPECT_EQ(ra.status, ErrorCode::Success);
+    EXPECT_EQ(rc.method_used, RefineMethod::Classical);
+    EXPECT_EQ(ra.method_used, RefineMethod::Classical);
+    EXPECT_EQ(rc.iterations, kClassicalStepsBeforeFgmres);
+    EXPECT_EQ(ra.iterations, rc.iterations);
+    EXPECT_EQ(xa, xc);  // bit-identical iterates
+}

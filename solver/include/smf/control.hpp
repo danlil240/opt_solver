@@ -142,7 +142,15 @@ struct Control {
     // Solve options
     bool           solve_use_blas3_single_rhs    = false;
     bool           solve_multifrontal_forward     = false;
+    // Classical refinement steps (refine(), factor_solve); 0 disables
+    // refinement for every refine_method.
     int            refinement_max_iters          = 5;
+    // Refinement method (see RefineMethod and refinement.hpp). Fgmres / Auto:
+    // classical steps plus FGMRES iterations together never exceed
+    // refine_max_steps; FGMRES restarts every fgmres_restart iterations.
+    RefineMethod   refine_method                 = RefineMethod::Auto;
+    int            refine_max_steps              = 10;
+    int            fgmres_restart                = 20;
 
     // Input checking. True (the default): analyse() scans the pattern for
     // unsorted, duplicate and out-of-range entries and cleans them up.

@@ -405,8 +405,13 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
   const std::size_t len = static_cast<std::size_t>(n > 0 ? n : 0) * static_cast<std::size_t>(nrhs > 0 ? nrhs : 0);
   if (refine_solve) refine_rhs_.assign(b, b + len);
   const int rc = solver_.solve(fk_, ctrl_, solve_info_, b, n, nrhs, sws_, job);
-  if (rc == 0 && refine_solve)
-    refine(refine_mat_, fk_, ctrl_, refine_rhs_, std::span<double>(b, len), nrhs, sws_);
+  if (rc == 0 && refine_solve) {
+    // Classical refinement, as before FGMRES existed: IPOPT runs its own
+    // refinement loop around these solves (Control::refine_method ignored).
+    Control rctrl = ctrl_;
+    rctrl.refine_method = RefineMethod::Classical;
+    refine(refine_mat_, fk_, rctrl, refine_rhs_, std::span<double>(b, len), nrhs, sws_);
+  }
   if (rc == 0 && pending_accept_) {
     ++stats_.accepted;
     pending_accept_ = false;

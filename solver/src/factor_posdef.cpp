@@ -346,6 +346,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.n = n;
   fkeep.status = FactorStatus::Success;
   fkeep.is_posdef = true;
+  fkeep.static_pivots = 0;
   fkeep.use_banded_spd = false;
   fkeep.band_n = 0;
   fkeep.band_kd = 0;

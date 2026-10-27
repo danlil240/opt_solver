@@ -47,6 +47,9 @@ struct AdapterStats {
     double flops = 0.0;
     int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
     int aptp_failed_columns = 0;  // Info::aptp_failed_columns of the last factor (smf adapters)
+    // smf adapter: smf::refine() of the last solve, -1 when it did not run.
+    int refine_iterations = -1;
+    bool refine_fgmres = false;  // RefinementResult::method_used == Fgmres
 };
 
 class SolverAdapter {

@@ -86,6 +86,20 @@ enum class MatchingTrigger {
 // static-pivot mode. Only the lean engine honours front_kernel: the legacy
 // task-parallel engine (Control::tree_parallel) always uses its own TPP
 // front kernel.
+// Iterative refinement method (Control::refine_method, refine()).
+//  Classical: x += M^-1 (b - A x) with the factor M, at most
+//             Control::refinement_max_iters steps.
+//  Fgmres:    right-preconditioned FGMRES(Control::fgmres_restart) with M as
+//             the preconditioner, at most Control::refine_max_steps iterations.
+//  Auto:      Classical, escalating to Fgmres on stagnation or on a
+//             statically pivoted factor that classical refinement has not
+//             brought to the gate within 3 steps (see refinement.hpp).
+enum class RefineMethod {
+    Classical = 0,
+    Fgmres    = 1,
+    Auto      = 2
+};
+
 enum class FrontKernel {
     Tpp  = 0,
     Aptp = 1,

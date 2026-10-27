@@ -80,6 +80,11 @@ struct RunRecord {
     int inertia_zero = 0;
     int delayed_pivots = 0;
     int aptp_failed_columns = -1;  // smf only (Info::aptp_failed_columns); -1 = not reported
+    int static_pivots = -1;        // smf only (Info::static_pivots); -1 = not reported
+    // smf only: smf::refine() inside the adapter's solve (static pivots, or
+    // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
+    int refine_iterations = -1;
+    std::string refine_method;     // "classical" | "fgmres"
     int64_t factor_entries = 0;
     double flops = 0.0;
 

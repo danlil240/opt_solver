@@ -271,46 +271,52 @@ void set_refine_values(std::span<const double> values, RefineMatrix &m) {
 
 namespace {
 
-RefinementResult refine_core(int n,
-                             const std::vector<RefineEntry> &entries,
-                             long double norm_A_inf,
-                             const FactorKeep &fkeep,
-                             const Control &ctrl,
-                             std::span<const double> b,
-                             std::span<double> x,
-                             int nrhs,
-                             SolveWorkspace &ws) {
+double metric_score(double eta, double om) noexcept {
+    return std::max(eta / kTargetEtaInf, om / kTargetOmega);
+}
+
+bool meets_gate(double eta, double om) noexcept {
+    return eta <= kTargetEtaInf && om <= kTargetOmega;
+}
+
+// Classical refinement x += M^-1 (b - A x) with the factor M. `cap` steps at
+// most. Classical mode (escalate == false) is the refinement as it was before
+// FGMRES: stop after two steps that contract the score by less than 0.85 or
+// on one that does not improve it. Auto mode (escalate == true) instead asks
+// for FGMRES (ClassicalOutcome::escalate) when a step contracts by less than
+// 0.5, or, on a statically pivoted factor, when the gate is still not met
+// after min(3, cap) steps. x is left at the best iterate.
+struct ClassicalOutcome {
+    RefinementResult result;
+    bool escalate = false;
+};
+
+ClassicalOutcome classical_refine(int n,
+                                  const std::vector<RefineEntry> &entries,
+                                  long double norm_A_inf,
+                                  const FactorKeep &fkeep,
+                                  const Control &solve_ctrl,
+                                  std::span<const double> b,
+                                  std::span<double> x,
+                                  int nrhs,
+                                  SolveWorkspace &ws,
+                                  double best_eta,
+                                  double best_omega,
+                                  int cap,
+                                  bool escalate) {
     const double inf = std::numeric_limits<double>::infinity();
     const std::size_t total_len = static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs);
-    double best_eta = inf;
-    double best_omega = inf;
-    if (!compute_residual_and_backward_error(
-            n, nrhs, entries, norm_A_inf, b, x, ws.refine_r, best_eta, best_omega)) {
-        return RefinementResult{ErrorCode::IllegalValue, 0, best_eta, best_omega};
-    }
-
-    if (best_eta <= kTargetEtaInf && best_omega <= kTargetOmega) {
-        return RefinementResult{ErrorCode::Success, 0, best_eta, best_omega};
-    }
-
-    const int max_iters = std::max(0, ctrl.refinement_max_iters);
-    if (max_iters == 0) {
-        return RefinementResult{ErrorCode::MaxIterations, 0, best_eta, best_omega};
-    }
+    const int static_check = std::min(3, cap);
+    ClassicalOutcome out;
 
     ws.refine_best_x.assign(x.begin(), x.begin() + static_cast<std::ptrdiff_t>(total_len));
     Solver solver;
-    Control solve_ctrl = ctrl;
-    solve_ctrl.refinement_max_iters = 0;
 
     int iters_done = 0;
     int stagnated_steps = 0;
-    auto metric_score = [](double eta, double om) noexcept -> double {
-        return std::max(eta / kTargetEtaInf, om / kTargetOmega);
-    };
     double best_score = metric_score(best_eta, best_omega);
 
-    for (int iter = 1; iter <= max_iters; ++iter) {
+    for (int iter = 1; iter <= cap; ++iter) {
         iters_done = iter;
         ws.refine_dx = ws.refine_r;
         Info step_info;
@@ -341,10 +347,16 @@ RefinementResult refine_core(int n,
             ws.refine_best_x.assign(
                 x.begin(), x.begin() + static_cast<std::ptrdiff_t>(total_len));
 
-            if (best_eta <= kTargetEtaInf && best_omega <= kTargetOmega) {
-                return RefinementResult{ErrorCode::Success, iters_done, best_eta, best_omega};
+            if (meets_gate(best_eta, best_omega)) {
+                out.result = RefinementResult{ErrorCode::Success, iters_done, best_eta, best_omega};
+                return out;
             }
-            if (ratio > 0.85) {
+            if (escalate) {
+                if (ratio > 0.5 || (fkeep.static_pivots > 0 && iter >= static_check)) {
+                    out.escalate = true;
+                    break;
+                }
+            } else if (ratio > 0.85) {
                 ++stagnated_steps;
                 if (stagnated_steps >= 2) {
                     break;
@@ -355,18 +367,287 @@ RefinementResult refine_core(int n,
         } else {
             // Candidate was worse than best_x: restore best_x and stop on stagnation
             std::copy(ws.refine_best_x.begin(), ws.refine_best_x.end(), x.begin());
+            out.escalate = escalate;
             break;
         }
     }
 
     const bool qualified =
-        std::isfinite(best_eta) && std::isfinite(best_omega) &&
-        best_eta <= kTargetEtaInf && best_omega <= kTargetOmega;
-    return RefinementResult{
+        std::isfinite(best_eta) && std::isfinite(best_omega) && meets_gate(best_eta, best_omega);
+    out.result = RefinementResult{
         qualified ? ErrorCode::Success : ErrorCode::MaxIterations,
         iters_done,
         best_eta,
         best_omega};
+    return out;
+}
+
+double dot(const double *a, const double *b, int n) noexcept {
+    double s = 0.0;
+    for (int i = 0; i < n; ++i) s += a[i] * b[i];
+    return s;
+}
+
+// y = A z for the symmetric matrix (lower canonical entries), in FP64.
+void sym_matvec(int n, const std::vector<RefineEntry> &entries, const double *z, double *y) {
+    std::fill(y, y + n, 0.0);
+    for (const auto &e : entries) {
+        const double v = static_cast<double>(e.val);
+        y[e.row] += v * z[e.col];
+        if (e.row != e.col) y[e.col] += v * z[e.row];
+    }
+}
+
+// Right-preconditioned FGMRES(restart) on one right-hand side, in FP64, with
+// the factor as the preconditioner (one solve per iteration) and modified
+// Gram-Schmidt. Restarts from the best iterate with its extended-precision
+// residual. After every iteration the iterate is formed and both backward
+// errors of the true residual are checked: it stops as soon as both meet the
+// gate, after `budget` iterations, on a breakdown with no improvement, a
+// failed solve, or a restart cycle that did not improve the best iterate.
+// An iterate whose ||x||inf exceeds kMaxGrowth times the reference
+// max(||x_start||inf, ||b||inf / ||A||inf) is never accepted: on a singular,
+// inconsistent system the least-squares iterates run off along the null
+// space, where both backward errors can be driven under the gate by an x of
+// absurd norm (1e29 on a pressure-null-space Stokes system). A legitimate
+// correction of a static-pivoted factor grows x by at most about
+// lambda(A + E) / lambda(A), beyond 1e8 only when A is numerically singular.
+// x_col is left at the best iterate; returns the iterations used.
+constexpr double kMaxGrowth = 1e8;
+
+int fgmres_column(int n,
+                  const std::vector<RefineEntry> &entries,
+                  long double norm_A_inf,
+                  const FactorKeep &fkeep,
+                  const Control &solve_ctrl,
+                  std::span<const double> b_col,
+                  std::span<double> x_col,
+                  int budget,
+                  int restart,
+                  SolveWorkspace &ws,
+                  double &eta_out,
+                  double &omega_out) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const std::size_t un = static_cast<std::size_t>(n);
+    std::vector<double> r_best;
+    if (!compute_residual_and_backward_error(
+            n, 1, entries, norm_A_inf, b_col, x_col, r_best, eta_out, omega_out)) {
+        eta_out = inf;
+        omega_out = inf;
+        return 0;
+    }
+    if (meets_gate(eta_out, omega_out) || budget <= 0) return 0;
+
+    double x_ref = 0.0;
+    for (double v : x_col) x_ref = std::max(x_ref, std::abs(v));
+    if (norm_A_inf > 0.0L) {
+        double b_inf = 0.0;
+        for (double v : b_col) b_inf = std::max(b_inf, std::abs(v));
+        x_ref = std::max(x_ref, b_inf / static_cast<double>(norm_A_inf));
+    }
+    const double x_limit = kMaxGrowth * x_ref;
+
+    // A cycle never runs past the budget: size the basis for what can run.
+    const int m_max = std::max(1, std::min(restart, budget));
+    const std::size_t mm = static_cast<std::size_t>(m_max);
+    std::vector<double> V((mm + 1) * un);  // Krylov basis v_0..v_m
+    std::vector<double> Z(mm * un);        // preconditioned directions z_j = M^-1 v_j
+    std::vector<double> H((mm + 1) * mm);  // Hessenberg, column-major, rotated to R in place
+    std::vector<double> cs(mm), sn(mm), g(mm + 1), y(mm);
+    std::vector<double> x0(x_col.begin(), x_col.end());
+    std::vector<double> xc(un), r_cand;
+    auto h = [&](int i, int j) -> double & {
+        return H[static_cast<std::size_t>(j) * (mm + 1) + static_cast<std::size_t>(i)];
+    };
+
+    Solver solver;
+    double best_score = metric_score(eta_out, omega_out);
+    int used = 0;
+    bool done = false;
+    while (used < budget && !done) {
+        // r_best is the true residual of x0 (= the best iterate).
+        const double beta = std::sqrt(dot(r_best.data(), r_best.data(), n));
+        if (!(beta > 0.0) || !std::isfinite(beta)) break;
+        for (std::size_t i = 0; i < un; ++i) V[i] = r_best[i] / beta;
+        std::fill(g.begin(), g.end(), 0.0);
+        g[0] = beta;
+        const int m = std::min(m_max, budget - used);
+        bool improved = false;
+        bool stop = false;
+        for (int j = 0; j < m; ++j) {
+            const double *vj = V.data() + static_cast<std::size_t>(j) * un;
+            double *zj = Z.data() + static_cast<std::size_t>(j) * un;
+            std::copy(vj, vj + n, zj);
+            Info step_info;
+            ++used;
+            if (solver.solve(fkeep, solve_ctrl, step_info, zj, n, 1, ws, SolveJob::Full) != 0) {
+                stop = true;
+                break;
+            }
+            double *w = V.data() + static_cast<std::size_t>(j + 1) * un;
+            sym_matvec(n, entries, zj, w);
+            for (int i = 0; i <= j; ++i) {
+                const double *vi = V.data() + static_cast<std::size_t>(i) * un;
+                const double hij = dot(w, vi, n);
+                h(i, j) = hij;
+                for (int k = 0; k < n; ++k) w[k] -= hij * vi[k];
+            }
+            const double hnext = std::sqrt(dot(w, w, n));
+            if (!std::isfinite(hnext)) {
+                stop = true;
+                break;
+            }
+            // Previous rotations on column j, then a new one zeroing h(j+1, j).
+            for (int i = 0; i < j; ++i) {
+                const double a = h(i, j);
+                const double c = h(i + 1, j);
+                h(i, j) = cs[static_cast<std::size_t>(i)] * a + sn[static_cast<std::size_t>(i)] * c;
+                h(i + 1, j) = -sn[static_cast<std::size_t>(i)] * a + cs[static_cast<std::size_t>(i)] * c;
+            }
+            const double diag = h(j, j);
+            const double rho = std::hypot(diag, hnext);
+            const std::size_t sj = static_cast<std::size_t>(j);
+            if (rho == 0.0) {
+                stop = true;  // A M^-1 singular on this direction
+                break;
+            }
+            cs[sj] = diag / rho;
+            sn[sj] = hnext / rho;
+            h(j, j) = rho;
+            h(j + 1, j) = 0.0;
+            g[sj + 1] = -sn[sj] * g[sj];
+            g[sj] = cs[sj] * g[sj];
+
+            // Least-squares solution of the k = j + 1 column problem and the
+            // iterate x0 + Z y; checked against the true residual.
+            const int k = j + 1;
+            for (int i = k - 1; i >= 0; --i) {
+                double s = g[static_cast<std::size_t>(i)];
+                for (int l = i + 1; l < k; ++l) s -= h(i, l) * y[static_cast<std::size_t>(l)];
+                y[static_cast<std::size_t>(i)] = s / h(i, i);
+            }
+            std::copy(x0.begin(), x0.end(), xc.begin());
+            for (int l = 0; l < k; ++l) {
+                const double yl = y[static_cast<std::size_t>(l)];
+                const double *zl = Z.data() + static_cast<std::size_t>(l) * un;
+                for (std::size_t i = 0; i < un; ++i) xc[i] += yl * zl[i];
+            }
+            double xc_inf = 0.0;
+            for (double v : xc) xc_inf = std::max(xc_inf, std::abs(v));
+            double cand_eta = inf;
+            double cand_omega = inf;
+            if (xc_inf <= x_limit &&
+                compute_residual_and_backward_error(
+                    n, 1, entries, norm_A_inf, b_col, xc, r_cand, cand_eta, cand_omega)) {
+                const double cand_score = metric_score(cand_eta, cand_omega);
+                if (cand_score < best_score) {
+                    best_score = cand_score;
+                    eta_out = cand_eta;
+                    omega_out = cand_omega;
+                    std::copy(xc.begin(), xc.end(), x_col.begin());
+                    r_best.swap(r_cand);
+                    improved = true;
+                    if (meets_gate(eta_out, omega_out)) {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            if (hnext <= 0.0) break;  // breakdown: the Krylov space is invariant
+            for (int i = 0; i < n; ++i) w[i] /= hnext;
+        }
+        if (stop || !improved) break;
+        std::copy(x_col.begin(), x_col.end(), x0.begin());
+    }
+    return used;
+}
+
+// FGMRES on every column of x that does not meet the gate, `budget`
+// iterations each. Returns the most iterations any column used.
+int fgmres_refine(int n,
+                  const std::vector<RefineEntry> &entries,
+                  long double norm_A_inf,
+                  const FactorKeep &fkeep,
+                  const Control &solve_ctrl,
+                  std::span<const double> b,
+                  std::span<double> x,
+                  int nrhs,
+                  int budget,
+                  SolveWorkspace &ws,
+                  double &eta_out,
+                  double &omega_out) {
+    int most = 0;
+    eta_out = 0.0;
+    omega_out = 0.0;
+    for (int c = 0; c < nrhs; ++c) {
+        const std::size_t off = static_cast<std::size_t>(c) * static_cast<std::size_t>(n);
+        double eta = 0.0;
+        double omega = 0.0;
+        const int used = fgmres_column(n, entries, norm_A_inf, fkeep, solve_ctrl,
+                                       b.subspan(off, static_cast<std::size_t>(n)),
+                                       x.subspan(off, static_cast<std::size_t>(n)), budget,
+                                       solve_ctrl.fgmres_restart, ws, eta, omega);
+        most = std::max(most, used);
+        eta_out = std::max(eta_out, eta);
+        omega_out = std::max(omega_out, omega);
+    }
+    return most;
+}
+
+RefinementResult refine_core(int n,
+                             const std::vector<RefineEntry> &entries,
+                             long double norm_A_inf,
+                             const FactorKeep &fkeep,
+                             const Control &ctrl,
+                             std::span<const double> b,
+                             std::span<double> x,
+                             int nrhs,
+                             SolveWorkspace &ws) {
+    const double inf = std::numeric_limits<double>::infinity();
+    double best_eta = inf;
+    double best_omega = inf;
+    if (!compute_residual_and_backward_error(
+            n, nrhs, entries, norm_A_inf, b, x, ws.refine_r, best_eta, best_omega)) {
+        return RefinementResult{ErrorCode::IllegalValue, 0, best_eta, best_omega};
+    }
+
+    if (meets_gate(best_eta, best_omega)) {
+        return RefinementResult{ErrorCode::Success, 0, best_eta, best_omega};
+    }
+
+    const int max_iters = std::max(0, ctrl.refinement_max_iters);
+    if (max_iters == 0) {
+        return RefinementResult{ErrorCode::MaxIterations, 0, best_eta, best_omega};
+    }
+
+    Control solve_ctrl = ctrl;
+    solve_ctrl.refinement_max_iters = 0;
+
+    if (ctrl.refine_method == RefineMethod::Classical) {
+        return classical_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs, ws,
+                                best_eta, best_omega, max_iters, /*escalate=*/false)
+            .result;
+    }
+
+    const int total = std::max(0, ctrl.refine_max_steps);
+    int classical_steps = 0;
+    if (ctrl.refine_method == RefineMethod::Auto) {
+        const ClassicalOutcome co =
+            classical_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs, ws,
+                             best_eta, best_omega, std::min(max_iters, total), /*escalate=*/true);
+        if (!co.escalate || co.result.iterations >= total) return co.result;
+        classical_steps = co.result.iterations;
+    }
+
+    double eta = inf;
+    double omega = inf;
+    const int used = fgmres_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs,
+                                   total - classical_steps, ws, eta, omega);
+    const bool qualified = std::isfinite(eta) && std::isfinite(omega) && meets_gate(eta, omega);
+    RefinementResult rr{qualified ? ErrorCode::Success : ErrorCode::MaxIterations,
+                        classical_steps + used, eta, omega};
+    rr.method_used = RefineMethod::Fgmres;
+    return rr;
 }
 
 } // namespace
