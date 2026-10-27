@@ -337,6 +337,10 @@ int main(int argc, char **argv) {
     std::string ipm_static;
     bool ipm_static_zero = false;
     int seq_steps = 5;
+    // --export-mtx PATH: write the case's matrix (a built-in fixture or --mtx)
+    // as Matrix Market, print "mtype=spd|indefinite", and exit. run_wsl.py uses
+    // it to hand the built-in cases to the Linux SSIDS driver.
+    std::string export_mtx;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -360,6 +364,7 @@ int main(int argc, char **argv) {
         else if (arg == "--refine-steps" && i + 1 < argc) refine_steps = std::max(0, std::atoi(argv[++i]));
         else if (arg == "--ipm-static" && i + 1 < argc) ipm_static = argv[++i];
         else if (arg == "--ipm-static-zero") ipm_static_zero = true;
+        else if (arg == "--export-mtx" && i + 1 < argc) export_mtx = argv[++i];
         else if (arg == "--seq-steps" && i + 1 < argc) {
             const std::string v = argv[++i];
             seq_steps = (v == "all") ? -1 : std::max(1, std::atoi(v.c_str()));
@@ -443,6 +448,25 @@ int main(int argc, char **argv) {
     }
     if (mtype == "spd") is_spd = true;
     else if (mtype == "indefinite") is_spd = false;
+
+    if (!export_mtx.empty()) {
+        std::FILE *f = std::fopen(export_mtx.c_str(), "wb");
+        if (!f) {
+            std::fprintf(stderr, "cannot write %s\n", export_mtx.c_str());
+            return 2;
+        }
+        std::fprintf(f, "%%%%MatrixMarket matrix coordinate real symmetric\n%d %d %lld\n", static_cast<int>(A.n),
+                     static_cast<int>(A.n), static_cast<long long>(A.nnz()));
+        for (smf::Int j = 0; j < A.n; ++j) {
+            for (smf::Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+                std::fprintf(f, "%d %d %.17g\n", static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]) + 1,
+                             static_cast<int>(j) + 1, A.values[static_cast<std::size_t>(p)]);
+            }
+        }
+        std::fclose(f);
+        std::printf("mtype=%s\n", is_spd ? "spd" : "indefinite");
+        return 0;
+    }
 
     rec.n = A.n;
     rec.nnz = A.nnz();

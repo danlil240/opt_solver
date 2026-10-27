@@ -14,6 +14,8 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
+import run_wsl
+
 
 def sha256_file(path: pathlib.Path) -> str:
     h = hashlib.sha256()
@@ -104,6 +106,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Comma-separated solvers that only run at 1 thread (no parallelism to measure)")
     parser.add_argument("--solvers", default=None, help="Comma-separated override of the manifest's solver list")
     parser.add_argument("--cases", default=None, help="Comma-separated matrix_id filter")
+    parser.add_argument("--runner", choices=("native", "wsl"), default="native",
+                        help="'wsl' runs the Linux-only solvers (ssids) through WSL2 via run_wsl.py; "
+                             "the others stay native")
     args = parser.parse_args(argv)
 
     if args.trials < 10 and not args.allow_short_trials:
@@ -171,9 +176,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     continue
                 if (solver_id, threads) in dead:
                     continue
-                if binary is not None and binary.name.startswith("bench_replay"):
+                use_wsl = args.runner == "wsl" and solver_id in run_wsl.WSL_SOLVERS
+                if use_wsl or (binary is not None and binary.name.startswith("bench_replay")):
                     cmd = [
-                        str(binary),
+                        str(binary) if binary is not None else "bench_replay",
                         "--manifest",
                         str(manifest_path),
                         "--case",
@@ -195,10 +201,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "--JsonlOut",
                         str(records_path),
                     ]
+                    exported_mtype = None
                     if case.get("mtx_path"):
                         cmd.extend(["--mtx", str(case["mtx_path"])])
+                    elif use_wsl and binary is not None:
+                        # Built-in generated case: the Linux driver needs a file.
+                        try:
+                            mtx, exported_mtype = run_wsl.export_builtin_case(
+                                binary, matrix_id, build_dir / "wsl_cases")
+                            cmd.extend(["--mtx", str(mtx)])
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"warning: {exc}", file=sys.stderr)
                     if case.get("matrix_type"):
                         cmd.extend(["--mtype", str(case["matrix_type"])])
+                    elif exported_mtype:
+                        cmd.extend(["--mtype", exported_mtype])
                     if case.get("seq_values_path"):
                         cmd.extend(["--seq-values", str(case["seq_values_path"])])
                     cmd.extend(replay_override_args(case))
@@ -210,6 +227,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
                             env[var] = str(threads)
                         lines_before = records_path.read_text(encoding="utf-8").count("\n") if records_path.exists() else 0
+                        if use_wsl:
+                            cmd = run_wsl.wsl_command(cmd[1:], threads)
                         proc = subprocess.run(
                             cmd,
                             capture_output=True,
@@ -217,10 +236,20 @@ def main(argv: Optional[List[str]] = None) -> int:
                             timeout=args.timeout,
                             env=env,
                         )
+                        new_lines = []
                         if records_path.exists():
                             new_lines = records_path.read_text(encoding="utf-8").splitlines()[lines_before:]
                             if any('"outcome":"Unavailable"' in ln for ln in new_lines):
                                 dead.add((solver_id, threads))
+                        if use_wsl and not new_lines:
+                            # The driver never ran (no WSL, distro or driver build).
+                            why = (proc.stderr or proc.stdout or "").replace(chr(0), "").strip()[:300]
+                            rec = run_wsl.unavailable_record(
+                                case, solver_id, mode, track, trial_id, is_warmup, threads,
+                                f"wsl driver did not run (rc={proc.returncode}): {why}")
+                            with records_path.open("a", encoding="utf-8") as f:
+                                f.write(json.dumps(rec) + "\n")
+                            dead.add((solver_id, threads))
                         if proc.returncode != 0 and not is_warmup:
                             if solver_id == "smf" or solver_id in required_baselines:
                                 any_failure = True
