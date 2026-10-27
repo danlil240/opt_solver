@@ -267,8 +267,35 @@ TEST(LeanEngine, AptpRefactorReusesWorkspace) {
     ASSERT_NE(ak, nullptr);
     FactorKeep fk;
     NumericWorkspace ws;
+    // The zero-diagonal constraint rows of this KKT delay, so the first
+    // factorization grows past the symbolic plan; the refactorizations below
+    // reuse what it grew.
     ASSERT_EQ(solver.factor(*ak, A0, ctrl, info, fk, ws), FactorStatus::Success);
-    if (info.delayed_pivots == 0) EXPECT_EQ(ws.capacity_growths_last_call, 0);
+    ASSERT_GT(info.delayed_pivots, 0);
+    {
+        // Quasidefinite values on the same pattern (constraint diagonals -1):
+        // no delays, so a first factorization in a fresh workspace grows
+        // exactly what the Tpp engine grows (the in-place front assembly
+        // extends past the planned factor size on both): the symbolic plan
+        // covers the APTP work buffer.
+        CscLower Q = A0;
+        for (Int j = 0; j < Q.n; ++j) {
+            const Int k = Q.col_ptr[static_cast<std::size_t>(j)];
+            if (Q.row_idx[static_cast<std::size_t>(k)] == j && Q.values[static_cast<std::size_t>(k)] == 0.0)
+                Q.values[static_cast<std::size_t>(k)] = -1.0;
+        }
+        Control tc = ctrl;
+        tc.front_kernel = FrontKernel::Tpp;
+        Info qa, qt;
+        FactorKeep fa, ft;
+        NumericWorkspace wa, wt;
+        ASSERT_EQ(solver.factor(*ak, Q, ctrl, qa, fa, wa), FactorStatus::Success);
+        ASSERT_EQ(solver.factor(*ak, Q, tc, qt, ft, wt), FactorStatus::Success);
+        ASSERT_EQ(qa.delayed_pivots, 0);
+        ASSERT_EQ(qt.delayed_pivots, 0);
+        EXPECT_EQ(wa.capacity_growths_last_call, wt.capacity_growths_last_call);
+        EXPECT_EQ(wa.front_heap_allocations_last_call, wt.front_heap_allocations_last_call);
+    }
     for (int it = 0; it < 5; ++it) {
         CscLower A = A0;
         for (Int j = 0; j < A.n; ++j) {

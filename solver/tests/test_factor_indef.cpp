@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <random>
 #include <set>
@@ -121,23 +122,36 @@ void expect_engines_agree(const CscLower &A, const std::string &name) {
 
 // The APTP engine (FrontKernel::Aptp, every plain front) and the TPP engine
 // both pass the accuracy gate and agree on inertia, on every indefinite
-// optim20 case and on random indefinite matrices with zero diagonals.
+// optim20 case (AptpEngineMatchesTppAccuracy) and on random indefinite
+// matrices with zero diagonals (AptpEngineMatchesTppOnRandom, which needs
+// no fixtures).
 TEST(FactorIndef, AptpEngineMatchesTppAccuracy) {
   const fs::path dir = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" / "optim20";
   const char *cases[] = {"kkt_lqr_h20",      "kkt_lqr_h200",   "kkt_nmpc_h30",   "kkt_contact_h40",
                          "kkt_eq_qp",        "kkt_ineq_slack", "kkt_auglag",     "kkt_ipm_late",
                          "kkt_network_flow", "kkt_pde_opt",    "indef_helmholtz_50", "indef_rand_1500"};
   int loaded = 0;
+  std::string missing;
   for (const char *c : cases) {
     const fs::path mtx = dir / (std::string(c) + ".mtx");
     std::error_code ec;
-    if (!fs::exists(mtx, ec)) continue;
+    if (!fs::exists(mtx, ec)) {
+      missing += std::string(missing.empty() ? "" : ", ") + c;
+      continue;
+    }
     auto mm = read_matrix_market(mtx.string());
     ASSERT_TRUE(mm.ok) << c << ": " << mm.error_message;
     ++loaded;
     expect_engines_agree(mm.matrix, c);
   }
-  if (loaded == 0) GTEST_SKIP() << "optim20 fixtures not present";
+  const int total = static_cast<int>(sizeof(cases) / sizeof(cases[0]));
+  if (loaded < total)
+    std::printf("[ NOTE     ] optim20: %d of %d fixtures missing: %s\n", total - loaded, total,
+                missing.c_str());
+  if (loaded == 0) GTEST_SKIP() << "no optim20 fixture present (" << missing << ")";
+}
+
+TEST(FactorIndef, AptpEngineMatchesTppOnRandom) {
   for (unsigned s = 0; s < 5; ++s) {
     const CscLower A = random_indefinite(400 + 150 * static_cast<Int>(s), 6, 0.3, 1000 + s);
     expect_engines_agree(A, "random seed " + std::to_string(1000 + s));

@@ -422,3 +422,63 @@ TEST(LdltAptp, FailedColumnsKeepLayout) {
     }
     EXPECT_GE(with_failures, 5);
 }
+
+// ldlt_factor_front's `first` (the engine's TPP fallback after APTP), on the
+// blocked path (f - first >= blocked_min_front): factoring [0, k) and then
+// continuing from first = k gives the same L, D, tags and trailing Schur
+// block as one call. The front is strongly diagonally dominant with mixed
+// signs, so every column passes its 1x1 test in order and both runs take
+// the same pivot sequence (no swaps).
+TEST(LdltAptp, TppContinuationFromFirstMatchesOneCall) {
+    const int f = 300, k = 100, ne = 250;
+    std::mt19937 rng(77);
+    std::uniform_real_distribution<double> uni(-1.0, 1.0);
+    const std::size_t sf = static_cast<std::size_t>(f);
+    std::vector<double> A(sf * sf, 0.0);
+    for (int j = 0; j < f; ++j) {
+        A[j * sf + j] = (j % 3 == 0 ? -1.0 : 1.0) * (static_cast<double>(f) + 10.0 * uni(rng));
+        for (int i = j + 1; i < f; ++i) A[j * sf + i] = uni(rng);
+    }
+    LdltKernelParams prm;
+    ASSERT_GE(f - k, prm.blocked_min_front);
+    std::vector<double> work(ldlt_work_size(f, prm));
+
+    std::vector<double> F1 = A;
+    std::vector<Int> r1(sf);
+    std::iota(r1.begin(), r1.end(), Int{0});
+    std::vector<int8_t> t1(sf, 0);
+    const LdltKernelResult one = ldlt_factor_front(F1.data(), f, ne, r1.data(), prm, t1.data(), work.data());
+    ASSERT_EQ(one.num_accepted, ne);
+
+    std::vector<double> F2 = A;
+    std::vector<Int> r2(sf);
+    std::iota(r2.begin(), r2.end(), Int{0});
+    std::vector<int8_t> t2(sf, 0);
+    const LdltKernelResult a = ldlt_factor_front(F2.data(), f, k, r2.data(), prm, t2.data(), work.data());
+    ASSERT_EQ(a.num_accepted, k);
+    const LdltKernelResult b = ldlt_factor_front(F2.data(), f, ne, r2.data(), prm, t2.data(), work.data(), k);
+    ASSERT_EQ(b.num_accepted, ne);
+    EXPECT_EQ(a.inertia.positive + b.inertia.positive, one.inertia.positive);
+    EXPECT_EQ(a.inertia.negative + b.inertia.negative, one.inertia.negative);
+    EXPECT_NEAR(a.flops + b.flops, one.flops, 1e-9 * one.flops);
+    EXPECT_EQ(r1, r2);
+    for (int c = 0; c < ne; ++c) EXPECT_EQ(t1[c], t2[c]) << c;
+
+    double max_err = 0.0, max_val = 0.0;
+    // L and D: columns [0, ne), rows c..f (the strict upper part is scratch).
+    for (int c = 0; c < ne; ++c)
+        for (int i = c; i < f; ++i) {
+            max_err = std::max(max_err, std::abs(F1[c * sf + i] - F2[c * sf + i]));
+            max_val = std::max(max_val, std::abs(F1[c * sf + i]));
+        }
+    EXPECT_LE(max_err, 1e-12 * max_val) << "L / D";
+    // Trailing Schur block [ne, f) (lower).
+    max_err = 0.0;
+    max_val = 0.0;
+    for (int c = ne; c < f; ++c)
+        for (int i = c; i < f; ++i) {
+            max_err = std::max(max_err, std::abs(F1[c * sf + i] - F2[c * sf + i]));
+            max_val = std::max(max_val, std::abs(F1[c * sf + i]));
+        }
+    EXPECT_LE(max_err, 1e-12 * max_val) << "Schur";
+}

@@ -82,11 +82,13 @@ struct Control {
     bool           indef_use_reference_kernel = false; // force scalar reference front kernel
 
     // Front kernel of plain threshold-pivoting indefinite fronts (see
-    // FrontKernel). aptp_nb / aptp_ib: APTP outer (tile) and inner block
-    // widths; aptp_min_elig: Auto's cutoff in fully summed columns, 0 = Auto
-    // never uses APTP (Auto = Tpp, the current default).
+    // FrontKernel). Aptp = APTP on all fronts; Auto = APTP on fronts with at
+    // least aptp_min_elig fully summed columns, and with aptp_min_elig = 0
+    // (the default) never, i.e. Tpp. aptp_nb / aptp_ib: APTP outer (tile)
+    // and inner block widths; nb = 64 measured ~3% faster than 128 on the
+    // tuning split, ib 16 vs 32 made no difference.
     FrontKernel    front_kernel  = FrontKernel::Auto;
-    int            aptp_nb       = 128;
+    int            aptp_nb       = 64;
     int            aptp_ib       = 32;
     int            aptp_min_elig = 0;
 

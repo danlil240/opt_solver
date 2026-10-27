@@ -8,9 +8,8 @@
 #include <condition_variable>
 #include <cmath>
 #include <cstddef>
+#include <cassert>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -123,7 +122,8 @@ struct FactorContext {
 };
 
 // Written one past the APTP kernel's declared workspace and checked after
-// it: catches a kernel that writes beyond aptp_work_size().
+// it: a kernel that writes beyond aptp_work_size() fails the factorization
+// with ErrorCode::InternalError (and an assert in debug builds).
 constexpr double kWorkCanary = -1.2345678901234567e-300;
 
 // Kernel workspace (doubles) of a front: ldlt_factor_front's, or with APTP
@@ -314,9 +314,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     work[need] = kWorkCanary;
     const AptpResult ar = ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
     if (work[need] != kWorkCanary) {
-      std::fprintf(stderr, "smf: APTP front kernel overran its workspace (f=%d, num_elig=%d)\n", f,
-                   num_elig);
-      std::abort();
+      assert(false && "APTP front kernel overran its workspace");
+      for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+      return ErrorCode::InternalError;
     }
     st.aptp_failed += ar.num_failed;
     if (ar.num_failed > 0) {
