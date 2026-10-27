@@ -11,6 +11,7 @@ struct Control {
     // Ordering
     OrderingMethod ordering      = OrderingMethod::AutoSerial;
     int            nemin         = 8;       // min columns for supernode amalgamation
+    Amalgamation   amalgamation  = Amalgamation::Smf;  // merge rule (see Amalgamation)
     // OrderingMethod::UserSupplied: user_perm[new] = old, length n, in
     // original index order; read by analyse() (null or not a permutation
     // gives ErrorCode::IllegalValue). It is used as given: no identity-band

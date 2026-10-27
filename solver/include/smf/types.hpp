@@ -64,6 +64,18 @@ enum class OrderingMethod {
 //                    5% of n pivots re-analyses once with the matching
 //                    ordering, and later factor() calls with that analysis
 //                    use it (IPOPT's MA97 od_hd_reuse rule).
+// Relaxed-amalgamation merge rule (analyse).
+//   Smf             - nemin plus the bounded-zeros rule (16 free zeros or
+//                     <= 30% zeros).
+//   SmfPlusCholmod  - the SMF rule, or CHOLMOD's defaults (which ignore
+//                     nemin): merged pivots <= 4, no new zeros, <= 16 with
+//                     zero share < 0.8, <= 48 with < 0.1, or any size with
+//                     < 0.05. Collapses chains of thin top fronts.
+enum class Amalgamation {
+    Smf            = 0,
+    SmfPlusCholmod = 1
+};
+
 enum class MatchingTrigger {
     Predicted      = 0,
     RealizedDelays = 1

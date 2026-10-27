@@ -334,7 +334,8 @@ namespace smf
 
     void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                             std::vector<Int> &order, std::vector<Supernode> &snodes,
-                            const std::uint8_t *keep_with_parent, Int *work)
+                            const std::uint8_t *keep_with_parent, Int *work,
+                            Amalgamation rule)
     {
         order.resize(static_cast<std::size_t>(n));
         snodes.clear();
@@ -450,8 +451,6 @@ namespace smf
                 const auto pi = static_cast<std::size_t>(p);
                 if (forced.empty() || forced[si] == 0)
                 {
-                    if (nelim[si] >= nemin || nelim[pi] >= nemin)
-                        continue;
                     const auto stored = [&](std::size_t g, LongInt cols) {
                         const LongInt q = colcount[static_cast<std::size_t>(first[g + 1]) - 1] - 1;
                         return cols * (cols + q);
@@ -460,8 +459,21 @@ namespace smf
                     const LongInt entries = stored(pi, k);
                     const LongInt zeros = entries - fill[si] - fill[pi];
                     const LongInt added = entries - stored(si, nelim[si]) - stored(pi, nelim[pi]);
-                    if (added > kAmalgamateFreeZeros &&
-                        static_cast<double>(zeros) > kAmalgamateMaxZeroShare * static_cast<double>(entries))
+                    bool take = false;
+                    if (nelim[si] < nemin && nelim[pi] < nemin)
+                        take = !(added > kAmalgamateFreeZeros &&
+                                 static_cast<double>(zeros) >
+                                     kAmalgamateMaxZeroShare * static_cast<double>(entries));
+                    if (!take && rule == Amalgamation::SmfPlusCholmod && nemin > 1)
+                    {
+                        // CHOLMOD's default relaxation (nrelax 4/16/48, zrelax
+                        // 0.8/0.1/0.05), independent of the nemin gate (nemin 1 still means
+                        // no amalgamation).
+                        const double z = static_cast<double>(zeros) / static_cast<double>(entries);
+                        take = k <= 4 || added <= 0 || (k <= 16 && z < 0.8) ||
+                               (k <= 48 && z < 0.1) || z < 0.05;
+                    }
+                    if (!take)
                         continue;
                 }
                 group[si] = p;

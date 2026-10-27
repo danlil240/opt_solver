@@ -222,6 +222,66 @@ TEST(Supernode, RelaxedAmalgamationBoundsZeros) {
     EXPECT_EQ(snodes[0].width(), 2);
 }
 
+// Thin chain: 20 nodes of 10 columns, column counts falling by 1 inside a
+// node, node i+1 starting one row above where a fundamental merge would put
+// it (so the nodes stay separate fundamental supernodes). nemin = 8 keeps the
+// SMF rule from touching 10-column nodes; CHOLMOD's rule merges them.
+static void thin_chain(std::vector<Int> &parent, std::vector<Int> &colcount, Int nodes, Int w,
+                       Int rows) {
+    const Int n = nodes * w;
+    parent.assign(static_cast<std::size_t>(n), 0);
+    colcount.assign(static_cast<std::size_t>(n), 0);
+    for (Int j = 0; j < n; ++j) {
+        parent[static_cast<std::size_t>(j)] = (j + 1 < n) ? j + 1 : -1;
+        const Int node = j / w, t = j % w;
+        colcount[static_cast<std::size_t>(j)] = rows - node * (w - 1) - t;
+    }
+}
+
+static long long stored_entries(const std::vector<Supernode> &sn, const std::vector<Int> &order,
+                                const std::vector<Int> &colcount) {
+    long long total = 0;
+    for (const auto &s : sn) {
+        const long long k = s.width();
+        const long long q = colcount[static_cast<std::size_t>(order[static_cast<std::size_t>(s.col_end) - 1])] - 1;
+        total += k * (k + q);
+    }
+    return total;
+}
+
+TEST(Supernode, ThinTopChainMerges) {
+    std::vector<Int> parent, colcount, order;
+    thin_chain(parent, colcount, 20, 10, 1800);
+    const Int n = 200;
+    std::vector<Supernode> base, chol;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, base);
+    EXPECT_EQ(base.size(), 20u);  // Smf: nemin blocks every merge
+    const long long e0 = stored_entries(base, order, colcount);
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, chol, nullptr, nullptr,
+                       Amalgamation::SmfPlusCholmod);
+    EXPECT_LE(chol.size(), 4u);
+    EXPECT_LT(static_cast<double>(stored_entries(chol, order, colcount)),
+              1.05 * static_cast<double>(e0));
+}
+
+// ~10% zeros per merge and more than 48 columns: no CHOLMOD merge. Two
+// nodes of 50 columns; the parent's front is 360 rows taller than the
+// child's, so merging pads 50 x 360 explicit zeros: 22,950 of 216,000
+// stored values (10.6%), above the 5% limit for ns > 48.
+TEST(Supernode, CholmodRuleRespectsZeroShare) {
+    const Int w = 50, n = 2 * w;
+    std::vector<Int> parent(static_cast<std::size_t>(n)), colcount(static_cast<std::size_t>(n)), order;
+    for (Int j = 0; j < n; ++j) {
+        parent[static_cast<std::size_t>(j)] = (j + 1 < n) ? j + 1 : -1;
+        const Int node = j / w, t = j % w;
+        colcount[static_cast<std::size_t>(j)] = (node == 0) ? 1800 - t : 2110 - t;
+    }
+    std::vector<Supernode> chol;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, chol, nullptr, nullptr,
+                       Amalgamation::SmfPlusCholmod);
+    EXPECT_EQ(chol.size(), 2u);
+}
+
 } // namespace smf
 
 #include <random>

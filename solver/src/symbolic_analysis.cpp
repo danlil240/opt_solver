@@ -502,7 +502,7 @@ namespace smf
         amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
                            order, snodes,
                            keep_with_parent.empty() ? nullptr : keep_with_parent.data(),
-                           amal_work);
+                           amal_work, control.amalgamation);
 
         // Final permutation and its elimination tree (relabelled, not rebuilt).
         for (Int k = 0; k < n; ++k)

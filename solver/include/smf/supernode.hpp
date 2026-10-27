@@ -86,12 +86,18 @@ void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
 /// and the zero-fill bound (2x2 pivot pairs). A null pointer gives exactly
 /// the unflagged result.
 ///
+/// `rule`: Amalgamation::SmfPlusCholmod also takes a merge CHOLMOD's default
+/// relaxation would (merged pivots ns, zero share z of the merged node: ns <= 4,
+/// no new zeros, ns <= 16 and z < 0.8, ns <= 48 and z < 0.1, or z < 0.05),
+/// ignoring nemin. Smf is bit-identical to the rule above.
+///
 /// `work` (optional): amalgamate_relaxed_work_size(n) ints of caller-owned
 /// workspace (contents need not be initialised); null allocates its own.
 void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                         std::vector<Int> &order, std::vector<Supernode> &snodes,
                         const std::uint8_t *keep_with_parent = nullptr,
-                        Int *work = nullptr);
+                        Int *work = nullptr,
+                        Amalgamation rule = Amalgamation::Smf);
 
 /// Ints of workspace amalgamate_relaxed needs for n columns.
 std::size_t amalgamate_relaxed_work_size(Int n);
