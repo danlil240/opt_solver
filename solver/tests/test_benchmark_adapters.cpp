@@ -1,4 +1,5 @@
 #include "../benchmarks/adapters/adapter.hpp"
+#include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/replay_steps.hpp"
 #include "../benchmarks/common/validation.hpp"
 
@@ -265,6 +266,57 @@ TEST(BenchmarkAdapters, RecordCarriesFirstFactorAndRefactorOnlyWhenMeasured) {
     const std::string line = rec.to_json_line();
     EXPECT_NE(line.find("\"first_factor_ms\":12.5"), std::string::npos) << line;
     EXPECT_NE(line.find("\"refactor_ms\":3.25"), std::string::npos) << line;
+}
+
+// R29: the cold path on the ipopt track refines like warm_sequence does. A
+// solver whose solve carries a 1e-6 relative error misses the accuracy gate
+// unrefined; harness refinement (ipopt track only, nrhs == 1) recovers it.
+TEST(BenchmarkAdapters, ColdIpoptTrackRefinesRecommendedDoesNot) {
+    CscLower A;
+    const int n = 200;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (int j = 0; j < n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(4.0);
+        if (j + 1 < n) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(-1.0);
+        }
+        A.col_ptr[static_cast<std::size_t>(j) + 1] = static_cast<Int>(A.row_idx.size());
+    }
+    const std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+    // Exact tridiagonal solve (Thomas) times (1 + 1e-6): an inaccurate "factorization".
+    auto inexact_solve = [&](std::vector<double> &r) {
+        std::vector<double> c(n), d(r);
+        double m = 4.0;
+        c[0] = -1.0 / m;
+        d[0] /= m;
+        for (int i = 1; i < n; ++i) {
+            m = 4.0 + c[i - 1];
+            c[i] = -1.0 / m;
+            d[i] = (d[i] + d[i - 1]) / m;
+        }
+        for (int i = n - 2; i >= 0; --i) d[i] -= c[i] * d[i + 1];
+        for (int i = 0; i < n; ++i) r[i] = d[i] * (1.0 + 1e-6);
+        return true;
+    };
+
+    std::vector<double> x0 = b;
+    inexact_solve(x0);
+    ASSERT_FALSE(is_qualified_validation(validate(A, b, x0, 1)));
+
+    std::vector<double> xi = x0;
+    const double ms = refine_timed("ipopt", 1, inexact_solve, A, A.values, b, xi, 3);
+    EXPECT_GT(ms, 0.0);
+    EXPECT_TRUE(is_qualified_validation(validate(A, b, xi, 1)));
+
+    std::vector<double> xr = x0;
+    EXPECT_EQ(refine_timed("recommended", 1, inexact_solve, A, A.values, b, xr, 3), 0.0);
+    EXPECT_EQ(xr, x0);
+    std::vector<double> xm = x0;
+    EXPECT_EQ(refine_timed("ipopt", 2, inexact_solve, A, A.values, b, xm, 3), 0.0);
+    EXPECT_EQ(xm, x0);
 }
 
 // ---------------------------------------------------------------------------

@@ -9,9 +9,11 @@
 #include "smf/csc_matrix.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace smf::bench {
@@ -93,6 +95,25 @@ void refine_solution(SolveCorrection &&solve_correction, const CscLower &A,
         if (!solve_correction(r)) break;
         for (std::size_t i = 0; i < n; ++i) x[i] += r[i];
     }
+}
+
+// IPOPT wraps every linear solve in refinement, so the harness does the same on
+// the "ipopt" track for every solver and every mode (warm_sequence and cold).
+// Single right-hand side only; other tracks never refine.
+inline bool refine_on_track(const std::string &track, int nrhs) {
+    return track == "ipopt" && nrhs == 1;
+}
+
+// refine_solution() timed, applied only when refine_on_track(); returns the
+// wall time in ms (0 when the track does not refine) for the record's refine_ms.
+template <class SolveCorrection>
+double refine_timed(const std::string &track, int nrhs, SolveCorrection &&solve_correction,
+                    const CscLower &A, const std::vector<double> &vals,
+                    const std::vector<double> &b, std::vector<double> &x, int max_steps) {
+    if (!refine_on_track(track, nrhs)) return 0.0;
+    const auto t0 = std::chrono::steady_clock::now();
+    refine_solution(solve_correction, A, vals, b, x, max_steps);
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
 } // namespace smf::bench

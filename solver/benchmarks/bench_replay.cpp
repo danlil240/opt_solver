@@ -769,7 +769,7 @@ int main(int argc, char **argv) {
     } else {
         const int batch_count = (A.n <= 64) ? 10 : 1;
         rec.batch_count = batch_count;
-        double sum_a = 0.0, sum_f = 0.0, sum_s = 0.0;
+        double sum_a = 0.0, sum_f = 0.0, sum_s = 0.0, sum_r = 0.0;
 
         const auto t0 = std::chrono::steady_clock::now();
         for (int b_it = 0; b_it < batch_count; ++b_it) {
@@ -785,6 +785,14 @@ int main(int argc, char **argv) {
                         : out_f;
             sum_s += adapter->stats().solve_ms;
             if (out_s != smf::bench::Outcome::Success) break;
+            // IPOPT-style refinement on the ipopt track, identical for every
+            // solver and to the warm_sequence path (R29). Not part of solve_ms.
+            sum_r += smf::bench::refine_timed(
+                track, nrhs,
+                [&adapter](std::vector<double> &r) {
+                    return adapter->solve(r, 1) == smf::bench::Outcome::Success;
+                },
+                A, A.values, b, x, refine_steps);
         }
         const auto t1 = std::chrono::steady_clock::now();
 
@@ -795,6 +803,7 @@ int main(int argc, char **argv) {
         rec.analyse_phases = st.analyse_phases;
         rec.factor_ms = sum_f * inv_batch;
         rec.solve_ms = sum_s * inv_batch;
+        rec.refine_ms = sum_r * inv_batch;
         rec.wall_ms =
             std::chrono::duration<double, std::milli>(t1 - t0).count() * inv_batch;
         rec.peak_rss_bytes = smf::bench::read_peak_rss_bytes();

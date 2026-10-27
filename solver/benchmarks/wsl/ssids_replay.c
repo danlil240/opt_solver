@@ -800,7 +800,7 @@ int main(int argc, char **argv) {
         }
     } else {
         const int batch = (A.n <= 64) ? 10 : 1;
-        double sa = 0, sf = 0, ss = 0;
+        double sa = 0, sf = 0, ss = 0, sr = 0;
         meta.batch_count = batch;
         const double t0 = now_ms();
         for (int it = 0; it < batch && ok; ++it) {
@@ -818,11 +818,19 @@ int main(int argc, char **argv) {
                 if (!ok) set_outcome(&res, "Failed", "ssids_solve failed");
                 ss += now_ms() - ts;
             }
+            /* R29: IPOPT-style refinement on the ipopt track, as in bench_replay's
+             * cold path (nrhs == 1, same merit rule and step cap). */
+            if (ok && !strcmp(track, "ipopt") && nrhs == 1) {
+                const double tr = now_ms();
+                refine_solution(&F, A.val, b, x, refine_steps);
+                sr += now_ms() - tr;
+            }
         }
         res.wall_ms = (now_ms() - t0) / batch;
         res.analyse_ms = sa / batch;
         res.factor_ms = sf / batch;
         res.solve_ms = ss / batch;
+        res.refine_ms = sr / batch;
         if (ok) {
             res.per_rhs = malloc((size_t)nrhs * sizeof(Valid));
             res.n_per_rhs = nrhs;
