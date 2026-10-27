@@ -9,6 +9,7 @@
 // Usage: bench_profile [--manifest path] [--solvers smf,ma27] [--repeats R]
 //                      [--case substring] [-v] [--nemin k] [--ordering m]
 //                      [--scaling s] [--threads t] [--u pivot_u]
+//                      [--top-tiles 0|1] [--tile-nb nb]
 //        bench_profile --sample analyse|factor|solve|all --case substring
 //                      [--seconds S] [--lines]
 //
@@ -142,6 +143,7 @@ int main(int argc, char **argv) {
     int repeats = 7;
     bool verbose = false;
     int nemin = -1, ordering = -1, scaling = -1, threads = 1;
+    int top_tiles = -1, tile_nb = -1;
     double pivot_u = -1.0;
     std::string sample_phase;
     double sample_seconds = 3.0;
@@ -153,6 +155,8 @@ int main(int argc, char **argv) {
         else if (a == "--ordering" && i + 1 < argc) ordering = std::atoi(argv[++i]);
         else if (a == "--scaling" && i + 1 < argc) scaling = std::atoi(argv[++i]);
         else if (a == "--threads" && i + 1 < argc) threads = std::atoi(argv[++i]);
+        else if (a == "--top-tiles" && i + 1 < argc) top_tiles = std::atoi(argv[++i]);
+        else if (a == "--tile-nb" && i + 1 < argc) tile_nb = std::atoi(argv[++i]);
         else if (a == "--u" && i + 1 < argc) pivot_u = std::atof(argv[++i]);
         else if (a == "--sample" && i + 1 < argc) sample_phase = argv[++i];
         else if (a == "--seconds" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
@@ -188,6 +192,8 @@ int main(int argc, char **argv) {
             if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
             if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;
             ctrl.num_threads = threads;
+            if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;
+            if (tile_nb > 0) ctrl.top_tile_nb = tile_nb;
             auto ad = smf::bench::make_solver_adapter("smf");
             ad->configure(ctrl, "recommended");
             std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
@@ -253,6 +259,8 @@ int main(int argc, char **argv) {
                                  : smf::MatrixType::RealSymmetricIndefinite;
         if (nemin > 0) ctrl.nemin = nemin;
         ctrl.num_threads = threads;
+        if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;
+        if (tile_nb > 0) ctrl.top_tile_nb = tile_nb;
         if (ordering >= 0) ctrl.ordering = static_cast<smf::OrderingMethod>(ordering);
         if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
         if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;

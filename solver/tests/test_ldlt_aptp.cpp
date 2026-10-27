@@ -13,14 +13,19 @@
 ///   - LdltAptp.FailedColumnsKeepLayout      : KKT-like fronts with small
 ///     nb / ib, so failures and fail-in-place updates happen across tiles;
 ///     the layout contract still holds for the failed columns.
+///   - LdltAptp.TiledKeepsContractAndIsDeterministic : the 2D tile-task
+///     kernel (ldlt_aptp_front_tiled) keeps the contract and is bitwise
+///     identical on 1, 3 and 4 threads.
 
 #include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
+#include "../src/parallel/tile_tasks.hpp"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <numeric>
 #include <random>
@@ -481,4 +486,91 @@ TEST(LdltAptp, TppContinuationFromFirstMatchesOneCall) {
             max_val = std::max(max_val, std::abs(F1[c * sf + i]));
         }
     EXPECT_LE(max_err, 1e-12 * max_val) << "Schur";
+}
+
+// ---------------------------------------------------------------------------
+// ldlt_aptp_front_tiled (2D tile tasks, parallel/tile_tasks.hpp)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+Run run_aptp_tiled(const Mat &A, int f, int num_elig, const AptpParams &prm, int threads) {
+    Run r;
+    r.F = A;
+    r.rows.resize(f);
+    std::iota(r.rows.begin(), r.rows.end(), 0);
+    r.tags.assign(static_cast<std::size_t>(std::max(1, f)), 0);
+    std::vector<double> work(aptp_work_size(f, num_elig, prm) + 1);
+    TileWorkspace tws;
+    r.res = ldlt_aptp_front_tiled(r.F.data(), f, num_elig, r.rows.data(), prm, r.tags.data(),
+                                  work.data(), tws, threads, nullptr);
+    return r;
+}
+
+// KKT-like front [[H, J^T], [J, 0]] with a weak H in a random symmetric
+// order (pivots fail the a posteriori test), as FailedColumnsKeepLayout.
+Mat kkt_front(int f, std::mt19937 &rng) {
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    const int np = (2 * f) / 3;
+    Mat K(static_cast<std::size_t>(f) * f, 0.0);
+    for (int j = 0; j < np; ++j)
+        for (int i = j; i < np; ++i) at(K, f, i, j) = 1e-3 * U(rng);
+    for (int j = 0; j < np; ++j)
+        for (int i = np; i < f; ++i)
+            if (std::uniform_int_distribution<int>(0, 3)(rng) == 0) at(K, f, i, j) = U(rng);
+    std::vector<int> perm(f);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), rng);
+    Mat A(static_cast<std::size_t>(f) * f, 0.0);
+    for (int j = 0; j < f; ++j)
+        for (int i = j; i < f; ++i) at(A, f, i, j) = sym(K, f, perm[i], perm[j]);
+    return A;
+}
+
+} // namespace
+
+// The tile-task kernel keeps ldlt_aptp_front's contract (reconstruction,
+// |l| <= 1/u, tags, row permutation, inertia from D) on random and on
+// KKT-like fronts with failures, small nb so there are many block columns
+// and trailing row blocks; and its result is bitwise the same on 1, 3 and 4
+// threads (updates into a tile in fixed block-column order).
+TEST(LdltAptp, TiledKeepsContractAndIsDeterministic) {
+    std::mt19937 rng(97);
+    int with_failures = 0;
+    for (int t = 0; t < 24; ++t) {
+        const int f = std::uniform_int_distribution<int>(40, 330)(rng);
+        // Every fifth front has a few eligible columns only: tiles of nb rows
+        // below a block column narrower than nb.
+        const int num_elig = (t % 5 == 4) ? std::uniform_int_distribution<int>(2, 12)(rng)
+                                          : std::uniform_int_distribution<int>(f / 2, f)(rng);
+        const Mat A = (t % 2 == 0) ? random_symmetric(f, rng) : kkt_front(f, rng);
+        AptpParams prm;
+        prm.nb = (t % 3 == 0) ? 16 : (t % 3 == 1 ? 24 : 64);
+        prm.ib = (t % 2 == 0) ? 8 : 4;
+        prm.u = (t % 4 == 1) ? 0.1 : 0.01;
+        SCOPED_TRACE(trace_msg("trial ", t, " f=", f, " elig=", num_elig, " nb=", prm.nb));
+        const Run r = run_aptp_tiled(A, f, num_elig, prm, 4);
+        ASSERT_EQ(r.res.num_eliminated + r.res.num_failed, num_elig);
+        if (r.res.num_failed > 0) ++with_failures;
+        expect_valid_tags(r);
+        expect_row_permutation(r, f, num_elig);
+        EXPECT_LE(reconstruction_error(A, r, f), 1e-12);
+        EXPECT_LE(max_abs_l(r.F, f, r.res.num_eliminated, r.tags), 1.0 / prm.u);
+        const InertiaCounts dI = inertia_from_d(r, f);
+        EXPECT_EQ(r.res.inertia.positive, dI.positive);
+        EXPECT_EQ(r.res.inertia.negative, dI.negative);
+        // Same pivot count as the serial kernel on these fronts.
+        const Run s = run_aptp(A, f, num_elig, prm);
+        EXPECT_EQ(r.res.num_eliminated, s.res.num_eliminated);
+
+        for (const int threads : {1, 3}) {
+            const Run o = run_aptp_tiled(A, f, num_elig, prm, threads);
+            ASSERT_EQ(o.res.num_eliminated, r.res.num_eliminated) << threads << " threads";
+            EXPECT_EQ(o.rows, r.rows) << threads << " threads";
+            EXPECT_EQ(o.tags, r.tags) << threads << " threads";
+            EXPECT_EQ(0, std::memcmp(o.F.data(), r.F.data(), r.F.size() * sizeof(double)))
+                << threads << " threads: F differs";
+        }
+    }
+    EXPECT_GE(with_failures, 3);
 }

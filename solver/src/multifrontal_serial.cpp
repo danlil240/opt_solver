@@ -2,6 +2,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
+#include "parallel/tile_tasks.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -60,6 +61,7 @@ struct TreeParallelBuffers {
     std::vector<int8_t> tags;
     std::vector<SolveStep> steps;
     std::vector<DiagSolveEntry> diag;
+    TileWorkspace tiles;
   };
   std::vector<Thread> threads;
 };
@@ -85,6 +87,7 @@ struct FrontPass {
   std::vector<int8_t> *tags;
   std::vector<double> *work;
   Int *pos;                  // row -> front position, -1 between fronts
+  TileWorkspace *tiles = nullptr; // tile-task scratch (top of the tree only)
   std::size_t fo = 0, ro = 0, cv_top = 0, cr_top = 0;
   SerialFactorStats st;
   int64_t growths = 0;
@@ -123,7 +126,22 @@ struct FactorContext {
   // fronts that run after the budget is spent.
   int delay_budget = -1;
   double budget_static = 0.0;
+  // Control::top_tiles: APTP parameters of the 2D tile tasks (null = off),
+  // used on plain threshold fronts of >= kTopTileMinFront rows processed
+  // with a TileCtx (the top of the tree).
+  const AptpParams *tile_aprm = nullptr;
 };
+
+// Threads of a front at the top of the tree: its share of the BLAS-thread
+// budget, and the pool's idle threads to recruit for its tile tasks.
+struct TileCtx {
+  int nthreads = 1;
+  TileHelpers *helpers = nullptr;
+};
+
+// Fronts at least this large are factored as 2D tile tasks at the top of the
+// tree (Control::top_tiles).
+constexpr int kTopTileMinFront = 512;
 
 // Running delay budget state (Control::delay_budget) of a sequence of
 // fronts: the delays counted so far and whether the budget is spent (the
@@ -165,7 +183,7 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
 // stack) blocks on P's own stack are popped. `bs` (null: no budget) is the
 // delay budget state of the sequence s belongs to, updated by this front.
 ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
-                        BudgetState *bs) {
+                        BudgetState *bs, const TileCtx *tc = nullptr) {
   const AnalysisKeep &keep = cx.keep;
   NumericWorkspace &ws = cx.ws;
   FactorKeep &fkeep = cx.fkeep;
@@ -240,8 +258,13 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // APTP only on plain threshold-pivoting fronts: a fallback or budget
   // static front (below) keeps the TPP kernel.
   const bool fallback_front = cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym);
-  const AptpParams *aprm = (cx.aprm != nullptr && !fallback_front && !budget_front &&
-                            num_elig >= cx.aptp_min_elig)
+  // 2D tile tasks (top of the tree): APTP block structure whatever the
+  // front kernel, on the same plain threshold fronts.
+  bool tiled = tc != nullptr && P.tiles != nullptr && cx.tile_aprm != nullptr &&
+               f >= kTopTileMinFront && !fallback_front && !budget_front;
+  const AptpParams *aprm = tiled ? cx.tile_aprm
+                           : (cx.aprm != nullptr && !fallback_front && !budget_front &&
+                              num_elig >= cx.aptp_min_elig)
                                ? cx.aprm
                                : nullptr;
   grow(*P.work, front_work_need(f, num_elig, cx.prm, aprm), P.growths);
@@ -294,6 +317,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   };
   LdltKernelResult kr;
   int aptp_failed = 0;
+  const int64_t tile_growths0 = P.tiles != nullptr ? P.tiles->growths : 0;
   // Assemble and factor; at most twice. Children's contribution blocks (the
   // top of P's stack when P made them) are only read here, and nothing is
   // pushed or released before this front's own Schur complement, so a delay
@@ -353,7 +377,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       // Schur state is current); what TPP fails too is delayed as usual.
       const std::size_t need = aptp_work_size(f, num_elig, *aprm);
       work[need] = kWorkCanary;
-      const AptpResult ar = ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
+      const AptpResult ar =
+          tiled ? ldlt_aptp_front_tiled(F, f, num_elig, rows, *aprm, tags, work, *P.tiles,
+                                        tc->nthreads, tc->helpers)
+                : ldlt_aptp_front(F, f, num_elig, rows, *aprm, tags, work);
       if (work[need] != kWorkCanary) {
         assert(false && "APTP front kernel overran its workspace");
         for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
@@ -384,6 +411,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     budget_front = true;
     prm = &budget_prm;
     aprm = nullptr;
+    tiled = false;
     ++P.st.budget_retries;
     // The kernels permuted rows[] into pivot order (sym_swap / view_swap)
     // but not pos[], which assembly scatters through: put rows[] back in
@@ -392,6 +420,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     std::copy(cm, cm + f, rows);
   }
   st.aptp_failed += aptp_failed;
+  if (tiled) ++st.top_tile_fronts;
+  if (P.tiles != nullptr) P.growths += P.tiles->growths - tile_growths0;
   const int p = kr.num_accepted;
   if (budget_on && !is_root) bs->count += num_elig - p;
   P.cv_top = new_cv_top;
@@ -528,6 +558,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.static_pivots += from.static_pivots;
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
+  to.top_tile_fronts += from.top_tile_fronts;
   to.flops += from.flops;
   to.max_front = std::max(to.max_front, from.max_front);
 }
@@ -653,6 +684,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const AptpParams *aptp = aptp_on ? &aprm : nullptr;
   const int aptp_min_elig =
       ctrl.front_kernel == FrontKernel::Aptp ? 1 : std::max(1, ctrl.aptp_min_elig);
+  // Control::top_tiles: 2D tile tasks on the large plain threshold fronts at
+  // the top of the tree, whatever front_kernel says (APTP is threshold
+  // pivoting with an a posteriori check, as stable as TPP).
+  AptpParams tile_aprm = aprm;
+  tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
+  const bool tiles_on = ctrl.top_tiles && ctrl.num_threads > 1 && !posdef &&
+                        prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0 && ctrl.pivot_u > 0.0;
 
   // Early abort once the negative pivots exceed the limit (indefinite only).
   // Pivots are only ever added, so a run whose final count is within the
@@ -845,13 +883,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       P.tags = &b.tags;
       P.work = &b.work;
       P.pos = b.pos.data();
+      P.tiles = &b.tiles;
       passes.push_back(&P);
     }
     node_blocks.resize(ns);
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
-                           budget_static};
+                           budget_static, tiles_on ? &tile_aprm : nullptr};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
@@ -865,7 +904,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       failed.compare_exchange_strong(ok, static_cast<int>(ErrorCode::InertiaExceeded),
                                      std::memory_order_relaxed);
     };
+    // Workers count no BLAS threads outside their own guards: the caller,
+    // worker 0, stops counting its outer guard before the others start.
     const auto run_pool = [threads](const auto &fn) {
+      BlasIdleScope idle;
       std::vector<std::thread> pool;
       pool.reserve(static_cast<std::size_t>(threads) - 1);
       for (int t = 1; t < threads; ++t) pool.emplace_back(fn, t);
@@ -944,6 +986,30 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::mutex mtx;
     std::condition_variable cv;
     int free_threads = threads;
+    // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
+    // offers blas_threads - 1 places to the pool, taken by the workers that
+    // the BLAS-thread budget leaves idle; they run its tasks on serial BLAS.
+    struct PoolHelpers final : TileHelpers {
+      std::mutex *mtx = nullptr;
+      std::condition_variable *cv = nullptr;
+      std::vector<std::pair<TileRunner *, int>> offers;
+      void offer(TileRunner &job, int slots) override {
+        std::lock_guard<std::mutex> lk(*mtx);
+        offers.emplace_back(&job, slots);
+        cv->notify_all();
+      }
+      void withdraw(TileRunner &job) override {
+        std::lock_guard<std::mutex> lk(*mtx);
+        for (std::size_t i = 0; i < offers.size(); ++i)
+          if (offers[i].first == &job) {
+            offers.erase(offers.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+          }
+      }
+    } helpers;
+    helpers.mtx = &mtx;
+    helpers.cv = &cv;
+    helpers.offers.reserve(static_cast<std::size_t>(threads));
     if (failed.load() == static_cast<int>(ErrorCode::Success)) {
       run_pool([&](int tid) {
         FrontPass &P = tpass[static_cast<std::size_t>(tid)];
@@ -953,25 +1019,39 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           // Delay budget of a top front: its children's end states, all final
           // (and published under the mutex) once it is ready.
           BudgetState top_state;
+          TileRunner *job = nullptr;
           {
             std::unique_lock<std::mutex> lk(mtx);
             cv.wait(lk, [&] {
-              return (!ready.empty() && free_threads > 0) || remaining == 0 ||
-                     failed.load() != static_cast<int>(ErrorCode::Success);
+              return (!ready.empty() && free_threads > 0) || !helpers.offers.empty() ||
+                     remaining == 0 || failed.load() != static_cast<int>(ErrorCode::Success);
             });
-            if (ready.empty() || failed.load() != static_cast<int>(ErrorCode::Success)) return;
-            s = ready.back();
-            ready.pop_back();
-            blas_threads = std::max(1, free_threads / static_cast<int>(ready.size() + 1));
-            free_threads -= blas_threads;
-            if (budget_regions) top_state = top_in_state(s);
+            if (failed.load() != static_cast<int>(ErrorCode::Success)) return;
+            if (!ready.empty() && free_threads > 0) {
+              s = ready.back();
+              ready.pop_back();
+              blas_threads = std::max(1, free_threads / static_cast<int>(ready.size() + 1));
+              free_threads -= blas_threads;
+              if (budget_regions) top_state = top_in_state(s);
+            } else if (!helpers.offers.empty()) {
+              job = helpers.offers.back().first;
+              if (--helpers.offers.back().second == 0) helpers.offers.pop_back();
+              job->add_helper();
+            } else {
+              return; // remaining == 0
+            }
+          }
+          if (job != nullptr) {
+            job->help();
+            continue;
           }
           ErrorCode e;
           const int neg0 = P.st.inertia.negative;
           BudgetState *bs = budget_regions ? &top_state : nullptr;
           {
             BlasThreadGuard blas(blas_threads);
-            e = process_front(cx, P, 1 + tid, s, false, bs);
+            const TileCtx tc{blas_threads, &helpers};
+            e = process_front(cx, P, 1 + tid, s, false, bs, &tc);
           }
           std::lock_guard<std::mutex> lk(mtx);
           free_threads += blas_threads;

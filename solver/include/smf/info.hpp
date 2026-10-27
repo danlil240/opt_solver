@@ -66,10 +66,14 @@ struct Info {
     /// path, because their delays would have taken the count past the budget.
     int          delay_budget_retries   = 0;
     /// Fully summed columns the APTP front kernel failed (summed over
-    /// fronts, before the TPP fallback; Control::front_kernel). Those the
+    /// fronts, before the TPP fallback; Control::front_kernel, and the tile
+    /// fronts of Control::top_tiles whatever the kernel). Those the
     /// fallback could not pivot either are also in delayed_pivots.
     int          aptp_failed_columns    = 0;
     int          parallel_subtrees      = 0;  ///< subtrees factored concurrently (0 = serial)
+    /// Fronts factored as 2D tile tasks at the top of the tree
+    /// (Control::top_tiles).
+    int          top_tile_fronts        = 0;
     /// After FactorStatus::InertiaExceeded: predicted flops (sum of p f^2,
     /// as predicted_flops) of the fronts that were not factored.
     double       aborted_flops_skipped  = 0.0;

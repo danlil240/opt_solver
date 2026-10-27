@@ -479,6 +479,7 @@ add_library(smf STATIC
     src/workspace.cpp
     src/parallel/task_tree.cpp
     src/parallel/blas_thread_guard.cpp
+    src/parallel/tile_tasks.cpp
     src/parallel/determinism.cpp
     src/parallel/solve_pool.cpp
     src/coo_to_csc.cpp

@@ -4,9 +4,11 @@
 // by the same code on the same data), solutions to rounding.
 
 #include "../benchmarks/common/validation.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
+#include "smf/matrix_market.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -14,7 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <random>
+#include <string>
 #include <vector>
 
 using namespace smf;
@@ -207,4 +211,150 @@ TEST(TreeParallel, ParallelSolveIndefiniteWithDelays) {
     ctrl.scaling = ScalingMethod::None;
     ctrl.pivot_u = 0.5;
     check_parallel_solve(grid_kkt(110, 7), ctrl, /*expect_delays=*/true);
+}
+
+namespace {
+
+// 3D Helmholtz on an m^3 grid: 7-point Laplacian minus a shift that puts
+// the operator well inside its spectrum (indefinite), lower CSC.
+CscLower helmholtz_3d(int m, double shift) {
+    const int n = m * m * m;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.push_back(0);
+    for (int z = 0; z < m; ++z)
+        for (int y = 0; y < m; ++y)
+            for (int x = 0; x < m; ++x) {
+                const int j = (z * m + y) * m + x;
+                A.row_idx.push_back(j);
+                A.values.push_back(6.0 - shift);
+                if (x + 1 < m) {
+                    A.row_idx.push_back(j + 1);
+                    A.values.push_back(-1.0);
+                }
+                if (y + 1 < m) {
+                    A.row_idx.push_back(j + m);
+                    A.values.push_back(-1.0);
+                }
+                if (z + 1 < m) {
+                    A.row_idx.push_back(j + m * m);
+                    A.values.push_back(-1.0);
+                }
+                A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+            }
+    return A;
+}
+
+// helm3d01 if the fixture is present, otherwise a generated 3D Helmholtz
+// 30^3; `name` says which.
+CscLower helmholtz_case(std::string &name) {
+    namespace fs = std::filesystem;
+    const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
+                         "fixtures" / "large" / "helm3d01" / "helm3d01.mtx";
+    std::error_code ec;
+    if (fs::exists(mtx, ec)) {
+        auto mm = read_matrix_market(mtx.string());
+        if (mm.ok) {
+            name = "helm3d01";
+            return std::move(mm.matrix);
+        }
+    }
+    name = "helmholtz_3d_30";
+    return helmholtz_3d(30, 0.9);
+}
+
+struct RefinedRun {
+    Info info;
+    double eta = 1.0;
+};
+
+// Factor and solve with a few steps of classical refinement (residual in
+// double), then the normwise backward error.
+RefinedRun factor_refined(const CscLower &A, Control ctrl, int threads) {
+    ctrl.num_threads = threads;
+    Solver solver;
+    RefinedRun run;
+    auto ak = solver.analyse(A, ctrl, run.info);
+    EXPECT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    FactorKeep fk;
+    EXPECT_EQ(solver.factor(*ak, A, ctrl, run.info, fk, nws), FactorStatus::Success);
+    const int n = static_cast<int>(A.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    std::vector<double> x = b, r(b.size());
+    EXPECT_EQ(solver.solve(fk, ctrl, run.info, x.data(), n, 1, sws), 0);
+    for (int it = 0; it < 3; ++it) {
+        r = b;
+        for (Int j = 0; j < A.n; ++j)
+            for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+                const std::size_t i = static_cast<std::size_t>(A.row_idx[static_cast<std::size_t>(p)]);
+                const double v = A.values[static_cast<std::size_t>(p)];
+                r[i] -= v * x[static_cast<std::size_t>(j)];
+                if (i != static_cast<std::size_t>(j)) r[static_cast<std::size_t>(j)] -= v * x[i];
+            }
+        EXPECT_EQ(solver.solve(fk, ctrl, run.info, r.data(), n, 1, sws), 0);
+        for (std::size_t i = 0; i < x.size(); ++i) x[i] += r[i];
+    }
+    run.eta = smf::bench::validate(A, b, x, 1).eta_inf;
+    return run;
+}
+
+} // namespace
+
+// Fronts of >= 512 rows at the top of the tree are factored as 2D tile
+// tasks (Control::top_tiles) with 8 threads: same inertia as the serial
+// factorization and the same backward error class.
+TEST(TreeParallel, TileTasksMatchSerial) {
+    std::string name;
+    const CscLower A = helmholtz_case(name);
+    SCOPED_TRACE(name);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    const RefinedRun serial = factor_refined(A, ctrl, 1);
+    ASSERT_GT(serial.info.num_negative, 0) << "not indefinite";
+    EXPECT_EQ(serial.info.top_tile_fronts, 0);
+    const RefinedRun par = factor_refined(A, ctrl, 8);
+    ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
+    EXPECT_GT(par.info.top_tile_fronts, 0) << "no front factored as tile tasks";
+    EXPECT_EQ(par.info.num_positive, serial.info.num_positive);
+    EXPECT_EQ(par.info.num_negative, serial.info.num_negative);
+    EXPECT_EQ(par.info.num_zero, serial.info.num_zero);
+    EXPECT_LE(serial.eta, 1e-14);
+    EXPECT_LE(par.eta, 1e-14);
+
+    // top_tiles off: today's threaded-BLAS top phase, same inertia.
+    ctrl.top_tiles = false;
+    const RefinedRun off = factor_refined(A, ctrl, 8);
+    EXPECT_EQ(off.info.top_tile_fronts, 0);
+    EXPECT_EQ(off.info.num_negative, serial.info.num_negative);
+}
+
+// The BLAS threads in use (BlasThreadGuard accounting) never exceed
+// num_threads: a tile front's owner drops to serial BLAS and each helper
+// counts one thread within the front's share.
+TEST(TreeParallel, TileTasksNoOversubscription) {
+    std::string name;
+    const CscLower A = helmholtz_case(name);
+    SCOPED_TRACE(name);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    for (const int threads : {8, 3}) {
+        ctrl.num_threads = threads;
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace nws;
+        FactorKeep fk;
+        ASSERT_EQ(blas_threads_active(), 0);
+        blas_threads_reset_peak();
+        ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+        const int peak = blas_threads_peak();
+        EXPECT_EQ(blas_threads_active(), 0);
+        EXPECT_GT(info.top_tile_fronts, 0) << threads << " threads";
+        EXPECT_GE(peak, 2) << threads << " threads";
+        EXPECT_LE(peak, threads) << threads << " threads, peak " << peak;
+    }
 }

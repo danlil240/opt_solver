@@ -134,6 +134,15 @@ struct Control {
     // with num_threads BLAS threads. tree_parallel opts into the older
     // task-parallel engine instead, which measured slower everywhere.
     int            num_threads   = 1;
+    // num_threads > 1: fronts of at least 512 rows at the top of the tree
+    // that pivot with plain threshold pivoting (indefinite, no static or
+    // in-order pivoting, not a fallback / delay-budget static front) are
+    // factored as 2D tile tasks on the tree-parallel thread pool, serial
+    // BLAS per task (APTP block-column structure, whatever front_kernel
+    // says), instead of one threaded-BLAS kernel call. top_tile_nb: their
+    // block-column / tile width.
+    bool           top_tiles     = true;
+    int            top_tile_nb   = 256;
     bool           tree_parallel = false;
     bool           deterministic = false;
     uint64_t       memory_budget_bytes = 0; // 0 = unbounded
