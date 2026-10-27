@@ -90,6 +90,14 @@ public:
             int n, int nrhs, SolveWorkspace &ws,
             SolveJob job = SolveJob::Full) const;
 
+  /// Solve A X = B for nrhs right-hand sides at once, column-major with
+  /// leading dimension ldb >= n (n = the factor's order; B.size() >=
+  /// ldb * (nrhs - 1) + n). The serial solve takes the fronts once for all
+  /// columns (BLAS-3 per front); rows [n, ldb) of each column are untouched.
+  int solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
+            std::span<double> B, int nrhs, int ldb, SolveWorkspace &ws,
+            SolveJob job = SolveJob::Full) const;
+
   /// Combined analyse + factor + solve in a single call.
   /// Solves A x = b in-place; returns the FactorKeep for inspection.
   /// @param A      lower-triangular CSC input

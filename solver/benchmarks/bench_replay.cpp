@@ -548,6 +548,8 @@ int main(int argc, char **argv) {
     // refines with smf::refine whenever its factor has static pivots.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_PIVOT_TOL")) ctrl.static_pivot_tol = std::atof(e);
     if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
+    // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
+    if (const char *e = std::getenv("SMF_BENCH_CACHE_INVERSE_DIAG")) ctrl.cache_inverse_diag = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
         const std::string k = e;
         if (k == "classical") ctrl.refine_method = smf::RefineMethod::Classical;

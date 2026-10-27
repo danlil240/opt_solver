@@ -1,12 +1,105 @@
 #include "smf/solve_diag.hpp"
+#include "smf/blas_thread_guard.hpp"
+#include "smf/dense_kernel.hpp"
+#include "smf/determinism.hpp"
 #include "smf/pivoting.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
 
 namespace smf {
+
+namespace {
+
+// kappa_1(L11) = ||L11||_1 ||L11^-1||_1 <= kInvDiagMaxCond. Multiplying by a
+// computed inverse loses accuracy as kappa grows, where the triangular solve
+// stays backward stable: an ill-conditioned block keeps its TRSV. Column
+// sums: contiguous, no scratch.
+bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X, int p,
+                              bool unit) {
+  double nl = 0.0, nx = 0.0;
+  for (int j = 0; j < p; ++j) {
+    const double *lc = L + j * f;
+    const double *xc = X + static_cast<std::ptrdiff_t>(j) * p;
+    double sl = unit ? 1.0 : std::abs(lc[j]);
+    double sx = std::abs(xc[j]);
+    for (int i = j + 1; i < p; ++i) {
+      sl += std::abs(lc[i]);
+      sx += std::abs(xc[i]);
+    }
+    nl = std::max(nl, sl);
+    nx = std::max(nx, sx);
+  }
+  return nl * nx <= kInvDiagMaxCond;  // false for NaN / inf too
+}
+
+} // namespace
+
+void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
+  info.inverse_diag_fronts = 0;
+  info.inverse_diag_seconds = 0.0;
+  fkeep.inv_diag_offset.clear();
+  const bool usable = fkeep.status == FactorStatus::Success ||
+                      (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular);
+  if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd || !usable) {
+    fkeep.inv_diag.clear();
+    return;
+  }
+  const auto t0 = std::chrono::steady_clock::now();
+  const std::size_t ns = fkeep.solve_steps.size();
+  LongInt total = 0;
+  int fronts = 0;
+  for (const SolveStep &st : fkeep.solve_steps)
+    if (st.p >= kInvDiagMinPivots) {
+      total += static_cast<LongInt>(st.p) * st.p;
+      ++fronts;
+    }
+  if (fronts == 0) {
+    fkeep.inv_diag.clear();
+    return;
+  }
+  // resize() keeps the capacity: same structure, no allocation.
+  fkeep.inv_diag_offset.resize(ns);
+  fkeep.inv_diag.resize(static_cast<std::size_t>(total));
+  const bool unit = !fkeep.is_posdef;
+  const BlasThreadGuard blas(deterministic_mode(ctrl) ? 1 : std::max(1, ctrl.num_threads));
+  LongInt off = 0;
+  for (std::size_t k = 0; k < ns; ++k) {
+    const SolveStep &st = fkeep.solve_steps[k];
+    const int p = st.p;
+    if (p < kInvDiagMinPivots) {
+      fkeep.inv_diag_offset[k] = -1;
+      continue;
+    }
+    const std::ptrdiff_t f = st.f;
+    const double *L = fkeep.factor_values.data() + st.factor_offset;
+    double *X = fkeep.inv_diag.data() + off;
+    // X = L11 as the solves read it: the strict lower triangle, the
+    // diagonal (ones when unit; D sits there with D inline) and zeros above.
+    for (int j = 0; j < p; ++j) {
+      double *xc = X + static_cast<std::ptrdiff_t>(j) * p;
+      const double *lc = L + j * f;
+      for (int i = 0; i < j; ++i) xc[i] = 0.0;
+      xc[j] = unit ? 1.0 : lc[j];
+      for (int i = j + 1; i < p; ++i) xc[i] = lc[i];
+    }
+    if (smf_dtrtri_lower(X, p, p, unit) != 0 || !inverse_well_conditioned(L, f, X, p, unit)) {
+      fkeep.inv_diag_offset[k] = -1;  // keep the TRSV for this front
+      --fronts;
+    } else {
+      fkeep.inv_diag_offset[k] = off;
+    }
+    off += static_cast<LongInt>(p) * p;
+  }
+  info.inverse_diag_fronts = fronts;
+  info.inverse_diag_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  info.factor_seconds += info.inverse_diag_seconds;
+}
 
 void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   (void)n;

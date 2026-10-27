@@ -6,6 +6,7 @@
 #include "smf/solve_forward.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -118,46 +119,64 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
+  FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
-    return factor_posdef(ak, ctrl, info, fkeep);
-  }
-  return factor_with_matching_trigger(ak, ctrl, info, [&] { return ak.cleaned.values; },
+    st = factor_posdef(ak, ctrl, info, fkeep);
+  } else {
+    st = factor_with_matching_trigger(ak, ctrl, info, [&] { return ak.cleaned.values; },
                                       [&](const AnalysisKeep &k) {
-    return factor_indef(k, ctrl, info, fkeep);
-  });
+      return factor_indef(k, ctrl, info, fkeep);
+    });
+  }
+  build_inverse_diag(fkeep, ctrl, info);
+  return st;
 }
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
                             const Control &ctrl, Info &info,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
+  FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
-    return factor_posdef(ak, updated, ctrl, info, fkeep, ws);
+    st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
+  } else {
+    const auto values = [&] {
+      FactorValues fv;
+      return resolve_factor_values(ak, updated, fv) ? cleaned_values(ak, fv)
+                                                    : std::vector<double>{};
+    };
+    st = factor_with_matching_trigger(ak, ctrl, info, values, [&](const AnalysisKeep &k) {
+      return factor_indef(k, updated, ctrl, info, fkeep, ws);
+    });
   }
-  const auto values = [&] {
-    FactorValues fv;
-    return resolve_factor_values(ak, updated, fv) ? cleaned_values(ak, fv) : std::vector<double>{};
-  };
-  return factor_with_matching_trigger(ak, ctrl, info, values, [&](const AnalysisKeep &k) {
-    return factor_indef(k, updated, ctrl, info, fkeep, ws);
-  });
+  build_inverse_diag(fkeep, ctrl, info);
+  return st;
 }
 
 FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> values,
                             const Control &ctrl, Info &info,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   const FactorValues fv{values.data(), values.size(), true};
+  FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
-    return factor_posdef(ak, fv, ctrl, info, fkeep, ws);
-  }
-  return factor_with_matching_trigger(ak, ctrl, info, [&] { return cleaned_values(ak, fv); },
+    st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);
+  } else {
+    st = factor_with_matching_trigger(ak, ctrl, info, [&] { return cleaned_values(ak, fv); },
                                       [&](const AnalysisKeep &k) {
-    return factor_indef(k, fv, ctrl, info, fkeep, ws);
-  });
+      return factor_indef(k, fv, ctrl, info, fkeep, ws);
+    });
+  }
+  build_inverse_diag(fkeep, ctrl, info);
+  return st;
 }
 
-int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
-                  double *b, int n, int nrhs, SolveWorkspace &ws,
-                  SolveJob job) const {
+namespace {
+
+// The solve with column stride ldb >= n. Only the full non-banded solve
+// reads and writes b with stride ldb (its gather and scatter); the other
+// paths need ldb == n (Solver::solve packs B for them).
+int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
+               double *b, int n, int nrhs, int ldb, SolveWorkspace &ws,
+               SolveJob job) {
   auto t0 = std::chrono::steady_clock::now();
 
   const int expected_n =
@@ -284,7 +303,7 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     const int *perm = fkeep.perm.data();
     const double *s = has_scale ? fkeep.scale.data() : nullptr;
     for (int r = 0; r < nrhs; ++r) {
-      const double *src = b + static_cast<std::ptrdiff_t>(r) * n;
+      const double *src = b + static_cast<std::ptrdiff_t>(r) * ldb;
       double *dst = w + static_cast<std::ptrdiff_t>(r) * n;
       if (s)
         for (int i = 0; i < n; ++i)
@@ -297,7 +316,7 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     diag_back(w, /*permute=*/false);
     for (int r = 0; r < nrhs; ++r) {
       const double *src = w + static_cast<std::ptrdiff_t>(r) * n;
-      double *dst = b + static_cast<std::ptrdiff_t>(r) * n;
+      double *dst = b + static_cast<std::ptrdiff_t>(r) * ldb;
       if (s)
         for (int i = 0; i < n; ++i)
           dst[perm[i]] = src[i] * s[perm[i]];
@@ -332,6 +351,39 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   info.solve_seconds += std::chrono::duration<double>(t1 - t0).count();
   info.status = ErrorCode::Success;
   return 0;
+}
+
+} // namespace
+
+int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
+                  double *b, int n, int nrhs, SolveWorkspace &ws,
+                  SolveJob job) const {
+  return solve_impl(fkeep, ctrl, info, b, n, nrhs, n, ws, job);
+}
+
+int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
+                  std::span<double> B, int nrhs, int ldb, SolveWorkspace &ws,
+                  SolveJob job) const {
+  const int n = fkeep.use_banded_spd ? fkeep.band_n : static_cast<int>(fkeep.perm.size());
+  if (n <= 0 || nrhs <= 0 || ldb < n ||
+      B.size() < static_cast<std::size_t>(ldb) * static_cast<std::size_t>(nrhs - 1) +
+                     static_cast<std::size_t>(n)) {
+    info.status = ErrorCode::IllegalValue;
+    return static_cast<int>(ErrorCode::IllegalValue);
+  }
+  if (ldb == n || (job == SolveJob::Full && !fkeep.use_banded_spd))
+    return solve_impl(fkeep, ctrl, info, B.data(), n, nrhs, ldb, ws, job);
+  // Partial jobs and the banded path take packed columns.
+  std::vector<double> packed(static_cast<std::size_t>(n) * static_cast<std::size_t>(nrhs));
+  for (int r = 0; r < nrhs; ++r)
+    std::copy_n(B.data() + static_cast<std::ptrdiff_t>(r) * ldb, n,
+                packed.data() + static_cast<std::ptrdiff_t>(r) * n);
+  const int rc = solve_impl(fkeep, ctrl, info, packed.data(), n, nrhs, n, ws, job);
+  if (rc == 0)
+    for (int r = 0; r < nrhs; ++r)
+      std::copy_n(packed.data() + static_cast<std::ptrdiff_t>(r) * n, n,
+                  B.data() + static_cast<std::ptrdiff_t>(r) * ldb);
+  return rc;
 }
 
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,

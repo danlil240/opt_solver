@@ -280,6 +280,7 @@ bool finalize_factor_from_front_results(
   }
 
   fkeep.solve_steps.clear();
+  fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
   std::vector<Int> fallback_order;

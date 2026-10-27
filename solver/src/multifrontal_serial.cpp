@@ -884,6 +884,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   fkeep.factor_col_ptr.resize(ns + 1);
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
+  fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_steps.reserve(ns);
   fkeep.solve_subtrees.clear();
   fkeep.inline_d = !posdef;

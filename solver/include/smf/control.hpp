@@ -161,6 +161,15 @@ struct Control {
     int64_t        solve_parallel_min_entries = 100000;
 
     // Solve options
+    // Factor time also stores L11^-1 of every front with at least 16 pivots
+    // (FactorKeep::inv_diag, solve_diag.hpp) so the solve applies the pivot
+    // block with a GEMV/GEMM instead of a TRSV/TRSM. A block whose
+    // kappa_1(L11) exceeds kInvDiagMaxCond keeps its TRSV (accuracy). Costs
+    // about p^3/3 flops per front at factor time and p^2 doubles per front.
+    // Off by default: on the 7 large_kkt IPOPT replays (1 thread) it saved
+    // no solve time (the blocks with p >= 16 are few and small; GEMV on the
+    // full p x p inverse does twice TRSV's flops) and cost 1-8% factor time.
+    bool           cache_inverse_diag            = false;
     bool           solve_use_blas3_single_rhs    = false;
     bool           solve_multifrontal_forward     = false;
     // Classical refinement steps (refine(), factor_solve); 0 disables

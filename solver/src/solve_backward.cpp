@@ -3,6 +3,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/pivoting.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/solve_pool.hpp"
 #include "smf/workspace.hpp"
 #include <algorithm>
@@ -153,9 +154,10 @@ void apply_inline_d(double *v, int p, const double *L, std::ptrdiff_t f) {
 // solved: they belong to ancestors) and writes only the pivot rows
 // rows[0, p), so fronts of disjoint subtrees can run concurrently.
 // With apply_d, the pivot values first take D^-1 (inline D).
-void backward_front(const double *factor_data, const Int *rows, int p, int f,
-                    bool posdef, bool apply_d, double *xc, std::vector<double> &b_loc,
-                    std::vector<double> &b_ext) {
+// Linv: the front's cached L11^-1 (p x p, FactorKeep::inv_diag), or null.
+void backward_front(const double *factor_data, const double *Linv, const Int *rows,
+                    int p, int f, bool posdef, bool apply_d, double *xc,
+                    std::vector<double> &b_loc, std::vector<double> &b_ext) {
   const int q = f - p;
   if (p <= 0)
     return;
@@ -230,6 +232,16 @@ void backward_front(const double *factor_data, const Int *rows, int p, int f,
     }
   }
 
+  if (Linv) {
+    // z = L11^-T b_loc with the cached inverse, written straight to x.
+    if (b_ext.size() < static_cast<std::size_t>(p))
+      b_ext.resize(static_cast<std::size_t>(p));
+    smf_dgemv_transpose(b_ext.data(), p, p, Linv, p, b_loc.data(), 1.0, 0.0);
+    for (int i = 0; i < p; ++i)
+      xc[rows[i]] = b_ext[static_cast<std::size_t>(i)];
+    return;
+  }
+
   // Solve L11^T z = b_loc (SPD: non-unit; indef: unit lower diagonal)
   if (posdef) {
     if (p <= 16)
@@ -246,6 +258,63 @@ void backward_front(const double *factor_data, const Int *rows, int p, int f,
   // Scatter
   for (int i = 0; i < p; ++i)
     xc[rows[i]] = b_loc[static_cast<std::size_t>(i)];
+}
+
+// One front of L^{-T} for nrhs columns at once (x with stride ldx), serial:
+// the f rows of every column gathered into W (f x nrhs); BLAS-3 (W1 -=
+// L21^T W2, then L11^-T W1 or TRSM) on fronts of at least kInvDiagMinPivots
+// pivots, backward_front's per-column kernels below that. Writes the pivot
+// rows only.
+void backward_front_block(const double *L, const double *Linv, const Int *rows,
+                          int p, int f, bool posdef, bool apply_d, double *x,
+                          std::ptrdiff_t ldx, int nrhs, std::vector<double> &wbuf,
+                          std::vector<double> &tbuf) {
+  if (p <= 0)
+    return;
+  const int q = f - p;
+  const std::size_t need = static_cast<std::size_t>(f) * static_cast<std::size_t>(nrhs);
+  if (wbuf.size() < need)
+    wbuf.resize(need);
+  double *W = wbuf.data();
+  for (int r = 0; r < nrhs; ++r) {
+    const double *xc = x + r * ldx;
+    double *w = W + static_cast<std::ptrdiff_t>(r) * f;
+    for (int i = 0; i < f; ++i)
+      w[i] = xc[rows[i]];
+    if (apply_d)
+      apply_inline_d(w, p, L, f);
+  }
+  if (p < kInvDiagMinPivots && Linv == nullptr) {
+    for (int r = 0; r < nrhs; ++r) {
+      double *w = W + static_cast<std::ptrdiff_t>(r) * f;
+      if (q > 0)
+        sub_dots(w, p, L + p, f, w + p, q);
+      if (posdef)
+        solve_lower_transpose_nonunit_small(w, p, L, f);
+      else
+        solve_lower_transpose_unit_small(w, p, L, f);
+    }
+  } else {
+    if (q > 0)
+      smf_dgemm_tn(W, p, nrhs, q, L + p, f, W + p, f, f, -1.0, 1.0);
+    if (Linv) {
+      const std::size_t tneed = static_cast<std::size_t>(p) * static_cast<std::size_t>(nrhs);
+      if (tbuf.size() < tneed)
+        tbuf.resize(tneed);
+      smf_dgemm_tn(tbuf.data(), p, nrhs, p, Linv, p, W, f, p, 1.0, 0.0);
+      for (int r = 0; r < nrhs; ++r)
+        std::copy_n(tbuf.data() + static_cast<std::ptrdiff_t>(r) * p, p,
+                    W + static_cast<std::ptrdiff_t>(r) * f);
+    } else {
+      smf_dtrsm_left_lower(W, p, nrhs, L, f, f, /*trans=*/true, /*unit=*/!posdef);
+    }
+  }
+  for (int r = 0; r < nrhs; ++r) {
+    double *xc = x + r * ldx;
+    const double *w = W + static_cast<std::ptrdiff_t>(r) * f;
+    for (int i = 0; i < p; ++i)
+      xc[rows[i]] = w[i];
+  }
 }
 
 } // anonymous namespace
@@ -274,11 +343,15 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   }
   const bool posdef = fkeep.is_posdef;
   const bool apply_d = apply_diag && backward_applies_diag(fkeep);
-  const auto step_front = [&](std::size_t k, const double *&L, const Int *&rows,
-                              int &p, int &f) {
+  const bool has_inv = fkeep.inv_diag_offset.size() == fkeep.solve_steps.size();
+  const auto step_front = [&](std::size_t k, const double *&L, const double *&Linv,
+                              const Int *&rows, int &p, int &f) {
     const SolveStep &step = fkeep.solve_steps[k];
     rows = fkeep.solve_row_indices.data() + step.row_offset;
     L = fkeep.factor_values.data() + step.factor_offset;
+    Linv = (has_inv && fkeep.inv_diag_offset[k] >= 0)
+               ? fkeep.inv_diag.data() + fkeep.inv_diag_offset[k]
+               : nullptr;
     p = step.p;
     f = step.f;
   };
@@ -296,6 +369,25 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   std::vector<double> &b_ext = ws.ext;
   std::vector<double> &tmp = ws.tmp;
   tmp.resize(static_cast<std::size_t>(n));
+
+  // Several right-hand sides, serial: each front once for all columns.
+  if (nrhs > 1 && threads == 1 && use_steps) {
+    for (std::size_t k = fkeep.solve_steps.size(); k-- > 0;) {
+      const double *L, *Linv;
+      const Int *rows;
+      int p, f;
+      step_front(k, L, Linv, rows, p, f);
+      backward_front_block(L, Linv, rows, p, f, posdef, apply_d, x, n, nrhs, b_loc, b_ext);
+    }
+    if (permute)
+      for (int rhs = 0; rhs < nrhs; ++rhs) {
+        double *xc = x + static_cast<std::ptrdiff_t>(rhs) * n;
+        for (int j = 0; j < n; ++j)
+          tmp[static_cast<std::size_t>(fkeep.perm[static_cast<std::size_t>(j)])] = xc[j];
+        std::copy(tmp.begin(), tmp.end(), xc);
+      }
+    return;
+  }
 
   for (int rhs = 0; rhs < nrhs; ++rhs) {
     double *xc = x + static_cast<std::ptrdiff_t>(rhs) * n;
@@ -330,11 +422,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       run_dag(pool, static_cast<int>(nts), std::move(ready),
               [&](int i, int tid, const auto &release) {
                 auto &sc = ws.threads[static_cast<std::size_t>(tid)];
-                const double *L;
+                const double *L, *Linv;
                 const Int *rows;
                 int p, f;
-                step_front(top_begin + static_cast<std::size_t>(i), L, rows, p, f);
-                backward_front(L, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
+                step_front(top_begin + static_cast<std::size_t>(i), L, Linv, rows, p, f);
+                backward_front(L, Linv, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
                 // Run the first child here, queue the others.
                 const int c0 = child_ptr[static_cast<std::size_t>(i)];
                 const int c1 = child_ptr[static_cast<std::size_t>(i) + 1];
@@ -352,11 +444,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
             break;
           const auto [b, e] = fkeep.solve_subtrees[i];
           for (auto k = static_cast<std::size_t>(e); k-- > static_cast<std::size_t>(b);) {
-            const double *L;
+            const double *L, *Linv;
             const Int *rows;
             int p, f;
-            step_front(k, L, rows, p, f);
-            backward_front(L, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
+            step_front(k, L, Linv, rows, p, f);
+            backward_front(L, Linv, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
           }
         }
       };
@@ -366,10 +458,11 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       for (int pos = ns - 1; pos >= 0; --pos) {
         const Int *rows = nullptr;
         const double *factor_data = nullptr;
+        const double *Linv = nullptr;
         int p = 0;
         int f = 0;
         if (use_steps) {
-          step_front(static_cast<std::size_t>(pos), factor_data, rows, p, f);
+          step_front(static_cast<std::size_t>(pos), factor_data, Linv, rows, p, f);
         } else {
           const Int s = (*postorder)[static_cast<std::size_t>(pos)];
           const Supernode &sn = ak->supernodes[static_cast<std::size_t>(s)];
@@ -379,7 +472,7 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
           p = sn.width();
           f = ak->front_size(s);
         }
-        backward_front(factor_data, rows, p, f, posdef, apply_d, xc, b_loc, b_ext);
+        backward_front(factor_data, Linv, rows, p, f, posdef, apply_d, xc, b_loc, b_ext);
       }
     }
 

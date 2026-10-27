@@ -89,4 +89,21 @@ void smf_dtrsv_lower_transpose_unit(double *b, int n, const double *L, int lda);
 void smf_dtrmm_left_lower(double *B, int m, int n, const double *L, int ldl,
                           int ldb);
 
+/// General matrix multiply with A transposed: C := alpha * Aᵀ * B + beta * C
+/// A is k×m (lda), B is k×n (ldb), C is m×n (ldc). Column-major.
+void smf_dgemm_tn(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha = 1.0,
+                  double beta = 0.0);
+
+/// Triangular solve with several right-hand sides: op(L) X = B, L m×m lower
+/// (ldl), op = L or Lᵀ (trans), unit or non-unit diagonal. B is m×n (ldb),
+/// overwritten with X.
+void smf_dtrsm_left_lower(double *B, int m, int n, const double *L, int ldl,
+                          int ldb, bool trans, bool unit);
+
+/// In-place inverse of the m×m lower triangular A (lda): unit = true takes
+/// the diagonal as ones (and leaves it untouched). The strict upper triangle
+/// is not referenced. Returns LAPACK info (0 success, > 0 exactly singular).
+int smf_dtrtri_lower(double *A, int m, int lda, bool unit);
+
 } // namespace smf

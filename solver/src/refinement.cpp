@@ -320,6 +320,8 @@ ClassicalOutcome classical_refine(int n,
         iters_done = iter;
         ws.refine_dx = ws.refine_r;
         Info step_info;
+        // All nrhs corrections in one call: the serial solve takes each
+        // front once for every column (BLAS-3, blocked multi-RHS solve).
         const int rc = solver.solve(
             fkeep, solve_ctrl, step_info, ws.refine_dx.data(), n, nrhs, ws, SolveJob::Full);
         if (rc != 0) {
@@ -563,7 +565,10 @@ int fgmres_column(int n,
 }
 
 // FGMRES on every column of x that does not meet the gate, `budget`
-// iterations each. Returns the most iterations any column used.
+// iterations each. Returns the most iterations any column used. Single-RHS
+// solves: each Arnoldi step's preconditioner solve needs the previous one,
+// and the columns converge independently, so there is no block of solves to
+// batch (classical refinement batches its columns, above).
 int fgmres_refine(int n,
                   const std::vector<RefineEntry> &entries,
                   long double norm_A_inf,

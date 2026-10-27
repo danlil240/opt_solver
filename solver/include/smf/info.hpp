@@ -90,6 +90,10 @@ struct Info {
     double       analyse_seconds        = 0.0;
     AnalysePhaseSeconds analyse_phases;
     double       factor_seconds         = 0.0;
+    /// Control::cache_inverse_diag: fronts whose L11^-1 the last factor()
+    /// cached, and the time that took (included in factor_seconds).
+    int          inverse_diag_fronts    = 0;
+    double       inverse_diag_seconds   = 0.0;
     double       solve_seconds          = 0.0;
     double       refinement_seconds     = 0.0;
     int          refinement_iterations  = 0;

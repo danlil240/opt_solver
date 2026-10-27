@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #if defined(SMF_BLAS_REFERENCE) && (SMF_BLAS_REFERENCE)
 
@@ -292,6 +293,61 @@ void smf_dtrmm_left_lower(double *B, int m, int n, const double *L, int ldl,
   }
 }
 
+
+void smf_dgemm_tn(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha, double beta) {
+  for (int j = 0; j < n; ++j)
+    for (int i = 0; i < m; ++i) {
+      double sum = 0.0;
+      for (int p = 0; p < k; ++p)
+        sum += A[i * lda + p] * B[j * ldb + p];
+      C[j * ldc + i] = alpha * sum + (beta == 0.0 ? 0.0 : beta * C[j * ldc + i]);
+    }
+}
+
+void smf_dtrsm_left_lower(double *B, int m, int n, const double *L, int ldl,
+                          int ldb, bool trans, bool unit) {
+  for (int j = 0; j < n; ++j) {
+    double *b = B + static_cast<std::size_t>(j) * ldb;
+    if (trans) {
+      if (unit)
+        smf_dtrsv_lower_transpose_unit(b, m, L, ldl);
+      else
+        smf_dtrsv_lower_transpose(b, m, L, ldl);
+    } else {
+      if (unit)
+        smf_dtrsv_lower_unit(b, m, L, ldl);
+      else
+        smf_dtrsv_lower(b, m, L, ldl);
+    }
+  }
+}
+
+int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
+  // Column j of the inverse: solve L x = e_j below the diagonal, using the
+  // already inverted columns to the right (backward over j).
+  for (int j = m - 1; j >= 0; --j) {
+    double ajj = 1.0;
+    if (!unit) {
+      if (A[j * lda + j] == 0.0) return j + 1;
+      ajj = 1.0 / A[j * lda + j];
+      A[j * lda + j] = ajj;
+    }
+    // x(j+1:m) = -inv(L(j+1:m, j+1:m)) * L(j+1:m, j) * ajj
+    std::vector<double> t(static_cast<std::size_t>(m - j - 1));
+    for (int i = j + 1; i < m; ++i) t[i - j - 1] = A[j * lda + i];
+    for (int i = j + 1; i < m; ++i) {
+      double sum = 0.0;
+      for (int k = j + 1; k <= i; ++k) {
+        const double lik = (k == i && unit) ? 1.0 : A[k * lda + i];
+        sum += lik * t[k - j - 1];
+      }
+      A[j * lda + i] = -sum * ajj;
+    }
+  }
+  return 0;
+}
+
 } // namespace smf
 
 #else
@@ -306,6 +362,7 @@ void dpotrf_(char *uplo, int *n, double *a, int *lda, int *info);
 void dpbtrf_(char *uplo, int *n, int *kd, double *ab, int *ldab, int *info);
 void dpbtrs_(char *uplo, int *n, int *kd, int *nrhs, double *ab, int *ldab,
              double *b, int *ldb, int *info);
+void dtrtri_(char *uplo, char *diag, int *n, double *a, int *lda, int *info);
 }
 #endif
 
@@ -647,6 +704,30 @@ void smf_dtrmm_left_lower(double *B, int m, int n, const double *L, int ldl,
   // B := L * B  (left, lower, no-transpose, non-unit, alpha=1)
   cblas_dtrmm(CblasColMajor, CblasLeft, CblasLower, CblasNoTrans, CblasNonUnit,
               m, n, 1.0, L, ldl, B, ldb);
+}
+
+void smf_dgemm_tn(double *C, int m, int n, int k, const double *A, int lda,
+                  const double *B, int ldb, int ldc, double alpha, double beta) {
+  if (m <= 0 || n <= 0) return;
+  cblas_dgemm(CblasColMajor, CblasTrans, CblasNoTrans, m, n, k, alpha, A, lda,
+              B, ldb, beta, C, ldc);
+}
+
+void smf_dtrsm_left_lower(double *B, int m, int n, const double *L, int ldl,
+                          int ldb, bool trans, bool unit) {
+  if (m <= 0 || n <= 0) return;
+  cblas_dtrsm(CblasColMajor, CblasLeft, CblasLower,
+              trans ? CblasTrans : CblasNoTrans, unit ? CblasUnit : CblasNonUnit,
+              m, n, 1.0, L, ldl, B, ldb);
+}
+
+int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
+  if (m <= 0) return 0;
+  char uplo = 'L';
+  char diag = unit ? 'U' : 'N';
+  int info = 0;
+  dtrtri_(&uplo, &diag, &m, A, &lda, &info);
+  return info;
 }
 
 } // namespace smf

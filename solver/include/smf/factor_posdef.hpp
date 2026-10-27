@@ -61,6 +61,13 @@ struct FactorKeep {
   std::vector<Int> solve_top_rows;
   std::vector<Int> solve_top_slot;
   std::vector<Int> solve_top_parent;
+  // Control::cache_inverse_diag: inv_diag_offset[k] is where solve step k's
+  // L11^-1 starts in inv_diag (p x p column-major, zero above the diagonal),
+  // -1 for a step without one (p < kInvDiagMinPivots). Empty: no cache. The
+  // inverse is of L11 as the triangular solves use it: unit lower for an
+  // indefinite factor (D left out), non-unit for SPD.
+  std::vector<double> inv_diag;
+  std::vector<LongInt> inv_diag_offset;
   std::vector<double> solve_tmp; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_loc; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_ext; ///< legacy scratch (not mutated by const solve)
