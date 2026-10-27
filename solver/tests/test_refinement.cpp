@@ -590,6 +590,108 @@ TEST(Matching, KktScalingBoundsEntries) {
     }
 }
 
+// The searches stop at a work budget and resume where they stopped, so a
+// matching computed in many budgeted steps (and its scaling) is bitwise the
+// one-shot matching, also with dense rows (phases 1-3).
+TEST(Matching, ResumedSearchesMatchOneShot) {
+    std::vector<CscLower> cases;
+    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(make_random_kkt(1500, 600, 3, seed));
+    {
+        // A few dense constraint rows (> 10 sqrt(n) entries each).
+        const int nv = 200, nc = 10;
+        CscLower A;
+        A.n = nv + nc;
+        A.col_ptr.push_back(0);
+        for (int j = 0; j < A.n; ++j) {
+            if (j < nv) {
+                A.row_idx.push_back(j);
+                A.values.push_back(1.0 + 0.01 * j);
+                if (j + 1 < nv) {
+                    A.row_idx.push_back(j + 1);
+                    A.values.push_back(0.3 * std::sin(0.7 * j));
+                }
+                for (int r = nv; r < A.n; ++r) {
+                    A.row_idx.push_back(r);
+                    A.values.push_back(std::cos(0.13 * j + r));
+                }
+            }
+            A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+        }
+        cases.push_back(std::move(A));
+    }
+    for (std::size_t c = 0; c < cases.size(); ++c) {
+        const CscLower &A = cases[c];
+        const MatchingResult one = compute_symmetric_matching(A);
+        ASSERT_EQ(one.status, ErrorCode::Success) << "case " << c;
+        SymmetricMatcher m(A);
+        ASSERT_EQ(m.status(), ErrorCode::Success);
+        int pauses = 0;
+        for (long long budget = 0; !m.advance(budget); budget = m.work() + 50) ++pauses;
+        EXPECT_GT(pauses, 1) << "case " << c;
+        const MatchingResult res = m.current();
+        EXPECT_EQ(res.status, ErrorCode::Success) << "case " << c;
+        EXPECT_EQ(res.matched_rank, one.matched_rank) << "case " << c;
+        EXPECT_EQ(res.col_to_row, one.col_to_row) << "case " << c;
+        EXPECT_EQ(res.row_to_col, one.row_to_col) << "case " << c;
+        EXPECT_EQ(res.scale, one.scale) << "case " << c;
+    }
+}
+
+// The initial phase (greedy matching plus length-2 augmentations) leaves a
+// partial matching of entries of A with a positive scaling; the searches that
+// follow do not change it.
+TEST(Matching, InitialMatchingIsPartialAndKept) {
+    const CscLower A = make_random_kkt(1500, 600, 3, 1);
+    const std::vector<double> d = dense_abs(A);
+    SymmetricMatcher m(A);
+    ASSERT_EQ(m.status(), ErrorCode::Success);
+    const MatchingResult init = m.initial();
+    EXPECT_GT(init.matched_rank, 0);
+    EXPECT_LT(init.matched_rank, A.n) << "fixture must leave work for the searches";
+    int matched = 0;
+    for (Int j = 0; j < A.n; ++j) {
+        const Int i = init.col_to_row[static_cast<std::size_t>(j)];
+        if (i < 0) continue;
+        ++matched;
+        EXPECT_EQ(init.row_to_col[static_cast<std::size_t>(i)], j);
+        EXPECT_GT(d[static_cast<std::size_t>(i) * static_cast<std::size_t>(A.n) + static_cast<std::size_t>(j)], 0.0);
+    }
+    EXPECT_EQ(matched, init.matched_rank);
+    for (double s : init.scale) {
+        EXPECT_TRUE(std::isfinite(s));
+        EXPECT_GT(s, 0.0);
+    }
+    ASSERT_TRUE(m.advance(-1));
+    EXPECT_EQ(m.current().matched_rank, A.n);
+    const MatchingResult again = m.initial();
+    EXPECT_EQ(again.col_to_row, init.col_to_row);
+    EXPECT_EQ(again.scale, init.scale);
+}
+
+TEST(Matching, StructurallySingularFailsAfterSearches) {
+    // Row/column 1 is empty: the construction already fails.
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 1, 1, 2};
+    A.row_idx = {0, 2};
+    A.values = {4.0, 5.0};
+    SymmetricMatcher m(A);
+    EXPECT_TRUE(m.advance(-1));
+    EXPECT_EQ(m.status(), ErrorCode::SingularMatrix);
+
+    // Columns 0 and 1 only reach row 2: a search fails.
+    CscLower B;
+    B.n = 3;
+    B.col_ptr = {0, 1, 2, 3};
+    B.row_idx = {2, 2, 2};
+    B.values = {1.0, 1.0, 1.0};
+    SymmetricMatcher mb(B);
+    EXPECT_TRUE(mb.advance(-1));
+    EXPECT_EQ(mb.status(), ErrorCode::SingularMatrix);
+    EXPECT_EQ(mb.current().status, ErrorCode::SingularMatrix);
+    EXPECT_LT(mb.current().matched_rank, 3);
+}
+
 TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
     // Default Control (auto ordering, ScalingMethod::Auto): a KKT matrix
     // (zero diagonals) gets the analysis' matching scaling in its factor when

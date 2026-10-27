@@ -24,12 +24,20 @@ namespace smf {
 bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<Int> &perm,
                               std::vector<Int> &amd_work, MatchingOrderStats *stats,
                               CompressedOrder how, int expected_refactors) {
-    const Int n = A.n;
-    const auto sn = static_cast<std::size_t>(n);
-    if (n == 0 || A.values.size() != A.row_idx.size()) return false;
+    if (A.n == 0 || A.values.size() != A.row_idx.size()) return false;
     const MatchingResult mr = compute_symmetric_matching(A);
     if (mr.status != ErrorCode::Success) return false;
-    const auto &sigma = mr.col_to_row;  // column j is matched to row sigma[j]
+    return matching_order_from(A, mr, pair_tol, perm, amd_work, stats, how, expected_refactors);
+}
+
+bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pair_tol, std::vector<Int> &perm,
+                         std::vector<Int> &amd_work, MatchingOrderStats *stats, CompressedOrder how,
+                         int expected_refactors) {
+    const Int n = A.n;
+    const auto sn = static_cast<std::size_t>(n);
+    if (n == 0 || A.values.size() != A.row_idx.size() || mr.col_to_row.size() != sn || mr.scale.size() != sn)
+        return false;
+    const auto &sigma = mr.col_to_row;  // column j is matched to row sigma[j] (-1: free)
     const auto &s = mr.scale;
 
     // Scaled |diagonal| and scaled |matched entry| of every column.
@@ -48,17 +56,24 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
     // Split every matching cycle c0 -> c1 = sigma(c0) -> ... into adjacent
     // pairs (c_t, c_t+1), whose coupling a(c_t+1, c_t) is a matched entry.
     // Even cycles take the alternation with the larger product of couplings;
-    // odd cycles leave out the member with the best diagonal.
+    // odd cycles leave out the member with the best diagonal. A partial
+    // matching also has open paths, which end at a free column; they are
+    // walked first, from their heads (columns no column is matched to), and
+    // split into consecutive pairs from the head.
     std::vector<Int> partner(sn, -1);
     std::vector<std::uint8_t> seen(sn, 0);
     std::vector<Int> cyc;
     const auto log_coupling = [&](Int c) {
         return std::log(std::max(matched[static_cast<std::size_t>(c)], 1e-300));
     };
+    std::vector<std::uint8_t> has_pred(sn, 0);
+    for (Int j = 0; j < n; ++j)
+        if (sigma[static_cast<std::size_t>(j)] >= 0) has_pred[static_cast<std::size_t>(sigma[static_cast<std::size_t>(j)])] = 1;
+    for (int pass = 0; pass < 2; ++pass)
     for (Int start = 0; start < n; ++start) {
-        if (seen[static_cast<std::size_t>(start)]) continue;
+        if (seen[static_cast<std::size_t>(start)] || (pass == 0 && has_pred[static_cast<std::size_t>(start)])) continue;
         cyc.clear();
-        for (Int c = start; !seen[static_cast<std::size_t>(c)]; c = sigma[static_cast<std::size_t>(c)]) {
+        for (Int c = start; c >= 0 && !seen[static_cast<std::size_t>(c)]; c = sigma[static_cast<std::size_t>(c)]) {
             seen[static_cast<std::size_t>(c)] = 1;
             cyc.push_back(c);
         }
@@ -66,7 +81,9 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
         if (k < 2) continue;
         std::size_t first = 0;  // pairs start at cyc[first]
         std::size_t npairs = k / 2;
-        if (k % 2 == 0) {
+        if (sigma[static_cast<std::size_t>(cyc.back())] != cyc.front()) {
+            // An open path: consecutive pairs from its head.
+        } else if (k % 2 == 0) {
             double w0 = 0.0, w1 = 0.0;
             for (std::size_t t = 0; t < k; ++t) (t % 2 == 0 ? w0 : w1) += log_coupling(cyc[t]);
             first = (w1 > w0) ? 1 : 0;

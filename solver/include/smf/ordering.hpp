@@ -105,6 +105,19 @@ bool matching_order_lower_csc(const CscLower& A, double pair_tol,
                               CompressedOrder how = CompressedOrder::Auto,
                               int expected_refactors = 1);
 
+struct MatchingResult;
+
+/// matching_order_lower_csc on a given matching `mr` of A, which may be
+/// partial (SymmetricMatcher::initial()): free columns stay unpaired and
+/// each open path of matched columns is split into pairs from its head.
+/// stats->scale is mr.scale. False when mr does not fit A or AMD is
+/// unavailable.
+bool matching_order_from(const CscLower& A, const MatchingResult& mr, double pair_tol,
+                         std::vector<Int>& perm, std::vector<Int>& amd_work,
+                         MatchingOrderStats* stats = nullptr,
+                         CompressedOrder how = CompressedOrder::Auto,
+                         int expected_refactors = 1);
+
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.
 /// Used as input to ordering backends and the elimination tree.

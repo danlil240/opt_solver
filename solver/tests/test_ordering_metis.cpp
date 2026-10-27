@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "smf/ordering_metis.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/check_matrix.hpp"
 #include "smf/matrix_market.hpp"
 #include <cmath>
@@ -178,6 +179,45 @@ TEST(MetisOrdering, MatchingKeepsPairsAdjacent)
             }
             EXPECT_TRUE(adjacent) << "constraint " << k << " how " << static_cast<int>(how);
         }
+    }
+}
+
+// The compressed ordering also takes a partial matching (the matching's
+// initial phase leaves free columns, and freeing a cycle's columns leaves
+// open paths): it stays a valid permutation, and freed constraints lose
+// their pairs.
+TEST(MetisOrdering, MatchingOrderFromPartialMatching)
+{
+    const int g = 30, m = 200, nx = g * g, n = nx + m;
+    const smf::CscLower A = kkt_grid(g, m);
+    smf::MatchingResult mr = smf::compute_symmetric_matching(A);
+    ASSERT_EQ(mr.status, smf::ErrorCode::Success);
+    std::vector<smf::Int> perm, work;
+    smf::MatchingOrderStats full;
+    ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, perm, work, &full));
+    ASSERT_TRUE(is_valid_permutation(perm, n));
+    EXPECT_EQ(full.pairs, m);
+
+    // Free every 4th constraint, as a column and as a row.
+    int freed = 0;
+    for (int k = 0; k < m; k += 4) {
+        const smf::Int c = nx + k;
+        const smf::Int r = mr.col_to_row[static_cast<std::size_t>(c)];
+        const smf::Int c2 = mr.row_to_col[static_cast<std::size_t>(c)];
+        mr.col_to_row[static_cast<std::size_t>(c)] = -1;
+        mr.row_to_col[static_cast<std::size_t>(r)] = -1;
+        mr.col_to_row[static_cast<std::size_t>(c2)] = -1;
+        mr.row_to_col[static_cast<std::size_t>(c)] = -1;
+        mr.matched_rank -= (c2 == c) ? 1 : 2;
+        ++freed;
+    }
+    for (smf::CompressedOrder how : {smf::CompressedOrder::Amd, smf::CompressedOrder::Auto}) {
+        smf::MatchingOrderStats part;
+        ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, perm, work, &part, how));
+        ASSERT_TRUE(is_valid_permutation(perm, n));
+        EXPECT_GT(part.pairs, 0);
+        EXPECT_LT(part.pairs, full.pairs);
+        EXPECT_EQ(part.nodes, n - part.pairs);
     }
 }
 

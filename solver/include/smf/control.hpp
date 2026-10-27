@@ -30,6 +30,12 @@ struct Control {
     // the analysis it is given (one re-analysis, stored inside it): do not
     // factor the same AnalysisKeep from two threads at once.
     MatchingTrigger matching_trigger = MatchingTrigger::Predicted;
+    // Work budget of the Predicted trial's matching searches, in multiples of
+    // the matrix's symmetric nonzeros (2 x lower entries); negative: none.
+    // Past it the trial first decides on the matching's initial phase (see
+    // MatchingTrial). The decisions are the same; the budget only spares the
+    // searches when the matching ordering loses anyway.
+    double         matching_search_budget = 2.0;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;

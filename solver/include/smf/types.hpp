@@ -81,6 +81,24 @@ enum class MatchingTrigger {
     RealizedDelays = 1
 };
 
+// How analyse() decided the auto matching trial (Info::matching_trial; see
+// Control::matching_search_budget).
+//   None            - no trial (not an auto ordering of a KKT-like matrix).
+//   Exact           - the exact matching decided; its searches stayed
+//                     within the budget.
+//   RejectedInitial - the searches exceeded the budget, and the matching
+//                     ordering of the matching's initial phase was already
+//                     too dear: AMD/METIS kept, no exact matching.
+//   ResumedExact    - the searches exceeded the budget, the initial phase's
+//                     matching ordering was cheap enough, so the searches
+//                     resumed and the exact matching decided.
+enum class MatchingTrial {
+    None            = 0,
+    Exact           = 1,
+    RejectedInitial = 2,
+    ResumedExact    = 3
+};
+
 // Dense kernel for the fully summed columns of an indefinite front.
 //   Tpp  - threshold partial pivoting (ldlt_factor_front), blocked BLAS-3,
 //          on every front.

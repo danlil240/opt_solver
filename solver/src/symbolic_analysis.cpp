@@ -6,6 +6,7 @@
 #include "smf/etree.hpp"
 #include "smf/ordering.hpp"
 #include "smf/ordering_parallel_nd.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
 #include "smf/supernode.hpp"
 #include "smf/sym_graph.hpp"
@@ -299,12 +300,43 @@ namespace smf
             }
             auto_matching = zero || static_cast<double>(small) >= kKktSmallDiagonalShare * static_cast<double>(n);
         }
+        // The matching's shortest-path searches run under
+        // Control::matching_search_budget. Past it (they dominate the trial
+        // on PGLib OPF and ncvxqp, where the matching ordering loses), the
+        // matching ordering of the matching's initial phase is built instead
+        // and decides first, in step 5 once the base ordering's flops are
+        // known: its verdict agreed with the exact one on all 46 corpus
+        // matrices with a trial. A loss ends the trial there; a win resumes
+        // the paused searches, and the exact matching decides as usual.
         std::vector<Int> matching_perm;
+        std::unique_ptr<SymmetricMatcher> paused_matcher;
         if (auto_matching)
-            auto_matching = matching_order_lower_csc(C, kMatchingPairTol, matching_perm,
-                                                     analyse_scratch_, &matching_stats,
-                                                     CompressedOrder::Auto,
-                                                     control.expected_refactors);
+        {
+            auto matcher = std::make_unique<SymmetricMatcher>(C);
+            const long long budget =
+                control.matching_search_budget < 0.0
+                    ? -1
+                    : static_cast<long long>(control.matching_search_budget * 2.0 *
+                                             static_cast<double>(C.row_idx.size()));
+            if (matcher->advance(budget))
+            {
+                const MatchingResult mr = matcher->current();
+                auto_matching = mr.status == ErrorCode::Success &&
+                                matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
+                                                    &matching_stats, CompressedOrder::Auto,
+                                                    control.expected_refactors);
+                if (auto_matching)
+                    info.matching_trial = MatchingTrial::Exact;
+            }
+            else
+            {
+                auto_matching = matching_order_from(C, matcher->initial(), kMatchingPairTol, matching_perm,
+                                                    analyse_scratch_, &matching_stats, CompressedOrder::Auto,
+                                                    control.expected_refactors);
+                if (auto_matching)
+                    paused_matcher = std::move(matcher);
+            }
+        }
         lap(phases.matching);
 
         if (user_order)
@@ -455,7 +487,31 @@ namespace smf
         // together, which AMD's lower predicted fill ignores (AMD's factor
         // then delays pivots by the thousand). Prefer it unless its exact
         // flops exceed AMD's by more than a constant factor.
-        if (auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching))
+        // A paused trial decides on its initial matching first (see above).
+        bool rejected_initial = false;
+        if (paused_matcher)
+        {
+            symbolic_counts(matching_perm.data(), sym1);
+            if (factor_flops(sym1) > kMatchingFlopsRatio * factor_flops(sym0))
+            {
+                rejected_initial = true;
+                info.matching_trial = MatchingTrial::RejectedInitial;
+            }
+            else
+            {
+                paused_matcher->advance(-1);
+                const MatchingResult mr = paused_matcher->current();
+                auto_matching = mr.status == ErrorCode::Success &&
+                                matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
+                                                    &matching_stats, CompressedOrder::Auto,
+                                                    control.expected_refactors);
+                if (auto_matching)
+                    info.matching_trial = MatchingTrial::ResumedExact;
+            }
+            paused_matcher.reset();
+        }
+        if (auto_matching && !rejected_initial &&
+            info.ordering_used != static_cast<int>(OrderingMethod::Matching))
         {
             const Int depth_m = symbolic_counts(matching_perm.data(), sym1);
             if (factor_flops(sym1) <= kMatchingFlopsRatio * factor_flops(sym0))

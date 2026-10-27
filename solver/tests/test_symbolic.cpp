@@ -171,6 +171,66 @@ TEST(Symbolic, AutoMatchingScaleOnlyWithMatchingOrdering) {
     EXPECT_TRUE(ak->matching_scale.empty());
 }
 
+// The auto matching trial's searches have a work budget (default 2x the
+// matrix's symmetric nonzeros). Past it, the trial first orders the
+// matching's initial phase and rejects on it, without the exact matching;
+// the analysis is the exact trial's (AMD kept, no matching scale).
+TEST(Symbolic, AutoMatchingTrialRejectsOnInitialMatchingPastBudget) {
+    EXPECT_DOUBLE_EQ(Control{}.matching_search_budget, 2.0);
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    Control exact;
+    exact.matrix_type = MatrixType::RealSymmetricIndefinite;
+    exact.ordering = OrderingMethod::AutoSerial;
+    exact.matching_search_budget = -1.0;
+    Control budgeted = exact;
+    budgeted.matching_search_budget = 0.0;
+    Solver s1, s2;
+    Info i1, i2;
+    auto a1 = s1.analyse(A, exact, i1);
+    auto a2 = s2.analyse(A, budgeted, i2);
+    ASSERT_NE(a1, nullptr);
+    ASSERT_NE(a2, nullptr);
+    EXPECT_EQ(i1.matching_trial, MatchingTrial::Exact);
+    EXPECT_EQ(i2.matching_trial, MatchingTrial::RejectedInitial);
+    EXPECT_EQ(i1.ordering_used, static_cast<int>(OrderingMethod::AMD));
+    EXPECT_EQ(i2.ordering_used, static_cast<int>(OrderingMethod::AMD));
+    EXPECT_EQ(a2->perm, a1->perm);
+    EXPECT_TRUE(a2->matching_rejected);
+    EXPECT_TRUE(a2->matching_scale.empty());
+}
+
+// TSOPF_FS_b162_c1 adopts the matching ordering, and its searches exceed the
+// default budget (~18x nnz): the initial matching passes, the searches
+// resume, and the analysis is bitwise the exact trial's.
+TEST(Symbolic, AutoMatchingTrialResumesWhenInitialMatchingPasses) {
+    namespace fs = std::filesystem;
+    const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" /
+                         "large" / "TSOPF_FS_b162_c1" / "TSOPF_FS_b162_c1.mtx";
+    std::error_code ec;
+    if (!fs::exists(mtx, ec)) GTEST_SKIP() << "fixture not present: " << mtx.string();
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok) << mm.error_message;
+    Control def;
+    def.matrix_type = MatrixType::RealSymmetricIndefinite;
+    def.ordering = OrderingMethod::AutoParallel;
+    Control exact = def;
+    exact.matching_search_budget = -1.0;
+    Solver s1, s2;
+    Info i1, i2;
+    auto a1 = s1.analyse(mm.matrix, exact, i1);
+    auto a2 = s2.analyse(mm.matrix, def, i2);
+    ASSERT_NE(a1, nullptr);
+    ASSERT_NE(a2, nullptr);
+    EXPECT_EQ(i1.matching_trial, MatchingTrial::Exact);
+    EXPECT_EQ(i2.matching_trial, MatchingTrial::ResumedExact);
+    EXPECT_EQ(i1.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_EQ(i2.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_EQ(a2->perm, a1->perm);
+    ASSERT_FALSE(a1->matching_scale.empty());
+    EXPECT_EQ(a2->matching_scale, a1->matching_scale);
+    EXPECT_FALSE(a2->matching_rejected);
+}
+
 // Per-step analyse timing: every phase is non-negative, ordering is measured,
 // and the phases account for (nearly) all of analyse_seconds.
 TEST(Symbolic, AnalysePhasesSumToTotal) {

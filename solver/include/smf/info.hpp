@@ -44,6 +44,8 @@ struct Info {
     /// (Control::matching_trigger = RealizedDelays: the first factorization
     /// delayed more than 5% of n pivots), else 0.
     int          matching_reanalyses = 0;
+    /// How analyse() decided the auto matching trial.
+    MatchingTrial matching_trial     = MatchingTrial::None;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues
