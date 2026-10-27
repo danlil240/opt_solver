@@ -250,7 +250,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 case, solver_id, mode, track, trial_id, is_warmup, threads, why, outcome)
                             with records_path.open("a", encoding="utf-8") as f:
                                 f.write(json.dumps(rec) + "\n")
-                            if env_dead:
+                            if env_dead or outcome == "Timeout":
                                 dead.add((solver_id, threads))
                         if proc.returncode != 0 and not is_warmup:
                             if solver_id == "smf" or solver_id in required_baselines:
