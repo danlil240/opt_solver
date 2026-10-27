@@ -1,6 +1,7 @@
 #include "smf/analysis.hpp"
 #include "smf/assembly_tree.hpp"
 #include "smf/check_matrix.hpp"
+#include "smf/determinism.hpp"
 #include "smf/error.hpp"
 #include "smf/etree.hpp"
 #include "smf/ordering.hpp"
@@ -126,6 +127,7 @@ namespace smf
 
         info = Info{}; // zero-initialise
         info.status = ErrorCode::Success;
+        if (deterministic_mode(control)) enable_blas_reproducibility();
 
         // Step 1: clean the input matrix
         auto cleaned = clean_lower_csc(A, info, control.check_input);
@@ -415,12 +417,16 @@ namespace smf
             if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
             {
                 std::vector<Int> mperm;
-                if (control.num_threads > 1)
+                // Deterministic mode: parallel ND at every thread count (its
+                // permutation does not depend on the thread count; serial
+                // METIS at 1 thread would give another ordering).
+                if (control.num_threads > 1 || deterministic_mode(control))
                 {
                     // Parallel nested dissection straight off the arena's
                     // adjacency (compressed, AMD leaves on threads).
                     mperm.resize(sn_sz);
-                    if (!parallel_nd_order(n, xadj, adj, nullptr, control.num_threads, mperm.data()))
+                    if (!parallel_nd_order(n, xadj, adj, nullptr, std::max(1, control.num_threads),
+                                           mperm.data()))
                         mperm.clear();
                 }
                 else

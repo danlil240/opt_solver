@@ -1,5 +1,6 @@
 #include "smf/factor_indef.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/determinism.hpp"
 #include "smf/blocked_indef.hpp"
 #include "smf/multifrontal_serial.hpp"
 #include "smf/numeric_front.hpp"
@@ -368,7 +369,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
 
   const bool use_parallel_path =
 #ifdef SMF_PARALLEL
-      (ctrl.num_threads > 1 && ctrl.tree_parallel);
+      (ctrl.num_threads > 1 && ctrl.tree_parallel && !deterministic_mode(ctrl));
 #else
       false;
 #endif
@@ -502,10 +503,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
           : ctrl.small_pivot;
 
   if (!use_parallel_path) {
-    // Threads go to BLAS inside the fronts.
+    // Threads go to BLAS inside the fronts (deterministic mode: one).
     std::optional<BlasThreadGuard> blas_threads;
     if (ctrl.num_threads > 1)
-      blas_threads.emplace(ctrl.num_threads);
+      blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
     SerialFactorStats st;
     const double static_pivot =
         ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;

@@ -9,7 +9,7 @@
 // Usage: bench_profile [--manifest path] [--solvers smf,ma27] [--repeats R]
 //                      [--case substring] [-v] [--nemin k] [--ordering m]
 //                      [--scaling s] [--threads t] [--u pivot_u]
-//                      [--top-tiles 0|1] [--tile-nb nb]
+//                      [--top-tiles 0|1] [--tile-nb nb] [--deterministic]
 //        bench_profile --sample analyse|factor|solve|all --case substring
 //                      [--seconds S] [--lines]
 //
@@ -144,6 +144,7 @@ int main(int argc, char **argv) {
     bool verbose = false;
     int nemin = -1, ordering = -1, scaling = -1, threads = 1;
     int top_tiles = -1, tile_nb = -1;
+    bool deterministic = false;
     double pivot_u = -1.0;
     std::string sample_phase;
     double sample_seconds = 3.0;
@@ -161,6 +162,7 @@ int main(int argc, char **argv) {
         else if (a == "--sample" && i + 1 < argc) sample_phase = argv[++i];
         else if (a == "--seconds" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--lines") sample_lines = true;
+        else if (a == "--deterministic") deterministic = true;
         if (a == "--manifest" && i + 1 < argc) manifest = argv[++i];
         else if (a == "--solvers" && i + 1 < argc) solvers_arg = argv[++i];
         else if (a == "--repeats" && i + 1 < argc) repeats = std::atoi(argv[++i]);
@@ -192,6 +194,7 @@ int main(int argc, char **argv) {
             if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
             if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;
             ctrl.num_threads = threads;
+            ctrl.deterministic = deterministic;
             if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;
             if (tile_nb > 0) ctrl.top_tile_nb = tile_nb;
             auto ad = smf::bench::make_solver_adapter("smf");
@@ -259,6 +262,7 @@ int main(int argc, char **argv) {
                                  : smf::MatrixType::RealSymmetricIndefinite;
         if (nemin > 0) ctrl.nemin = nemin;
         ctrl.num_threads = threads;
+        ctrl.deterministic = deterministic;
         if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;
         if (tile_nb > 0) ctrl.top_tile_nb = tile_nb;
         if (ordering >= 0) ctrl.ordering = static_cast<smf::OrderingMethod>(ordering);

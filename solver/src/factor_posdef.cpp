@@ -4,6 +4,7 @@
 #include "smf/frontal_matrix.hpp"
 #include "smf/multifrontal_serial.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/determinism.hpp"
 #include "smf/scaling.hpp"
 #include "smf/threading.hpp"
 #include "smf/workspace.hpp"
@@ -405,7 +406,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   }
 
 #ifdef SMF_PARALLEL
-  if (ctrl.num_threads > 1 && ctrl.tree_parallel) {
+  if (ctrl.num_threads > 1 && ctrl.tree_parallel && !deterministic_mode(ctrl)) {
     CscLower Ap;
     Ap.n = n;
     Ap.col_ptr = ap_col_ptr;
@@ -424,10 +425,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   }
 #endif // SMF_PARALLEL
 
-  // Threads go to BLAS inside the fronts.
+  // Threads go to BLAS inside the fronts (deterministic mode: one).
   std::optional<BlasThreadGuard> blas_threads;
   if (ctrl.num_threads > 1)
-    blas_threads.emplace(ctrl.num_threads);
+    blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,

@@ -144,6 +144,11 @@ struct Control {
     bool           top_tiles     = true;
     int            top_tile_nb   = 256;
     bool           tree_parallel = false;
+    // Deterministic mode (determinism.hpp; also always on in an
+    // SMF_DETERMINISTIC build): bitwise-identical ordering, factor, inertia
+    // and solutions across runs and across num_threads. Costs serial BLAS
+    // per front, tiled large fronts at every thread count and a serial
+    // solve; tree_parallel is ignored.
     bool           deterministic = false;
     uint64_t       memory_budget_bytes = 0; // 0 = unbounded
     int64_t        factor_parallel_min_flops = 10000;

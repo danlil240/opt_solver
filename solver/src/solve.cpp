@@ -1,5 +1,6 @@
 #include "smf/solve_backward.hpp"
 #include "smf/dense_kernel.hpp"
+#include "smf/determinism.hpp"
 #include "smf/scaling.hpp"
 #include "smf/solve_diag.hpp"
 #include "smf/solve_forward.hpp"
@@ -256,8 +257,11 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
   // Subtree-parallel triangular solves once the factor is big enough to
   // repay waking the pool (needs a tree-parallel factorization's layout).
+  // Deterministic mode: one thread, the factor's steps in order (postorder).
+  const bool det = deterministic_mode(ctrl);
+  if (det) enable_blas_reproducibility();
   const int threads =
-      (ctrl.num_threads > 1 &&
+      (ctrl.num_threads > 1 && !det &&
        static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)
           ? ctrl.num_threads
           : 1;

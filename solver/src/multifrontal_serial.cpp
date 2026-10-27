@@ -1,5 +1,6 @@
 #include "smf/multifrontal_serial.hpp"
 #include "smf/blas_thread_guard.hpp"
+#include "smf/determinism.hpp"
 #include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
 #include "parallel/tile_tasks.hpp"
@@ -64,6 +65,8 @@ struct TreeParallelBuffers {
     TileWorkspace tiles;
   };
   std::vector<Thread> threads;
+  // Deterministic mode, serial path: tile-task scratch of the main pass.
+  TileWorkspace serial_tiles;
 };
 
 namespace {
@@ -687,10 +690,22 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Control::top_tiles: 2D tile tasks on the large plain threshold fronts at
   // the top of the tree, whatever front_kernel says (APTP is threshold
   // pivoting with an a posteriori check, as stable as TPP).
+  //
+  // Deterministic mode (determinism.hpp): the tile kernel's result does not
+  // depend on its thread count but differs from the untiled kernels', so
+  // every such front of >= kTopTileMinFront rows is tiled, wherever it sits
+  // in the tree and whatever num_threads is (1 included); BLAS runs on one
+  // thread everywhere, and the factor is laid out in postorder.
+  const bool det = deterministic_mode(ctrl);
+  if (det) enable_blas_reproducibility();
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
-  const bool tiles_on = ctrl.top_tiles && ctrl.num_threads > 1 && !posdef &&
+  const bool tiles_on = ctrl.top_tiles && (ctrl.num_threads > 1 || det) && !posdef &&
                         prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0 && ctrl.pivot_u > 0.0;
+  // Deterministic mode: the tile context of the fronts outside the top
+  // phase (one thread, no helpers).
+  const TileCtx serial_tc{};
+  const TileCtx *const det_tc = det && tiles_on ? &serial_tc : nullptr;
 
   // Early abort once the negative pivots exceed the limit (indefinite only).
   // Pivots are only ever added, so a run whose final count is within the
@@ -824,10 +839,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   };
 
   if (threads <= 1) {
+    if (det_tc != nullptr) {
+      if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
+      main.tiles = &ws.tree_par->serial_tiles;
+    }
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
-                           budget_static};
+                           budget_static, det_tc != nullptr ? &tile_aprm : nullptr};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -850,7 +869,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           budget = BudgetState{};  // first front of a subtree
         }
       }
-      status = process_front(cx, main, 0, sk, true, bs);
+      status = process_front(cx, main, 0, sk, true, bs, det_tc);
       if (budget_regions && (region_end[k] == npos || region_end[k] == k))
         node_budget[static_cast<std::size_t>(sk)] = *bs;
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
@@ -940,7 +959,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             break;
           const int neg0 = P.st.inertia.negative;
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
-                                            budget_regions ? &budget : nullptr);
+                                            budget_regions ? &budget : nullptr, det_tc);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e), std::memory_order_relaxed);
             complete = false;
@@ -1049,7 +1068,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           const int neg0 = P.st.inertia.negative;
           BudgetState *bs = budget_regions ? &top_state : nullptr;
           {
-            BlasThreadGuard blas(blas_threads);
+            // Deterministic mode: BLAS on one thread whatever the front's
+            // share (its tile tasks still recruit blas_threads - 1 helpers).
+            BlasThreadGuard blas(det ? 1 : blas_threads);
             const TileCtx tc{blas_threads, &helpers};
             e = process_front(cx, P, 1 + tid, s, false, bs, &tc);
           }
@@ -1112,15 +1133,20 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         step.row_offset += static_cast<LongInt>(rbase[static_cast<std::size_t>(t)]);
         return step;
       };
+      std::vector<std::size_t> post_pos(ns, 0);
+      for (std::size_t k = 0; k < keep.postorder.size(); ++k)
+        post_pos[static_cast<std::size_t>(keep.postorder[k])] = k;
       for (int t = 0; t < threads; ++t) {
         const std::size_t ti = static_cast<std::size_t>(t);
         const auto &steps = *tpass[ti].steps;
         const auto base = static_cast<LongInt>(fkeep.solve_steps.size());
-        for (const auto &[b, e] : subtree_steps[ti])
-          fkeep.solve_subtrees.emplace_back(base + static_cast<LongInt>(b),
-                                            base + static_cast<LongInt>(e));
-        for (std::size_t k = 0; k < phase1_steps[ti]; ++k)
-          fkeep.solve_steps.push_back(relocated(t, steps[k]));
+        if (!det) {
+          for (const auto &[b, e] : subtree_steps[ti])
+            fkeep.solve_subtrees.emplace_back(base + static_cast<LongInt>(b),
+                                              base + static_cast<LongInt>(e));
+          for (std::size_t k = 0; k < phase1_steps[ti]; ++k)
+            fkeep.solve_steps.push_back(relocated(t, steps[k]));
+        }
         add_stats(st, tpass[ti].st);
         main.growths += tpass[ti].growths;
       }
@@ -1135,9 +1161,6 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           int pass;
           std::size_t b, e;
         };
-        std::vector<std::size_t> post_pos(ns, 0);
-        for (std::size_t k = 0; k < keep.postorder.size(); ++k)
-          post_pos[static_cast<std::size_t>(keep.postorder[k])] = k;
         std::vector<Chunk> chunks;
         for (int t = 0; t < threads; ++t) {
           std::size_t b = 0;
@@ -1154,36 +1177,62 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                     d.begin() + static_cast<std::ptrdiff_t>(c.e));
         }
       }
-      fkeep.solve_top_begin = static_cast<LongInt>(fkeep.solve_steps.size());
-      // The solve takes subtrees in this order: heaviest (stored entries)
-      // first, so the last ones to start are small.
-      {
-        std::vector<std::pair<double, std::pair<LongInt, LongInt>>> by_work;
-        by_work.reserve(fkeep.solve_subtrees.size());
-        for (const auto &r : fkeep.solve_subtrees) {
-          double w = 0.0;
-          for (LongInt k = r.first; k < r.second; ++k) {
-            const SolveStep &step = fkeep.solve_steps[static_cast<std::size_t>(k)];
-            w += static_cast<double>(step.p) * step.f;
-          }
-          by_work.push_back({w, r});
+      if (det) {
+        // Deterministic mode: every front's solve step in postorder, the
+        // order of the serial factorization, and no parallel solve layout
+        // (the solve runs serially): the solve then does the same
+        // operations in the same order whatever the thread count. A pass's
+        // k-th step is the front of its k-th diag mark.
+        struct StepRef {
+          std::size_t post;
+          int pass;
+          std::size_t k;
+        };
+        std::vector<StepRef> refs;
+        refs.reserve(ns);
+        for (int t = 0; t < threads; ++t) {
+          const auto &marks = tpass[static_cast<std::size_t>(t)].diag_marks;
+          assert(marks.size() == tpass[static_cast<std::size_t>(t)].steps->size());
+          for (std::size_t k = 0; k < marks.size(); ++k)
+            refs.push_back({post_pos[static_cast<std::size_t>(marks[k].first)], t, k});
         }
-        std::sort(by_work.begin(), by_work.end(),
-                  [](const auto &a, const auto &b) { return a.first > b.first; });
-        for (std::size_t i = 0; i < by_work.size(); ++i) fkeep.solve_subtrees[i] = by_work[i].second;
-      }
-      for (const Done &d : done_order)
-        fkeep.solve_steps.push_back(
-            relocated(d.pass, (*tpass[static_cast<std::size_t>(d.pass)].steps)[d.step]));
-      // Top-part tree over solve steps (parents are top nodes too).
-      {
-        std::vector<Int> top_pos(ns, -1);
-        for (std::size_t i = 0; i < done_order.size(); ++i)
-          top_pos[static_cast<std::size_t>(done_order[i].node)] = static_cast<Int>(i);
-        fkeep.solve_top_parent.resize(done_order.size());
-        for (std::size_t i = 0; i < done_order.size(); ++i) {
-          const Int par = keep.supernodes[static_cast<std::size_t>(done_order[i].node)].parent;
-          fkeep.solve_top_parent[i] = par >= 0 ? top_pos[static_cast<std::size_t>(par)] : -1;
+        std::sort(refs.begin(), refs.end(),
+                  [](const StepRef &a, const StepRef &b) { return a.post < b.post; });
+        for (const StepRef &r : refs)
+          fkeep.solve_steps.push_back(
+              relocated(r.pass, (*tpass[static_cast<std::size_t>(r.pass)].steps)[r.k]));
+      } else {
+        fkeep.solve_top_begin = static_cast<LongInt>(fkeep.solve_steps.size());
+        // The solve takes subtrees in this order: heaviest (stored entries)
+        // first, so the last ones to start are small.
+        {
+          std::vector<std::pair<double, std::pair<LongInt, LongInt>>> by_work;
+          by_work.reserve(fkeep.solve_subtrees.size());
+          for (const auto &r : fkeep.solve_subtrees) {
+            double w = 0.0;
+            for (LongInt k = r.first; k < r.second; ++k) {
+              const SolveStep &step = fkeep.solve_steps[static_cast<std::size_t>(k)];
+              w += static_cast<double>(step.p) * step.f;
+            }
+            by_work.push_back({w, r});
+          }
+          std::sort(by_work.begin(), by_work.end(),
+                    [](const auto &a, const auto &b) { return a.first > b.first; });
+          for (std::size_t i = 0; i < by_work.size(); ++i) fkeep.solve_subtrees[i] = by_work[i].second;
+        }
+        for (const Done &d : done_order)
+          fkeep.solve_steps.push_back(
+              relocated(d.pass, (*tpass[static_cast<std::size_t>(d.pass)].steps)[d.step]));
+        // Top-part tree over solve steps (parents are top nodes too).
+        {
+          std::vector<Int> top_pos(ns, -1);
+          for (std::size_t i = 0; i < done_order.size(); ++i)
+            top_pos[static_cast<std::size_t>(done_order[i].node)] = static_cast<Int>(i);
+          fkeep.solve_top_parent.resize(done_order.size());
+          for (std::size_t i = 0; i < done_order.size(); ++i) {
+            const Int par = keep.supernodes[static_cast<std::size_t>(done_order[i].node)].parent;
+            fkeep.solve_top_parent[i] = par >= 0 ? top_pos[static_cast<std::size_t>(par)] : -1;
+          }
         }
       }
       for (std::size_t si = 0; si < ns; ++si)
