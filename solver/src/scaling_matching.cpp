@@ -1,5 +1,7 @@
 #include "smf/scaling_matching.hpp"
 
+#include "indexed_min_heap.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -161,7 +163,10 @@ struct SymmetricMatcher::State {
     std::vector<double> init_u, init_v;
     // Search scratch.
     std::vector<int> touched, finalized, level;
-    std::vector<std::pair<double, int>> heap;
+    // Rows queued above the current distance, one entry per row, popped in
+    // (distance, row) order: the order of the binary heap of (distance,
+    // row) pairs with lazy duplicates it replaces (see IndexedMinHeap).
+    IndexedMinHeap heap;
 
     bool dense(int i) const { return row_dense[static_cast<std::size_t>(i)] != 0; }
     bool search(int start_col);
@@ -193,6 +198,7 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
     const double *const gcost = g.cost.data();
 
     s.rs.assign(static_cast<std::size_t>(n), RowState{kInf, kInf});
+    s.heap.reset(n);
     s.row_match.assign(static_cast<std::size_t>(n), -1);
     s.row_parent.assign(static_cast<std::size_t>(n), -1);
     s.row_done.assign(static_cast<std::size_t>(n), 0);
@@ -328,7 +334,6 @@ bool SymmetricMatcher::State::search(int start_col) {
     const Int *const gptr = g.ptr.data();
     const int *const grow = g.row.data();
     const double *const gcost = g.cost.data();
-    const auto heap_cmp = std::greater<std::pair<double, int>>();
     touched.clear();
     finalized.clear();
     heap.clear();
@@ -381,8 +386,7 @@ bool SymmetricMatcher::State::search(int start_col) {
                     if (nd == base) {
                         level.push_back(i);
                     } else {
-                        heap.emplace_back(nd, i);
-                        std::push_heap(heap.begin(), heap.end(), heap_cmp);
+                        heap.push_or_decrease(i, nd);
                     }
                 }
             }
@@ -400,10 +404,11 @@ bool SymmetricMatcher::State::search(int start_col) {
         } else {
             level.clear();
             level_head = 0;
-            if (heap.empty() || heap.front().first >= path_len) break;
-            std::pop_heap(heap.begin(), heap.end(), heap_cmp);
-            const auto [d, hi] = heap.back();
-            heap.pop_back();
+            if (heap.empty() || heap.top_key() >= path_len) break;
+            const double d = heap.top_key();
+            const int hi = heap.top_id();
+            heap.pop();
+            // A row moved to `level` keeps its older, larger entry.
             if (DN[hi] || d > R[hi].dist) continue;
             i = hi;
             base = d;

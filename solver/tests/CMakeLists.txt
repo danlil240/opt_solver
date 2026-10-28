@@ -74,6 +74,10 @@ add_executable(test_matching_trial test_matching_trial.cpp)
 target_link_libraries(test_matching_trial PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME MatchingTrial COMMAND test_matching_trial)
 
+add_executable(test_indexed_min_heap test_indexed_min_heap.cpp)
+target_link_libraries(test_indexed_min_heap PRIVATE smf GTest::GTest GTest::Main)
+add_test(NAME IndexedMinHeap COMMAND test_indexed_min_heap)
+
 add_executable(test_parallel_nd test_parallel_nd.cpp)
 target_link_libraries(test_parallel_nd PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME ParallelNd COMMAND test_parallel_nd)
