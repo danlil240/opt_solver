@@ -3,6 +3,7 @@
 #include "indexed_min_heap.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -365,6 +366,9 @@ bool SymmetricMatcher::State::search(int start_col) {
     int *const T = touched.data();
     int *const F = finalized.data();
     int *const L = level.data();
+    // The counters index fixed-size lists of n entries (see State): a row
+    // is touched, finalized and queued at the current distance at most once
+    // per search, which the debug asserts below check.
     std::size_t n_touched = 0, n_final = 0, n_level = 0;
     heap.clear();
     std::size_t level_head = 0;
@@ -398,7 +402,10 @@ bool SymmetricMatcher::State::search(int start_col) {
             const double nd = base + std::max(0.0, gcost[q] - ri.u - vj);
             if (nd < ri.dist) {
                 if (M[i] < 0) {
-                    if (ri.dist == kInf) T[n_touched++] = i;
+                    if (ri.dist == kInf) {
+                        assert(n_touched < static_cast<std::size_t>(n));
+                        T[n_touched++] = i;
+                    }
                     ri.dist = nd;
                     P[i] = j;
                     if (nd < path_len) {
@@ -409,10 +416,14 @@ bool SymmetricMatcher::State::search(int start_col) {
                     // stop scanning (dense columns would cost O(n)).
                     if (nd == base) return;
                 } else if (nd < path_len) {
-                    if (ri.dist == kInf) T[n_touched++] = i;
+                    if (ri.dist == kInf) {
+                        assert(n_touched < static_cast<std::size_t>(n));
+                        T[n_touched++] = i;
+                    }
                     ri.dist = nd;
                     P[i] = j;
                     if (nd == base) {
+                        assert(n_level < static_cast<std::size_t>(n));
                         L[n_level++] = i;
                     } else {
                         heap.push_or_decrease(i, nd);
@@ -428,7 +439,7 @@ bool SymmetricMatcher::State::search(int start_col) {
         int i;
         if (level_head < n_level) {
             if (base >= path_len) break;
-            i = level[level_head++];
+            i = L[level_head++];
             if (DN[i]) continue;
         } else {
             n_level = 0;
@@ -443,6 +454,7 @@ bool SymmetricMatcher::State::search(int start_col) {
             base = d;
         }
         DN[i] = 1;
+        assert(n_final < static_cast<std::size_t>(n));
         F[n_final++] = i;
         relax(M[i], base);
     }
