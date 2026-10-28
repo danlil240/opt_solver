@@ -5,6 +5,7 @@
 // Compares smf against Eigen SimplicialLDLT on 5 synthetic SPD matrices.
 // CHOLMOD support is included when SMF_HAS_CHOLMOD is defined.
 
+#include "common/validation.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
@@ -383,16 +384,13 @@ static double smf_run(const smf::CscLower &A, std::vector<double> &x_out, SmfTim
     t.factor_ms = elapsed_ms(ta1, ta2);
     t.solve_ms = elapsed_ms(ta2, ta3);
 
-    // residual ||Ax - b||_2 / sqrt(n)
-    std::vector<double> Ax(static_cast<std::size_t>(n), 0.0);
-    spmv_sym(A, x_out.data(), Ax.data());
-    double res = 0.0;
-    for (smf::Int i = 0; i < n; ++i)
+    std::vector<double> b_ones(static_cast<std::size_t>(n), 1.0);
+    smf::bench::Validation val = smf::bench::validate(A, b_ones, x_out, 1);
+    if (!smf::bench::is_qualified_validation(val))
     {
-        double r = Ax[static_cast<std::size_t>(i)] - 1.0;
-        res += r * r;
+        return -1.0;
     }
-    return std::sqrt(res) / std::sqrt(static_cast<double>(n));
+    return val.eta_inf;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +422,7 @@ static bool smf_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
         return false;
     t.analyse_ms = elapsed_ms(ta0, ta1);
 
+    std::vector<double> b_ones(static_cast<std::size_t>(n), 1.0);
     double total_factor = 0.0, total_solve = 0.0;
     for (int i = 0; i < reps; ++i)
     {
@@ -434,10 +433,15 @@ static bool smf_repeated_run(const smf::CscLower &A, int reps, RepeatedTimes &t)
         auto tf1 = Clock::now();
         if (fs != smf::FactorStatus::Success)
             return false;
-        solver.solve(fk, ctrl, info, x.data(), static_cast<int>(n));
+        int rc = solver.solve(fk, ctrl, info, x.data(), static_cast<int>(n));
         auto tf2 = Clock::now();
+        if (rc != 0)
+            return false;
         total_factor += elapsed_ms(tf0, tf1);
         total_solve  += elapsed_ms(tf1, tf2);
+        smf::bench::Validation val = smf::bench::validate(A, b_ones, x, 1);
+        if (!smf::bench::is_qualified_validation(val))
+            return false;
     }
     t.avg_factor_ms = total_factor / static_cast<double>(reps);
     t.avg_solve_ms  = total_solve  / static_cast<double>(reps);
@@ -1113,13 +1117,19 @@ int main()
     int eig_valid = 0;
 #endif
 
+    int smf_failures = 0;
     for (auto &mc : cases)
     {
         const smf::CscLower &A = mc.A;
         const int N = static_cast<int>(A.n);
         const int nnz = static_cast<int>(A.nnz());
 
-        // smf
+        // smf: separate warmup from measured runs
+        {
+            SmfTimes warm_t;
+            std::vector<double> warm_x;
+            (void)smf_run(A, warm_x, warm_t);
+        }
         double smf_best = 1e18, smf_res = -1.0;
         SmfTimes smf_best_times;
         std::vector<double> smf_x;
@@ -1133,6 +1143,10 @@ int main()
                 smf_res        = res;
                 smf_best_times = t;
             }
+        }
+        if (smf_res < 0.0)
+        {
+            ++smf_failures;
         }
         breakdown_rows.push_back({mc.name, N, smf_best_times});
 
@@ -1361,6 +1375,10 @@ int main()
 
         RepeatedTimes smf_rt;
         bool smf_ok = smf_repeated_run(A, REPEAT_REPS, smf_rt);
+        if (!smf_ok)
+        {
+            ++smf_failures;
+        }
 
 #ifdef SMF_HAS_CHOLMOD
         RepeatedTimes chol_rt;
@@ -1410,5 +1428,5 @@ int main()
         std::puts("");
     }
 
-    return 0;
+    return smf_failures == 0 ? 0 : 1;
 }

@@ -1,9 +1,58 @@
 #include "smf/scaling.hpp"
+#include "smf/scaling_matching.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
 
 namespace smf {
+
+bool validate_positive_scale(const std::vector<double>& scale, int n) noexcept {
+    if (n < 0 || static_cast<int>(scale.size()) != n) {
+        return false;
+    }
+    for (double s : scale) {
+        if (!std::isfinite(s) || !(s > 0.0)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+ErrorCode compute_scaling_for_method(const CscLower& A,
+                                     ScalingMethod method,
+                                     std::vector<double>& scale_out,
+                                     int print_level,
+                                     const double* user_scale) {
+    scale_out.clear();
+    if (method == ScalingMethod::None) {
+        return ErrorCode::Success;
+    }
+    if (method == ScalingMethod::UserSupplied) {
+        if (!user_scale) {
+            return ErrorCode::IllegalValue;
+        }
+        scale_out.assign(user_scale, user_scale + A.n);
+        return validate_positive_scale(scale_out, static_cast<int>(A.n))
+                   ? ErrorCode::Success
+                   : ErrorCode::IllegalValue;
+    }
+    if (method == ScalingMethod::Equilibration) {
+        scale_out = compute_equilibration_scale(A, 3);
+        return validate_positive_scale(scale_out, static_cast<int>(A.n))
+                   ? ErrorCode::Success
+                   : ErrorCode::IllegalValue;
+    }
+    if (method == ScalingMethod::Matching) {
+        const ErrorCode ec = compute_matching_scale(A, scale_out, print_level);
+        if (ec != ErrorCode::Success) {
+            return ec;
+        }
+        return validate_positive_scale(scale_out, static_cast<int>(A.n))
+                   ? ErrorCode::Success
+                   : ErrorCode::IllegalValue;
+    }
+    return ErrorCode::FeatureNotAvailable;
+}
 
 std::vector<double> compute_equilibration_scale(const CscLower& A,
                                                 int num_iterations) {

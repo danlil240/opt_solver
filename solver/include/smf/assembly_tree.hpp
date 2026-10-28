@@ -3,35 +3,32 @@
 #include "smf/supernode.hpp"
 #include "smf/info.hpp"
 #include "smf/csc_matrix.hpp"
+#include <cstddef>
+#include <span>
 #include <vector>
 
 namespace smf {
 
-/// Per-supernode data needed for assembly and factorization.
-struct FrontalInfo {
-    std::vector<Int> row_indices; ///< all row indices in the frontal matrix, sorted
-
-    /// Pre-computed parent-row scatter maps, one per child (same order as Supernode::children
-    /// after symbolic_analysis.cpp pre-sorts children by descending postorder).
-    /// child_parent_rows[k][i] = row index in *this* front for child k's i-th extended row.
-    /// Populated by symbolic_analysis for smaller analyses; may be empty for
-    /// large-n cases where factorization computes this map on demand.
-    std::vector<std::vector<Int>> child_parent_rows;
-
-    Int front_size() const { return static_cast<Int>(row_indices.size()); }
-};
-
-/// Compute per-supernode frontal row indices and populate prediction stats in Info.
-/// Uses the original lower-CSC sparsity pattern (no symbolic fill).
+/// Compute every supernode's frontal row indices in CSR form and populate
+/// prediction stats in Info. Uses the original lower-CSC sparsity pattern (no
+/// symbolic fill): a front's rows are its pivot columns, its columns' pattern
+/// and its children's extension rows.
 ///
-/// @param A         cleaned lower-CSC matrix
-/// @param supernodes  supernode list (from M2.S2), already in column order
-/// @param info       output: predicted_factor_entries, predicted_flops, max_front_size,
-///                           max_supernode_size, max_tree_depth populated
-/// @returns FrontalInfo for each supernode (same indexing as supernodes)
-std::vector<FrontalInfo> build_assembly_tree(
-    const CscLower& A,
-    const std::vector<Supernode>& supernodes,
-    Info& info);
+/// @param A              cleaned (permuted) lower-CSC matrix
+/// @param supernodes     supernode list in column order (postorder)
+/// @param child_ptr      children CSR (build_children_csr), nsn + 1 entries
+/// @param child_idx      children CSR indices
+/// @param front_row_ptr  output: nsn + 1 offsets into front_row_idx
+/// @param front_row_idx  output: each front's rows, sorted ascending
+/// @param info           output: predicted_factor_entries, predicted_flops,
+///                       max_front_size, max_supernode_size, max_tree_depth
+/// @param rows_hint      expected total row count (capacity reserved up front;
+///                       0 = unknown). Only a hint: any value gives the same result.
+/// @param work           optional caller workspace of n + nsn ints (contents
+///                       need not be initialised); null allocates its own.
+void build_assembly_tree(const CscLower &A, std::span<const Supernode> supernodes,
+                         std::span<const Int> child_ptr, std::span<const Int> child_idx,
+                         std::vector<Int> &front_row_ptr, std::vector<Int> &front_row_idx,
+                         Info &info, std::size_t rows_hint = 0, Int *work = nullptr);
 
 } // namespace smf

@@ -1,9 +1,123 @@
 #include "smf/solve_diag.hpp"
+#include "smf/blas_thread_guard.hpp"
+#include "smf/dense_kernel.hpp"
+#include "smf/determinism.hpp"
+#include "smf/pivoting.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace smf {
+
+namespace {
+
+// kappa_1(L11) = ||L11||_1 ||L11^-1||_1 <= kInvDiagMaxCond. Multiplying by a
+// computed inverse loses accuracy as kappa grows, where the triangular solve
+// stays backward stable: an ill-conditioned block keeps its TRSV. Column
+// sums: contiguous, no scratch. A NaN or infinite column sum (a non-finite
+// entry in L11 or its inverse) rejects the block: std::max would drop a NaN.
+bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X, int p,
+                              bool unit) {
+  double nl = 0.0, nx = 0.0;
+  for (int j = 0; j < p; ++j) {
+    const double *lc = L + j * f;
+    const double *xc = X + static_cast<std::ptrdiff_t>(j) * p;
+    double sl = unit ? 1.0 : std::abs(lc[j]);
+    double sx = std::abs(xc[j]);
+    for (int i = j + 1; i < p; ++i) {
+      sl += std::abs(lc[i]);
+      sx += std::abs(xc[i]);
+    }
+    if (!std::isfinite(sl) || !std::isfinite(sx))
+      return false;
+    nl = std::max(nl, sl);
+    nx = std::max(nx, sx);
+  }
+  return nl * nx <= kInvDiagMaxCond;
+}
+
+} // namespace
+
+void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
+  info.inverse_diag_fronts = 0;
+  info.inverse_diag_seconds = 0.0;
+  fkeep.inv_diag_offset.clear();
+  // Only a factorization that ran to the end: Success, or Singular
+  // reported as SingularMatrix under continue_on_singular. A hard error
+  // (input, mapping, scaling, allocation) also reports Singular but clears
+  // factor_values and may leave stale or partial solve steps behind.
+  const bool usable =
+      (fkeep.status == FactorStatus::Success && info.status == ErrorCode::Success) ||
+      (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular &&
+       info.status == ErrorCode::SingularMatrix);
+  if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd ||
+      !usable || fkeep.factor_values.empty()) {
+    fkeep.inv_diag.clear();
+    return;
+  }
+  // Every step's front must lie inside factor_values.
+  const auto nvals = static_cast<LongInt>(fkeep.factor_values.size());
+  for (const SolveStep &st : fkeep.solve_steps)
+    if (st.p < 0 || st.f < st.p || st.factor_offset < 0 ||
+        st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals) {
+      fkeep.inv_diag.clear();
+      return;
+    }
+  const auto t0 = std::chrono::steady_clock::now();
+  const std::size_t ns = fkeep.solve_steps.size();
+  LongInt total = 0;
+  int fronts = 0;
+  for (const SolveStep &st : fkeep.solve_steps)
+    if (st.p >= kInvDiagMinPivots) {
+      total += static_cast<LongInt>(st.p) * st.p;
+      ++fronts;
+    }
+  if (fronts == 0) {
+    fkeep.inv_diag.clear();
+    return;
+  }
+  // resize() keeps the capacity: same structure, no allocation.
+  fkeep.inv_diag_offset.resize(ns);
+  fkeep.inv_diag.resize(static_cast<std::size_t>(total));
+  const bool unit = !fkeep.is_posdef;
+  const BlasThreadGuard blas(deterministic_mode(ctrl) ? 1 : std::max(1, ctrl.num_threads));
+  LongInt off = 0;
+  for (std::size_t k = 0; k < ns; ++k) {
+    const SolveStep &st = fkeep.solve_steps[k];
+    const int p = st.p;
+    if (p < kInvDiagMinPivots) {
+      fkeep.inv_diag_offset[k] = -1;
+      continue;
+    }
+    const std::ptrdiff_t f = st.f;
+    const double *L = fkeep.factor_values.data() + st.factor_offset;
+    double *X = fkeep.inv_diag.data() + off;
+    // X = L11 as the solves read it: the strict lower triangle, the
+    // diagonal (ones when unit; D sits there with D inline) and zeros above.
+    for (int j = 0; j < p; ++j) {
+      double *xc = X + static_cast<std::ptrdiff_t>(j) * p;
+      const double *lc = L + j * f;
+      for (int i = 0; i < j; ++i) xc[i] = 0.0;
+      xc[j] = unit ? 1.0 : lc[j];
+      for (int i = j + 1; i < p; ++i) xc[i] = lc[i];
+    }
+    if (smf_dtrtri_lower(X, p, p, unit) != 0 || !inverse_well_conditioned(L, f, X, p, unit)) {
+      fkeep.inv_diag_offset[k] = -1;  // keep the TRSV for this front
+      --fronts;
+    } else {
+      fkeep.inv_diag_offset[k] = off;
+    }
+    off += static_cast<LongInt>(p) * p;
+  }
+  info.inverse_diag_fronts = fronts;
+  info.inverse_diag_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  info.factor_seconds += info.inverse_diag_seconds;
+}
 
 void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   (void)n;
@@ -12,13 +126,19 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   if (!fkeep.diag_entries.empty()) {
     for (const DiagSolveEntry &entry : fkeep.diag_entries) {
       if (entry.tag == 1) {
-        x[entry.row0] /= entry.d00;
+        if (entry.d00 == 0.0 || !is_finite_fast(entry.d00)) {
+          x[entry.row0] = 0.0;
+        } else {
+          x[entry.row0] /= entry.d00;
+        }
       } else if (entry.tag == 2) {
-        const double det = entry.d00 * entry.d11 - entry.d10 * entry.d10;
         const double x0 = x[entry.row0];
         const double x1 = x[entry.row1];
-        x[entry.row0] = (entry.d11 * x0 - entry.d10 * x1) / det;
-        x[entry.row1] = (-entry.d10 * x0 + entry.d00 * x1) / det;
+        double y0 = 0.0;
+        double y1 = 0.0;
+        solve_2x2_scaled(entry.d00, entry.d10, entry.d11, x0, x1, y0, y1);
+        x[entry.row0] = y0;
+        x[entry.row1] = y1;
       }
     }
     return;
@@ -38,11 +158,11 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
       continue;
 
     const Supernode &sn = analysis.supernodes[si];
-    const FrontalInfo &fi = analysis.fronts[si];
+    const std::span<const Int> rows = analysis.front_rows(s);
 
     const int p = static_cast<int>(sn.width());
-    const int f = static_cast<int>(fi.front_size());
-    const int start = fkeep.factor_col_ptr[si];
+    const int f = static_cast<int>(rows.size());
+    const LongInt start = fkeep.factor_col_ptr[si];
 
     for (int k = 0; k < p; ++k) {
       const std::size_t ki = static_cast<std::size_t>(k);
@@ -54,7 +174,7 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
         // 1×1 pivot: divide x[r] by D[k,k]
         const double dkk =
             fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
-        x[fi.row_indices[ki]] /= dkk;
+        x[rows[ki]] /= dkk;
 
       } else if (tag == 2) {
         // 2×2 pivot block at columns k and k+1
@@ -67,8 +187,8 @@ void solve_diag(const FactorKeep &fkeep, double *x, int n) {
             start + (k + 1) * f + (k + 1))];
 
         const double det = d00 * d11 - d10 * d10;
-        const int r0 = static_cast<int>(fi.row_indices[ki]);
-        const int r1 = static_cast<int>(fi.row_indices[ki + 1]);
+        const int r0 = static_cast<int>(rows[ki]);
+        const int r1 = static_cast<int>(rows[ki + 1]);
         const double x0 = x[r0];
         const double x1 = x[r1];
         // D^{-1} = [[d11, -d10], [-d10, d00]] / det

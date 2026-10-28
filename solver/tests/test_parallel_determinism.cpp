@@ -1,23 +1,26 @@
 // test_parallel_determinism.cpp — M6.G1 acceptance tests
 //
 // Decision Log (BLAS non-determinism):
-//   D-DET-001: True bitwise identity across thread counts cannot be guaranteed
-//   when BLAS (OpenBLAS/MKL) uses AVX2 FMAs in thread-count-dependent orders.
-//   Workaround: deterministic mode fixes the smf assembly/reduction order (child
-//   sort + fixed reduction index order, no omp reduction). BLAS internal threading
-//   is serialised via BLASThreadGuard (M6.B1). The acceptance criterion is therefore
-//   implemented as residual tolerance (< 1e-10) rather than strict bit identity
-//   across thread counts. Serial-to-serial runs ARE bitwise identical (no BLAS
-//   thread variation). This deviation is documented per plan §4 "Note any
-//   BLAS-induced bit-instability in Decision Log."
+//   D-DET-001 (superseded by Task 14): bitwise identity across thread counts
+//   was judged impossible and the multi-thread test used a residual
+//   tolerance. Deterministic mode (determinism.hpp) now gives it: one BLAS
+//   thread per call, tiled fronts whatever the thread count, a thread-count
+//   independent ordering, a postorder factor layout and a serial postorder
+//   solve, MKL CNR. BitwiseAcrossThreadCounts checks it bit for bit.
 
+#include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
+#include "smf/matrix_market.hpp"
 #include "smf/solver.hpp"
+#include "smf/workspace.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <gtest/gtest.h>
+#include <string>
+#include <span>
 #include <vector>
 
 using namespace smf;
@@ -299,4 +302,200 @@ TEST(ParallelDeterminism, DeterministicReduceCorrect) {
     EXPECT_DOUBLE_EQ(acc[0], 5.1);
     EXPECT_DOUBLE_EQ(acc[1], 7.2);
     EXPECT_DOUBLE_EQ(acc[2], 9.3);
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: deterministic mode (Control::deterministic / SMF_DETERMINISTIC):
+// bitwise-identical solutions, D entries and inertia across runs and across
+// 1/2/8/16 threads (analyse, factor and solve each run).
+// ---------------------------------------------------------------------------
+namespace {
+
+namespace fs = std::filesystem;
+
+fs::path fixture_root() {
+    return fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures";
+}
+
+// 7-point Laplacian on an m^3 grid minus `shift` on the diagonal, lower CSC
+// (shift 0: SPD Poisson; shift 0.9: indefinite Helmholtz).
+CscLower grid_3d(int m, double shift) {
+    const int n = m * m * m;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.push_back(0);
+    for (int z = 0; z < m; ++z)
+        for (int y = 0; y < m; ++y)
+            for (int x = 0; x < m; ++x) {
+                const int j = (z * m + y) * m + x;
+                A.row_idx.push_back(j);
+                A.values.push_back(6.0 - shift);
+                if (x + 1 < m) { A.row_idx.push_back(j + 1); A.values.push_back(-1.0); }
+                if (y + 1 < m) { A.row_idx.push_back(j + m); A.values.push_back(-1.0); }
+                if (z + 1 < m) { A.row_idx.push_back(j + m * m); A.values.push_back(-1.0); }
+                A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+            }
+    return A;
+}
+
+struct DetCase {
+    std::string name;
+    CscLower A;
+    MatrixType type;
+    bool expect_parallel;  // 8 threads take the tree-parallel path
+    bool expect_tiles;     // 8 threads factor top fronts as tile tasks
+    OrderingMethod ordering = OrderingMethod::AutoSerial;
+};
+
+struct DetRun {
+    std::vector<double> x;
+    std::vector<double> xm;  // nrhs = 5 blocked solve (Task 16)
+    std::vector<double> d;  // D entries (indefinite), elimination order
+    int pos = 0, neg = 0, zero = 0;
+    int subtrees = 0, tiles = 0;
+    int ordering_used = 0;
+};
+
+DetRun det_run(const DetCase &c, int threads) {
+    Control ctrl;
+    ctrl.matrix_type = c.type;
+    ctrl.num_threads = threads;
+    ctrl.deterministic = true;
+    ctrl.ordering = c.ordering;
+    // Cached L11^-1 (built at factor time) is part of what must reproduce.
+    ctrl.cache_inverse_diag = true;
+    // AutoParallel tries METIS only when AMD's flops times the refactors
+    // are large enough per row.
+    if (c.ordering == OrderingMethod::AutoParallel) ctrl.expected_refactors = 100;
+    Solver solver;
+    Info info;
+    DetRun r;
+    auto ak = solver.analyse(c.A, ctrl, info);
+    EXPECT_NE(ak.get(), nullptr);
+    if (!ak) return r;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    FactorKeep fk;
+    EXPECT_EQ(solver.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
+    const int n = static_cast<int>(c.A.n);
+    r.x.resize(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < r.x.size(); ++i)
+        r.x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    EXPECT_EQ(solver.solve(fk, ctrl, info, r.x.data(), n, 1, sws), 0);
+    // nrhs > 1: the serial blocked solve (GEMM / TRSM per front). The caller's
+    // BLAS runs `threads` threads, as a threaded application's would.
+    {
+        constexpr int kNrhs = 5;
+        r.xm.resize(static_cast<std::size_t>(n) * kNrhs);
+        for (std::size_t i = 0; i < r.xm.size(); ++i)
+            r.xm[i] = std::cos(0.007 * static_cast<double>(i)) + 0.25;
+        BlasThreadGuard blas(threads);
+        EXPECT_EQ(solver.solve(fk, ctrl, info, std::span<double>(r.xm), kNrhs, n, sws), 0);
+    }
+    for (const DiagSolveEntry &e : fk.diag_entries) {
+        r.d.push_back(e.d00);
+        r.d.push_back(e.d10);
+        r.d.push_back(e.d11);
+    }
+    r.pos = info.num_positive;
+    r.neg = info.num_negative;
+    r.zero = info.num_zero;
+    r.subtrees = info.parallel_subtrees;
+    r.tiles = info.top_tile_fronts;
+    r.ordering_used = info.ordering_used;
+    return r;
+}
+
+// Entries whose bit patterns differ, and the largest difference among them.
+std::pair<std::size_t, double> bit_diff(const std::vector<double> &a, const std::vector<double> &b) {
+    if (a.size() != b.size()) return {std::max(a.size(), b.size()), INFINITY};
+    std::size_t cnt = 0;
+    double mx = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (std::memcmp(&a[i], &b[i], sizeof(double)) != 0) {
+            ++cnt;
+            mx = std::max(mx, std::abs(a[i] - b[i]));
+        }
+    return {cnt, mx};
+}
+
+} // namespace
+
+TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
+    std::vector<DetCase> cases;
+    {
+        const fs::path mtx = fixture_root() / "optim20" / "kkt_pde_opt.mtx";
+        auto mm = read_matrix_market(mtx.string());
+        ASSERT_TRUE(mm.ok) << mtx.string() << ": " << mm.error_message;
+        cases.push_back({"kkt_pde_opt", std::move(mm.matrix), MatrixType::RealSymmetricIndefinite,
+                         false, false});
+    }
+    cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                     true, false});
+    // AutoParallel: its METIS candidate (kept on a 3D grid) is serial METIS
+    // at 1 thread and parallel ND above, except in deterministic mode.
+    cases.push_back({"poisson_3d_26/AutoParallel", grid_3d(26, 0.0),
+                     MatrixType::RealSymmetricPositiveDefinite, true, false,
+                     OrderingMethod::AutoParallel});
+    {
+        // The Task 13 Helmholtz: helm3d01 when the fixture is present.
+        const fs::path mtx = fixture_root() / "large" / "helm3d01" / "helm3d01.mtx";
+        std::error_code ec;
+        auto mm = fs::exists(mtx, ec) ? read_matrix_market(mtx.string()) : MatrixMarketResult{};
+        if (mm.ok)
+            cases.push_back({"helm3d01", std::move(mm.matrix), MatrixType::RealSymmetricIndefinite,
+                             true, true});
+        else
+            cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9),
+                             MatrixType::RealSymmetricIndefinite, true, true});
+    }
+
+    constexpr int kRuns = 10;
+    for (const DetCase &c : cases) {
+        SCOPED_TRACE(c.name);
+        const DetRun ref = det_run(c, 1);
+        ASSERT_FALSE(ref.x.empty());
+        if (c.ordering == OrderingMethod::AutoParallel)
+            EXPECT_EQ(ref.ordering_used, static_cast<int>(OrderingMethod::METIS))
+                << "METIS candidate not kept: the ordering path is not exercised";
+        int mismatches = 0;
+        for (const int threads : {1, 2, 8, 16}) {
+            for (int run = 0; run < kRuns; ++run) {
+                const DetRun r = det_run(c, threads);
+                if (threads == 8 && run == 0) {
+                    if (c.expect_parallel)
+                        EXPECT_GE(r.subtrees, 2) << "8 threads: parallel path not taken";
+                    if (c.expect_tiles)
+                        EXPECT_GT(r.tiles, 0) << "8 threads: no tile-task front";
+                }
+                EXPECT_EQ(r.ordering_used, ref.ordering_used) << threads << " threads, run " << run;
+                EXPECT_EQ(r.pos, ref.pos) << threads << " threads, run " << run;
+                EXPECT_EQ(r.neg, ref.neg) << threads << " threads, run " << run;
+                EXPECT_EQ(r.zero, ref.zero) << threads << " threads, run " << run;
+                const auto [dx, mx] = bit_diff(r.x, ref.x);
+                const auto [dd, md] = bit_diff(r.d, ref.d);
+                const auto [dm, mm] = bit_diff(r.xm, ref.xm);
+                if (dm != 0)
+                    ADD_FAILURE() << c.name << ": " << threads << " threads, run " << run << ": "
+                                  << dm << " of " << r.xm.size()
+                                  << " nrhs = 5 solution entries differ (max " << mm << ")";
+                if (dx != 0 || dd != 0) {
+                    ++mismatches;
+                    ADD_FAILURE() << c.name << ": " << threads << " threads, run " << run << ": "
+                                  << dx << " of " << r.x.size() << " solution entries differ (max "
+                                  << mx << "), " << dd << " of " << r.d.size()
+                                  << " D values differ (max " << md << ")";
+                }
+            }
+        }
+        std::printf("[BitwiseAcrossThreadCounts] %s n=%d: %d of %d runs differ from 1-thread run 0\n",
+                    c.name.c_str(), static_cast<int>(c.A.n), mismatches, 4 * kRuns);
+    }
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    // MKL's conditional numerical reproducibility took effect.
+    EXPECT_EQ(blas_reproducibility_status(), 0)
+        << "mkl_cbwr_set returned " << blas_reproducibility_status();
+    std::printf("[BitwiseAcrossThreadCounts] MKL CNR branch %d (10 = AVX2, 2 = AUTO)\n",
+                blas_reproducibility_branch());
+#endif
 }

@@ -9,6 +9,10 @@
 
 find_path(CHOLMOD_INCLUDE_DIR
     NAMES cholmod.h
+    HINTS
+        "$ENV{CONDA_PREFIX}/Library/include/suitesparse"
+        "$ENV{CONDA_PREFIX}/include/suitesparse"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/include/suitesparse"
     PATHS
         /usr/include/suitesparse
         /usr/local/include/suitesparse
@@ -19,6 +23,10 @@ find_path(CHOLMOD_INCLUDE_DIR
 
 find_library(CHOLMOD_LIBRARY
     NAMES cholmod
+    HINTS
+        "$ENV{CONDA_PREFIX}/Library/lib"
+        "$ENV{CONDA_PREFIX}/lib"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/lib"
     PATHS
         /usr/lib/x86_64-linux-gnu
         /usr/lib

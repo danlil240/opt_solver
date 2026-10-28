@@ -22,9 +22,9 @@ static smf::AnalysisKeep make_analysis_1x1() {
   sn.parent = -1;
   ak.supernodes.push_back(sn);
 
-  smf::FrontalInfo fi;
-  fi.row_indices = {0};
-  ak.fronts.push_back(fi);
+  ak.child_ptr = {0, 0};
+  ak.front_row_ptr = {0, 1};
+  ak.front_row_idx = {0};
 
   return ak;
 }

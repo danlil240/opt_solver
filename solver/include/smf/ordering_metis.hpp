@@ -28,4 +28,17 @@ public:
         const std::vector<Int>& adjncy) override;
 };
 
+/// Serialised METIS entry points. The METIS linked here (conda-forge 5.2.1 on
+/// Windows) keeps GKlib's memory core in process-global state, so two
+/// concurrent METIS calls abort the process ("Could not find pointer ... in
+/// mcore"); every METIS call in smf goes through these, which hold one
+/// process-wide mutex. Options: METIS defaults with SEED = 0 and
+/// NUMBERING = 0, so a call's result does not depend on call order. The
+/// arrays are passed to METIS as-is (its API takes them mutable). vwgt may be
+/// null. Return false on a METIS error or when METIS is not compiled in.
+/// metis_node_nd: perm[new] = old, iperm[old] = new.
+bool metis_node_nd(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* perm, Int* iperm);
+/// metis_vertex_separator: part[v] in {0, 1, 2}, 2 = separator.
+bool metis_vertex_separator(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* part, Int* sepsize);
+
 } // namespace smf

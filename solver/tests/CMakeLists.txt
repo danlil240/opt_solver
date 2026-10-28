@@ -60,7 +60,7 @@ add_test(NAME Supernode COMMAND test_supernode)
 
 # --- M2.S3 test target ---
 
-add_executable(test_assembly_tree test_assembly_tree.cpp)
+add_executable(test_assembly_tree test_assembly_tree.cpp ../benchmarks/common/validation.cpp)
 target_link_libraries(test_assembly_tree PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME AssemblyTree COMMAND test_assembly_tree)
 
@@ -69,6 +69,10 @@ add_test(NAME AssemblyTree COMMAND test_assembly_tree)
 add_executable(test_symbolic test_symbolic.cpp)
 target_link_libraries(test_symbolic PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME Symbolic COMMAND test_symbolic)
+
+add_executable(test_parallel_nd test_parallel_nd.cpp)
+target_link_libraries(test_parallel_nd PRIVATE smf GTest::GTest GTest::Main)
+add_test(NAME ParallelNd COMMAND test_parallel_nd)
 
 # --- pg:3a test targets ---
 
@@ -90,8 +94,11 @@ add_executable(test_factor_posdef test_factor_posdef.cpp)
 target_link_libraries(test_factor_posdef PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorPosdef COMMAND test_factor_posdef)
 
-add_executable(test_factor_indef test_factor_indef.cpp)
+add_executable(test_factor_indef test_factor_indef.cpp ../benchmarks/common/validation.cpp)
 target_link_libraries(test_factor_indef PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_factor_indef PRIVATE psapi)
+endif()
 add_test(NAME FactorIndef COMMAND test_factor_indef)
 
 add_executable(test_diagnostics test_diagnostics.cpp)
@@ -220,3 +227,210 @@ add_test(NAME Poisson2D COMMAND test_poisson_2d)
 add_executable(test_indef_larger test_indef_larger.cpp)
 target_link_libraries(test_indef_larger PRIVATE smf GTest::gtest_main)
 add_test(NAME IndefLarger COMMAND test_indef_larger)
+
+# --- Task 1: Benchmark validation tests ---
+
+add_executable(test_benchmark_validation
+    test_benchmark_validation.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_benchmark_validation PRIVATE smf GTest::gtest_main)
+add_test(NAME BenchmarkValidation COMMAND test_benchmark_validation)
+
+# --- Task 2: Indefinite adversarial & factor identity tests ---
+
+add_executable(test_indef_adversarial
+    test_indef_adversarial.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_indef_adversarial PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_indef_adversarial PRIVATE psapi)
+endif()
+add_test(NAME IndefAdversarial COMMAND test_indef_adversarial)
+
+add_executable(test_factor_identity test_factor_identity.cpp)
+target_link_libraries(test_factor_identity PRIVATE smf GTest::gtest_main)
+add_test(NAME FactorIdentity COMMAND test_factor_identity)
+
+# --- Task 3: Delayed pivots and full-front stability tests ---
+
+add_executable(test_delayed_pivots
+    test_delayed_pivots.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_delayed_pivots PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_delayed_pivots PRIVATE psapi)
+endif()
+add_test(NAME DelayedPivots COMMAND test_delayed_pivots)
+
+# --- Task 4: NumericWorkspace and SolveWorkspace tests ---
+
+add_executable(test_numeric_workspace
+    test_numeric_workspace.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_numeric_workspace PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_numeric_workspace PRIVATE psapi)
+endif()
+add_test(NAME NumericWorkspace COMMAND test_numeric_workspace)
+
+# --- Task 5: Refinement and symmetric matching tests ---
+
+add_executable(test_refinement
+    test_refinement.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_refinement PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_refinement PRIVATE psapi)
+endif()
+add_test(NAME Refinement COMMAND test_refinement --gtest_filter=Refinement.*)
+add_test(NAME Matching COMMAND test_refinement --gtest_filter=Matching.*)
+add_test(NAME Scaling COMMAND test_refinement --gtest_filter=Scaling.*)
+add_test(NAME StaticPivoting COMMAND test_refinement --gtest_filter=StaticPivoting.*)
+
+add_executable(test_tree_parallel
+    test_tree_parallel.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_tree_parallel PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_tree_parallel PRIVATE psapi)
+endif()
+add_test(NAME TreeParallel COMMAND test_tree_parallel)
+
+# --- IPM mode: engine hooks (max_negative_pivots) ---
+
+add_executable(test_ipm_hooks
+    test_ipm_hooks.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_ipm_hooks PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_hooks PRIVATE psapi)
+endif()
+add_test(NAME IpmHooks COMMAND test_ipm_hooks)
+set_tests_properties(IpmHooks PROPERTIES TIMEOUT 30)
+
+# --- IPM mode: IpmSession (pass-through to Solver; Feature 1 inertia learning and early abort) ---
+
+add_executable(test_ipm_session
+    test_ipm_session.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_ipm_session PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_session PRIVATE psapi)
+endif()
+add_test(NAME IpmSession COMMAND test_ipm_session)
+set_tests_properties(IpmSession PROPERTIES TIMEOUT 60)
+
+# --- IPM mode Feature 3b: IpmSession Regularized (quasidefinite) mode ---
+
+add_executable(test_ipm_regularized
+    test_ipm_regularized.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_ipm_regularized PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_ipm_regularized PRIVATE psapi)
+endif()
+add_test(NAME IpmRegularized COMMAND test_ipm_regularized)
+set_tests_properties(IpmRegularized PROPERTIES TIMEOUT 60)
+
+# --- Task 6: Benchmark adapters tests ---
+
+add_executable(test_benchmark_adapters
+    test_benchmark_adapters.cpp
+    ../benchmarks/common/validation.cpp
+    ../benchmarks/adapters/hsl.cpp
+    ../benchmarks/adapters/hsl_dynamic.cpp
+    ../benchmarks/adapters/spral.cpp
+    ../benchmarks/adapters/mumps.cpp
+    ../benchmarks/adapters/pardiso.cpp
+    ../benchmarks/adapters/cholmod.cpp
+    ../benchmarks/adapters/cudss_adapter.cpp
+)
+target_link_libraries(test_benchmark_adapters PRIVATE
+    smf smf_bench_baselines GTest::gtest_main ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(test_benchmark_adapters PRIVATE psapi)
+endif()
+smf_stage_runtime_dlls(test_benchmark_adapters)
+add_test(NAME BenchmarkAdapters COMMAND test_benchmark_adapters)
+
+# --- Task 7: Blocked indefinite frontal kernel tests ---
+
+add_executable(test_blocked_indef
+    test_blocked_indef.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_blocked_indef PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_blocked_indef PRIVATE psapi)
+endif()
+add_test(NAME BlockedIndef COMMAND test_blocked_indef)
+
+# --- Task 8: Task budget and memory-aware parallel scheduling tests ---
+
+add_executable(test_task_budget
+    test_task_budget.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_task_budget PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_task_budget PRIVATE psapi)
+endif()
+add_test(NAME TaskBudget COMMAND test_task_budget)
+
+# --- Task 9: MA97 plugin ABI and runtime tests ---
+
+add_executable(test_ma97_plugin_abi test_ma97_plugin_abi.cpp)
+target_link_libraries(test_ma97_plugin_abi PRIVATE smf GTest::gtest_main)
+add_test(NAME Ma97PluginAbi COMMAND test_ma97_plugin_abi)
+if(SMF_BUILD_MA97_PLUGIN)
+    # InexactInertiaReportsFailure loads the plugin.
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_ma97_plugin_abi PRIVATE dl)
+    endif()
+    add_dependencies(test_ma97_plugin_abi smf_ma97)
+    target_compile_definitions(test_ma97_plugin_abi PRIVATE
+        SMF_MA97_PLUGIN_PATH="$<TARGET_FILE:smf_ma97>")
+endif()
+
+if(SMF_BUILD_MA97_PLUGIN)
+    add_executable(test_ipopt_plugin_runtime test_ipopt_plugin_runtime.cpp)
+    target_link_libraries(test_ipopt_plugin_runtime PRIVATE smf GTest::gtest_main)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(test_ipopt_plugin_runtime PRIVATE dl)
+    endif()
+    add_dependencies(test_ipopt_plugin_runtime smf_ma97)
+    target_compile_definitions(test_ipopt_plugin_runtime PRIVATE
+        SMF_MA97_PLUGIN_PATH="$<TARGET_FILE:smf_ma97>")
+    add_test(NAME Ma97PluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginRuntime.*)
+    # Task 17: PGLib IPOPT captures replayed through the plugin (skips without fixtures).
+    add_test(NAME IpoptPluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=IpoptPluginRuntime.*)
+endif()
+
+# --- Task 10: Native portfolio dispatch policy tests ---
+
+add_executable(test_dispatch_policy
+    test_dispatch_policy.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_dispatch_policy PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_dispatch_policy PRIVATE psapi)
+endif()
+add_test(NAME DispatchPolicy COMMAND test_dispatch_policy)
+
+add_executable(test_lean_engine test_lean_engine.cpp)
+target_link_libraries(test_lean_engine PRIVATE smf GTest::gtest_main)
+add_test(NAME LeanEngine COMMAND test_lean_engine)
+
+add_executable(test_ldlt_aptp test_ldlt_aptp.cpp)
+target_link_libraries(test_ldlt_aptp PRIVATE smf GTest::gtest_main)
+add_test(NAME LdltAptp COMMAND test_ldlt_aptp)

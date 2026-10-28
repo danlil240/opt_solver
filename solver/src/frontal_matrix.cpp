@@ -48,15 +48,18 @@ void FrontalMatrix::scatter_original(const std::vector<Int>& col_ptr,
                                      const std::vector<Int>& row_idx,
                                      const std::vector<double>& values)
 {
+    // row_map_ and each column's row_idx are both sorted: merge-walk them in
+    // O(f + col_nnz) per column instead of a per-entry binary search.
     const Int* const row_end = row_map_ + f_;
     for (Int j = 0; j < p_; ++j) {
         const Int orig_col = col_map_[j];
+        const Int* it = row_map_;
         for (Int k = col_ptr[static_cast<std::size_t>(orig_col)];
              k < col_ptr[static_cast<std::size_t>(orig_col) + 1]; ++k) {
             const Int orig_row = row_idx[static_cast<std::size_t>(k)];
-            // Binary search for orig_row in sorted row_map_
-            const Int* it = std::lower_bound(row_map_, row_end, orig_row);
-            if (it != row_end && *it == orig_row) {
+            while (it != row_end && *it < orig_row) ++it;
+            if (it == row_end) break;
+            if (*it == orig_row) {
                 const Int front_row = static_cast<Int>(it - row_map_);
                 at(front_row, j) += values[static_cast<std::size_t>(k)];
             }
@@ -65,7 +68,7 @@ void FrontalMatrix::scatter_original(const std::vector<Int>& col_ptr,
 }
 
 void FrontalMatrix::assemble_contrib(const double* contrib, Int q,
-                                     const std::vector<Int>& parent_rows)
+                                     std::span<const Int> parent_rows)
 {
     for (Int j = 0; j < q; ++j) {
         const Int pr_j = parent_rows[static_cast<std::size_t>(j)];

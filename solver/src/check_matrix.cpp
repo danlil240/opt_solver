@@ -6,7 +6,7 @@
 
 namespace smf {
 
-CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
+CleanedPattern clean_lower_csc(const CscLower& A, Info& info, bool check) {
     CleanedPattern result;
 
     // Validate n
@@ -44,6 +44,54 @@ CleanedPattern clean_lower_csc(const CscLower& A, Info& info) {
     // row_idx and values sizes must match nnz
     if (A.row_idx.size() != nnz_sz || A.values.size() != nnz_sz) {
         info.status = ErrorCode::IllegalValue;
+        return result;
+    }
+
+    // Fast path: a single O(nnz) validation pass detects the common case of
+    // already-clean input (sorted unique rows, all in range). Avoids the
+    // per-column Entry sort/dedup machinery and copies the arrays wholesale
+    // instead of pushing entries one by one. Missing diagonals are only
+    // counted (the slow path does not insert them either).
+    bool clean = true;
+    int missing_diag = 0;
+    if (!check) {
+        // Clean by contract: sorted rows >= j, so a diagonal is first.
+        for (Int j = 0; j < n; ++j) {
+            const Int k0 = A.col_ptr[static_cast<std::size_t>(j)];
+            const Int k1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
+            if (k0 == k1 || A.row_idx[static_cast<std::size_t>(k0)] != j) ++missing_diag;
+        }
+    }
+    for (Int j = 0; j < n && clean && check; ++j) {
+        const Int k0 = A.col_ptr[static_cast<std::size_t>(j)];
+        const Int k1 = A.col_ptr[static_cast<std::size_t>(j) + 1];
+        Int prev = j - 1;
+        for (Int k = k0; k < k1; ++k) {
+            const Int i = A.row_idx[static_cast<std::size_t>(k)];
+            if (i <= prev || i >= n) {
+                clean = false;
+                break;
+            }
+            prev = i;
+        }
+        // Sorted rows >= j: the diagonal, when present, is the first entry.
+        if (k0 == k1 || A.row_idx[static_cast<std::size_t>(k0)] != j) ++missing_diag;
+    }
+
+    if (clean) {
+        result.clean.n = n;
+        result.clean.col_ptr = A.col_ptr;
+        result.clean.row_idx = A.row_idx;
+        result.clean.values = A.values;
+        result.original_to_clean.resize(nnz_sz);
+        for (Int k = 0; k < nnz; ++k) {
+            result.original_to_clean[static_cast<std::size_t>(k)] = k;
+        }
+        result.missing_diag = missing_diag;
+        result.was_clean = true;
+        info.matrix_duplicates = 0;
+        info.matrix_out_of_range = 0;
+        info.matrix_missing_diag = missing_diag;
         return result;
     }
 

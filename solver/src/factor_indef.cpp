@@ -1,727 +1,688 @@
 #include "smf/factor_indef.hpp"
 #include "smf/blas_thread_guard.hpp"
-#include "smf/frontal_matrix.hpp"
+#include "smf/determinism.hpp"
+#include "smf/blocked_indef.hpp"
+#include "smf/multifrontal_serial.hpp"
+#include "smf/numeric_front.hpp"
 #include "smf/pivoting.hpp"
+#include "smf/scaling.hpp"
 #include "smf/threading.hpp"
+#include "smf/workspace.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace smf {
 
 namespace {
 
-void build_diag_entries(const AnalysisKeep &keep, FactorKeep &fkeep) {
-  fkeep.diag_entries.clear();
-  fkeep.diag_entries.reserve(static_cast<std::size_t>(keep.n));
+// Control::delay_budget: static pivot tolerance (relative to max|A| after
+// scaling) of the fronts after the budget, sqrt(eps) scale as in MA57
+// (refinement_mixed_precision.md).
+constexpr double kDelayBudgetStaticTol = 1e-8;
 
-  const int ns = static_cast<int>(keep.supernodes.size());
-  for (int s = 0; s < ns; ++s) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    if (si >= fkeep.pivot_types.size())
-      continue;
-    const auto &ptypes = fkeep.pivot_types[si];
-    if (ptypes.empty())
-      continue;
+bool check_analysis_storage_bounds(const AnalysisKeep &keep) noexcept {
+  LongInt total_predicted = 0;
+  const std::size_t ns = keep.supernodes.size();
+  if (ns > 0 && keep.front_row_ptr.size() < ns + 1) return false;
+  for (std::size_t s = 0; s < ns; ++s) {
+    const LongInt p = static_cast<LongInt>(keep.supernodes[s].width());
+    const LongInt f = static_cast<LongInt>(keep.front_size(static_cast<Int>(s)));
+    LongInt front_sq = 0;
+    if (!checked_storage_elements(f, f, front_sq)) {
+      return false;
+    }
+    LongInt panel_elems = 0;
+    if (!checked_storage_elements(f, p, panel_elems)) {
+      return false;
+    }
+    if (!checked_add_i64(total_predicted, panel_elems, total_predicted) ||
+        total_predicted > kMaxFactorStorageEntries) {
+      return false;
+    }
+  }
+  return true;
+}
 
-    const Supernode &sn = keep.supernodes[si];
-    const FrontalInfo &fi = keep.fronts[si];
-    const int p = static_cast<int>(sn.width());
-    const int f = static_cast<int>(fi.front_size());
-    const int start = fkeep.factor_col_ptr[si];
+#ifdef SMF_PARALLEL
+// Per-node front build + factor for the task-parallel path.
+FrontResult build_and_factor_supernode_front(
+    Int s,
+    const AnalysisKeep &keep,
+    const CscLower &Ap,
+    const Control &ctrl,
+    double eff_small,
+    std::vector<FrontResult> &node_results,
+    NumericWorkspace *ws_opt) {
+  const std::size_t si = static_cast<std::size_t>(s);
+  const Supernode &sn = keep.supernodes[si];
+  const std::span<const Int> frows = keep.front_rows(s);
+  const std::span<const Int> kids = keep.children(s);
+  const int p_sym = static_cast<int>(sn.width());
+  const int f_sym = static_cast<int>(frows.size());
 
-    for (int k = 0; k < p; ++k) {
-      const std::size_t ki = static_cast<std::size_t>(k);
-      if (ki >= ptypes.size())
-        break;
-      const int8_t tag = ptypes[ki];
-      if (tag == 1) {
-        DiagSolveEntry entry;
-        entry.tag = 1;
-        entry.row0 = fi.row_indices[ki];
-        entry.d00 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
-        fkeep.diag_entries.push_back(entry);
-      } else if (tag == 2) {
-        DiagSolveEntry entry;
-        entry.tag = 2;
-        entry.row0 = fi.row_indices[ki];
-        entry.row1 = fi.row_indices[ki + 1];
-        entry.d00 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + k)];
-        entry.d10 = fkeep.factor_values[static_cast<std::size_t>(start + k * f + (k + 1))];
-        entry.d11 = fkeep.factor_values[static_cast<std::size_t>(start + (k + 1) * f + (k + 1))];
-        fkeep.diag_entries.push_back(entry);
+  std::vector<Int> eligible_rows;
+  eligible_rows.reserve(static_cast<std::size_t>(p_sym + 8));
+  for (Int c : kids) {
+    const auto &c_res = node_results[static_cast<std::size_t>(c)];
+    for (Int dcol : c_res.delayed_col_ids) {
+      if (std::find(eligible_rows.begin(), eligible_rows.end(), dcol) ==
+          eligible_rows.end()) {
+        eligible_rows.push_back(dcol);
       }
     }
   }
+  for (int k = 0; k < p_sym; ++k) {
+    const Int r_id = frows[static_cast<std::size_t>(k)];
+    if (std::find(eligible_rows.begin(), eligible_rows.end(), r_id) ==
+        eligible_rows.end()) {
+      eligible_rows.push_back(r_id);
+    }
+  }
+  const int num_eligible = static_cast<int>(eligible_rows.size());
+
+  std::vector<Int> ext_rows;
+  ext_rows.reserve(static_cast<std::size_t>(std::max(0, f_sym - p_sym) + 8));
+  for (int k = p_sym; k < f_sym; ++k) {
+    const Int r_id = frows[static_cast<std::size_t>(k)];
+    if (std::find(eligible_rows.begin(), eligible_rows.end(), r_id) ==
+        eligible_rows.end()) {
+      ext_rows.push_back(r_id);
+    }
+  }
+  for (Int c : kids) {
+    const auto &c_res = node_results[static_cast<std::size_t>(c)];
+    for (Int crow : c_res.contrib_row_ids) {
+      if (std::find(eligible_rows.begin(), eligible_rows.end(), crow) ==
+          eligible_rows.end()) {
+        ext_rows.push_back(crow);
+      }
+    }
+  }
+  std::sort(ext_rows.begin(), ext_rows.end());
+  ext_rows.erase(std::unique(ext_rows.begin(), ext_rows.end()), ext_rows.end());
+
+  std::vector<Int> all_rows;
+  all_rows.reserve(eligible_rows.size() + ext_rows.size());
+  all_rows.insert(all_rows.end(), eligible_rows.begin(), eligible_rows.end());
+  all_rows.insert(all_rows.end(), ext_rows.begin(), ext_rows.end());
+
+  LongInt front_sq = 0;
+  if (!checked_storage_elements(static_cast<LongInt>(all_rows.size()),
+                                static_cast<LongInt>(all_rows.size()),
+                                front_sq)) {
+    FrontResult err_res;
+    err_res.status = ErrorCode::AllocationError;
+    return err_res;
+  }
+
+  if (ws_opt != nullptr) {
+    const std::size_t prev_cap = node_results[si].l_row_ids.capacity();
+    if (all_rows.size() > prev_cap ||
+        static_cast<std::size_t>(front_sq) > ws_opt->front_scratch.capacity()) {
+      ++ws_opt->capacity_growths_last_call;
+      ++ws_opt->front_heap_allocations_last_call;
+      if (static_cast<std::size_t>(front_sq) > ws_opt->front_scratch.capacity()) {
+        ws_opt->front_scratch.reserve(static_cast<std::size_t>(front_sq));
+      }
+    }
+  }
+
+  NumericFront front(std::move(all_rows), num_eligible);
+
+  front.scatter_original_columns(Ap, sn.col_start, sn.col_end);
+
+  for (Int c : kids) {
+    auto &c_res = node_results[static_cast<std::size_t>(c)];
+    if (!c_res.contrib.empty()) {
+      front.assemble_contribution(c_res.contrib_row_ids, c_res.contrib);
+      if (ws_opt != nullptr) {
+        ws_opt->release_contrib(std::move(c_res.contrib));
+      } else {
+        std::vector<double>().swap(c_res.contrib);
+      }
+    }
+  }
+
+  const bool is_root = (sn.parent == -1);
+  if (!ctrl.indef_use_reference_kernel &&
+      ctrl.indef_panel_size > 1 &&
+      front.num_rows() >= 16) {
+    if (ws_opt != nullptr) {
+      return factor_front_blocked(front, ctrl, *ws_opt, eff_small, is_root);
+    }
+    NumericWorkspace local_ws;
+    return factor_front_blocked(front, ctrl, local_ws, eff_small, is_root);
+  }
+  return factor_front_reference(front, ctrl, eff_small, is_root);
 }
 
-void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
-  fkeep.solve_steps.clear();
-  fkeep.solve_row_indices.clear();
-  fkeep.solve_steps.reserve(keep.solve_postorder.size());
+#endif // SMF_PARALLEL
 
-  std::size_t row_count = 0;
+bool finalize_factor_from_front_results(
+    const AnalysisKeep &keep,
+    const std::vector<FrontResult> &node_results,
+    FactorKeep &fkeep,
+    Info &info,
+    InertiaCounts &total_inertia,
+    int &total_delayed,
+    double &total_flops,
+    int &max_realized_front) {
+  const int n = static_cast<int>(keep.n);
+  const int ns = static_cast<int>(keep.supernodes.size());
+
+  total_inertia = InertiaCounts{};
+  total_delayed = 0;
+  total_flops = 0.0;
+  max_realized_front = 0;
+
+  fkeep.n = keep.n;
+  fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
+  fkeep.pivot_types.assign(static_cast<std::size_t>(ns), {});
+
+  LongInt offset = 0;
+  for (int s = 0; s < ns; ++s) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const FrontResult &fr = node_results[si];
+    fkeep.factor_col_ptr[si] = offset;
+    if (!checked_add_i64(offset, static_cast<LongInt>(fr.l_panel.size()), offset) ||
+        offset > kMaxFactorStorageEntries) {
+      fkeep.factor_values.clear();
+      return false;
+    }
+    fkeep.pivot_types[si] = fr.pivot_tags;
+
+    total_inertia.positive += fr.inertia.positive;
+    total_inertia.negative += fr.inertia.negative;
+    total_inertia.zero += fr.inertia.zero;
+    total_delayed += fr.delayed_count;
+    total_flops += fr.flops;
+    if (fr.front_size > max_realized_front) {
+      max_realized_front = fr.front_size;
+    }
+  }
+  fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
+  fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
+  for (int s = 0; s < ns; ++s) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const auto &panel = node_results[si].l_panel;
+    if (!panel.empty()) {
+      std::copy(panel.begin(),
+                panel.end(),
+                fkeep.factor_values.begin() +
+                    static_cast<std::ptrdiff_t>(fkeep.factor_col_ptr[si]));
+    }
+  }
+
+  fkeep.num_perm.clear();
+  fkeep.num_perm.reserve(static_cast<std::size_t>(n));
+  std::vector<uint8_t> seen(static_cast<std::size_t>(n), 0);
+
+  for (int s = 0; s < ns; ++s) {
+    for (Int sym_r : node_results[static_cast<std::size_t>(s)].accepted_row_ids) {
+      if (sym_r >= 0 && sym_r < n && !seen[static_cast<std::size_t>(sym_r)]) {
+        seen[static_cast<std::size_t>(sym_r)] = 1;
+        fkeep.num_perm.push_back(static_cast<int>(sym_r));
+      }
+    }
+  }
+  for (int sym_r = 0; sym_r < n; ++sym_r) {
+    if (!seen[static_cast<std::size_t>(sym_r)]) {
+      fkeep.num_perm.push_back(sym_r);
+    }
+  }
+
+  fkeep.num_iperm.assign(static_cast<std::size_t>(n), 0);
+  for (int new_piv = 0; new_piv < n; ++new_piv) {
+    const int sym_idx = fkeep.num_perm[static_cast<std::size_t>(new_piv)];
+    fkeep.num_iperm[static_cast<std::size_t>(sym_idx)] = new_piv;
+  }
+
+  fkeep.perm.resize(static_cast<std::size_t>(n));
+  fkeep.iperm.resize(static_cast<std::size_t>(n));
+  for (int new_piv = 0; new_piv < n; ++new_piv) {
+    const int sym_idx = fkeep.num_perm[static_cast<std::size_t>(new_piv)];
+    const int old_idx =
+        (sym_idx >= 0 && sym_idx < static_cast<int>(keep.perm.size()))
+            ? static_cast<int>(keep.perm[static_cast<std::size_t>(sym_idx)])
+            : new_piv;
+    fkeep.perm[static_cast<std::size_t>(new_piv)] = old_idx;
+    if (old_idx >= 0 && old_idx < n) {
+      fkeep.iperm[static_cast<std::size_t>(old_idx)] = new_piv;
+    }
+  }
+
+  fkeep.diag_entries.clear();
+  fkeep.inline_d = false;
+  fkeep.diag_entries.reserve(static_cast<std::size_t>(n));
+  for (int s = 0; s < ns; ++s) {
+    for (const auto &db : node_results[static_cast<std::size_t>(s)].d_blocks) {
+      DiagSolveEntry entry;
+      entry.tag = db.tag;
+      entry.row0 = static_cast<Int>(
+          fkeep.num_iperm[static_cast<std::size_t>(db.row0)]);
+      entry.row1 = (db.tag == 2)
+                       ? static_cast<Int>(
+                             fkeep.num_iperm[static_cast<std::size_t>(db.row1)])
+                       : 0;
+      entry.d00 = db.d00;
+      entry.d10 = db.d10;
+      entry.d11 = db.d11;
+      fkeep.diag_entries.push_back(entry);
+    }
+  }
+
+  fkeep.solve_steps.clear();
+  fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
+  fkeep.solve_row_indices.clear();
+  fkeep.solve_subtrees.clear();
+  std::vector<Int> fallback_order;
+  const std::vector<Int> *order_ptr = &keep.solve_postorder;
+  if (order_ptr->empty()) {
+    if (!keep.postorder.empty()) {
+      order_ptr = &keep.postorder;
+    } else {
+      fallback_order.resize(static_cast<std::size_t>(ns));
+      std::iota(fallback_order.begin(), fallback_order.end(), 0);
+      order_ptr = &fallback_order;
+    }
+  }
+
+  fkeep.solve_steps.reserve(order_ptr->size());
+  LongInt total_rows = 0;
   int max_p = 0;
   int max_q = 0;
-  for (Int s : keep.solve_postorder)
-  {
-    const std::size_t si = static_cast<std::size_t>(s);
-    const int p = static_cast<int>(keep.supernodes[si].width());
-    const int f = static_cast<int>(keep.fronts[si].front_size());
-    row_count += keep.fronts[si].row_indices.size();
-    max_p = std::max(max_p, p);
-    max_q = std::max(max_q, f - p);
+  for (Int s : *order_ptr) {
+    const auto &fr = node_results[static_cast<std::size_t>(s)];
+    if (!checked_add_i64(total_rows, static_cast<LongInt>(fr.l_row_ids.size()), total_rows) ||
+        total_rows > kMaxFactorStorageEntries) {
+      fkeep.factor_values.clear();
+      return false;
+    }
+    max_p = std::max(max_p, fr.num_accepted);
+    max_q = std::max(max_q, std::max(0, fr.front_size - fr.num_accepted));
   }
-  fkeep.solve_row_indices.reserve(row_count);
+  fkeep.solve_row_indices.reserve(static_cast<std::size_t>(total_rows));
 
-  for (Int s : keep.solve_postorder) {
+  for (Int s : *order_ptr) {
     const std::size_t si = static_cast<std::size_t>(s);
-    const FrontalInfo &fi = keep.fronts[si];
-    const Supernode &sn = keep.supernodes[si];
+    const auto &fr = node_results[si];
     SolveStep step;
-    step.row_offset = static_cast<Int>(fkeep.solve_row_indices.size());
+    step.row_offset = static_cast<LongInt>(fkeep.solve_row_indices.size());
     step.factor_offset = fkeep.factor_col_ptr[si];
-    step.p = static_cast<int>(sn.width());
-    step.f = static_cast<int>(fi.front_size());
+    step.p = fr.num_accepted;
+    step.f = fr.front_size;
     fkeep.solve_steps.push_back(step);
-    fkeep.solve_row_indices.insert(fkeep.solve_row_indices.end(),
-                                   fi.row_indices.begin(), fi.row_indices.end());
+    for (Int sym_r : fr.l_row_ids) {
+      fkeep.solve_row_indices.push_back(
+          static_cast<Int>(fkeep.num_iperm[static_cast<std::size_t>(sym_r)]));
+    }
   }
 
-  fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
-  fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
-  fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
+  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+  info.actual_flops = total_flops;
+  if (max_realized_front > info.max_front_size) {
+    info.max_front_size = max_realized_front;
+  }
+  return true;
 }
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Permute VALUES into pre-computed permuted positions using the scatter map
-// built during analyse().  O(nnz) — replaces the former O(nnz * avg_col_width)
-// linear-search in permute_values_only_indef.
-// ---------------------------------------------------------------------------
-static std::vector<double> scatter_values_indef(
-    const CscLower &A_orig,
-    const std::vector<Int> &orig_to_perm_idx,
-    Int nnz_perm) {
-  std::vector<double> perm_values(static_cast<std::size_t>(nnz_perm), 0.0);
-  const Int nnz = static_cast<Int>(A_orig.values.size());
-  for (Int k = 0; k < nnz; ++k)
-    perm_values[static_cast<std::size_t>(
-        orig_to_perm_idx[static_cast<std::size_t>(k)])] +=
-        A_orig.values[static_cast<std::size_t>(k)];
-  return perm_values;
+FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws) {
+  FactorValues values;
+  if (!resolve_factor_values(keep, updated, values)) values.data = nullptr;
+  return factor_indef(keep, values, ctrl, info, fkeep, ws);
 }
 
-// ---------------------------------------------------------------------------
-// Parallel indefinite factorization helper
-// ---------------------------------------------------------------------------
-#ifdef SMF_PARALLEL
-static FactorStatus
-factor_indef_parallel(const AnalysisKeep &keep, const CscLower &Ap,
-                      const Control &ctrl,
-                      FactorKeep &fkeep, InertiaCounts &out_inertia,
-                      int &out_delayed) {
+FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
+                          const Control &ctrl, Info &info,
+                          FactorKeep &fkeep, NumericWorkspace &ws) {
+  const auto t0 = std::chrono::steady_clock::now();
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
-  // Per-node contribution blocks (already heap-allocated, ideal for tasks).
-  std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));
-
-  // Per-node inertia and delayed counts — accumulated serially after the
-  // parallel region to avoid atomic ops on the hot path.
-  std::vector<InertiaCounts> node_inertia(static_cast<std::size_t>(ns));
-  std::vector<int> node_delayed(static_cast<std::size_t>(ns), 0);
-
-  // Shared atomic error flag (0 = ok, 1 = singular).
-  std::atomic<int> err_flag{0};
-
-  auto process_node = [&](Int s) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    const Supernode &sn = keep.supernodes[si];
-    const FrontalInfo &fi = keep.fronts[si];
-    const Int p = sn.width();
-    const Int f = fi.front_size();
-    const Int ext = f - p;
-
-    if (p == 0)
-      return;
-
-    // Per-task arena.
-    AlignedArena arena(static_cast<std::size_t>(8) << 20); // 8 MiB per task
-    AlignedArena::Marker mark = arena.save();
-
-    FrontalMatrix front(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
-
-    // Scatter from permuted matrix (analysis ordering).
-    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
-
-    // a22[col*ext+row] for row>=col: accumulates child A22 contributions.
-    std::vector<double> a22_par;
-    if (ext > 0)
-      a22_par.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
-
-    // Assemble children contributions (all done by taskwait).
-    // child_parent_rows may be precomputed or built on demand.
-    std::vector<Int> prows_local;
-    for (std::size_t k = 0; k < sn.children.size(); ++k) {
-      const Int c = sn.children[k];
-      const std::size_t ci = static_cast<std::size_t>(c);
-      if (contrib[ci].empty())
-        continue;
-
-      const FrontalInfo &cfi = keep.fronts[ci];
-      const Int cp = keep.supernodes[ci].width();
-      const Int cext = cfi.front_size() - cp;
-      if (cext <= 0)
-        continue;
-
-      const std::vector<Int> *prows_ptr = nullptr;
-      if (k < fi.child_parent_rows.size() &&
-          fi.child_parent_rows[k].size() == static_cast<std::size_t>(cext)) {
-        prows_ptr = &fi.child_parent_rows[k];
-      } else {
-        prows_local.resize(static_cast<std::size_t>(cext));
-        for (Int i = 0; i < cext; ++i) {
-          const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
-          const auto it = std::lower_bound(fi.row_indices.cbegin(),
-                                           fi.row_indices.cend(), glob);
-          prows_local[static_cast<std::size_t>(i)] =
-              static_cast<Int>(it - fi.row_indices.cbegin());
-        }
-        prows_ptr = &prows_local;
-      }
-      const std::vector<Int> &prows = *prows_ptr;
-
-      front.assemble_contrib(contrib[ci].data(), cext, prows);
-
-      // Accumulate A22-type child contributions into a22_par.
-      if (ext > 0) {
-        const double *cc = contrib[ci].data();
-        for (Int jj = 0; jj < cext; ++jj) {
-          const Int pr_j = prows[static_cast<std::size_t>(jj)];
-          if (pr_j < p) continue;
-          const Int lcol = pr_j - p;
-          for (Int ii = jj; ii < cext; ++ii) {
-            const Int pr_i = prows[static_cast<std::size_t>(ii)];
-            if (pr_i < p) continue;
-            const Int lrow = pr_i - p;
-            const double val =
-                cc[static_cast<std::size_t>(jj) *
-                       static_cast<std::size_t>(cext) +
-                   static_cast<std::size_t>(ii)];
-            if (lrow >= lcol)
-              a22_par[static_cast<std::size_t>(lcol) *
-                          static_cast<std::size_t>(ext) +
-                      static_cast<std::size_t>(lrow)] += val;
-            else
-              a22_par[static_cast<std::size_t>(lrow) *
-                          static_cast<std::size_t>(ext) +
-                      static_cast<std::size_t>(lcol)] += val;
-          }
-        }
-      }
-
-      contrib[ci].clear();
-    }
-
-    // BBK pivot loop on the fully-summed block.
-    const int num_fs = static_cast<int>(p);
-    std::vector<int8_t> pivot_tag(static_cast<std::size_t>(num_fs), int8_t{0});
-    InertiaCounts local_inertia{};
-    int local_delayed = 0;
-
-    int k = 0;
-    while (k < num_fs) {
-      PivotResult pr =
-          choose_pivot(front, k, num_fs, ctrl.pivot_u, ctrl.small_pivot);
-
-      if (pr.decision == PivotDecision::Reject) {
-        ++local_delayed;
-        ++k;
-        continue;
-      }
-
-      if (pr.decision == PivotDecision::Accept1x1) {
-        if (pr.col0 != k)
-          sym_swap_front(front, k, pr.col0, num_fs);
-        const double d00 =
-            front.at(static_cast<Int>(k), static_cast<Int>(k));
-        add_inertia_1x1(d00, ctrl.small_pivot, local_inertia);
-        pivot_tag[static_cast<std::size_t>(k)] = int8_t{1};
-        apply_pivot_1x1(front, k, num_fs);
-        ++k;
-      } else {
-        assert(k + 1 < num_fs);
-        if (pr.col1 != k + 1)
-          sym_swap_front(front, k + 1, pr.col1, num_fs);
-        const double d00 =
-            front.at(static_cast<Int>(k), static_cast<Int>(k));
-        const double d10 =
-            front.at(static_cast<Int>(k + 1), static_cast<Int>(k));
-        const double d11 =
-            front.at(static_cast<Int>(k + 1), static_cast<Int>(k + 1));
-        add_inertia_2x2(d00, d10, d11, ctrl.small_pivot, local_inertia);
-        pivot_tag[static_cast<std::size_t>(k)] = int8_t{2};
-        pivot_tag[static_cast<std::size_t>(k + 1)] = int8_t{-1};
-        apply_pivot_2x2(front, k, num_fs, ctrl.small_pivot);
-        k += 2;
-      }
-    }
-
-    // Rejected pivots → zero eigenvalues.
-    local_inertia.zero += local_delayed;
-    if (local_delayed > 0) {
-      int expected = 0;
-      err_flag.compare_exchange_strong(expected, 1,
-                                       std::memory_order_relaxed);
-    }
-
-    node_inertia[si] = local_inertia;
-    node_delayed[si] = local_delayed;
-
-    // Store factor columns.
-    {
-      const std::size_t lsize =
-          static_cast<std::size_t>(f) * static_cast<std::size_t>(p);
-      const std::size_t base =
-          static_cast<std::size_t>(fkeep.factor_col_ptr[si]);
-      const double *src = front.data();
-      for (std::size_t qi = 0; qi < lsize; ++qi)
-        fkeep.factor_values[base + qi] = src[qi];
-    }
-
-    if (si < fkeep.pivot_types.size())
-      fkeep.pivot_types[si] = pivot_tag;
-
-    // Compute contribution block for parent.
-    if (ext > 0 && sn.parent >= 0) {
-      const std::size_t ext_sz = static_cast<std::size_t>(ext);
-      // Initialize with accumulated a22 contributions.
-      contrib[si] = a22_par;
-      double *cb = contrib[si].data();
-
-      for (int pk = 0; pk < num_fs; ++pk) {
-        const int8_t tag = pivot_tag[static_cast<std::size_t>(pk)];
-        if (tag == int8_t{0} || tag == int8_t{-1})
-          continue;
-
-        if (tag == int8_t{1}) {
-          const double d = front.at(static_cast<Int>(pk), static_cast<Int>(pk));
-          if (std::abs(d) < ctrl.small_pivot)
-            continue;
-          // After apply_pivot_1x1, extension rows already store L factor entries.
-          for (Int j = 0; j < ext; ++j) {
-            const double lj =
-                front.at(p + j, static_cast<Int>(pk));
-            for (Int i = j; i < ext; ++i) {
-              const double li =
-                  front.at(p + i, static_cast<Int>(pk));
-              cb[static_cast<std::size_t>(j) * ext_sz +
-                 static_cast<std::size_t>(i)] -= li * d * lj;
-            }
-          }
-        } else {
-          const double d00 =
-              front.at(static_cast<Int>(pk), static_cast<Int>(pk));
-          const double d10 =
-              front.at(static_cast<Int>(pk + 1), static_cast<Int>(pk));
-          const double d11 =
-              front.at(static_cast<Int>(pk + 1), static_cast<Int>(pk + 1));
-          const double det = d00 * d11 - d10 * d10;
-          if (std::abs(det) < ctrl.small_pivot)
-            continue;
-
-          // After apply_pivot_2x2, extension rows already store L factor entries.
-          for (Int j = 0; j < ext; ++j) {
-            const double lj0 = front.at(p + j, static_cast<Int>(pk));
-            const double lj1 = front.at(p + j, static_cast<Int>(pk + 1));
-            for (Int i = j; i < ext; ++i) {
-              const double li0 = front.at(p + i, static_cast<Int>(pk));
-              const double li1 = front.at(p + i, static_cast<Int>(pk + 1));
-
-              cb[static_cast<std::size_t>(j) * ext_sz +
-                 static_cast<std::size_t>(i)] -=
-                  li0 * d00 * lj0 + li0 * d10 * lj1 + li1 * d10 * lj0 +
-                  li1 * d11 * lj1;
-            }
-          }
-        }
-      }
-    }
-
-    arena.reset_to(mark);
-  };
-
-  run_parallel_postorder(keep.supernodes, process_node, ctrl.num_threads);
-
-  // Accumulate per-node statistics serially.
-  InertiaCounts total_inertia{};
-  int total_delayed = 0;
-  for (Int s = 0; s < ns; ++s) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    total_inertia.positive += node_inertia[si].positive;
-    total_inertia.negative += node_inertia[si].negative;
-    total_inertia.zero += node_inertia[si].zero;
-    total_delayed += node_delayed[si];
-  }
-
-  out_inertia = total_inertia;
-  out_delayed = total_delayed;
-
-  return (err_flag.load() != 0) ? FactorStatus::Singular : FactorStatus::Success;
-}
-#endif // SMF_PARALLEL
-
-FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
-                          Info &info, FactorKeep &fkeep) {
-  const Int ns = static_cast<Int>(keep.supernodes.size());
-
-  // ---------------------------------------------------------------
-  // Initialise output bookkeeping
-  // ---------------------------------------------------------------
   info.delayed_pivots = 0;
+  info.static_pivots = 0;
+  info.inertia_exact = true;
+  info.delay_budget_retries = 0;
+  info.aptp_failed_columns = 0;
+  info.top_tile_fronts = 0;
+  info.small_front_handovers = 0;
+  info.aborted_flops_skipped = 0.0;
+  ws.front_heap_allocations_last_call = 0;
+  ws.capacity_growths_last_call = 0;
 
-  // Compute total factor storage and build factor_col_ptr
-  fkeep.factor_col_ptr.resize(static_cast<std::size_t>(ns) + 1, 0);
-  {
-    int offset = 0;
-    for (Int s = 0; s < ns; ++s) {
-      const std::size_t si = static_cast<std::size_t>(s);
-      fkeep.factor_col_ptr[si] = offset;
-      const Int w = keep.supernodes[si].width();
-      const Int f = keep.fronts[si].front_size();
-      offset += static_cast<int>(f) * static_cast<int>(w);
-    }
-    fkeep.factor_col_ptr[static_cast<std::size_t>(ns)] = offset;
-    fkeep.factor_values.assign(static_cast<std::size_t>(offset), 0.0);
+  if (!check_analysis_storage_bounds(keep)) {
+    fkeep.factor_values.clear();
+    fkeep.status = FactorStatus::Singular;
+    info.factor_status = FactorStatus::Singular;
+    info.status = ErrorCode::AllocationError;
+    return FactorStatus::Singular;
   }
 
+  const bool use_parallel_path =
+#ifdef SMF_PARALLEL
+      (ctrl.num_threads > 1 && ctrl.tree_parallel && !deterministic_mode(ctrl));
+#else
+      false;
+#endif
+  if (use_parallel_path) {
+    ws.prepare_for_analysis(keep);
+  }
+  // ScalingMethod::Auto applies the analysis' matching scaling when it
+  // computed one (saddle-point matrices under auto ordering), else none.
+  ScalingMethod scaling = ctrl.scaling;
+  const double *user_scale = ctrl.user_scale;
+  if (scaling == ScalingMethod::Auto) {
+    scaling = keep.matching_scale.empty() ? ScalingMethod::None
+                                          : ScalingMethod::UserSupplied;
+    user_scale = keep.matching_scale.data();
+  }
+  double matrix_max_abs = 0.0;
+  const ErrorCode map_err = map_values_to_permuted(
+      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs);
+  if (map_err != ErrorCode::Success) {
+    fkeep.factor_values.clear();
+    fkeep.status = FactorStatus::Singular;
+    info.factor_status = FactorStatus::Singular;
+    info.status = map_err;
+    return FactorStatus::Singular;
+  }
+
+  fkeep.scale.clear();
+  if (scaling != ScalingMethod::None && keep.n > 0) {
+    // The Matching ordering already matched the analysed values; when they
+    // are being factored unchanged, its scaling is the one to compute.
+    const bool reuse_analysis_matching =
+        scaling == ScalingMethod::Matching && !keep.matching_scale.empty() &&
+        ws.clean_values == keep.cleaned.values;
+    ErrorCode sc_err = ErrorCode::Success;
+    if (reuse_analysis_matching) {
+      fkeep.scale = keep.matching_scale;
+    } else {
+      CscLower clean_mat;
+      clean_mat.n = keep.n;
+      clean_mat.col_ptr = keep.cleaned.col_ptr;
+      clean_mat.row_idx = keep.cleaned.row_idx;
+      clean_mat.values = ws.clean_values;
+      sc_err = compute_scaling_for_method(clean_mat, scaling, fkeep.scale,
+                                          ctrl.print_level, user_scale);
+    }
+    if (sc_err != ErrorCode::Success) {
+      fkeep.factor_values.clear();
+      fkeep.status = FactorStatus::Singular;
+      info.factor_status = FactorStatus::Singular;
+      info.status = sc_err;
+      return FactorStatus::Singular;
+    }
+
+    // Apply scale S * A * S to clean_values and rescatter into ws.perm_values
+    for (Int j = 0; j < keep.n; ++j) {
+      const double sj = fkeep.scale[static_cast<std::size_t>(j)];
+      for (Int p = keep.cleaned.col_ptr[static_cast<std::size_t>(j)];
+           p < keep.cleaned.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+        const Int i = keep.cleaned.row_idx[static_cast<std::size_t>(p)];
+        ws.clean_values[static_cast<std::size_t>(p)] *=
+            fkeep.scale[static_cast<std::size_t>(i)] * sj;
+      }
+    }
+    if (keep.orig_to_perm_idx.empty()) {
+      ws.perm_values = ws.clean_values;
+    } else {
+      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
+      for (std::size_t k = 0; k < ws.clean_values.size(); ++k) {
+        const Int p_slot = keep.orig_to_perm_idx[k];
+        ws.perm_values[static_cast<std::size_t>(p_slot)] += ws.clean_values[k];
+      }
+    }
+  }
+
+  fkeep.n = keep.n;
   fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
   fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
+  fkeep.num_perm.resize(static_cast<std::size_t>(keep.n));
+  std::iota(fkeep.num_perm.begin(), fkeep.num_perm.end(), 0);
+  fkeep.num_iperm = fkeep.num_perm;
   fkeep.analysis = &keep;
   fkeep.is_posdef = false;
+  fkeep.static_pivots = 0;
+  fkeep.status = FactorStatus::Success;
+  fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
+  fkeep.factor_values.clear();
   fkeep.pivot_types.assign(static_cast<std::size_t>(ns), {});
 
-  if (ns == 0) {
+  if (ns == 0 || keep.n == 0) {
     info.num_positive = 0;
     info.num_negative = 0;
     info.num_zero = 0;
+    info.numerical_rank = 0;
+    info.factor_status = FactorStatus::Success;
+    info.status = ErrorCode::Success;
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
     return FactorStatus::Success;
   }
 
-#ifdef SMF_PARALLEL
-  if (ctrl.num_threads > 1) {
-    BlasSerialGuard blas_guard;
-    // Identity ordering reuses cleaned pattern/values directly.
-    CscLower Ap;
-    Ap.n = keep.n;
-    if (keep.orig_to_perm_idx.empty()) {
-      Ap.col_ptr = keep.cleaned.col_ptr;
-      Ap.row_idx = keep.cleaned.row_idx;
-      Ap.values = keep.cleaned.values;
-    } else {
-      const Int nnz_perm_p =
-          keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
-      std::vector<double> Ap_values =
-          scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_p);
-      Ap.col_ptr = keep.perm_col_ptr;
-      Ap.row_idx = keep.perm_row_idx;
-      Ap.values = std::move(Ap_values);
-    }
-    
-    InertiaCounts par_inertia{};
-    int par_delayed = 0;
-    const FactorStatus ps =
-        factor_indef_parallel(keep, Ap, ctrl, fkeep, par_inertia, par_delayed);
-    info.delayed_pivots = par_delayed;
-    info.num_positive = par_inertia.positive;
-    info.num_negative = par_inertia.negative;
-    info.num_zero = par_inertia.zero;
-    info.numerical_rank =
-        static_cast<int>(keep.n) - par_inertia.zero;
-      build_diag_entries(keep, fkeep);
-      build_solve_steps(keep, fkeep);
-    if (par_inertia.zero > 0)
-      return FactorStatus::Singular;
-    return ps;
-  }
-#endif // SMF_PARALLEL
+  const std::vector<Int> &ap_col_ptr =
+      keep.perm_col_ptr.empty() ? keep.cleaned.col_ptr : keep.perm_col_ptr;
+  const std::vector<Int> &ap_row_idx =
+      keep.perm_col_ptr.empty() ? keep.cleaned.row_idx : keep.perm_row_idx;
 
-  // ---- Serial path -----------------------------------------
+  if (scaling != ScalingMethod::None) {
+    matrix_max_abs = 0.0;
+    for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
+  }
+  // Diagonal regularization (Control::reg_diag_sign): +-reg_diag_tol * max|A|
+  // on the scaled diagonal, max|A| taken before it. In the permuted pattern
+  // the diagonal of permuted column j is original row keep.perm[j].
+  if (ctrl.reg_diag_sign != nullptr && ctrl.reg_diag_tol > 0.0 && matrix_max_abs > 0.0) {
+    const double rho = ctrl.reg_diag_tol * matrix_max_abs;
+    for (Int j = 0; j < keep.n; ++j) {
+      const std::size_t sj = static_cast<std::size_t>(j);
+      const Int orig = keep.perm.empty() ? j : keep.perm[sj];
+      const int8_t sign = ctrl.reg_diag_sign[static_cast<std::size_t>(orig)];
+      if (sign == 0) continue;
+      for (Int p = ap_col_ptr[sj]; p < ap_col_ptr[sj + 1]; ++p) {
+        if (ap_row_idx[static_cast<std::size_t>(p)] == j) {
+          ws.perm_values[static_cast<std::size_t>(p)] += sign > 0 ? rho : -rho;
+          break;
+        }
+      }
+    }
+  }
+  const double eff_small =
+      (matrix_max_abs > 0.0 && matrix_max_abs < ctrl.small_pivot)
+          ? (ctrl.small_pivot * matrix_max_abs)
+          : ctrl.small_pivot;
+
+  if (!use_parallel_path) {
+    // Threads go to BLAS inside the fronts (deterministic mode: one).
+    std::optional<BlasThreadGuard> blas_threads;
+    if (ctrl.num_threads > 1)
+      blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
+    SerialFactorStats st;
+    const double static_pivot =
+        ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;
+    const double fallback_static_pivot =
+        ctrl.fallback_static_pivot_tol > 0.0 ? ctrl.fallback_static_pivot_tol * matrix_max_abs : 0.0;
+    // Control::delay_budget: the fronts after the budget static-pivot at
+    // kDelayBudgetStaticTol * max|A| (sqrt(eps) scale, as MA57).
+    const double budget_static_pivot =
+        ctrl.delay_budget >= 0 ? kDelayBudgetStaticTol * matrix_max_abs : 0.0;
+    const ErrorCode err = multifrontal_factor_serial(
+        keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
+        eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
+        fkeep, ws, st);
+    blas_threads.reset();
+    if (err == ErrorCode::InertiaExceeded) {
+      // Too many negative pivots: stopped early, the factor is unusable.
+      std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
+      fkeep.factor_values.clear();
+      info.status = err;
+      info.factor_status = FactorStatus::InertiaExceeded;
+      fkeep.status = FactorStatus::InertiaExceeded;
+      info.delayed_pivots = st.delayed;
+      info.static_pivots = st.static_pivots;
+      info.inertia_exact = st.static_pivots == 0;
+      info.delay_budget_retries = st.budget_retries;
+      info.aptp_failed_columns = st.aptp_failed;
+      info.parallel_subtrees = st.parallel_subtrees;
+      info.top_tile_fronts = st.top_tile_fronts;
+      info.small_front_handovers = st.small_front_handovers;
+      info.num_positive = st.inertia.positive;
+      info.num_negative = st.inertia.negative;
+      info.num_zero = st.inertia.zero;
+      info.actual_flops = st.flops;
+      info.aborted_flops_skipped = st.aborted_flops_skipped;
+      info.factor_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      return FactorStatus::InertiaExceeded;
+    }
+    if (err != ErrorCode::Success) {
+      std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
+      fkeep.factor_values.clear();
+      info.status = err;
+      info.factor_status = FactorStatus::Singular;
+      fkeep.status = FactorStatus::Singular;
+      return FactorStatus::Singular;
+    }
+    info.delayed_pivots = st.delayed;
+    info.static_pivots = st.static_pivots;
+    fkeep.static_pivots = st.static_pivots;
+    info.inertia_exact = st.static_pivots == 0;
+    info.delay_budget_retries = st.budget_retries;
+    info.aptp_failed_columns = st.aptp_failed;
+    info.parallel_subtrees = st.parallel_subtrees;
+    info.top_tile_fronts = st.top_tile_fronts;
+    info.small_front_handovers = st.small_front_handovers;
+    info.num_positive = st.inertia.positive;
+    info.num_negative = st.inertia.negative;
+    info.num_zero = st.inertia.zero;
+    info.numerical_rank = static_cast<int>(keep.n) - st.inertia.zero;
+    info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+    info.actual_flops = st.flops;
+    info.max_front_size = std::max(info.max_front_size, st.max_front);
+    info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
+    info.arena_peak_bytes = static_cast<long>(
+        (ws.cb_values.capacity() + ws.kernel_work.capacity()) *
+        sizeof(double));
+
+    ++ws.warmup_calls;
+    const auto t1 = std::chrono::steady_clock::now();
+    info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+    fkeep.status =
+        (st.inertia.zero > 0) ? FactorStatus::Singular : FactorStatus::Success;
+    info.factor_status = fkeep.status;
+    info.status = (fkeep.status == FactorStatus::Success)
+                      ? ErrorCode::Success
+                      : ErrorCode::SingularMatrix;
+    return fkeep.status;
+  }
 
   CscLower Ap;
   Ap.n = keep.n;
-  if (keep.orig_to_perm_idx.empty()) {
-    Ap.col_ptr = keep.cleaned.col_ptr;
-    Ap.row_idx = keep.cleaned.row_idx;
-    Ap.values = keep.cleaned.values;
-  } else {
-    const Int nnz_perm_s = keep.perm_col_ptr[static_cast<std::size_t>(keep.n)];
-    std::vector<double> Ap_values =
-        scatter_values_indef(keep.cleaned, keep.orig_to_perm_idx, nnz_perm_s);
-    Ap.col_ptr = keep.perm_col_ptr;
-    Ap.row_idx = keep.perm_row_idx;
-    Ap.values = std::move(Ap_values);
+  Ap.col_ptr = ap_col_ptr;
+  Ap.row_idx = ap_row_idx;
+  Ap.values = ws.perm_values;
+
+  std::atomic<int> alloc_or_input_err{0};
+
+#ifdef SMF_PARALLEL
+  {
+    BlasSerialGuard blas_guard;
+    auto process_node = [&](Int s) {
+      if (alloc_or_input_err.load(std::memory_order_relaxed) != 0)
+        return;
+      FrontResult fr = build_and_factor_supernode_front(
+          s, keep, Ap, ctrl, eff_small, ws.node_results, nullptr);
+      if (fr.status == ErrorCode::AllocationError ||
+          fr.status == ErrorCode::IllegalValue) {
+        alloc_or_input_err.store(static_cast<int>(fr.status),
+                                 std::memory_order_relaxed);
+      }
+      ws.node_results[static_cast<std::size_t>(s)] = std::move(fr);
+    };
+    ExecutionPolicy policy;
+    policy.threads = ctrl.num_threads;
+    policy.memory_budget_bytes = ctrl.memory_budget_bytes;
+    policy.min_task_flops = ctrl.factor_parallel_min_flops;
+    policy.deterministic = ctrl.deterministic;
+    run_costed_postorder(keep, policy, process_node);
+  }
+#endif
+
+  if (alloc_or_input_err.load() != 0) {
+    fkeep.factor_values.clear();
+    info.status = static_cast<ErrorCode>(alloc_or_input_err.load());
+    info.factor_status = FactorStatus::Singular;
+    fkeep.status = FactorStatus::Singular;
+    return FactorStatus::Singular;
   }
 
-  // Per-supernode contribution blocks (ext×ext, column-major, heap-alloc).
-  std::vector<std::vector<double>> contrib(static_cast<std::size_t>(ns));
-
-  // Arena for FrontalMatrix buffers — reset after each supernode.
-  AlignedArena arena(static_cast<std::size_t>(32) << 20); // 32 MiB
-
-  InertiaCounts inertia{};
-
-  for (Int s = 0; s < ns; ++s) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    const Supernode &sn = keep.supernodes[si];
-    const FrontalInfo &fi = keep.fronts[si];
-    const Int p = sn.width();      // pivot (fully-summed) columns
-    const Int f = fi.front_size(); // total front rows (pivot + extension)
-    const Int ext = f - p;         // extension rows
-
-    if (p == 0)
-      continue;
-
-    // Column indices for this supernode = first p rows of the front.
-    AlignedArena::Marker mark = arena.save();
-    FrontalMatrix front(f, p, fi.row_indices.data(), fi.row_indices.data(), arena);
-
-    // ---- Scatter permuted A values ----------------------------------
-    front.scatter_original(Ap.col_ptr, Ap.row_idx, Ap.values);
-
-    // a22[col*ext+row] for row>=col: accumulates child A22 contributions
-    // that land in extension×extension positions of this front.
-    std::vector<double> a22;
-    if (ext > 0)
-      a22.assign(static_cast<std::size_t>(ext) * static_cast<std::size_t>(ext), 0.0);
-
-    // ---- Assemble child contribution blocks -------------------------
-    // Children are pre-sorted; child_parent_rows may be precomputed or
-    // built on demand.
-    std::vector<Int> prows_local;
-    for (std::size_t k = 0; k < sn.children.size(); ++k) {
-      const Int c = sn.children[k];
-      const std::size_t ci = static_cast<std::size_t>(c);
-      if (contrib[ci].empty())
-        continue;
-
-      const FrontalInfo &cfi = keep.fronts[ci];
-      const Int cp = keep.supernodes[ci].width();
-      const Int cext = cfi.front_size() - cp;
-      if (cext <= 0)
-        continue;
-
-      const std::vector<Int> *prows_ptr = nullptr;
-      if (k < fi.child_parent_rows.size() &&
-          fi.child_parent_rows[k].size() == static_cast<std::size_t>(cext)) {
-        prows_ptr = &fi.child_parent_rows[k];
-      } else {
-        prows_local.resize(static_cast<std::size_t>(cext));
-        for (Int i = 0; i < cext; ++i) {
-          const Int glob = cfi.row_indices[static_cast<std::size_t>(cp + i)];
-          const auto it = std::lower_bound(fi.row_indices.cbegin(),
-                                           fi.row_indices.cend(), glob);
-          prows_local[static_cast<std::size_t>(i)] =
-              static_cast<Int>(it - fi.row_indices.cbegin());
-        }
-        prows_ptr = &prows_local;
-      }
-      const std::vector<Int> &prows = *prows_ptr;
-
-      front.assemble_contrib(contrib[ci].data(), cext, prows);
-
-      // Accumulate A22-type entries (both row and col map to extension rows)
-      // into a22, so the contribution block carries the full Schur complement.
-      if (ext > 0) {
-        const double *cc = contrib[ci].data();
-        for (Int jj = 0; jj < cext; ++jj) {
-          const Int pr_j = prows[static_cast<std::size_t>(jj)];
-          if (pr_j < p)
-            continue;
-          const Int lcol = pr_j - p;
-          for (Int ii = jj; ii < cext; ++ii) {
-            const Int pr_i = prows[static_cast<std::size_t>(ii)];
-            if (pr_i < p)
-              continue;
-            const Int lrow = pr_i - p;
-            const double val =
-                cc[static_cast<std::size_t>(jj) *
-                       static_cast<std::size_t>(cext) +
-                   static_cast<std::size_t>(ii)];
-            // Store in lower-triangle position (lrow >= lcol or swap)
-            if (lrow >= lcol)
-              a22[static_cast<std::size_t>(lcol) *
-                      static_cast<std::size_t>(ext) +
-                  static_cast<std::size_t>(lrow)] += val;
-            else
-              a22[static_cast<std::size_t>(lrow) *
-                      static_cast<std::size_t>(ext) +
-                  static_cast<std::size_t>(lcol)] += val;
-          }
-        }
-      }
-
-      contrib[ci].clear();
-    }
-
-    // ---- BBK pivot loop on the p×p fully-summed block ---------------
-    // pivot_tag[k]: 0=delayed, 1=1×1 accepted, 2=first of 2×2, -1=second of 2×2
-    const int num_fs = static_cast<int>(p);
-    std::vector<int8_t> pivot_tag(static_cast<std::size_t>(num_fs), int8_t{0});
-
-    int delayed_here = 0;
-    int k = 0;
-    while (k < num_fs) {
-      PivotResult pr =
-          choose_pivot(front, k, num_fs, ctrl.pivot_u, ctrl.small_pivot);
-
-      if (pr.decision == PivotDecision::Reject) {
-        // column k is delayed — leave tag at 0
-        ++delayed_here;
-        ++k;
-        continue;
-      }
-
-      if (pr.decision == PivotDecision::Accept1x1) {
-        if (pr.col0 != k)
-          sym_swap_front(front, k, pr.col0, num_fs);
-
-        const double d00 = front.at(static_cast<Int>(k), static_cast<Int>(k));
-        add_inertia_1x1(d00, ctrl.small_pivot, inertia);
-        pivot_tag[static_cast<std::size_t>(k)] = int8_t{1};
-        apply_pivot_1x1(front, k, num_fs);
-        ++k;
-
-      } else { // Accept2x2
-        assert(k + 1 < num_fs);
-        if (pr.col1 != k + 1)
-          sym_swap_front(front, k + 1, pr.col1, num_fs);
-
-        const double d00 = front.at(static_cast<Int>(k), static_cast<Int>(k));
-        const double d10 =
-            front.at(static_cast<Int>(k + 1), static_cast<Int>(k));
-        const double d11 =
-            front.at(static_cast<Int>(k + 1), static_cast<Int>(k + 1));
-        add_inertia_2x2(d00, d10, d11, ctrl.small_pivot, inertia);
-        pivot_tag[static_cast<std::size_t>(k)] = int8_t{2};
-        pivot_tag[static_cast<std::size_t>(k + 1)] = int8_t{-1};
-        apply_pivot_2x2(front, k, num_fs, ctrl.small_pivot);
-        k += 2;
-      }
-    }
-
-    info.delayed_pivots += delayed_here;
-
-    // DECISION LOG (M5.S2): Rejected pivots are zero eigenvalues.
-    // In this implementation there is no real "delay-to-parent" mechanism —
-    // a Reject at any supernode means the column can never be factored and
-    // its eigenvalue contribution is zero.  Count each rejected column in
-    // inertia.zero so that info.num_zero and info.numerical_rank are correct.
-    inertia.zero += delayed_here;
-
-    // ---- Store the f×p factored front in fkeep.factor_values --------
-    {
-      const std::size_t lsize =
-          static_cast<std::size_t>(f) * static_cast<std::size_t>(p);
-      const std::size_t base =
-          static_cast<std::size_t>(fkeep.factor_col_ptr[si]);
-      const double *src = front.data();
-      for (std::size_t q = 0; q < lsize; ++q)
-        fkeep.factor_values[base + q] = src[q];
-    }
-
-    // ---- Store pivot tags for solve_diag ----------------------------
-    if (si < fkeep.pivot_types.size())
-      fkeep.pivot_types[si] = pivot_tag;
-
-    // ---- Compute contribution block for parent ----------------------
-    // CB[j*ext+i] = a22[j*ext+i] - ∑_k L_ext[i,k]·D_k·L_ext[j,k]  (i>=j)
-    // a22 carries assembled child A22-type contributions; the Schur
-    // complement from the pivot columns is subtracted below.
-    if (ext > 0 && sn.parent >= 0) {
-      const std::size_t ext_sz = static_cast<std::size_t>(ext);
-      // Initialize contribution block from accumulated a22
-      contrib[si] = a22;
-      double *cb = contrib[si].data();
-
-      for (int pk = 0; pk < num_fs; ++pk) {
-        const int8_t tag = pivot_tag[static_cast<std::size_t>(pk)];
-        if (tag == int8_t{0} || tag == int8_t{-1})
-          continue;
-
-        if (tag == int8_t{1}) {
-          // 1×1 pivot at column pk
-          // After apply_pivot_1x1, extension rows already store L factor entries
-          // (divided by d), so read them directly — no extra inv_d needed.
-          const double d = front.at(static_cast<Int>(pk), static_cast<Int>(pk));
-          if (std::abs(d) < ctrl.small_pivot)
-            continue;
-
-          for (Int j = 0; j < ext; ++j) {
-            const double lj = front.at(p + j, static_cast<Int>(pk));
-            for (Int i = j; i < ext; ++i) {
-              const double li = front.at(p + i, static_cast<Int>(pk));
-              cb[static_cast<std::size_t>(j) * ext_sz +
-                 static_cast<std::size_t>(i)] -= li * d * lj;
-            }
-          }
-
-        } else { // tag == 2 : 2×2 pivot at (pk, pk+1)
-          // After apply_pivot_2x2, extension rows already store L factor entries
-          // for both columns pk and pk+1 — read them directly.
-          const double d00 =
-              front.at(static_cast<Int>(pk), static_cast<Int>(pk));
-          const double d10 =
-              front.at(static_cast<Int>(pk + 1), static_cast<Int>(pk));
-          const double d11 =
-              front.at(static_cast<Int>(pk + 1), static_cast<Int>(pk + 1));
-          const double det = d00 * d11 - d10 * d10;
-          if (std::abs(det) < ctrl.small_pivot)
-            continue;
-
-          for (Int j = 0; j < ext; ++j) {
-            const double lj0 = front.at(p + j, static_cast<Int>(pk));
-            const double lj1 = front.at(p + j, static_cast<Int>(pk + 1));
-
-            for (Int i = j; i < ext; ++i) {
-              const double li0 = front.at(p + i, static_cast<Int>(pk));
-              const double li1 = front.at(p + i, static_cast<Int>(pk + 1));
-
-              cb[static_cast<std::size_t>(j) * ext_sz +
-                 static_cast<std::size_t>(i)] -=
-                  li0 * d00 * lj0 + li0 * d10 * lj1 + li1 * d10 * lj0 +
-                  li1 * d11 * lj1;
-            }
-          }
-        }
-      } // pk loop
-    }
-
-    arena.reset_to(mark);
-  } // supernode loop
-
-  // Accumulate inertia into info
-  info.num_positive = inertia.positive;
-  info.num_negative = inertia.negative;
-  info.num_zero = inertia.zero;
-
-  // DECISION LOG (M5.S2): numerical_rank = n minus zero-eigenvalue count.
-  // All rejected pivots have been folded into inertia.zero above.
-  info.numerical_rank = static_cast<int>(keep.n) - inertia.zero;
-  build_diag_entries(keep, fkeep);
-  build_solve_steps(keep, fkeep);
-
-  // Return Singular whenever any pivot was rejected (zero) — regardless of
-  // continue_on_singular.  The flag controls only whether the caller proceeds
-  // to solve with the degraded factorization; it does not change the status.
-  if (inertia.zero > 0)
+  InertiaCounts total_inertia{};
+  int total_delayed = 0;
+  double total_flops = 0.0;
+  int max_realized_front = 0;
+  if (!finalize_factor_from_front_results(keep,
+                                          ws.node_results,
+                                          fkeep,
+                                          info,
+                                          total_inertia,
+                                          total_delayed,
+                                          total_flops,
+                                          max_realized_front)) {
+    fkeep.factor_values.clear();
+    info.status = ErrorCode::AllocationError;
+    info.factor_status = FactorStatus::Singular;
+    fkeep.status = FactorStatus::Singular;
     return FactorStatus::Singular;
-  return FactorStatus::Success;
+  }
+
+  info.delayed_pivots = total_delayed;
+  info.num_positive = total_inertia.positive;
+  info.num_negative = total_inertia.negative;
+  info.num_zero = total_inertia.zero;
+  info.numerical_rank = static_cast<int>(keep.n) - total_inertia.zero;
+
+  // The task-parallel engine has no early stop: the limit is checked on the
+  // finished factor (nothing skipped), so the status means the same.
+  if (ctrl.max_negative_pivots >= 0 && total_inertia.negative > ctrl.max_negative_pivots) {
+    fkeep.factor_values.clear();
+    info.status = ErrorCode::InertiaExceeded;
+    info.factor_status = FactorStatus::InertiaExceeded;
+    fkeep.status = FactorStatus::InertiaExceeded;
+    return FactorStatus::InertiaExceeded;
+  }
+  info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
+  info.arena_peak_bytes = static_cast<long>(
+      ws.front_scratch.capacity() * sizeof(double) + ws.peak_pool_bytes);
+
+  ++ws.warmup_calls;
+  const auto t1 = std::chrono::steady_clock::now();
+  info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
+
+  fkeep.status =
+      (total_inertia.zero > 0) ? FactorStatus::Singular : FactorStatus::Success;
+  info.factor_status = fkeep.status;
+  info.status = (fkeep.status == FactorStatus::Success)
+                    ? ErrorCode::Success
+                    : ErrorCode::SingularMatrix;
+  return fkeep.status;
+}
+
+FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
+                          Info &info, FactorKeep &fkeep) {
+  NumericWorkspace ws;
+  return factor_indef(keep, keep.cleaned, ctrl, info, fkeep, ws);
 }
 
 } // namespace smf

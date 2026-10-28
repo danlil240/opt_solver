@@ -25,9 +25,9 @@ static void make_1x1(AnalysisKeep &ak, FactorKeep &fk) {
   // no children
   ak.supernodes.push_back(std::move(sn));
 
-  FrontalInfo fi;
-  fi.row_indices = {0};
-  ak.fronts.push_back(std::move(fi));
+  ak.child_ptr = {0, 0};
+  ak.front_row_ptr = {0, 1};
+  ak.front_row_idx = {0};
 
   // Factor: L11 = [2.0]  (sqrt(4))
   ak.solve_postorder = {0};
@@ -63,18 +63,14 @@ static void make_2x2(AnalysisKeep &ak, FactorKeep &fk) {
   sn1.col_start = 1;
   sn1.col_end = 2;
   sn1.parent = -1;
-  sn1.children = {0};
   ak.supernodes.push_back(std::move(sn1));
 
-  // fi0: front rows {0,1} → f=2, p=1, q=1
-  FrontalInfo fi0;
-  fi0.row_indices = {0, 1};
-  ak.fronts.push_back(std::move(fi0));
-
-  // fi1: front rows {1} → f=1, p=1, q=0
-  FrontalInfo fi1;
-  fi1.row_indices = {1};
-  ak.fronts.push_back(std::move(fi1));
+  // children: sn1 -> {0}
+  ak.child_ptr = {0, 0, 1};
+  ak.child_idx = {0};
+  // front rows: sn0 {0,1} (f=2, p=1, q=1); sn1 {1} (f=1, p=1, q=0)
+  ak.front_row_ptr = {0, 2, 3};
+  ak.front_row_idx = {0, 1, 1};
 
   // Factor values:
   //   sn0: f×p = 2×1 col-major: [L[0,0], L[1,0]] = [2.0, 1.0]

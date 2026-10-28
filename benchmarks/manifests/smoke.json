@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "suite": "smoke",
+  "solvers": ["smf", "ma27", "ma57", "ma86", "ma87", "ma97", "ssids", "mumps", "mkl_pardiso", "cholmod"],
+  "required_baselines": ["ma57", "ma97"],
+  "cases": [
+    {
+      "matrix_id": "smoke_spd_tridiag_10",
+      "sequence_id": "smoke_spd_tridiag_10",
+      "family_id": "synthetic_spd",
+      "symmetry": "spd",
+      "n": 10,
+      "split": "train",
+      "mode": "cold",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    },
+    {
+      "matrix_id": "smoke_indef_exchange_2",
+      "sequence_id": "smoke_indef_exchange_2",
+      "family_id": "synthetic_indef",
+      "symmetry": "indefinite",
+      "n": 2,
+      "split": "train",
+      "mode": "cold",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    },
+    {
+      "matrix_id": "smoke_kkt_4",
+      "sequence_id": "smoke_kkt_4",
+      "family_id": "synthetic_kkt",
+      "symmetry": "indefinite",
+      "n": 4,
+      "split": "test",
+      "mode": "warm_sequence",
+      "track": "recommended",
+      "expected_outcome": "Success"
+    }
+  ]
+}

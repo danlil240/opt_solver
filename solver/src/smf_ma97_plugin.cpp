@@ -1,163 +1,294 @@
-#include <cmath>
-#include <cstdio>
-/**
- * smf_ma97_plugin.cpp  —  HSL MA97 C interface backed by smf.
- *
- * Build as a shared library (libsmf_ma97.so) with
- *   cmake -DSMF_BUILD_MA97_PLUGIN=ON
- *   cmake --build build --target smf_ma97
- *   cmake --install build --prefix /usr/local
- *
- * Then tell IPOPT to use it by adding two solver options:
- *   s_opts["linear_solver"] = "ma97";
- *   s_opts["hsllib"]        = "/usr/local/lib/libsmf_ma97.so";
- *
- * IPOPT loads the 7 symbols below via dlsym at runtime.  The structs
- * ma97_control_d / ma97_info_d are laid out to match the HSL MA97 3.x
- * C interface specification (same layout IPOPT 3.14 was compiled against).
- *
- * Compatibility note
- * ------------------
- * The only fields read at well-known offsets are:
- *   control.f_arrays  (offset 0, int)  — safe to read regardless of layout
- *   info.flag         (offset 0, int)  — safe to write regardless of layout
- * For solvers using hessian_approximation=limited-memory (L-BFGS) IPOPT
- * does not check inertia, so info.num_neg is never consulted.  For
- * exact-Hessian mode the struct layout must match HSL MA97 exactly.
- */
-
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
-#include "smf/solver.hpp"
+#include "smf/ipm_session.hpp"
 #include "smf/types.hpp"
 
 #include <algorithm>
 #include <cassert>
-#include <cstdlib>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <span>
 #include <sstream>
 #include <string>
 #include <vector>
 
-// ============================================================================
-// MA97 struct definitions  (HSL MA97 2.8 / IPOPT 3.14 C interface spec)
-// ============================================================================
-
 struct ma97_control_d
 {
-    // CRITICAL: field order must match HSL MA97 2.8 / IPOPT 3.14 exactly
-    // or IPOPT will misread control parameters like u (pivot tolerance)
-    int f_arrays;         // [0]  0=C 0-based, 1=Fortran 1-based
-    int action;           // [4]  0=continue on singular, 1=abort
-    int nemin;            // [8]  node amalgamation minimum
-    double multiplier;    // [16] factor memory multiplier (8-byte aligned)
-    int ordering;         // [24] ordering method: 5=METIS/auto
-    int print_level;      // [28] -1=silent, 0=errors, 1=warnings, 2+=diagnostics
-    int scaling;          // [32] 0=user/none, 1-4=HSL scaling methods
-    double small;         // [40] small pivot threshold (8-byte aligned)
-    double u;             // [48] pivot tolerance (CRITICAL: IPOPT default 1e-8)
-    int unit_diagnostics; // [56]
-    int unit_error;       // [60]
-    int unit_warning;     // [64]
-    long factor_min;      // [72] minimum factor allocation (8-byte aligned)
-    int solve_blas3;      // [80] use BLAS3 for solve
-    int solve_min;        // [84] minimum solve work for threading
-    int solve_mf;         // [88] solve multifrontal control
-    double consist_tol;   // [96] consistency tolerance (8-byte aligned)
-    int ispare[5];        // [104] reserved
-    double rspare[10];    // [124] reserved (8-byte aligned)
+    int f_arrays;
+    int action;
+    int nemin;
+    double multiplier;
+    int ordering;
+    int print_level;
+    int scaling;
+    double small;
+    double u;
+    int unit_diagnostics;
+    int unit_error;
+    int unit_warning;
+    long factor_min;
+    int solve_blas3;
+    int solve_min;
+    int solve_mf;
+    double consist_tol;
+    int ispare[5];
+    double rspare[10];
 };
 
 struct ma97_info_d
 {
-    // CRITICAL: field order must match HSL MA97 2.8 / IPOPT 3.14 exactly
-    int flag;                // [0]  return code: 0=success, <0=error, 7=singular
-    int flag68;              // [4]  out-of-range warning count
-    int flag77;              // [8]  dup/rank deficiency warning count
-    int matrix_dup;          // [12] duplicate entries
-    int matrix_rank;         // [16] estimated rank
-    int matrix_outrange;     // [20] out-of-range entries
-    int matrix_missing_diag; // [24] missing diagonal entries
-    int maxdepth;            // [28] max supernode tree depth
-    int maxfront;            // [32] max frontal matrix size
-    int num_delay;           // [36] delayed pivots
-    long num_factor;         // [40] # nonzeros in factor (8-byte aligned)
-    long num_flops;          // [48] # floating-point ops
-    int num_neg;             // [56] negative eigenvalues (CRITICAL for IPOPT)
-    int num_sup;             // [60] supernodes
-    int num_two;             // [64] 2×2 pivots
-    int ordering;            // [68] ordering used
-    int stat;                // [72] Fortran allocation status
-    int maxsupernode;        // [76] largest supernode size
-    int ispare[4];           // [80] reserved
-    double rspare[10];       // [96] reserved (8-byte aligned)
+    int flag;
+    int flag68;
+    int flag77;
+    int matrix_dup;
+    int matrix_rank;
+    int matrix_outrange;
+    int matrix_missing_diag;
+    int maxdepth;
+    int maxfront;
+    int num_delay;
+    long num_factor;
+    long num_flops;
+    int num_neg;
+    int num_sup;
+    int num_two;
+    int ordering;
+    int stat;
+    int maxsupernode;
+    int ispare[4];
+    double rspare[10];
 };
 
-// ============================================================================
-// Internal per-problem state kept behind the opaque akeep / fkeep pointers
-// ============================================================================
+// A new IpmSession whose statistics are added to the unload summary when the
+// last of akeep / fkeep frees it.
+static std::shared_ptr<smf::IpmSession> make_session();
 
+// The IpmSession owns the analysis, the factor and the workspaces. akeep and
+// fkeep share it: MA97 callers may free akeep and still solve with fkeep.
 struct SmfAkeep
 {
-    smf::Solver solver;
-    smf::Control ctrl;
-    smf::CscLower mat; // sorted lower-CSC copy
-    smf::Info info;
-    std::unique_ptr<smf::AnalysisKeep> ak;
-
-    // Map: position k in mat → original index in the IPOPT val[] array
-    std::vector<int> sort_perm;
-    // Map: position k in mat → position in ak->cleaned (for value scatter)
-    std::vector<int> csc_to_cleaned;
+    std::shared_ptr<smf::IpmSession> session = make_session();
+    smf::Control ctrl;          // factor control, updated from every MA97 control block
+    smf::CscLower mat;          // pattern + this factorization's values (CSC order)
+    std::vector<int> sort_perm; // CSC entry -> caller's entry
     int n = 0;
+    int capture_id = 0;          // KKT dump sequence id (SMF_KKT_DUMP_DIR)
+    int dump_factorizations = 0; // factorizations dumped for this analysis
 };
 
+// The factor itself lives in the session, so two fkeeps made from one akeep
+// would share it: `generation` is the session's factor_generation() when this
+// fkeep was factored, and a solve with an fkeep whose factor has since been
+// replaced (another fkeep factored from the same akeep) fails with flag -1
+// (MA97's "error in the sequence of calls"). IPOPT reuses one fkeep handle per
+// akeep, which always holds the current generation.
 struct SmfFkeep
 {
-    smf::FactorKeep fk;
+    std::shared_ptr<smf::IpmSession> session;
+    smf::Control ctrl; // solve control: the factor's, updated by each solve's control block
+    int n = 0;
     int num_neg = 0;
-    int capture_id = 0;
-    bool rhs_captured = false;
+    int num_two = 0;
+    std::uint64_t generation = 0; // session factor generation of this fkeep's factor
+    bool aborted = false; // factor stopped on wrong inertia: num_neg is a partial count
 };
 
-// ============================================================================
-// Internal helpers
-// ============================================================================
+static bool env_flag(const char* name, bool fallback)
+{
+    const char* v = std::getenv(name);
+    return (v == nullptr || *v == '\0') ? fallback : std::atoi(v) != 0;
+}
+
+// The IPM features are opt-in through the environment (the MA97 interface
+// has no slots for them). Their defaults were decided on the held-out IPOPT
+// models (docs/performance/2026-10-26-ipm-mode.md): every feature failed its
+// gate there, so every default is off and the plugin behaves as plain smf.
+//   SMF_IPM_ABORT=1      inertia learning and early abort (Feature 1), default
+//                        off: identical logs, but saves < 5% (the excess
+//                        negatives appear in the root front); tuning gate failed too.
+//   SMF_IPM_REANALYSE=1  re-analysis from the realized pivot order (Feature 2),
+//                        default off; IpmControl's default thresholds. Held-out
+//                        wall geomean 1.017 > 1; tuning failed the iteration band.
+//   SMF_IPM_STATIC=off|fallback|regularized  static mode (Feature 3), default
+//                        off; an unknown value is off. Both static modes fail
+//                        the held-out outcome gate (new failures, iterations).
+//   SMF_IPM_STATIC_ZERO=1  static pivots count as zero eigenvalues instead of
+//                        by the hybrid rule (IpmControl::static_as_zero), default 0.
+static smf::StaticMode env_static_mode()
+{
+    const char* v = std::getenv("SMF_IPM_STATIC");
+    if (v != nullptr && std::strcmp(v, "fallback") == 0)
+        return smf::StaticMode::Fallback;
+    if (v != nullptr && std::strcmp(v, "regularized") == 0)
+        return smf::StaticMode::Regularized;
+    return smf::StaticMode::Off;
+}
+
+static smf::IpmControl plugin_ipm_control()
+{
+    static const bool abort_on = env_flag("SMF_IPM_ABORT", false);
+    static const bool reanalyse_on = env_flag("SMF_IPM_REANALYSE", false);
+    static const smf::StaticMode static_mode = env_static_mode();
+    static const bool static_zero = env_flag("SMF_IPM_STATIC_ZERO", false);
+    smf::IpmControl ipm;
+    ipm.learn_inertia = abort_on;
+    ipm.abort_on_wrong_inertia = abort_on;
+    ipm.reanalyse = reanalyse_on;
+    ipm.static_mode = static_mode;
+    ipm.static_as_zero = static_zero;
+    return ipm;
+}
+
+// Test seam, never set in production: SMF_TEST_DELAY_BUDGET=k gives every
+// factorization Control::delay_budget = k (k = 0: every front static-pivots),
+// so a test can force static pivots without requesting a static mode. Read
+// once, at the first analyse after the plugin is loaded; unset, the plugin
+// keeps the default delay_budget = -1 (unlimited delays, exact inertia).
+static int test_delay_budget()
+{
+    static const int budget = [] {
+        const char* v = std::getenv("SMF_TEST_DELAY_BUDGET");
+        return (v == nullptr || *v == '\0') ? -1 : std::atoi(v);
+    }();
+    return budget;
+}
+
+// Call statistics for benchmarking (SMF_PLUGIN_STATS=1): counts and time of
+// factorizations and solves, printed to stderr when the plugin unloads.
+struct PluginStats
+{
+    bool enabled = std::getenv("SMF_PLUGIN_STATS") != nullptr;
+    bool trace = std::getenv("SMF_PLUGIN_STATS") != nullptr && std::atoi(std::getenv("SMF_PLUGIN_STATS")) > 1;
+    bool last_call_was_factor = false;  // no solve since the previous factorization => IPOPT inertia correction
+    long factors = 0;
+    long solves = 0;
+    long rhs = 0;
+    double factor_s = 0.0;
+    double solve_s = 0.0;
+    // IpmSession statistics of the sessions freed so far (one per analysis).
+    long sessions = 0;
+    smf::IpmStats ipm;
+    void add_session(const smf::IpmStats& st)
+    {
+        ++sessions;
+        ipm.factorizations += st.factorizations;
+        ipm.accepted += st.accepted;
+        ipm.aborted += st.aborted;
+        ipm.reanalyses_tried += st.reanalyses_tried;
+        ipm.reanalyses_adopted += st.reanalyses_adopted;
+        ipm.reanalyses_reverted += st.reanalyses_reverted;
+        ipm.static_pivots += st.static_pivots;
+        ipm.flops_avoided += st.flops_avoided;
+        ipm.reanalyse_seconds += st.reanalyse_seconds;
+    }
+    ~PluginStats()
+    {
+        if (!enabled)
+            return;
+        std::fprintf(stderr,
+                     "[smf_ma97] factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
+                     factors, factor_s, solves, rhs, solve_s,
+                     solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
+        std::fprintf(stderr,
+                     "[smf_ma97] ipm: sessions=%ld factorizations=%d accepted=%d aborted=%d "
+                     "reanalyses_tried=%d reanalyses_adopted=%d reanalyses_reverted=%d reanalyse_s=%.6f "
+                     "flops_avoided=%.6e\n",
+                     sessions, ipm.factorizations, ipm.accepted, ipm.aborted, ipm.reanalyses_tried,
+                     ipm.reanalyses_adopted, ipm.reanalyses_reverted, ipm.reanalyse_seconds, ipm.flops_avoided);
+    }
+};
+static PluginStats g_stats;
+
+static std::shared_ptr<smf::IpmSession> make_session()
+{
+    return std::shared_ptr<smf::IpmSession>(new smf::IpmSession(), [](smf::IpmSession* s) {
+        if (g_stats.enabled)
+            g_stats.add_session(s->stats());
+        delete s;
+    });
+}
+
+// KKT capture for benchmarking (SMF_KKT_DUMP_DIR): the first factorization of
+// each analysis writes <dir>/kkt_s<id>.mtx (cleaned lower triangle, entries in
+// column-major order); every factorization appends its values, in that same
+// order, to <dir>/kkt_s<id>.vals as raw doubles. SMF_KKT_DUMP_MAX (default
+// 200) caps the factorizations recorded per analysis.
+static void dump_kkt(SmfAkeep* ak)
+{
+    static const char* dir = std::getenv("SMF_KKT_DUMP_DIR");
+    if (dir == nullptr || *dir == '\0')
+        return;
+    static int next_id = 0;
+    static const int max_dumps = std::getenv("SMF_KKT_DUMP_MAX") ? std::atoi(std::getenv("SMF_KKT_DUMP_MAX")) : 200;
+    if (ak->dump_factorizations == 0)
+        ak->capture_id = next_id++;
+    if (ak->dump_factorizations >= max_dumps)
+        return;
+    const std::filesystem::path base =
+        std::filesystem::path(dir) / ("kkt_s" + std::to_string(ak->capture_id));
+    const smf::CscLower& A = ak->mat;
+    if (ak->dump_factorizations == 0)
+    {
+        std::ofstream mtx(base.string() + ".mtx");
+        mtx << "%%MatrixMarket matrix coordinate real symmetric\n"
+            << "% IPOPT KKT matrix captured by the smf_ma97 plugin\n"
+            << A.n << " " << A.n << " " << A.row_idx.size() << "\n"
+            << std::setprecision(17);
+        for (smf::Int j = 0; j < A.n; ++j)
+            for (smf::Int k = A.col_ptr[static_cast<size_t>(j)]; k < A.col_ptr[static_cast<size_t>(j) + 1]; ++k)
+                mtx << A.row_idx[static_cast<size_t>(k)] + 1 << " " << j + 1 << " "
+                    << A.values[static_cast<size_t>(k)] << "\n";
+    }
+    std::ofstream vals(base.string() + ".vals", std::ios::binary | std::ios::app);
+    vals.write(reinterpret_cast<const char*>(A.values.data()),
+               static_cast<std::streamsize>(A.values.size() * sizeof(double)));
+    ++ak->dump_factorizations;
+}
 
 static bool build_csc_pattern(SmfAkeep* ak, int n, const int* ptr, const int* row, int base)
 {
-    // Collect (col, row, orig_pos) for lower-triangle entries (row >= col)
+    if (!ak || n <= 0 || !ptr || !row)
+        return false;
+
     struct Entry
     {
         int col, row, orig;
     };
     std::vector<Entry> entries;
     const int nnz_total = ptr[n] - base;
+    if (nnz_total < 0)
+        return false;
     entries.reserve(static_cast<size_t>(nnz_total));
 
     for (int j = 0; j < n; ++j)
     {
         const int cs = ptr[j] - base;
         const int ce = ptr[j + 1] - base;
+        if (cs < 0 || ce < cs)
+            return false;
         for (int p = cs; p < ce; ++p)
         {
             const int r = row[p] - base;
             if (r < 0 || r >= n)
-                continue; // out-of-range guard
-            if (r >= j)   // lower triangle only
+                continue;
+            if (r >= j)
                 entries.push_back({j, r, p});
+            else
+                entries.push_back({r, j, p});
         }
     }
     const int m = static_cast<int>(entries.size());
 
-    // Sort into column-major order for CscLower
     std::sort(entries.begin(), entries.end(),
               [](const Entry &a, const Entry &b) noexcept { return a.col != b.col ? a.col < b.col : a.row < b.row; });
 
@@ -180,38 +311,6 @@ static bool build_csc_pattern(SmfAkeep* ak, int n, const int* ptr, const int* ro
     return true;
 }
 
-static void build_csc_to_cleaned(SmfAkeep* ak)
-{
-    // ak->ak->cleaned is the ORIGINAL-ordered cleaned matrix (from
-    // symbolic_analysis.cpp: keep->cleaned = std::move(cleaned.clean)).
-    // Factor permutes it internally via permute_lower_csc_indef(cleaned, iperm).
-    // Therefore we must search by ORIGINAL (old_j, old_i) — no iperm needed.
-    const int n = ak->n;
-    const int mat_nnz = static_cast<int>(ak->mat.values.size());
-
-    ak->csc_to_cleaned.assign(static_cast<size_t>(mat_nnz), -1);
-
-    for (int old_j = 0; old_j < n; ++old_j)
-    {
-        const int cs = ak->mat.col_ptr[static_cast<size_t>(old_j)];
-        const int ce = ak->mat.col_ptr[static_cast<size_t>(old_j + 1)];
-        for (int p = cs; p < ce; ++p)
-        {
-            const int old_i = ak->mat.row_idx[static_cast<size_t>(p)];
-
-            // Search for (old_j, old_i) in cleaned (original ordering).
-            const int cl_cs = static_cast<int>(ak->ak->cleaned.col_ptr[static_cast<size_t>(old_j)]);
-            const int cl_ce = static_cast<int>(ak->ak->cleaned.col_ptr[static_cast<size_t>(old_j + 1)]);
-
-            const auto beg = ak->ak->cleaned.row_idx.begin() + cl_cs;
-            const auto end = ak->ak->cleaned.row_idx.begin() + cl_ce;
-            const auto it = std::lower_bound(beg, end, old_i);
-
-            ak->csc_to_cleaned[static_cast<size_t>(p)] = static_cast<int>(it - ak->ak->cleaned.row_idx.begin());
-        }
-    }
-}
-
 static void fill_values(SmfAkeep* ak, const double* val)
 {
     const int m = static_cast<int>(ak->mat.values.size());
@@ -219,149 +318,71 @@ static void fill_values(SmfAkeep* ak, const double* val)
         ak->mat.values[static_cast<size_t>(k)] = val[static_cast<size_t>(ak->sort_perm[static_cast<size_t>(k)])];
 }
 
-static void push_to_cleaned(SmfAkeep* ak)
+static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl)
 {
-    // Defensive: ensure cleaned.values is properly sized — analyse may leave
-    // it empty if the input was zero-valued at analyse time.
-    const auto cleaned_nnz = static_cast<size_t>(ak->ak->cleaned.nnz());
-    if (ak->ak->cleaned.values.size() != cleaned_nnz)
-        ak->ak->cleaned.values.assign(cleaned_nnz, 0.0);
-    else
-        std::fill(ak->ak->cleaned.values.begin(), ak->ak->cleaned.values.end(), 0.0);
+    if (!ctrl)
+        return true;
 
-    const int m = static_cast<int>(ak->mat.values.size());
-    for (int k = 0; k < m; ++k)
-    {
-        const int pos = ak->csc_to_cleaned[static_cast<size_t>(k)];
-        if (pos >= 0 && pos < static_cast<int>(ak->ak->cleaned.values.size()))
-        {
-            ak->ak->cleaned.values[static_cast<size_t>(pos)] += ak->mat.values[static_cast<size_t>(k)];
-        }
-    }
-}
-
-static int capture_limit()
-{
-    const char* env = std::getenv("SMF_MA97_CAPTURE_LIMIT");
-    if (!env || env[0] == '\0')
-        return 1;
-    const int value = std::atoi(env);
-    return value > 0 ? value : 1;
-}
-
-static std::string capture_path(const char* dir, int id, const char* suffix)
-{
-    std::ostringstream os;
-    os << dir << "/kkt_" << std::setw(4) << std::setfill('0') << id << suffix;
-    return os.str();
-}
-
-static int maybe_capture_matrix(const SmfAkeep* ak)
-{
-    const char* dir = std::getenv("SMF_MA97_CAPTURE_DIR");
-    if (!dir || dir[0] == '\0' || !ak || !ak->ak)
-        return 0;
-
-    static int capture_count = 0;
-    if (capture_count >= capture_limit())
-        return 0;
-
-    const int id = ++capture_count;
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    if (ec)
-        return 0;
-
-    const smf::CscLower& A = ak->ak->cleaned;
-    const std::string matrix_file = capture_path(dir, id, ".mtx");
-    std::ofstream out(matrix_file);
-    if (!out)
-        return 0;
-
-    out << "%%MatrixMarket matrix coordinate real symmetric\n";
-    out << "% Captured from smf_ma97_plugin ma97_factor_d\n";
-    out << A.n << ' ' << A.n << ' ' << A.nnz() << '\n';
-    out << std::setprecision(17);
-    for (int j = 0; j < A.n; ++j)
-    {
-        for (smf::Int p = A.col_ptr[static_cast<size_t>(j)]; p < A.col_ptr[static_cast<size_t>(j + 1)]; ++p)
-        {
-            const int i = A.row_idx[static_cast<size_t>(p)];
-            out << (i + 1) << ' ' << (j + 1) << ' ' << A.values[static_cast<size_t>(p)] << '\n';
-        }
-    }
-
-    std::ofstream meta(capture_path(dir, id, ".meta"));
-    if (meta)
-    {
-        meta << "id " << id << '\n';
-        meta << "n " << A.n << '\n';
-        meta << "nnz_lower " << A.nnz() << '\n';
-        meta << "source smf_ma97_plugin ma97_factor_d\n";
-    }
-    return id;
-}
-
-static void maybe_capture_rhs(const SmfAkeep* ak, SmfFkeep* fw, const double* x, int ldx, int nrhs)
-{
-    const char* dir = std::getenv("SMF_MA97_CAPTURE_DIR");
-    if (!dir || dir[0] == '\0' || !ak || !fw || fw->capture_id <= 0 || fw->rhs_captured || !x)
-        return;
-
-    std::error_code ec;
-    std::filesystem::create_directories(dir, ec);
-    if (ec)
-        return;
-
-    std::ofstream out(capture_path(dir, fw->capture_id, ".rhs"));
-    if (!out)
-        return;
-
-    const int n = ak->n;
-    out << n << ' ' << nrhs << '\n';
-    out << std::setprecision(17);
-    for (int rhs = 0; rhs < nrhs; ++rhs)
-    {
-        for (int i = 0; i < n; ++i)
-            out << x[static_cast<size_t>(rhs * ldx + i)] << '\n';
-    }
-    fw->rhs_captured = true;
-}
-
-static void apply_ma97_control(SmfAkeep* ak, const ma97_control_d* ctrl)
-{
-    if (!ak || !ctrl)
-        return;
-
-    // Map HSL MA97 control parameters to smf::Control
     if (ctrl->nemin > 0)
-        ak->ctrl.nemin = ctrl->nemin;
-    
-    // IPOPT owns MA97 pivot-quality escalation.  Do not floor this value here:
-    // same-matrix KKT comparison showed the old 0.01 floor caused a real solve
-    // residual regression while IPOPT's requested 1e-8 remained accurate.
-    if (ctrl->u > 0.0)
-        ak->ctrl.pivot_u = ctrl->u;
-    
+        out_ctrl.nemin = ctrl->nemin;
+    if (ctrl->u >= 0.0 && ctrl->u <= 0.5)
+        out_ctrl.pivot_u = ctrl->u;
     if (ctrl->small > 0.0)
-        ak->ctrl.small_pivot = ctrl->small;
+        out_ctrl.small_pivot = ctrl->small;
     if (ctrl->multiplier > 0.0)
-        ak->ctrl.factor_memory_multiplier = static_cast<int>(ctrl->multiplier);
-    ak->ctrl.solve_use_blas3_single_rhs = (ctrl->solve_blas3 != 0);
-    // action: 0=continue on singular, 1=abort → map to continue_on_singular
-    ak->ctrl.continue_on_singular = (ctrl->action == 0);
-    // scaling: 0=user/none, 1-4=HSL methods → conservatively map to None
-    // (smf doesn't fully support HSL scaling enums; IPOPT manages its own scaling)
-}
+        out_ctrl.factor_memory_multiplier = ctrl->multiplier;
+    out_ctrl.solve_use_blas3_single_rhs = (ctrl->solve_blas3 != 0);
+    out_ctrl.solve_multifrontal_forward = (ctrl->solve_mf != 0);
+    out_ctrl.continue_on_singular = (ctrl->action == 0);
+    out_ctrl.print_level = ctrl->print_level;
+    // MA97 callers (IPOPT) refactor one pattern every iteration, which pays
+    // for a costlier ordering.
+    out_ctrl.expected_refactors = 10;
+    // No delay budget: delays are never traded for static pivots (inexact
+    // inertia), except through the test seam.
+    out_ctrl.delay_budget = test_delay_budget();
 
-// ============================================================================
-// Exported C symbols  (loaded by IPOPT via dlsym when linear_solver=ma97)
-// ============================================================================
+    switch (ctrl->ordering)
+    {
+    case 0:
+    case 1:
+        out_ctrl.ordering = smf::OrderingMethod::AMD;
+        break;
+    case 3:
+        out_ctrl.ordering = smf::OrderingMethod::METIS;
+        break;
+    case 5:
+    default:
+        out_ctrl.ordering = smf::OrderingMethod::AutoParallel;
+        break;
+    }
+
+    // scaling <= 0 is "none", or the caller's own scale vector when factor
+    // receives one (applied in ma97_factor_d).
+    if (ctrl->scaling <= 0)
+    {
+        out_ctrl.scaling = smf::ScalingMethod::None;
+        return true;
+    }
+    switch (ctrl->scaling)
+    {
+    case 1:
+        out_ctrl.scaling = smf::ScalingMethod::Matching;
+        break;
+    case 2:
+    case 3:
+    case 4:
+        out_ctrl.scaling = smf::ScalingMethod::Equilibration;
+        break;
+    default:
+        return false;
+    }
+    return true;
+}
 
 extern "C"
 {
 
-    // Forward declarations (allow mutual calls within the extern "C" block)
     void ma97_solve_d(int job,
                       int nrhs,
                       double* x,
@@ -371,52 +392,61 @@ extern "C"
                       const ma97_control_d* ctrl,
                       ma97_info_d* info);
 
-    // ---------------------------------------------------------------------------
-    // ma97_default_control_d  — called once by IPOPT to get default settings
-    // ---------------------------------------------------------------------------
     void ma97_default_control_d(ma97_control_d* ctrl)
     {
+        if (!ctrl)
+            return;
         std::memset(ctrl, 0, sizeof(*ctrl));
-        // CRITICAL: these defaults must match IPOPT 3.14's registered MA97 defaults
-        ctrl->f_arrays = 0;     // 0-based C indexing (IPOPT overwrites to 1)
-        ctrl->action = 0;       // 0=continue on singular (IPOPT expects this)
-        ctrl->nemin = 8;        // node amalgamation threshold
-        ctrl->multiplier = 1.2; // factor memory multiplier
-        ctrl->ordering = 5;     // 5=METIS/auto
-        ctrl->print_level = -1; // -1=silent
-        ctrl->scaling = 0;      // 0=none/user (IPOPT manages its own scaling)
-        ctrl->small = 1e-20;    // small pivot threshold
-        ctrl->u = 1e-8;         // pivot tolerance (IPOPT default, NOT 0.01)
+        ctrl->f_arrays = 0;
+        ctrl->action = 0;
+        ctrl->nemin = 8;
+        ctrl->multiplier = 1.2;
+        ctrl->ordering = 5;
+        ctrl->print_level = -1;
+        ctrl->scaling = 0;
+        ctrl->small = 1e-20;
+        ctrl->u = 1e-8;
         ctrl->unit_diagnostics = 6;
         ctrl->unit_error = 6;
         ctrl->unit_warning = 6;
         ctrl->factor_min = 0;
-        ctrl->solve_blas3 = 1;  // enable BLAS3 for solve
+        ctrl->solve_blas3 = 1;
         ctrl->solve_min = 1;
         ctrl->solve_mf = 1;
         ctrl->consist_tol = 0.0;
     }
 
-    // ---------------------------------------------------------------------------
-    // ma97_analyse_d  — symbolic analysis (builds sparsity pattern + ordering)
-    // ---------------------------------------------------------------------------
     void ma97_analyse_d(int /*check*/,
                         int n,
                         const int* ptr,
                         const int* row,
-                        double* val, // may be NULL (pattern only)
+                        double* val,
                         void** akeep,
                         const ma97_control_d* ctrl,
                         ma97_info_d* info,
                         int* /*order*/)
     {
+        if (!info)
+            return;
         std::memset(info, 0, sizeof(*info));
+        if (!akeep || n <= 0 || !ptr || !row)
+        {
+            info->flag = -1;
+            if (akeep) *akeep = nullptr;
+            return;
+        }
 
         const int base = (ctrl && ctrl->f_arrays) ? 1 : 0;
 
         auto* ak = new SmfAkeep();
         ak->ctrl.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
-        apply_ma97_control(ak, ctrl);
+        if (!apply_ma97_control(ak->ctrl, ctrl))
+        {
+            info->flag = -6;
+            delete ak;
+            *akeep = nullptr;
+            return;
+        }
 
         if (!build_csc_pattern(ak, n, ptr, row, base))
         {
@@ -426,12 +456,18 @@ extern "C"
             return;
         }
 
-        // Fill numerical values if provided (optional at analyse stage)
+        // smf's analysis needs values to recognise saddle-point matrices
+        // (their matching ordering keeps 2x2 pivots together; AMD alone
+        // delays ~1 pivot per row on ACOPF KKT systems). IPOPT analyses the
+        // pattern only, so without values the analysis is deferred to the
+        // first factorization.
+        std::span<const double> values;
         if (val)
+        {
             fill_values(ak, val);
-
-        ak->ak = ak->solver.analyse(ak->mat, ak->ctrl, ak->info);
-        if (!ak->ak || ak->info.status != smf::ErrorCode::Success)
+            values = ak->mat.values;
+        }
+        if (ak->session->analyse(ak->mat, values, ak->ctrl, plugin_ipm_control()) != smf::ErrorCode::Success)
         {
             info->flag = -3;
             delete ak;
@@ -439,19 +475,23 @@ extern "C"
             return;
         }
 
-        build_csc_to_cleaned(ak);
-
-        // Populate info fields from analysis
         info->flag = 0;
         info->matrix_rank = n;
-        info->num_sup = static_cast<int>(ak->ak->supernodes.size());
-        info->ordering = ctrl ? ctrl->ordering : 5;
+        if (const smf::AnalysisKeep* a = ak->session->analysis_keep())
+        {
+            const smf::Info& si = ak->session->info();
+            info->matrix_dup = si.matrix_duplicates;
+            info->matrix_outrange = si.matrix_out_of_range;
+            info->matrix_missing_diag = si.matrix_missing_diag;
+            info->num_sup = static_cast<int>(a->supernodes.size());
+            info->maxdepth = si.max_tree_depth;
+            info->maxfront = si.max_front_size;
+            info->maxsupernode = si.max_supernode_size;
+            info->ordering = si.ordering_used;
+        }
         *akeep = ak;
     }
 
-    // ---------------------------------------------------------------------------
-    // ma97_factor_d  — numerical factorization
-    // ---------------------------------------------------------------------------
     void ma97_factor_d(int matrix_type,
                        const int* /*ptr*/,
                        const int* /*row*/,
@@ -460,93 +500,276 @@ extern "C"
                        void** fkeep,
                        const ma97_control_d* ctrl,
                        ma97_info_d* info,
-                       double* /*scale*/)
+                       double* scale)
     {
+        if (!info)
+            return;
         std::memset(info, 0, sizeof(*info));
-
-        auto* ak = static_cast<SmfAkeep*>(*akeep);
-        if (!ak || !ak->ak)
+        if (!akeep || !*akeep || !fkeep || !val)
         {
             info->flag = -5;
             return;
         }
 
-        // Set matrix_type BEFORE calling apply_ma97_control so pivot_u clamping works correctly
+        auto* ak = static_cast<SmfAkeep*>(*akeep);
         ak->ctrl.matrix_type = (matrix_type == static_cast<int>(smf::MatrixType::RealSymmetricPositiveDefinite))
                                    ? smf::MatrixType::RealSymmetricPositiveDefinite
                                    : smf::MatrixType::RealSymmetricIndefinite;
-        apply_ma97_control(ak, ctrl);
+        if (!apply_ma97_control(ak->ctrl, ctrl))
+        {
+            info->flag = -6;
+            return;
+        }
+        // IPOPT's MC64 request (scaling = 1) once the pattern is analysed:
+        // when the analysis computed the matching ordering and rejected it
+        // (kept AMD or METIS), the matching scaling is not applied, as under
+        // ScalingMethod::Auto. Without its ordering it makes the factor less
+        // accurate (triage-case9241-notes.md; on PGLib case2869 / case4661 a
+        // reused matching scale gives wrong inertia and omega up to 1 on most
+        // steps), and recomputing it costs ~10x a refactorization. The
+        // request is then answered with the unit scale, which IPOPT stores
+        // and passes back. Patterns the analysis did not try the matching on
+        // (n below its minimum, no zero/small diagonal) keep the matching
+        // scaling, which helps there (COPS elec / chain iteration counts).
+        // SMF_PLUGIN_MC64=always restores the matching scaling on every
+        // request.
+        // Known limitation: a request on the very first factorization (no
+        // analysis yet; the analysis is deferred into session.factor below)
+        // still gets the matching scaling. IPOPT's default ma97_scaling
+        // (dynamic) factors unscaled first, so its requests always come after
+        // the analysis; with ma97_scaling = mc64 the first scale is matching
+        // and its reuse keeps it, the pre-Task-17 behaviour.
+        static const bool mc64_always = [] {
+            const char* v = std::getenv("SMF_PLUGIN_MC64");
+            return v != nullptr && std::strcmp(v, "always") == 0;
+        }();
+        const smf::AnalysisKeep* analysed = ak->session->analysis_keep();
+        const bool unit_scale = !mc64_always && ak->ctrl.scaling == smf::ScalingMethod::Matching &&
+                                analysed != nullptr && analysed->matching_rejected;
+        if (unit_scale)
+            ak->ctrl.scaling = smf::ScalingMethod::None;
+        // IPOPT's "reuse" scaling strategies compute MC64 scaling once
+        // (scaling = 1, returned in `scale`) and pass it back with
+        // scaling = 0 on later factorizations. A unit scale passed back is
+        // no scaling.
+        bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
+        const bool reuse_scaling =
+            !computed_scaling && !unit_scale && scale &&
+            !std::all_of(scale, scale + ak->n, [](double s) { return s == 1.0; });
+        if (reuse_scaling)
+            ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
 
-        // Scatter IPOPT's values into ak->cleaned
         fill_values(ak, val);
-        push_to_cleaned(ak);
+        dump_kkt(ak);
+        smf::IpmSession& session = *ak->session;
+        session.set_control(ak->ctrl);
+        if (reuse_scaling)
+            session.set_user_scale(scale);
 
-        // Debug: verify values are non-zero (only if print_level > 1)
-        if (ctrl && ctrl->print_level > 1)
+        // The first factorization also runs the deferred analysis; that time
+        // is not counted as factorization time.
+        const bool analysed_before = session.analysis_keep() != nullptr;
+        // ra= trace: reverts decided before this factorization (a revert
+        // decided at its end does not change the analysis it ran on).
+        const int reverted_before = session.stats().reanalyses_reverted;
+        const auto t_factor = std::chrono::steady_clock::now();
+        smf::IpmFactorStatus status = session.factor(ak->mat.values);
+        // A reused scale that makes the factor singular is presumed stale: one
+        // computed at a blown-up iterate (entries ~1e23 on cops_chain_800)
+        // shrinks pivots of later, nonsingular KKT matrices below `small`.
+        // IPOPT never rescales after a singular factor (it returns before its
+        // high-delay check), so refactor once with a fresh matching scaling
+        // and hand that scale back for its later reuses. If the fresh scaling
+        // cannot be computed, the stale-scale result stands.
+        static const bool stale_retry = env_flag("SMF_STALE_SCALE_RETRY", true);
+        if (stale_retry && reuse_scaling && status == smf::IpmFactorStatus::Singular)
         {
-            double vsum = 0.0;
-            for (double v : ak->ak->cleaned.values)
-                vsum += v * v;
-            fprintf(stderr, "[smf_ma97] factor: cleaned values norm=%.3e (n=%d nnz=%d)\n", std::sqrt(vsum), ak->n,
-                    (int)ak->ak->cleaned.values.size());
-        }
-
-        // Free any previously held fkeep to avoid memory leak
-        if (*fkeep)
-        {
-            delete static_cast<SmfFkeep*>(*fkeep);
-            *fkeep = nullptr;
-        }
-
-        auto* fw = new SmfFkeep();
-        fw->capture_id = maybe_capture_matrix(ak);
-        const smf::FactorStatus fs = ak->solver.factor(*ak->ak, ak->ctrl, ak->info, fw->fk);
-
-        if (ctrl && ctrl->print_level > 1)
-        {
-            fprintf(stderr, "[smf_ma97] factor: status=%d pos=%d neg=%d zero=%d (keep.n=%d)\n", (int)fs,
-                    ak->info.num_positive, ak->info.num_negative, ak->info.num_zero, (int)ak->ak->n);
-        }
-
-        // CRITICAL: sanity check inertia before exposing to IPOPT
-        const int inertia_total = ak->info.num_positive + ak->info.num_negative + ak->info.num_zero;
-        if (inertia_total != static_cast<int>(ak->ak->n))
-        {
-            if (ctrl && ctrl->print_level >= 0)
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] factor %ld: singular with a reused scale (zero=%d): rescaling\n",
+                             g_stats.factors + 1, session.info().num_zero);
+            smf::Control fresh = ak->ctrl;
+            fresh.scaling = smf::ScalingMethod::Matching;
+            session.set_control(fresh);
+            const smf::IpmFactorStatus retried = session.factor(ak->mat.values);
+            if (retried == smf::IpmFactorStatus::Ok || retried == smf::IpmFactorStatus::Singular)
             {
-                fprintf(stderr,
-                    "[smf_ma97] ERROR: invalid inertia total=%d n=%d pos=%d neg=%d zero=%d\n",
-                    inertia_total, static_cast<int>(ak->ak->n), ak->info.num_positive,
-                    ak->info.num_negative, ak->info.num_zero);
+                status = retried;
+                ak->ctrl = fresh;
+                computed_scaling = true;
             }
+            else
+            {
+                session.set_control(ak->ctrl);
+                session.set_user_scale(scale);
+                status = session.factor(ak->mat.values);
+            }
+        }
+        const bool aborted = status == smf::IpmFactorStatus::WrongInertia;
+        const smf::Info& si = session.info();
+        if (session.analysis_keep() == nullptr)
+        {
+            info->flag = -3;
+            return;
+        }
+        const double analyse_s = analysed_before ? 0.0 : si.analyse_seconds;
+        const smf::FactorStatus fs = si.factor_status;
+        const smf::FactorKeep& fk = session.factor_keep();
+
+        // Refactorizations reuse the previous fkeep handle; the factor's
+        // storage itself lives in the session.
+        auto* fw = *fkeep ? static_cast<SmfFkeep*>(*fkeep) : nullptr;
+        *fkeep = nullptr;
+        if (!fw)
+            fw = new SmfFkeep();
+        fw->session = ak->session;
+        fw->n = ak->n;
+        fw->ctrl = ak->ctrl;
+        fw->generation = session.factor_generation();
+        fw->aborted = false;
+        if (g_stats.enabled)
+        {
+            ++g_stats.factors;
+            g_stats.factor_s +=
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s;
+        }
+        // A successful SPD factor reports no inertia counts of its own.
+        const bool pd = ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
+                        fs == smf::FactorStatus::Success;
+        // Per-factorization trace (SMF_PLUGIN_STATS>=2); corr=1 when the previous
+        // plugin call was also a factorization (IPOPT inertia correction).
+        // abort=1: stopped on wrong inertia (partial counts); skipped = the
+        // predicted flops of the fronts it did not factor; flops = actual.
+        // ra=tried/adopted/reverted: the session's re-analysis counts, tried
+        // and adopted including this factorization, reverted as of its start,
+        // so adopted > reverted exactly when it ran on a re-analysed order
+        // (a probation factor that is then reverted included).
+        if (g_stats.trace)
+        {
+            const smf::IpmStats& ist = session.stats();
+            std::fprintf(stderr,
+                         "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
+                         "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d abort=%d flops=%.6e "
+                         "skipped=%.6e ra=%d/%d/%d\n",
+                         g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, si.delayed_pivots,
+                         si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
+                         pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
+                         std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
+                         ctrl ? ctrl->scaling : -1, unit_scale ? "unit" : computed_scaling ? "out" : (reuse_scaling ? "in" : "-"),
+                         ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
+                         static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
+                                                        [](const auto& de) { return de.tag == 2; })),
+                         aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
+                         ist.reanalyses_tried, ist.reanalyses_adopted, reverted_before);
+        }
+        g_stats.last_call_was_factor = true;
+
+        // This early return comes before the inexact-inertia guard below on
+        // purpose: an aborted factor (SMF_IPM_ABORT only, off by default)
+        // is already rejected by IPOPT through its num_neg (above the
+        // learned expectation), and the solve that completes it refactors.
+        // Wrong inertia: the factorization stopped once its negative pivots
+        // exceeded the learned expectation. MA97 has no status for it, so it
+        // is a successful factor whose num_neg (the partial count, already
+        // above the expectation) IPOPT rejects; it then refactors with a
+        // larger delta. A solve with this fkeep completes the factorization.
+        // The scaling ran before the abort: return it as for any factor
+        // (IPOPT's reuse strategies keep it for later factorizations).
+        if (aborted)
+        {
+            if (computed_scaling && scale && !fk.scale.empty())
+                std::copy(fk.scale.begin(), fk.scale.end(), scale);
+            if (unit_scale && scale)
+                std::fill(scale, scale + ak->n, 1.0);
+            fw->num_neg = si.num_negative;
+            fw->num_two = 0;
+            fw->aborted = true;
+            info->flag = 0;
+            info->num_neg = fw->num_neg;
+            info->num_two = 0;
+            info->matrix_rank = ak->n;
+            info->num_delay = si.delayed_pivots;
+            info->maxfront = si.max_front_size;
+            info->num_factor = static_cast<long>(si.actual_factor_entries);
+            info->num_flops = static_cast<long>(si.actual_flops);
+            info->maxsupernode = si.max_supernode_size;
+            info->ordering = si.ordering_used;
+            *fkeep = fw;
+            return;
+        }
+
+        // Every other status but Ok / Singular is a failure; smf reports
+        // input/scaling/allocation failures as FactorStatus::Singular too,
+        // which IpmSession maps to Error (only SingularMatrix is the MA97
+        // "singular" warning).
+        if (status != smf::IpmFactorStatus::Ok && status != smf::IpmFactorStatus::Singular)
+        {
             info->flag = -5;
             delete fw;
             return;
         }
 
-        fw->num_neg = ak->info.num_negative;
-        // Populate info fields from factor
-        info->num_neg = fw->num_neg;
-        info->matrix_rank = ak->n - ak->info.num_zero;
-        info->num_delay = ak->info.delayed_pivots;
-        info->maxfront = ak->info.max_front_size;
-        info->num_factor = static_cast<long>(ak->info.actual_factor_entries);
-        info->num_flops = static_cast<long>(ak->info.actual_flops);
-        info->maxsupernode = ak->info.max_supernode_size;
-
-        if (fs == smf::FactorStatus::Singular)
+        const int num_pos = pd ? ak->n : si.num_positive;
+        const int num_neg = pd ? 0 : si.num_negative;
+        const int num_zero = pd ? 0 : si.num_zero;
+        const int inertia_total = num_pos + num_neg + num_zero;
+        if (inertia_total != static_cast<int>(session.analysis_keep()->n))
         {
-            // flag=7 is the HSL MA97 "singular" warning — positive, not fatal.
-            // IPOPT sees SYMSOLVER_SINGULAR and applies inertia correction.
-            // We still expose fkeep so solve can proceed if IPOPT chooses to.
+            info->flag = -5;
+            delete fw;
+            return;
+        }
+
+        int two_count = 0;
+        for (const auto &de : fk.diag_entries)
+        {
+            if (de.tag == 2)
+                ++two_count;
+        }
+
+        fw->num_neg = num_neg;
+        fw->num_two = two_count;
+        info->num_neg = fw->num_neg;
+        info->num_two = fw->num_two;
+        info->matrix_rank = ak->n - num_zero;
+        info->num_delay = si.delayed_pivots;
+        info->maxfront = si.max_front_size;
+        info->num_factor = static_cast<long>(si.actual_factor_entries);
+        info->num_flops = static_cast<long>(si.actual_flops);
+        info->maxsupernode = si.max_supernode_size;
+        info->ordering = si.ordering_used;
+
+        if (computed_scaling && scale && !fk.scale.empty())
+        {
+            std::copy(fk.scale.begin(), fk.scale.end(), scale);
+        }
+        if (unit_scale && scale)
+            std::fill(scale, scale + ak->n, 1.0);
+
+        if (status == smf::IpmFactorStatus::Singular)
+        {
             info->flag = 7;
             *fkeep = fw;
             return;
         }
-        if (fs != smf::FactorStatus::Success && fs != smf::FactorStatus::MaxPivotDelays)
+
+        // Honest inertia: a factor with a static pivot (Info::inertia_exact
+        // false) has the inertia of a perturbed matrix, which IPOPT must not
+        // accept as the KKT inertia. MA97 has no flag for that, so it is
+        // reported as MA97's singular warning (flag 7), on which IPOPT
+        // increases its regularization and refactors. This applies only when
+        // the plugin did not ask for static pivots itself: the opt-in static
+        // modes (SMF_IPM_STATIC=fallback|regularized, off by default) perturb
+        // pivots on purpose and report their inertia by their own
+        // (hybrid / static_as_zero) accounting, unchanged. With the defaults
+        // (no static mode, delay_budget -1) no pivot is ever static, so the
+        // guard never fires.
+        if (!si.inertia_exact && plugin_ipm_control().static_mode == smf::StaticMode::Off)
         {
-            info->flag = -5;
-            delete fw;
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] factor %ld: %d static pivots, inexact inertia: flag 7\n",
+                             g_stats.factors, si.static_pivots);
+            info->flag = 7;
+            *fkeep = fw;
             return;
         }
 
@@ -554,10 +777,6 @@ extern "C"
         *fkeep = fw;
     }
 
-    // ---------------------------------------------------------------------------
-    // ma97_factor_solve_d  — factor then immediately solve (IPOPT calls this
-    //                         when new_matrix=true and solve is needed at once)
-    // ---------------------------------------------------------------------------
     void ma97_factor_solve_d(int matrix_type,
                              const int* ptr,
                              const int* row,
@@ -571,113 +790,109 @@ extern "C"
                              ma97_info_d* info,
                              double* scale)
     {
-        if (ctrl && ctrl->print_level > 1)
-            fprintf(stderr, "[smf_ma97] factor_solve_d called\n");
         ma97_factor_d(matrix_type, ptr, row, val, akeep, fkeep, ctrl, info, scale);
-        if (ctrl && ctrl->print_level > 1)
-            fprintf(stderr, "[smf_ma97] factor_solve_d: after factor flag=%d\n", info->flag);
-        if (info->flag < 0)
+        if (!info || info->flag < 0)
             return;
         ma97_solve_d(0, nrhs, x, ldx, akeep, fkeep, ctrl, info);
     }
 
-    // ---------------------------------------------------------------------------
-    // ma97_solve_d  — triangular solve  (job=0: full AX=B)
-    // ---------------------------------------------------------------------------
     void ma97_solve_d(int job,
                       int nrhs,
                       double* x,
                       int ldx,
-                      void** akeep,
+                      void** /*akeep*/,
                       void** fkeep,
                       const ma97_control_d* ctrl,
                       ma97_info_d* info)
     {
-        if (ctrl && ctrl->print_level > 1)
-            fprintf(stderr, "[smf_ma97] >>> ENTERING ma97_solve_d job=%d\n", job);
+        if (!info)
+            return;
         std::memset(info, 0, sizeof(*info));
-
-        auto* ak = static_cast<SmfAkeep*>(*akeep);
-        auto* fw = static_cast<SmfFkeep*>(*fkeep);
-        if (!ak || !fw)
+        if (!fkeep || !*fkeep || !x)
         {
             info->flag = -5;
             return;
         }
 
-        smf::SolveJob sjob = smf::SolveJob::Full;
-        if (job == 1)
-            sjob = smf::SolveJob::Forward;
-        if (job == 2)
-            sjob = smf::SolveJob::DiagOnly;
-        if (job == 3)
-            sjob = smf::SolveJob::Backward;
-        if (job == 4)
-            sjob = smf::SolveJob::DiagBack;
-
-        const int n = ak->n;
-        int rc = 0;
-
-        maybe_capture_rhs(ak, fw, x, ldx, nrhs);
-
-        // Debug: RHS norm (only if print_level > 1)
-        if (ctrl && ctrl->print_level > 1)
+        auto* fw = static_cast<SmfFkeep*>(*fkeep);
+        const int n = fw->n;
+        // This fkeep's factor was replaced by a later factorization into
+        // another fkeep from the same akeep (they share one session).
+        if (!fw->session || fw->generation != fw->session->factor_generation())
         {
-            double rhs_norm = 0.0;
-            for (int i = 0; i < n * nrhs; ++i)
-                rhs_norm += x[i] * x[i];
-            fprintf(stderr, "[smf_ma97] solve: n=%d nrhs=%d rhs_norm=%.3e\n", n, nrhs, std::sqrt(rhs_norm));
+            info->flag = -1;
+            return;
+        }
+        if (nrhs < 1)
+        {
+            info->flag = -2;
+            return;
+        }
+        if (ldx < n)
+        {
+            info->flag = -4;
+            return;
+        }
+        if (job < 0 || job > 4)
+        {
+            info->flag = -5;
+            return;
         }
 
+        apply_ma97_control(fw->ctrl, ctrl);
+        const smf::SolveJob sjob = static_cast<smf::SolveJob>(job);
+        smf::IpmSession& session = *fw->session;
+        session.set_control(fw->ctrl);
+        int rc = 0;
+
+        const auto t_solve = std::chrono::steady_clock::now();
         if (ldx == n)
         {
-            // Fast path: columns are contiguous
-            rc = ak->solver.solve(fw->fk, ak->ctrl, ak->info, x, n, nrhs, sjob);
+            rc = session.solve(x, n, nrhs, sjob);
         }
         else
         {
-            // General path: copy column-by-column into contiguous buffer
-            std::vector<double> buf(static_cast<size_t>(n * nrhs));
+            std::vector<double> buf(static_cast<size_t>(n) * static_cast<size_t>(nrhs));
             for (int j = 0; j < nrhs; ++j)
-                std::copy(x + j * ldx, x + j * ldx + n, buf.data() + j * n);
-            rc = ak->solver.solve(fw->fk, ak->ctrl, ak->info, buf.data(), n, nrhs, sjob);
-            for (int j = 0; j < nrhs; ++j)
-                std::copy(buf.data() + j * n, buf.data() + (j + 1) * n, x + j * ldx);
+                std::copy(x + static_cast<size_t>(j) * ldx,
+                          x + static_cast<size_t>(j) * ldx + n,
+                          buf.data() + static_cast<size_t>(j) * n);
+            rc = session.solve(buf.data(), n, nrhs, sjob);
+            if (rc == 0)
+            {
+                for (int j = 0; j < nrhs; ++j)
+                    std::copy(buf.data() + static_cast<size_t>(j) * n,
+                              buf.data() + static_cast<size_t>(j + 1) * n,
+                              x + static_cast<size_t>(j) * ldx);
+            }
         }
 
+        // A solve after an aborted factor completed it first: report the
+        // full inertia from now on.
+        if (fw->aborted && rc == 0)
+        {
+            const smf::InertiaCounts in = session.inertia();
+            fw->num_neg = in.negative;
+            const auto& de = session.factor_keep().diag_entries;
+            fw->num_two = static_cast<int>(std::count_if(de.begin(), de.end(), [](const auto& d) { return d.tag == 2; }));
+            fw->aborted = false;
+            if (g_stats.trace)
+                std::fprintf(stderr, "[smf_ma97] completed aborted factor %ld before a solve: neg=%d\n",
+                             g_stats.factors, fw->num_neg);
+        }
+
+        g_stats.last_call_was_factor = false;
+        if (g_stats.enabled)
+        {
+            ++g_stats.solves;
+            g_stats.rhs += nrhs;
+            g_stats.solve_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_solve).count();
+        }
         info->flag = (rc == 0) ? 0 : -5;
         info->num_neg = fw->num_neg;
-
-        // Debug: solution norm (only if print_level > 1)
-        if (ctrl && ctrl->print_level > 1)
-        {
-            double sol_norm = 0.0;
-            for (int i = 0; i < n * nrhs; ++i)
-                sol_norm += x[i] * x[i];
-            fprintf(stderr, "[smf_ma97] solve: sol_norm=%.3e rc=%d\n", std::sqrt(sol_norm), rc);
-        }
+        info->num_two = fw->num_two;
     }
 
-    // ---------------------------------------------------------------------------
-    // ma97_finalise_d  — free both akeep and fkeep
-    // ---------------------------------------------------------------------------
-    void ma97_finalise_d(void** akeep, void** fkeep)
-    {
-        if (fkeep && *fkeep)
-        {
-            delete static_cast<SmfFkeep*>(*fkeep);
-            *fkeep = nullptr;
-        }
-        if (akeep && *akeep)
-        {
-            delete static_cast<SmfAkeep*>(*akeep);
-            *akeep = nullptr;
-        }
-    }
-
-    // ---------------------------------------------------------------------------
-    // ma97_free_akeep_d  — free only akeep (called when reusing analysis)
-    // ---------------------------------------------------------------------------
     void ma97_free_akeep_d(void** akeep)
     {
         if (akeep && *akeep)
@@ -685,6 +900,21 @@ extern "C"
             delete static_cast<SmfAkeep*>(*akeep);
             *akeep = nullptr;
         }
+    }
+
+    void ma97_free_fkeep_d(void** fkeep)
+    {
+        if (fkeep && *fkeep)
+        {
+            delete static_cast<SmfFkeep*>(*fkeep);
+            *fkeep = nullptr;
+        }
+    }
+
+    void ma97_finalise_d(void** akeep, void** fkeep)
+    {
+        ma97_free_fkeep_d(fkeep);
+        ma97_free_akeep_d(akeep);
     }
 
 } // extern "C"

@@ -70,6 +70,8 @@ private:
 
     std::unique_ptr<AnalysisKeep> ak_;
     FactorKeep                    fk_;
+    NumericWorkspace              nws_;
+    SolveWorkspace                sws_;
 
     int  n_{0};
     int  neg_evals_{0};

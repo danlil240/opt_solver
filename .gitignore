@@ -1,6 +1,6 @@
 # Build directories
 build/
-build/
+build-*/
 cmake-build-*/
 
 # Installation directories
@@ -46,3 +46,25 @@ Testing/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+build-deps/
+
+# Large benchmark matrices: fetched by tools/bench/fetch_suitesparse.py
+benchmarks/fixtures/large/
+# bench_replay binary matrix cache
+*.smfbin
+benchmarks/fixtures/ipopt_kkt/
+# Benchmark run outputs (tools/bench/run.py, ipopt_kkt.py)
+benchmarks/results/
+# Generated manifests for the ignored fixtures above (fetch_suitesparse.py, ipopt_kkt.py)
+benchmarks/manifests/large.json
+benchmarks/manifests/ipopt_kkt.json
+
+# PGLib-OPF case files: fetched by tools/bench/fetch_pglib.py
+benchmarks/fixtures/pglib/
+
+# Full-sequence KKT captures of the hard corpus (ipopt_kkt.py capture --suite hard --keep all)
+benchmarks/fixtures/ipopt_hard/

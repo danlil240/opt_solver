@@ -5,6 +5,9 @@
 #include <algorithm>  // std::max
 #include <cassert>
 #include <new>        // std::bad_alloc
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 
 namespace smf {
 
@@ -13,21 +16,41 @@ namespace {
 inline std::size_t align_up(std::size_t x, std::size_t align) noexcept {
     return (x + align - 1u) & ~(align - 1u);
 }
+
+inline void* aligned_alloc_64(std::size_t bytes) noexcept {
+#ifdef _WIN32
+    return ::_aligned_malloc(bytes, 64u);
+#else
+    void* ptr = nullptr;
+    if (::posix_memalign(&ptr, 64u, bytes) != 0) {
+        return nullptr;
+    }
+    return ptr;
+#endif
+}
+
+inline void aligned_free_64(void* ptr) noexcept {
+#ifdef _WIN32
+    ::_aligned_free(ptr);
+#else
+    std::free(ptr);
+#endif
+}
 } // anonymous namespace
 
 AlignedArena::AlignedArena(std::size_t capacity_bytes) {
     // Round capacity up to a multiple of 64 bytes.
     capacity_ = align_up(capacity_bytes == 0 ? 64u : capacity_bytes, 64u);
-    void* ptr = nullptr;
-    if (::posix_memalign(&ptr, 64u, capacity_) != 0) {
+    void* ptr = aligned_alloc_64(capacity_);
+    if (ptr == nullptr) {
         throw std::bad_alloc{};
     }
     buf_ = static_cast<uint8_t*>(ptr);
 }
 
 AlignedArena::~AlignedArena() {
-    for (void* p : old_bufs_) std::free(p);
-    std::free(buf_);
+    for (void* p : old_bufs_) aligned_free_64(p);
+    aligned_free_64(buf_);
 }
 
 void* AlignedArena::allocate(std::size_t bytes, std::size_t align) {
@@ -51,7 +74,7 @@ void AlignedArena::reset_to(Marker m) noexcept {
 }
 
 void AlignedArena::clear() noexcept {
-    for (void* p : old_bufs_) { std::free(p); }
+    for (void* p : old_bufs_) { aligned_free_64(p); }
     old_bufs_.clear();
     offset_ = 0;
 }
@@ -61,8 +84,8 @@ void AlignedArena::grow(std::size_t min_new_capacity) {
                                    capacity_ * 3u / 2u);
     new_cap = align_up(new_cap, 64u);
 
-    void* new_ptr = nullptr;
-    if (::posix_memalign(&new_ptr, 64u, new_cap) != 0) {
+    void* new_ptr = aligned_alloc_64(new_cap);
+    if (new_ptr == nullptr) {
         throw std::bad_alloc{};
     }
     // Copy existing data.

@@ -18,7 +18,13 @@ endif()
 
 find_path(SuiteSparseAMD_INCLUDE_DIR
     NAMES suitesparse/amd.h amd.h
-    HINTS ${PC_AMD_INCLUDE_DIRS}
+    HINTS
+        ${PC_AMD_INCLUDE_DIRS}
+        "$ENV{CONDA_PREFIX}/Library/include"
+        "$ENV{CONDA_PREFIX}/Library/include/suitesparse"
+        "$ENV{CONDA_PREFIX}/include"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/include"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/include/suitesparse"
     PATHS
         /usr/include
         /usr/local/include
@@ -28,7 +34,11 @@ find_path(SuiteSparseAMD_INCLUDE_DIR
 
 find_library(SuiteSparseAMD_LIBRARY
     NAMES amd
-    HINTS ${PC_AMD_LIBRARY_DIRS}
+    HINTS
+        ${PC_AMD_LIBRARY_DIRS}
+        "$ENV{CONDA_PREFIX}/Library/lib"
+        "$ENV{CONDA_PREFIX}/lib"
+        "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library/lib"
     PATHS
         /usr/lib
         /usr/local/lib

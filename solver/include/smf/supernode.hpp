@@ -1,6 +1,8 @@
 #pragma once
 #include "smf/types.hpp"
 #include "smf/etree.hpp"
+#include <cstdint>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -11,11 +13,19 @@ struct Supernode {
     Int col_start;  ///< first column in this supernode (0-based)
     Int col_end;    ///< one-past-last column (col_end - col_start = width)
     Int parent;     ///< index of parent supernode in supernode tree; -1 for roots
-    std::vector<Int> children; ///< indices of child supernodes
+                    ///< (children: see build_children_csr / AnalysisKeep::children)
 
     /// Width (number of pivot columns) of this supernode.
     Int width() const { return col_end - col_start; }
 };
+
+/// Children of every supernode in CSR form, from the parent links of a forest
+/// numbered in postorder (children before parents). The children of s are
+/// child_idx[child_ptr[s] .. child_ptr[s+1]) in *descending* index order (the
+/// order the factor's LIFO contribution stack consumes them). Two passes
+/// (count, fill); child_ptr gets nsn + 1 entries, child_idx one per non-root.
+void build_children_csr(std::span<const Supernode> snodes,
+                        std::vector<Int> &child_ptr, std::vector<Int> &child_idx);
 
 /// Detect fundamental supernodes from the elimination tree and sparsity pattern.
 ///
@@ -40,13 +50,65 @@ std::vector<Supernode> detect_fundamental_supernodes(
     const std::vector<Int>& row_idx,
     const EliminationTree& etree);
 
+/// Exact column counts |L_{*j}| (diagonal included) from the lower triangle
+/// stored by rows (row i lists columns k <= i, any order; the diagonal is
+/// ignored).
+std::vector<Int> filled_column_counts_from_rows(Int n, const Int *row_ptr,
+                                                const Int *row_cols,
+                                                const EliminationTree &etree);
+
+/// The same exact column counts of P A P^T straight from the symmetric
+/// adjacency of A (both triangles, no diagonal; see lower_csc_adjacency),
+/// perm[new] = old, iperm[old] = new, and that matrix's etree (parent and
+/// postorder in the new numbering, e.g. etree_from_adjacency and
+/// etree_postorder). colcount: n ints out; work: 4n ints.
+void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
+                                         const Int *perm, const Int *iperm,
+                                         const Int *parent, const Int *postorder,
+                                         Int *colcount, Int *work);
+
+/// Relaxed amalgamation that may merge *any* child into its parent, not only
+/// the child whose columns happen to precede the parent's.
+///
+/// `parent` and `colcount` describe the elimination tree of a postordered
+/// column numbering (children before parents, subtrees contiguous). A child
+/// merges into its parent when both have fewer than `nemin` eliminated
+/// columns (counting columns merged so far) and the merge adds few stored
+/// zeros: at most 16, or the merged node stays at most 30% zeros. Because merged groups are no
+/// longer contiguous in the input numbering, a new column order is returned
+/// in `order` (order[new] = old index of the input numbering); it is a
+/// topological order of the same elimination tree, so the factor's fill is
+/// unchanged. `snodes` receives the amalgamated supernodes in that order,
+/// numbered in postorder (parent links only; see build_children_csr).
+///
+/// `keep_with_parent` (optional, length n, same numbering): a column flagged
+/// 1 always ends up in its etree parent's supernode, regardless of `nemin`
+/// and the zero-fill bound (2x2 pivot pairs). A null pointer gives exactly
+/// the unflagged result.
+///
+/// `rule`: Amalgamation::SmfPlusCholmod also takes a merge CHOLMOD's default
+/// relaxation would (merged pivots ns, zero share z of the merged node: ns <= 4,
+/// no new zeros, ns <= 16 and z < 0.8, ns <= 48 and z < 0.1, or z < 0.05),
+/// ignoring nemin. Smf is bit-identical to the rule above.
+///
+/// `work` (optional): amalgamate_relaxed_work_size(n) ints of caller-owned
+/// workspace (contents need not be initialised); null allocates its own.
+void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
+                        std::vector<Int> &order, std::vector<Supernode> &snodes,
+                        const std::uint8_t *keep_with_parent = nullptr,
+                        Int *work = nullptr,
+                        Amalgamation rule = Amalgamation::Smf);
+
+/// Ints of workspace amalgamate_relaxed needs for n columns.
+std::size_t amalgamate_relaxed_work_size(Int n);
+
 /// Amalgamate supernodes using the nemin threshold.
 ///
 /// Two adjacent supernodes S (child) and P (parent) are merged when:
 ///   S.width() < nemin  AND  P.width() < nemin
 ///
-/// Merging absorbs S into P: P.col_start = S.col_start; P inherits S's children
-/// while preserving P's other children.
+/// Merging absorbs S into P: P.col_start = S.col_start; S's children become
+/// P's children (parent links resolved through merged nodes).
 /// Repeated bottom-up until stable.
 ///
 /// @param supernodes  fundamental supernodes (taken by value; modified internally)

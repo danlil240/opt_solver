@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -25,6 +26,11 @@
 
 /// Write text to a file; returns true on success.
 static bool write_file(const char *path, const char *content) {
+    std::error_code ec;
+    auto parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) {
+        std::filesystem::create_directories(parent, ec);
+    }
     std::ofstream ofs(path);
     if (!ofs.is_open()) return false;
     ofs << content;
@@ -394,4 +400,33 @@ TEST(MatrixMarket, IntegerFieldType) {
     ASSERT_TRUE(r.ok) << r.error_message;
     EXPECT_EQ(static_cast<int>(r.matrix.nnz()), 3);
     EXPECT_DOUBLE_EQ(r.matrix.values[0], 5.0);
+}
+
+TEST(MatrixMarket, ErrorInconsistentEntryCount) {
+    const char *path = "/tmp/smf_test_mm_bad_count.mtx";
+    ASSERT_TRUE(write_file(path,
+        "%%MatrixMarket matrix coordinate real symmetric\n"
+        "3 3 5\n"
+        "1 1 4.0\n"
+        "2 2 5.0\n"
+        "3 3 6.0\n"
+    ));
+
+    smf::MatrixMarketResult r = smf::read_matrix_market(path);
+    EXPECT_FALSE(r.ok);
+    EXPECT_FALSE(r.error_message.empty());
+}
+
+TEST(MatrixMarket, ErrorMalformedDataLine) {
+    const char *path = "/tmp/smf_test_mm_bad_line.mtx";
+    ASSERT_TRUE(write_file(path,
+        "%%MatrixMarket matrix coordinate real symmetric\n"
+        "2 2 2\n"
+        "1 1 4.0\n"
+        "2 not_an_int 5.0\n"
+    ));
+
+    smf::MatrixMarketResult r = smf::read_matrix_market(path);
+    EXPECT_FALSE(r.ok);
+    EXPECT_FALSE(r.error_message.empty());
 }

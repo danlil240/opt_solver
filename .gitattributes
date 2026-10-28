@@ -1,0 +1,2 @@
+# Files executed inside WSL/Linux must keep LF line endings.
+solver/benchmarks/wsl/* text eol=lf

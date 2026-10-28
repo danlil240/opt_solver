@@ -1,4 +1,5 @@
 #include "smf/dense_indef.hpp"
+#include "smf/pivoting.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -15,7 +16,7 @@ FactorStatus dense_cholesky_lower(double* A, int n, int lda) noexcept
         for (int col = 0; col < j; ++col)
             s -= A[j + col * lda] * A[j + col * lda];
 
-        if (s <= 0.0)
+        if (s <= 0.0 || !std::isfinite(s))
             return FactorStatus::NotPositiveDefinite;
 
         A[j + j * lda] = std::sqrt(s);
@@ -36,7 +37,7 @@ FactorStatus dense_cholesky_lower(double* A, int n, int lda) noexcept
 // ---------------------------------------------------------------------------
 void add_inertia_1x1(double d, double small, InertiaCounts& out) noexcept
 {
-    if (std::abs(d) < small)
+    if (!std::isfinite(d) || std::abs(d) < small)
         ++out.zero;
     else if (d > 0.0)
         ++out.positive;
@@ -46,35 +47,44 @@ void add_inertia_1x1(double d, double small, InertiaCounts& out) noexcept
 
 // ---------------------------------------------------------------------------
 // add_inertia_2x2
-// Signs inferred from trace / determinant of [[d00,d10],[d10,d11]].
+// Scale-normalized eigenvalue sign classification for [[d00,d10],[d10,d11]].
 // ---------------------------------------------------------------------------
 void add_inertia_2x2(double d00, double d10, double d11, double small,
                      InertiaCounts& out) noexcept
 {
-    const double det  = d00 * d11 - d10 * d10;
-    const double trc  = d00 + d11;
-    const double norm = std::abs(d00) + std::abs(d11) + std::abs(d10);
+    if (d10 == 0.0) {
+        add_inertia_1x1(d00, small, out);
+        add_inertia_1x1(d11, small, out);
+        return;
+    }
 
-    if (det < -small * norm) {
-        // One positive, one negative eigenvalue.
+    double s = 0.0;
+    const double det_s = scaled_det_2x2(d00, d10, d11, s);
+    if (s == 0.0 || !std::isfinite(det_s)) {
+        out.zero += 2;
+        return;
+    }
+
+    const double tr_s = (d00 / s) + (d11 / s);
+
+    if (det_s < -small) {
         ++out.positive;
         ++out.negative;
-    } else if (std::abs(det) <= small * norm) {
-        // One zero eigenvalue; the other has the sign of the trace.
+    } else if (std::abs(det_s) <= small) {
         ++out.zero;
-        if (trc >= 0.0) ++out.positive;
-        else            ++out.negative;
+        if (tr_s > small)       ++out.positive;
+        else if (tr_s < -small) ++out.negative;
+        else                    ++out.zero;
     } else {
-        // det > 0: both eigenvalues have the same sign (= sign of trace).
-        if      (trc > 0.0) out.positive += 2;
-        else if (trc < 0.0) out.negative += 2;
-        else                out.zero     += 2;
+        if      (tr_s > 0.0) out.positive += 2;
+        else if (tr_s < 0.0) out.negative += 2;
+        else                 out.zero     += 2;
     }
 }
 
 // ---------------------------------------------------------------------------
 // dense_ldlt_indef
-// Bounded Bunch-Kaufman threshold pivoting, alpha = (1+sqrt(17))/8 ~ 0.6404.
+// Threshold pivoting with scaled 2×2 arithmetic.
 // col-major storage: (i,j) -> A[i + j*lda], lower triangle only.
 // ---------------------------------------------------------------------------
 FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
@@ -83,12 +93,23 @@ FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
 {
     bool singular = false;
 
-    // Symmetric swap of rows/cols p and q within the lower-triangular active
-    // submatrix.  cur is the current factorization position (column index at
-    // which the active block begins).  Requires cur <= p < q < n.
-    auto sym_swap = [&](int cur, int p, int q) {
+    double max_abs = 0.0;
+    for (int j = 0; j < n; ++j) {
+        for (int i = j; i < n; ++i) {
+            const double v = std::abs(A[i + j * lda]);
+            if (v > max_abs) max_abs = v;
+        }
+    }
+    const double eff_small =
+        (max_abs > 0.0 && max_abs < 1.0) ? (small * max_abs) : small;
+
+    // Symmetric swap of rows/cols p and q across the full lower-triangular matrix
+    // (including already-computed L columns in [0, p)). Requires 0 <= p < q < n.
+    auto sym_swap = [&](int p, int q) {
+        if (p == q) return;
+        if (p > q) std::swap(p, q);
         std::swap(A[p + p * lda], A[q + q * lda]);
-        for (int m = cur; m < p; ++m)
+        for (int m = 0; m < p; ++m)
             std::swap(A[p + m * lda], A[q + m * lda]);
         for (int m = p + 1; m < q; ++m)
             std::swap(A[m + p * lda], A[q + m * lda]);
@@ -98,10 +119,6 @@ FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
 
     int k = 0;
     while (k < n) {
-
-        // ----------------------------------------------------------------
-        // Step 1: find r = argmax_{i in [k+1,n)} |A[i + k*lda]|; omega1.
-        // ----------------------------------------------------------------
         int    r      = k + 1;
         double omega1 = 0.0;
         if (k + 1 < n) {
@@ -115,30 +132,25 @@ FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
 
         const double akk = std::abs(A[k + k * lda]);
 
-        // ----------------------------------------------------------------
-        // Step 2: 1×1 pivot at k if diagonal dominates.
-        // ----------------------------------------------------------------
-        if (omega1 == 0.0 || akk >= u * omega1) {
+        if (omega1 == 0.0 || (akk >= eff_small && akk >= u * omega1)) {
             const double d = A[k + k * lda];
-            add_inertia_1x1(d, small, inertia);
+            add_inertia_1x1(d, eff_small, inertia);
             pivots.push_back(Pivot{PivotType::OneByOne, k, -1, d, 0.0, 0.0});
 
-            if (std::abs(d) >= small) {
+            if (std::abs(d) >= eff_small) {
                 for (int i = k + 1; i < n; ++i)
                     A[i + k * lda] /= d;
-                for (int j = k + 1; j < n; ++j)
+                for (int j = k + 1; j < n; ++j) {
+                    const double w_jk = d * A[j + k * lda];
                     for (int i = j; i < n; ++i)
-                        A[i + j * lda] -= A[i + k * lda] * d * A[j + k * lda];
+                        A[i + j * lda] -= A[i + k * lda] * w_jk;
+                }
             } else {
                 singular = true;
             }
             ++k;
 
         } else {
-            // ----------------------------------------------------------------
-            // Step 3: compute omega2 = max_{i in [k,n), i != r}
-            //         |A[max(i,r) + min(i,r)*lda]|.
-            // ----------------------------------------------------------------
             double omega2 = 0.0;
             for (int i = k; i < n; ++i) {
                 if (i == r) continue;
@@ -148,60 +160,71 @@ FactorStatus dense_ldlt_indef(double* A, int n, int lda, double u, double small,
                 if (v > omega2) omega2 = v;
             }
 
-            if (akk * omega2 >= u * omega1 * omega1) {
-                // swap(k, r) then 1×1 at k
-                sym_swap(k, k, r);
+            // The 2x2 (k, r) is preferred to a 1x1 on the partner r (MA27's
+            // order): at a tiny u a near-null A(r,r) passes the 1x1 test and
+            // puts up to 1/u into L. The partner 1x1 is only taken when the
+            // 2x2 is numerically singular.
+            double s2r = 0.0;
+            const double det_r = scaled_det_2x2(A[k + k * lda], A[r + k * lda],
+                                                A[r + r * lda], s2r);
+            const bool two_ok = s2r >= eff_small && std::abs(det_r) > small;
+            const double arr = std::abs(A[r + r * lda]);
+            if (!two_ok && arr >= eff_small && arr >= u * omega2) {
+                sym_swap(k, r);
                 const double d = A[k + k * lda];
-                add_inertia_1x1(d, small, inertia);
-                pivots.push_back(Pivot{PivotType::OneByOne, k, -1, d, 0.0, 0.0});
+                add_inertia_1x1(d, eff_small, inertia);
+                pivots.push_back(Pivot{PivotType::OneByOne, r, -1, d, 0.0, 0.0});
 
-                if (std::abs(d) >= small) {
+                if (std::abs(d) >= eff_small) {
                     for (int i = k + 1; i < n; ++i)
                         A[i + k * lda] /= d;
-                    for (int j = k + 1; j < n; ++j)
+                    for (int j = k + 1; j < n; ++j) {
+                        const double w_jk = d * A[j + k * lda];
                         for (int i = j; i < n; ++i)
-                            A[i + j * lda] -= A[i + k * lda] * d * A[j + k * lda];
+                            A[i + j * lda] -= A[i + k * lda] * w_jk;
+                    }
                 } else {
                     singular = true;
                 }
                 ++k;
 
             } else {
-                // 2×2 pivot at (k, k+1); swap r into position k+1 if needed.
                 if (r != k + 1)
-                    sym_swap(k, k + 1, r);
+                    sym_swap(k + 1, r);
 
-                const double d00 = A[ k        +  k      * lda];
-                const double d10 = A[(k + 1)   +  k      * lda];
-                const double d11 = A[(k + 1)   + (k + 1) * lda];
+                const double d00 = A[ k      +  k      * lda];
+                const double d10 = A[(k + 1) +  k      * lda];
+                const double d11 = A[(k + 1) + (k + 1) * lda];
 
                 add_inertia_2x2(d00, d10, d11, small, inertia);
                 pivots.push_back(
-                    Pivot{PivotType::TwoByTwo, k, k + 1, d00, d10, d11});
+                    Pivot{PivotType::TwoByTwo, k, r, d00, d10, d11});
 
-                const double det = d00 * d11 - d10 * d10;
-                if (std::abs(det) > small) {
-                    const double inv_det = 1.0 / det;
-
-                    // Compute L columns in-place (store into A[i+k*lda] and
-                    // A[i+(k+1)*lda] for i in [k+2, n)).
+                double s2 = 0.0;
+                const double det_s = scaled_det_2x2(d00, d10, d11, s2);
+                if (s2 >= eff_small && std::abs(det_s) > small) {
                     for (int i = k + 2; i < n; ++i) {
                         const double ai0 = A[i +  k      * lda];
                         const double ai1 = A[i + (k + 1) * lda];
-                        A[i +  k      * lda] = ( d11 * ai0 - d10 * ai1) * inv_det;
-                        A[i + (k + 1) * lda] = (-d10 * ai0 + d00 * ai1) * inv_det;
+                        double l0 = 0.0;
+                        double l1 = 0.0;
+                        solve_2x2_scaled(d00, d10, d11, ai0, ai1, l0, l1);
+                        A[i +  k      * lda] = l0;
+                        A[i + (k + 1) * lda] = l1;
                     }
 
-                    // Schur complement update using the computed L columns.
                     for (int j = k + 2; j < n; ++j) {
+                        const double lj0 = A[j +  k      * lda];
+                        const double lj1 = A[j + (k + 1) * lda];
+                        const double wj0 = d00 * lj0 + d10 * lj1;
+                        const double wj1 = d10 * lj0 + d11 * lj1;
                         for (int i = j; i < n; ++i) {
                             A[i + j * lda] -=
-                                  A[i +  k      * lda] * d00 * A[j +  k      * lda]
-                                + A[i +  k      * lda] * d10 * A[j + (k + 1) * lda]
-                                + A[i + (k + 1) * lda] * d10 * A[j +  k      * lda]
-                                + A[i + (k + 1) * lda] * d11 * A[j + (k + 1) * lda];
+                                  A[i +  k      * lda] * wj0
+                                + A[i + (k + 1) * lda] * wj1;
                         }
                     }
+                    A[(k + 1) + k * lda] = 0.0;
                 } else {
                     singular = true;
                 }
