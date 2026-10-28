@@ -184,6 +184,9 @@ struct SymmetricMatcher::State {
     std::vector<Int> init_col_to_row;
     std::vector<double> init_u, init_v;
     // Search scratch.
+    // Each holds at most n rows per search (a row is touched, finalized and
+    // queued at the current distance at most once), so they are sized n
+    // once and filled through counters.
     std::vector<int> touched, finalized, level;
     // Rows queued above the current distance, one entry per row, popped in
     // (distance, row) order: the order of the binary heap of (distance,
@@ -221,6 +224,9 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
 
     s.rs.assign(static_cast<std::size_t>(n), RowState{kInf, kInf});
     s.heap.reset(n);
+    s.touched.resize(static_cast<std::size_t>(n));
+    s.finalized.resize(static_cast<std::size_t>(n));
+    s.level.resize(static_cast<std::size_t>(n));
     s.row_match.assign(static_cast<std::size_t>(n), -1);
     s.row_parent.assign(static_cast<std::size_t>(n), -1);
     s.row_done.assign(static_cast<std::size_t>(n), 0);
@@ -356,10 +362,11 @@ bool SymmetricMatcher::State::search(int start_col) {
     const Int *const gptr = g.ptr.data();
     const int *const grow = g.row.data();
     const double *const gcost = g.cost.data();
-    touched.clear();
-    finalized.clear();
+    int *const T = touched.data();
+    int *const F = finalized.data();
+    int *const L = level.data();
+    std::size_t n_touched = 0, n_final = 0, n_level = 0;
     heap.clear();
-    level.clear();
     std::size_t level_head = 0;
 
     // Free rows are never expanded: the closest one seen so far ends the
@@ -391,7 +398,7 @@ bool SymmetricMatcher::State::search(int start_col) {
             const double nd = base + std::max(0.0, gcost[q] - ri.u - vj);
             if (nd < ri.dist) {
                 if (M[i] < 0) {
-                    if (ri.dist == kInf) touched.push_back(i);
+                    if (ri.dist == kInf) T[n_touched++] = i;
                     ri.dist = nd;
                     P[i] = j;
                     if (nd < path_len) {
@@ -402,11 +409,11 @@ bool SymmetricMatcher::State::search(int start_col) {
                     // stop scanning (dense columns would cost O(n)).
                     if (nd == base) return;
                 } else if (nd < path_len) {
-                    if (ri.dist == kInf) touched.push_back(i);
+                    if (ri.dist == kInf) T[n_touched++] = i;
                     ri.dist = nd;
                     P[i] = j;
                     if (nd == base) {
-                        level.push_back(i);
+                        L[n_level++] = i;
                     } else {
                         heap.push_or_decrease(i, nd);
                     }
@@ -419,12 +426,12 @@ bool SymmetricMatcher::State::search(int start_col) {
     double base = 0.0;
     while (true) {
         int i;
-        if (level_head < level.size()) {
+        if (level_head < n_level) {
             if (base >= path_len) break;
             i = level[level_head++];
             if (DN[i]) continue;
         } else {
-            level.clear();
+            n_level = 0;
             level_head = 0;
             if (heap.empty() || heap.top_key() >= path_len) break;
             const double d = heap.top_key();
@@ -436,7 +443,7 @@ bool SymmetricMatcher::State::search(int start_col) {
             base = d;
         }
         DN[i] = 1;
-        finalized.push_back(i);
+        F[n_final++] = i;
         relax(M[i], base);
     }
 
@@ -445,7 +452,8 @@ bool SymmetricMatcher::State::search(int start_col) {
         // their matched columns keeps reduced costs >= 0 and makes the
         // path tight.
         v[static_cast<std::size_t>(start_col)] += path_len;
-        for (int i : finalized) {
+        for (std::size_t k = 0; k < n_final; ++k) {
+            const int i = F[k];
             const double delta = path_len - R[i].dist;
             R[i].u -= delta;
             const int mc = M[i];
@@ -466,7 +474,8 @@ bool SymmetricMatcher::State::search(int start_col) {
         ++matched;
     }
 
-    for (int i : touched) {
+    for (std::size_t k = 0; k < n_touched; ++k) {
+        const int i = T[k];
         R[i].dist = kInf;
         DN[i] = 0;
     }
