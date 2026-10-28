@@ -13,6 +13,7 @@
 //
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
+//                             [--sample S [--lines]]
 //   file: one "<id> <path.mtx>" per line. --budget replaces the default
 //   budget of the second analysis. --ordering is the OrderingMethod value
 //   and --refactors Control::expected_refactors (the IPOPT plugin's
@@ -169,7 +170,8 @@ int main(int argc, char **argv) {
     }
     if (list.empty()) {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
-                             "[--budget b] [--case s]\n");
+                             "[--budget b] [--refactors r] [--case s] "
+                             "[--sample S [--lines]]\n");
         return 2;
     }
     std::ifstream in(list);
