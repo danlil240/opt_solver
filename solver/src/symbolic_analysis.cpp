@@ -687,6 +687,9 @@ namespace smf
         // the analysis actually kept.
         keep->matching_rejected =
             auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching);
+        if (keep->matching_rejected && (info.matching_trial == MatchingTrial::Exact ||
+                                        info.matching_trial == MatchingTrial::ResumedExact))
+            keep->rejected_matching_scale = std::move(matching_stats.scale);
         keep->matching_trigger_eligible =
             auto_order && !use_identity_ordering &&
             control.matrix_type == MatrixType::RealSymmetricIndefinite &&

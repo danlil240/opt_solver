@@ -1,5 +1,6 @@
 #include "smf/ipm_session.hpp"
 
+#include "smf/factor_indef.hpp"
 #include "smf/pivot_order.hpp"
 #include "smf/refinement.hpp"
 
@@ -8,26 +9,6 @@
 #include <chrono>
 
 namespace smf {
-
-namespace {
-
-// Flops of a factorization of `ak` without delays, counted as the kernel
-// counts Info::actual_flops: a pivot with r rows below it in its front costs
-// r + r (r + 1) (2x2 pivots count about the same per column).
-double kernel_flops(const AnalysisKeep &ak) {
-  double total = 0.0;
-  for (std::size_t s = 0; s < ak.supernodes.size(); ++s) {
-    const double f = static_cast<double>(ak.front_size(static_cast<Int>(s)));
-    const Int p = ak.supernodes[s].width();
-    for (Int k = 0; k < p; ++k) {
-      const double r = f - static_cast<double>(k) - 1.0;
-      total += r + r * (r + 1.0);
-    }
-  }
-  return total;
-}
-
-} // namespace
 
 ErrorCode IpmSession::analyse(const CscLower& pattern, std::span<const double> values,
                               const Control& ctrl, const IpmControl& ipm) {
@@ -367,7 +348,7 @@ void IpmSession::prepare_analysis() {
   const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   stats_.reanalyse_seconds += secs;
   if (!nak || ainfo.status != ErrorCode::Success) return;
-  if (kernel_flops(*nak) > ipm_.reanalyse_flops_ratio * trigger_flops_) return;
+  if (delay_free_kernel_flops(*nak) > ipm_.reanalyse_flops_ratio * trigger_flops_) return;
   // A user-supplied order computes no matching scaling. Keep the current
   // analysis' (ScalingMethod::Auto applies it; Matching reuses it only for
   // the values it was computed from), so the scaling does not change.

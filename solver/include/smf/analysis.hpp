@@ -4,15 +4,27 @@
 #include "smf/etree.hpp"
 #include "smf/supernode.hpp"
 #include "smf/assembly_tree.hpp"
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <vector>
 
 namespace smf {
 
+/// A process-unique, nonzero number for each AnalysisKeep constructed.
+inline std::uint64_t next_analysis_serial() noexcept {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 /// All symbolic analysis outputs needed by the factorization phase.
 struct AnalysisKeep {
+    /// Identifies this analysis (a copy is the same analysis): FactorKeep
+    /// state tied to an analysis (FactorKeep::delay_analysis) compares it,
+    /// never an address that a later analysis could reuse.
+    std::uint64_t            serial = next_analysis_serial();
     CscLower                 cleaned;           ///< cleaned input (from check_matrix)
     std::vector<Int>         orig_col_ptr;      ///< original input col_ptr for pattern validation
     std::vector<Int>         orig_row_idx;      ///< original input row_idx for pattern validation
@@ -45,6 +57,12 @@ struct AnalysisKeep {
     /// and kept AMD or METIS: the matching's scaling would not pay off
     /// without its ordering (ScalingMethod::Auto applies none).
     bool                     matching_rejected = false;
+    /// matching_rejected with the exact matching computed (Info::
+    /// matching_trial Exact or ResumedExact): its scaling of the analysed
+    /// values, which ScalingMethod::Auto does not apply; the scale-on-delay
+    /// trigger (Control::scale_on_delay_ratio) reuses it when it factors
+    /// those same values. Else empty.
+    std::vector<double>      rejected_matching_scale;
     Int                      n = 0;             ///< matrix order (= cleaned.n)
     /// Auto ordering of an indefinite matrix with values that did not end
     /// up with the matching ordering: factor() may re-analyse with it

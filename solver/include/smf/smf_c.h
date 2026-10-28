@@ -101,6 +101,12 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  * @param out       On success, *out is set to a newly allocated factor handle.
  *                  Must not be NULL.
  * @return SMF_OK, SMF_ERR_INVALID_ARG, SMF_ERR_SINGULAR, or SMF_ERR_INTERNAL.
+ *
+ * Uses the default smf::Control: an SMF_INDEF factorization whose delayed
+ * pivots inflate its work past Control::scale_on_delay_ratio stops and is
+ * redone with the matching scaling of its values. Each call starts from a
+ * new factor, so a sequence of calls on such a matrix pays that stopped try
+ * every time.
  */
 int smf_factor(smf_analysis_t analysis,
                const double*  values,

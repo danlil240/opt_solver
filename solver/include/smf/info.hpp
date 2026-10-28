@@ -46,6 +46,20 @@ struct Info {
     int          matching_reanalyses = 0;
     /// How analyse() decided the auto matching trial.
     MatchingTrial matching_trial     = MatchingTrial::None;
+    /// Indefinite factor(): the scaling the returned factor was computed
+    /// with (a ScalingMethod value; Auto reports what it resolved to: None,
+    /// or Matching for the analysis' or the scale-on-delay matching scale).
+    int          scaling_used        = 0;
+    /// 1 when this factor() computed a new matching scaling of its values
+    /// for the scale-on-delay trigger (Control::scale_on_delay_ratio): after
+    /// a factorization stopped at the threshold, or when the scale kept from
+    /// an earlier one no longer fit (Control::scale_on_delay_reuse_tol);
+    /// else 0.
+    int          delay_rescales      = 0;
+    /// 1 when this factor() stopped a factorization at the scale-on-delay
+    /// work limit, or threw away a factor whose kept scale failed the
+    /// accuracy probe (that work was spent), else 0.
+    int          delay_stops         = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues
@@ -57,6 +71,11 @@ struct Info {
     LongInt      predicted_factor_entries = 0;
     double       predicted_flops        = 0.0;
     double       actual_flops           = 0.0;
+    /// Indefinite factor(): sum over fronts of (fully summed columns) x
+    /// (rows)^2 as factored, delayed columns included; without delays it is
+    /// predicted_flops. The scale-on-delay trigger's work measure
+    /// (Control::scale_on_delay_ratio).
+    double       front_work             = 0.0;
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
     /// False iff this factorization perturbed a pivot by static pivoting
@@ -76,6 +95,9 @@ struct Info {
     /// Fronts factored as 2D tile tasks at the top of the tree
     /// (Control::top_tiles).
     int          top_tile_fronts        = 0;
+    /// Subtree-parallel engine (parallel_subtrees > 0): fronts of the top
+    /// of the tree factored, after the subtrees (also after a stop).
+    int          top_part_fronts        = 0;
     /// Contribution blocks of small fronts handed to their parent in a
     /// small-front buffer instead of the stack (Control::small_front_kernels).
     int          small_front_handovers  = 0;

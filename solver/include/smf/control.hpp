@@ -42,6 +42,46 @@ struct Control {
     // ScalingMethod::UserSupplied: n positive factors in original index
     // order, read during factor() (MA97's user `scale` argument).
     const double*  user_scale    = nullptr;
+    // Scaling on delay (negative: off). Under ScalingMethod::Auto, an
+    // indefinite factorization with plain threshold pivoting at pivot_u >=
+    // 1e-6 (kWeakPivotRatio; never IPOPT's u = 1e-8), no static pivoting
+    // (static_pivot_tol, fallback_static_pivot_tol), no delay_budget, no
+    // max_negative_pivots and not on the legacy tree_parallel engine stops
+    // as soon as its front work (Info::front_work: fully summed columns x
+    // rows^2 per front, as factored) exceeds scale_on_delay_ratio times that
+    // of the same factorization without delays (Info::predicted_flops), and
+    // is redone with the maximum-product matching scaling of its own values
+    // (that of ScalingMethod::Matching). What the delays cost decides, not
+    // how many there are: delays that inflate the fronts a few times over (a
+    // dense KKT, a cheap one) are not worth a matching; a cascade, or the
+    // badly scaled KKTs it marks, are (16: on the tuning split the easy
+    // cases stay below 9, the ones the matching rescues start at 28). This
+    // covers both what Auto applies: no scaling (the analysis kept AMD or
+    // METIS) and the analysis' matching scale, which is of the analysed
+    // values and can be stale for later ones (factoring the analysed values
+    // themselves it never stops). The FactorKeep keeps the scale for that
+    // analysis: a later factor() of it into the same FactorKeep starts from
+    // the kept scale while it still fits the new values (see
+    // scale_on_delay_reuse_tol), under the same work limit, and computes a
+    // new matching scaling otherwise or when the limit trips. Only a
+    // factorization that ran to the end updates the FactorKeep.
+    // Info::delay_rescales and Info::scaling_used report it. Work is only
+    // ever added, so the decision is the one the finished factorization's
+    // count would give: identical at every num_threads in deterministic
+    // mode.
+    double         scale_on_delay_ratio = 16.0;
+    // Fit test of a kept scale s on new values: the 90th percentile over
+    // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
+    // scaling, whose rows all peak at exactly 1) may be at most this:
+    // 0.1, i.e. 90% of the rows within 26% of the matching property. On
+    // the tuning split a kept scale that cost accuracy (cops_pinene_400,
+    // omega 1e-8 against 1e-12 fresh) measured 0.18, kept PGLib scales that
+    // stayed accurate 0.01-0.15. A factor with a kept scale also has to pass
+    // an accuracy probe (one solve with a fixed right-hand side: backward
+    // error within 10x of the fresh scale's and at most 1e-9), else the
+    // matching scaling is computed anew. Negative: a new matching scaling
+    // for every factorization once the trigger has fired (no probes).
+    double         scale_on_delay_reuse_tol = 0.1;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter
