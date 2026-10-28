@@ -745,7 +745,8 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         EXPECT_TRUE(ak->matching_scale.empty());
         ASSERT_FALSE(ak->rejected_matching_scale.empty());
         EXPECT_EQ(fk.scale, ak->rejected_matching_scale);
-        EXPECT_EQ(fk.delay_matching_analysis, ak.get());
+        EXPECT_EQ(fk.delay_analysis, ak->serial);
+        EXPECT_EQ(fk.delay_scale, ak->rejected_matching_scale);
         std::vector<double> fresh;
         ASSERT_EQ(compute_scaling_for_method(ak->cleaned, ScalingMethod::Matching, fresh),
                   ErrorCode::Success);

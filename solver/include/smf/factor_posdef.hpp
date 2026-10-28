@@ -4,6 +4,7 @@
 #include "smf/info.hpp"
 #include "smf/types.hpp"
 #include <utility>
+#include <cstdint>
 #include <vector>
 
 namespace smf {
@@ -84,13 +85,14 @@ struct FactorKeep {
   int band_kd = 0;                 ///< lower half-bandwidth for banded SPD factor
   std::vector<double> band_factor; ///< banded Cholesky factor (ldab=band_kd+1, col-major)
   std::vector<double> scale;       ///< positive diagonal scaling S applied during factorization
-  /// Control::scale_on_delay_ratio: the analysis whose factorization into
-  /// this FactorKeep last fired the delay trigger (only compared, never
-  /// dereferenced). Later factorizations of it into this FactorKeep use the
-  /// matching scaling of their own values from the start (a new analysis
-  /// that happens to get the same address inherits that: harmless, any
-  /// matching scaling is valid). Null: none.
-  const AnalysisKeep *delay_matching_analysis = nullptr;
+  /// Control::scale_on_delay_ratio: the analysis (AnalysisKeep::serial;
+  /// 0 = none) whose factorization into this FactorKeep fired the delay
+  /// trigger, and what came of it: the matching scale it factored with
+  /// (delay_scale), which later factorizations of that analysis into this
+  /// FactorKeep start from; or, delay_scale empty, that the values had no
+  /// matching scaling, so later ones run unarmed.
+  std::uint64_t delay_analysis = 0;
+  std::vector<double> delay_scale;
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };

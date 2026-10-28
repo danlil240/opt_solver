@@ -534,7 +534,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
         eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
         fkeep, ws, st, work_limit);
     blas_threads.reset();
-    if (err == kWorkLimitExceeded) {
+    if (err == ErrorCode::WorkLimitExceeded) {
       // Stopped at the scale-on-delay threshold: the factor is unusable.
       std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
       fkeep.factor_values.clear();
@@ -545,7 +545,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.static_pivots = st.static_pivots;
       info.aptp_failed_columns = st.aptp_failed;
       info.actual_flops = st.flops;
-      info.front_work = st.front_work;
+      info.front_work = static_cast<double>(st.front_work);
       info.factor_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       return FactorStatus::MaxPivotDelays;
@@ -569,7 +569,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.num_negative = st.inertia.negative;
       info.num_zero = st.inertia.zero;
       info.actual_flops = st.flops;
-      info.front_work = st.front_work;
+      info.front_work = static_cast<double>(st.front_work);
       info.aborted_flops_skipped = st.aborted_flops_skipped;
       info.factor_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -598,7 +598,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.numerical_rank = static_cast<int>(keep.n) - st.inertia.zero;
     info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
     info.actual_flops = st.flops;
-    info.front_work = st.front_work;
+    info.front_work = static_cast<double>(st.front_work);
     info.max_front_size = std::max(info.max_front_size, st.max_front);
     info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
     info.arena_peak_bytes = static_cast<long>(

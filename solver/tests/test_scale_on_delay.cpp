@@ -1,11 +1,13 @@
 // Control::scale_on_delay_ratio: under ScalingMethod::Auto, a threshold-
 // pivoting factorization (pivot_u >= 1e-6) whose delays inflate its front
 // work past the ratio stops and is redone with the matching scaling of its
-// values; later factorizations of the analysis into the same FactorKeep use
-// the matching scaling from the start.
+// values; later factorizations of the analysis into the same FactorKeep
+// start from that scale while it fits their values
+// (Control::scale_on_delay_reuse_tol).
 #include "../benchmarks/common/validation.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/determinism.hpp"
 #include "smf/factor_indef.hpp"
 #include "smf/info.hpp"
 #include "smf/scaling.hpp"
@@ -116,12 +118,23 @@ Control base_control() {
     return c;  // Auto scaling, pivot_u = 0.01, default trigger ratio
 }
 
+// The matching scaling (ScalingMethod::Matching's) of M's values, M being
+// a clean matrix of ak's pattern.
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, const CscLower &M) {
+    CscLower clean = ak.cleaned;
+    clean.values = M.values;
+    std::vector<double> ref;
+    EXPECT_EQ(compute_scaling_for_method(clean, ScalingMethod::Matching, ref), ErrorCode::Success);
+    return ref;
+}
+
 } // namespace
 
-TEST(ScaleOnDelay, FiresOnBadlyScaledKktAndKeepsMatchingScaling) {
+TEST(ScaleOnDelay, FiresOnBadlyScaledKktAndKeepsTheScale) {
     const CscLower A = kkt(kG, kM, 4.1, 3.0);
     const Control ctrl = base_control();
     ASSERT_GE(ctrl.scale_on_delay_ratio, 1.0);
+    ASSERT_GE(ctrl.scale_on_delay_reuse_tol, 0.0);
 
     // Premise: unscaled, the delays inflate the work well past the threshold.
     ASSERT_GT(unscaled_ratio(A, ctrl), 1.5 * ctrl.scale_on_delay_ratio);
@@ -148,34 +161,52 @@ TEST(ScaleOnDelay, FiresOnBadlyScaledKktAndKeepsMatchingScaling) {
     EXPECT_EQ(i1.num_zero, 0);
     EXPECT_TRUE(i1.inertia_exact);
     expect_accurate_solve(s, fk, ctrl, A);
-    // The scale is the matching scaling of A's values (Matching's own), and
-    // the FactorKeep remembers the analysis.
-    const auto matching_scale_of = [&](const CscLower &M) {
-        CscLower clean = ak->cleaned;
-        clean.values = M.values;  // the test matrices are clean already
-        std::vector<double> ref;
-        EXPECT_EQ(compute_scaling_for_method(clean, ScalingMethod::Matching, ref),
-                  ErrorCode::Success);
-        return ref;
-    };
-    EXPECT_EQ(fk.scale, matching_scale_of(A));
-    EXPECT_EQ(fk.delay_matching_analysis, ak.get());
+    // The scale is the matching scaling of A's values, and the FactorKeep
+    // keeps it for this analysis.
+    const std::vector<double> scale_a = matching_scale_of(*ak, A);
+    EXPECT_EQ(fk.scale, scale_a);
+    EXPECT_EQ(fk.delay_analysis, ak->serial);
+    EXPECT_EQ(fk.delay_scale, scale_a);
 
-    // Next factorization into the same FactorKeep, new values of the same
-    // pattern (another bad scaling): matching scaling of the new values from
-    // the start, no stopped try.
+    // Next factorization into the same FactorKeep, values that the kept
+    // scale still fits (the same bad scaling, a slightly larger H
+    // diagonal): the kept scale is reused, no stopped try, no matching.
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    Info i1b;
+    ASSERT_EQ(s.factor(*ak, A1, ctrl, i1b, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i1b.delay_rescales, 0);
+    EXPECT_EQ(i1b.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_EQ(fk.scale, scale_a);
+    EXPECT_EQ(fk.delay_scale, scale_a);
+    EXPECT_EQ(i1b.num_positive, kG * kG);
+    EXPECT_EQ(i1b.num_negative, kM);
+    expect_accurate_solve(s, fk, ctrl, A1);
+
+    // Values the kept scale no longer fits (another bad scaling): a new
+    // matching scaling of them, kept in its place.
     const CscLower A2 = kkt(kG, kM, 4.6, 3.0, -0.1, 11);
     ASSERT_GT(unscaled_ratio(A2, ctrl), ctrl.scale_on_delay_ratio);
     Info i2;
     ASSERT_EQ(s.factor(*ak, A2, ctrl, i2, fk, ws), FactorStatus::Success);
-    EXPECT_EQ(i2.delay_rescales, 0);
+    EXPECT_EQ(i2.delay_rescales, 1);
     EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
     EXPECT_LE(work_ratio(*ak, i2), ctrl.scale_on_delay_ratio);
-    EXPECT_EQ(fk.scale, matching_scale_of(A2));
-    EXPECT_EQ(fk.delay_matching_analysis, ak.get());
+    const std::vector<double> scale_a2 = matching_scale_of(*ak, A2);
+    EXPECT_EQ(fk.scale, scale_a2);
+    EXPECT_EQ(fk.delay_scale, scale_a2);
     EXPECT_EQ(i2.num_positive, kG * kG);
     EXPECT_EQ(i2.num_negative, kM);
     expect_accurate_solve(s, fk, ctrl, A2);
+
+    // With reuse off, every later factorization computes a new matching.
+    {
+        Control rc = ctrl;
+        rc.scale_on_delay_reuse_tol = -1.0;
+        Info ir;
+        ASSERT_EQ(s.factor(*ak, A2, rc, ir, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(ir.delay_rescales, 1);
+        EXPECT_EQ(fk.scale, scale_a2);
+    }
 
     // Another FactorKeep, or another analysis, starts over.
     FactorKeep fk_other;
@@ -185,10 +216,11 @@ TEST(ScaleOnDelay, FiresOnBadlyScaledKktAndKeepsMatchingScaling) {
     Info ib;
     auto ak_b = s.analyse(A, ctrl, ib);
     ASSERT_NE(ak_b.get(), nullptr);
+    EXPECT_NE(ak_b->serial, ak->serial);
     Info i3;
     ASSERT_EQ(s.factor(*ak_b, ctrl, i3, fk), FactorStatus::Success);
     EXPECT_EQ(i3.delay_rescales, 1);
-    EXPECT_EQ(fk.delay_matching_analysis, ak_b.get());
+    EXPECT_EQ(fk.delay_analysis, ak_b->serial);
 }
 
 // Well scaled: no delays, nothing fires, no scaling.
@@ -207,11 +239,11 @@ TEST(ScaleOnDelay, DoesNotFireOnWellScaledKkt) {
     EXPECT_EQ(i1.delay_rescales, 0);
     EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::None));
     EXPECT_TRUE(fk.scale.empty());
-    EXPECT_EQ(fk.delay_matching_analysis, nullptr);
+    EXPECT_EQ(fk.delay_analysis, 0u);
     expect_accurate_solve(s, fk, ctrl, A);
 }
 
-// Delays that cost little (the zero (2,2) block of a mildly scaled KKT:
+// Delays that cost little (the zero (2,2) block of a well scaled KKT:
 // constraint rows pivot one level up) do not fire the trigger: a factor that
 // delays but stays under the work ratio is the plain one, bit for bit.
 TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
@@ -264,7 +296,7 @@ TEST(ScaleOnDelay, NeverFiresBelowWeakPivotRatio) {
         EXPECT_EQ(i1.delay_rescales, 0);
         EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::None));
         EXPECT_TRUE(fk.scale.empty());
-        EXPECT_EQ(fk.delay_matching_analysis, nullptr);
+        EXPECT_EQ(fk.delay_analysis, 0u);
         EXPECT_EQ(i1.delayed_pivots, i_off.delayed_pivots);
         EXPECT_EQ(i1.num_negative, i_off.num_negative);
         EXPECT_EQ(fk.factor_values, fk_off.factor_values);
@@ -272,15 +304,25 @@ TEST(ScaleOnDelay, NeverFiresBelowWeakPivotRatio) {
     }
 }
 
-// Not armed outside plain threshold pivoting with Auto scaling.
+// Not armed outside plain threshold pivoting with Auto scaling, with
+// max_negative_pivots, or on the legacy tree_parallel engine. A ratio of 0
+// would stop after the first front if it were armed, and the badly scaled
+// KKT with a zero (2,2) block delays under every pivoting variant below
+// (static pivoting perturbs instead, but its fronts still count work).
 TEST(ScaleOnDelay, OnlyUnderAutoScalingAndThresholdPivoting) {
-    const CscLower A = kkt(kG, kM, 4.1, 3.0);
-    for (int variant = 0; variant < 4; ++variant) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0, 0.0);
+    for (int variant = 0; variant < 6; ++variant) {
         Control ctrl = base_control();
+        ctrl.scale_on_delay_ratio = 0.0;
         if (variant == 0) ctrl.scaling = ScalingMethod::None;
         if (variant == 1) ctrl.static_pivot_tol = 1e-8;
-        if (variant == 2) ctrl.delay_budget = 1000000;
-        if (variant == 3) ctrl.scale_on_delay_ratio = -1.0;
+        if (variant == 2) ctrl.fallback_static_pivot_tol = 1e-8;
+        if (variant == 3) ctrl.delay_budget = 1000000;
+        if (variant == 4) ctrl.max_negative_pivots = static_cast<int>(A.n);
+        if (variant == 5) {
+            ctrl.tree_parallel = true;
+            ctrl.num_threads = 2;
+        }
         Solver s;
         Info ia;
         auto ak = s.analyse(A, ctrl, ia);
@@ -288,8 +330,49 @@ TEST(ScaleOnDelay, OnlyUnderAutoScalingAndThresholdPivoting) {
         FactorKeep fk;
         Info i1;
         (void)s.factor(*ak, ctrl, i1, fk);
+        // Deterministic mode ignores tree_parallel (the lean engine runs).
+        if (variant == 5 && deterministic_mode(ctrl)) continue;
+        EXPECT_GT(i1.front_work, 0.0) << "variant " << variant;
         EXPECT_EQ(i1.delay_rescales, 0) << "variant " << variant;
-        EXPECT_EQ(fk.delay_matching_analysis, nullptr) << "variant " << variant;
+        EXPECT_EQ(fk.delay_analysis, 0u) << "variant " << variant;
+    }
+}
+
+// max_negative_pivots arms an early stop of its own; with it the trigger is
+// off, so the factorization, its status and the FactorKeep state are the
+// same at 1, 2 and 4 threads (deterministic mode), whichever limit would
+// have been crossed first.
+TEST(ScaleOnDelay, MaxNegativePivotsDisarmsTheTrigger) {
+    const CscLower A = kkt(90, 300, 4.1, 3.0);  // n < 10000: no auto matching
+    for (const int neg_limit : {300 - 1, 300}) {  // trips / does not trip
+        std::vector<double> x_ref;
+        FactorStatus st_ref = FactorStatus::Success;
+        for (const int threads : {1, 2, 4}) {
+            Control ctrl = base_control();
+            ctrl.deterministic = true;
+            ctrl.num_threads = threads;
+            ctrl.max_negative_pivots = neg_limit;
+            Solver s;
+            Info ia;
+            auto ak = s.analyse(A, ctrl, ia);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            Info i1;
+            const FactorStatus st = s.factor(*ak, ctrl, i1, fk);
+            EXPECT_EQ(i1.delay_rescales, 0);
+            EXPECT_EQ(fk.delay_analysis, 0u);
+            EXPECT_TRUE(fk.scale.empty());
+            if (threads > 1) EXPECT_GT(i1.parallel_subtrees, 1) << "threads " << threads;
+            if (threads == 1) st_ref = st;
+            EXPECT_EQ(st, st_ref) << "threads " << threads;
+            if (st != FactorStatus::Success) continue;
+            std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
+            Info si;
+            ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), static_cast<int>(A.n), 1), 0);
+            if (x_ref.empty()) x_ref = x;
+            else EXPECT_EQ(x, x_ref) << "threads " << threads;
+        }
+        EXPECT_EQ(st_ref, neg_limit < 300 ? FactorStatus::InertiaExceeded : FactorStatus::Success);
     }
 }
 
@@ -299,36 +382,35 @@ TEST(ScaleOnDelay, WorkLimitStopsOnlyPastTheCount) {
     const CscLower A = kkt(kG, kM, 4.1, 3.0);
     Control ctrl = base_control();
     ctrl.scale_on_delay_ratio = -1.0;
-    for (const int threads : {1, 4}) {
-        ctrl.num_threads = threads;
-        Solver s;
-        Info ia;
-        auto ak = s.analyse(A, ctrl, ia);
-        ASSERT_NE(ak.get(), nullptr);
-        NumericWorkspace ws;
-        FactorKeep f_ref, f_hi, f_lo;
-        Info i_ref, i_hi, i_lo;
-        ASSERT_EQ(factor_indef(*ak, A, ctrl, i_ref, f_ref, ws), FactorStatus::Success);
-        const double work = i_ref.front_work;
-        ASSERT_GT(work, delay_free_front_work(*ak));  // it delays
-        ASSERT_EQ(factor_indef(*ak, A, ctrl, i_hi, f_hi, ws, work), FactorStatus::Success);
-        EXPECT_EQ(i_hi.front_work, work);
-        EXPECT_EQ(i_hi.delayed_pivots, i_ref.delayed_pivots);
-        if (threads == 1) EXPECT_EQ(f_hi.factor_values, f_ref.factor_values);
-        EXPECT_EQ(factor_indef(*ak, A, ctrl, i_lo, f_lo, ws, work - 1.0),
-                  FactorStatus::MaxPivotDelays);
-        EXPECT_GT(i_lo.front_work, work - 1.0);
-        EXPECT_TRUE(f_lo.factor_values.empty());
-        FactorKeep f_again;
-        Info i_again;
-        ASSERT_EQ(factor_indef(*ak, A, ctrl, i_again, f_again, ws), FactorStatus::Success);
-        EXPECT_EQ(i_again.delayed_pivots, i_ref.delayed_pivots);
-        if (threads == 1) EXPECT_EQ(f_again.factor_values, f_ref.factor_values);
-    }
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep f_ref, f_hi, f_lo;
+    Info i_ref, i_hi, i_lo;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_ref, f_ref, ws), FactorStatus::Success);
+    const double work = i_ref.front_work;
+    ASSERT_GT(work, delay_free_front_work(*ak));  // it delays
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_hi, f_hi, ws, work), FactorStatus::Success);
+    EXPECT_EQ(i_hi.front_work, work);
+    EXPECT_EQ(i_hi.delayed_pivots, i_ref.delayed_pivots);
+    EXPECT_EQ(f_hi.factor_values, f_ref.factor_values);
+    EXPECT_EQ(factor_indef(*ak, A, ctrl, i_lo, f_lo, ws, work - 1.0),
+              FactorStatus::MaxPivotDelays);
+    EXPECT_GT(i_lo.front_work, work - 1.0);
+    EXPECT_TRUE(f_lo.factor_values.empty());
+    FactorKeep f_again;
+    Info i_again;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_again, f_again, ws), FactorStatus::Success);
+    EXPECT_EQ(i_again.delayed_pivots, i_ref.delayed_pivots);
+    EXPECT_EQ(f_again.factor_values, f_ref.factor_values);
 }
 
-// The same on the tree-parallel subtree engine (a tree heavy enough to be
-// split at 4 threads; the threads count the work into one shared total).
+// The same on the subtree-parallel engine (a tree split at 4 threads; the
+// threads count the work into one shared total). A limit of a tenth of the
+// work stops while the subtrees are being factored, before the top of the
+// tree; the workspace is fit for the next factorization after that.
 TEST(ScaleOnDelay, WorkLimitOnParallelSubtrees) {
     const CscLower A = kkt(100, 200, 4.1, 0.0);
     for (const bool det : {false, true}) {
@@ -351,22 +433,36 @@ TEST(ScaleOnDelay, WorkLimitOnParallelSubtrees) {
         EXPECT_EQ(i_hi.front_work, work);
         EXPECT_EQ(i_hi.delayed_pivots, i_ref.delayed_pivots);
         EXPECT_EQ(i_hi.num_negative, i_ref.num_negative);
-        EXPECT_EQ(factor_indef(*ak, A, ctrl, i_lo, f_lo, ws, 0.5 * work),
-                  FactorStatus::MaxPivotDelays);
-        EXPECT_GT(i_lo.front_work, 0.5 * work);
+        const double limit = 0.1 * work;
+        EXPECT_EQ(factor_indef(*ak, A, ctrl, i_lo, f_lo, ws, limit), FactorStatus::MaxPivotDelays);
+        EXPECT_GT(i_lo.front_work, limit);
+        // Stopped in the subtree phase: the top of the tree (its largest
+        // fronts) never ran, so most of the work was skipped.
+        EXPECT_LT(i_lo.front_work, 0.5 * work);
         EXPECT_TRUE(f_lo.factor_values.empty());
         ASSERT_EQ(factor_indef(*ak, A, ctrl, i_again, f_again, ws), FactorStatus::Success);
         EXPECT_EQ(i_again.front_work, work);
         EXPECT_EQ(i_again.delayed_pivots, i_ref.delayed_pivots);
+        EXPECT_EQ(i_again.num_negative, i_ref.num_negative);
+        if (det) {
+            // Deterministic mode: the same solution, bit for bit.
+            const auto solve = [&](const FactorKeep &f) {
+                std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
+                Info si;
+                EXPECT_EQ(s.solve(f, ctrl, si, x.data(), static_cast<int>(A.n), 1), 0);
+                return x;
+            };
+            EXPECT_EQ(solve(f_again), solve(f_ref));
+        }
         std::printf("[ScaleOnDelay] subtrees %d (det %d): work %.3e, stopped at %.3e\n",
                     i_ref.parallel_subtrees, det ? 1 : 0, work, i_lo.front_work);
     }
 }
 
 // Deterministic mode: the trigger decision, and the solution, are the same
-// at every thread count.
+// at every thread count, the subtree engine running at 2 and 4.
 TEST(ScaleOnDelay, DeterministicAcrossThreadCounts) {
-    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A = kkt(90, 300, 4.1, 3.0);  // n < 10000: no auto matching
     std::vector<double> x_ref;
     for (const int threads : {1, 2, 4}) {
         Control ctrl = base_control();
@@ -380,6 +476,7 @@ TEST(ScaleOnDelay, DeterministicAcrossThreadCounts) {
         Info i1;
         ASSERT_EQ(s.factor(*ak, ctrl, i1, fk), FactorStatus::Success);
         EXPECT_EQ(i1.delay_rescales, 1) << "threads " << threads;
+        if (threads > 1) EXPECT_GT(i1.parallel_subtrees, 1) << "threads " << threads;
         std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
         Info si;
         ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), static_cast<int>(A.n), 1), 0);
@@ -388,9 +485,12 @@ TEST(ScaleOnDelay, DeterministicAcrossThreadCounts) {
     }
 }
 
-// A singular matrix (one variable's row and column numerically zero) whose
-// delays fire the trigger: whether or not its matching scaling exists, the
-// result keeps the plain factorization's status and inertia (a zero pivot).
+// A singular matrix (one variable's row and column numerically zero, so it
+// has no matching scaling: the no-matching branch) whose delays fire the
+// trigger: the result keeps the plain factorization's status and inertia (a
+// zero pivot), and the FactorKeep remembers that there is no matching
+// scaling, so a later factorization runs unarmed instead of paying the
+// stopped try again.
 TEST(ScaleOnDelay, SingularMatrixKeepsStatusAndInertia) {
     CscLower A = kkt(kG, kM, 4.1, 3.0);
     const Int z = 5;
@@ -411,15 +511,19 @@ TEST(ScaleOnDelay, SingularMatrixKeepsStatusAndInertia) {
     std::printf("[ScaleOnDelay] singular: off %d delays, work ratio %.2f, status %d\n",
                 i_off.delayed_pivots, work_ratio(*ak, i_off), static_cast<int>(st_off));
     ASSERT_GT(work_ratio(*ak, i_off), ctrl.scale_on_delay_ratio);
-    const FactorStatus st = s.factor(*ak, ctrl, i1, fk);
-    std::printf("[ScaleOnDelay] singular: on %d delays, rescaled %d\n", i1.delayed_pivots,
-                i1.delay_rescales);
-    EXPECT_EQ(st, st_off);
-    EXPECT_EQ(i1.status, i_off.status);
-    EXPECT_EQ(i1.num_zero, i_off.num_zero);
-    EXPECT_EQ(i1.num_positive, i_off.num_positive);
-    EXPECT_EQ(i1.num_negative, i_off.num_negative);
-    EXPECT_GE(i1.num_zero, 1);
+    for (int call = 0; call < 2; ++call) {
+        const FactorStatus st = s.factor(*ak, ctrl, i1, fk);
+        EXPECT_EQ(st, st_off);
+        EXPECT_EQ(i1.status, i_off.status);
+        EXPECT_EQ(i1.num_zero, i_off.num_zero);
+        EXPECT_EQ(i1.num_positive, i_off.num_positive);
+        EXPECT_EQ(i1.num_negative, i_off.num_negative);
+        EXPECT_GE(i1.num_zero, 1);
+        EXPECT_EQ(i1.delay_rescales, 0);
+        EXPECT_EQ(fk.delay_analysis, ak->serial);  // no matching scaling: unarmed from now
+        EXPECT_TRUE(fk.delay_scale.empty());
+        EXPECT_EQ(fk.factor_values, fk_off.factor_values);
+    }
 }
 
 // With the matching ordering Auto applies the analysis' matching scale, of
@@ -457,14 +561,14 @@ TEST(ScaleOnDelay, ReplacesStaleAnalysisMatchingScale) {
     EXPECT_EQ(i1.delay_rescales, 0);
     EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::Matching));
     EXPECT_EQ(fk.scale, ak->matching_scale);
-    EXPECT_EQ(fk.delay_matching_analysis, nullptr);
+    EXPECT_EQ(fk.delay_analysis, 0u);
 
     Info i2;
     ASSERT_EQ(s.factor(*ak, A2, ctrl, i2, fk, ws), FactorStatus::Success);
     EXPECT_EQ(i2.delay_rescales, 1);
     EXPECT_LE(work_ratio(*ak, i2), ctrl.scale_on_delay_ratio);
     EXPECT_NE(fk.scale, ak->matching_scale);
-    EXPECT_EQ(fk.delay_matching_analysis, ak.get());
+    EXPECT_EQ(fk.delay_analysis, ak->serial);
     EXPECT_EQ(i2.num_positive, kG * kG);
     EXPECT_EQ(i2.num_negative, kM);
     expect_accurate_solve(s, fk, ctrl, A2);

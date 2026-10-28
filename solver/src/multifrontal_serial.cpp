@@ -6,6 +6,7 @@
 #include "parallel/tile_tasks.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
@@ -529,7 +530,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.inertia.zero += kr.inertia.zero;
   st.static_pivots += kr.static_pivots;
   st.flops += kr.flops;
-  st.front_work += static_cast<double>(num_elig) * static_cast<double>(f) * static_cast<double>(f);
+  st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
 
   if (cx.posdef && p < num_elig) {
@@ -833,9 +834,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const bool armed = neg_limit >= 0;
   // Early stop once the front work exceeds work_limit (the same monotone
   // argument: an unstopped run's final count decides it). The counts are
-  // integers, summed exactly (below 2^53) in any order.
-  const double work_cap = posdef ? -1.0 : work_limit;
-  const bool work_armed = work_cap >= 0.0;
+  // integers, summed exactly in any order.
+  const bool work_armed = !posdef && work_limit >= 0.0;
+  const long long work_cap =
+      !work_armed ? -1
+                  : (work_limit >= 9.0e18 ? std::numeric_limits<long long>::max()
+                                          : static_cast<long long>(std::floor(work_limit)));
 
   // Symbolic plan: largest front, factor size, and the peak of the
   // contribution stack when no pivot is delayed.
@@ -1002,7 +1006,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
         status = ErrorCode::InertiaExceeded;
       if (status == ErrorCode::Success && work_armed && main.st.front_work > work_cap)
-        status = kWorkLimitExceeded;
+        status = ErrorCode::WorkLimitExceeded;
       if (status != ErrorCode::Success) break;
     }
     if (status == ErrorCode::InertiaExceeded)
@@ -1055,14 +1059,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      std::memory_order_relaxed);
     };
     // work_limit: the same, with the fronts' work.
-    const auto count_work = [&](double added_d) {
-      const long long added = std::llround(added_d);
-      if (added <= 0 ||
-          static_cast<double>(work_done.fetch_add(added, std::memory_order_relaxed) + added) <=
-              work_cap)
+    const auto count_work = [&](long long added) {
+      if (added <= 0 || work_done.fetch_add(added, std::memory_order_relaxed) + added <= work_cap)
         return;
       int ok = static_cast<int>(ErrorCode::Success);
-      failed.compare_exchange_strong(ok, static_cast<int>(kWorkLimitExceeded),
+      failed.compare_exchange_strong(ok, static_cast<int>(ErrorCode::WorkLimitExceeded),
                                      std::memory_order_relaxed);
     };
     // Workers count no BLAS threads outside their own guards: the caller,
@@ -1100,7 +1101,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
             break;
           const int neg0 = P.st.inertia.negative;
-          const double work0 = P.st.front_work;
+          const long long work0 = P.st.front_work;
           const Int next_s = k < hi ? keep.postorder[k + 1] : Int{-1};
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
                                             budget_regions ? &budget : nullptr, det_tc, next_s);
@@ -1211,7 +1212,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
           ErrorCode e;
           const int neg0 = P.st.inertia.negative;
-          const double work0 = P.st.front_work;
+          const long long work0 = P.st.front_work;
           BudgetState *bs = budget_regions ? &top_state : nullptr;
           {
             // Deterministic mode: BLAS on one thread whatever the front's

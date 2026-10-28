@@ -81,6 +81,10 @@ struct RunRecord {
     int delayed_pivots = 0;
     int aptp_failed_columns = -1;  // smf only (Info::aptp_failed_columns); -1 = not reported
     int static_pivots = -1;        // smf only (Info::static_pivots); -1 = not reported
+    // smf only: factorizations of the run whose scale-on-delay trigger
+    // computed a matching scaling (Info::delay_rescales, summed over a
+    // warm sequence's steps); -1 = not reported.
+    int delay_rescales = -1;
     // smf only: smf::refine() inside the adapter's solve (static pivots, or
     // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
     int refine_iterations = -1;

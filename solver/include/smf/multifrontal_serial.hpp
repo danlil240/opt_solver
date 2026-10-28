@@ -10,12 +10,6 @@
 
 namespace smf {
 
-/// Returned by multifrontal_factor_serial when the front work exceeds its
-/// `work_limit` (the scale-on-delay trigger, Control::scale_on_delay_ratio).
-/// Internal: Solver::factor always factors again after it, so it never
-/// reaches a caller.
-inline constexpr ErrorCode kWorkLimitExceeded = static_cast<ErrorCode>(-100);
-
 struct SerialFactorStats {
   InertiaCounts inertia{};
   int delayed = 0;
@@ -28,7 +22,8 @@ struct SerialFactorStats {
   double flops = 0.0;
   // Sum over fronts of (fully summed columns) x (rows)^2, as realized: the
   // delay-inflated counterpart of Info::predicted_flops (Info::front_work).
-  double front_work = 0.0;
+  // An integer, so sums are exact in any order.
+  long long front_work = 0;
   int max_front = 0;
   // ErrorCode::InertiaExceeded: predicted flops of the fronts not factored.
   double aborted_flops_skipped = 0.0;
@@ -58,8 +53,8 @@ struct SerialFactorStats {
 /// counts and `st.aborted_flops_skipped` the skipped fronts' predicted flops.
 ///
 /// Indefinite with `work_limit` >= 0: as soon as the front work counted so
-/// far (st.front_work, integers) exceeds it, the remaining fronts are
-/// skipped and kWorkLimitExceeded is returned. Work is only ever added, so
+/// far (st.front_work, an exact integer sum) exceeds it, the remaining
+/// fronts are skipped and ErrorCode::WorkLimitExceeded is returned. Work is only ever added, so
 /// this happens exactly when the finished factorization's count would
 /// exceed it, and a run within the limit does the work of an unarmed one.
 ///

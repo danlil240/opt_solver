@@ -50,9 +50,11 @@ struct Info {
     /// with (a ScalingMethod value; Auto reports what it resolved to: None,
     /// or Matching for the analysis' or the scale-on-delay matching scale).
     int          scaling_used        = 0;
-    /// 1 when this factor() stopped a factorization at the scale-on-delay
-    /// threshold (Control::scale_on_delay_ratio) and factored again with the
-    /// matching scaling of its values, else 0.
+    /// 1 when this factor() computed a new matching scaling of its values
+    /// for the scale-on-delay trigger (Control::scale_on_delay_ratio): after
+    /// a factorization stopped at the threshold, or when the scale kept from
+    /// an earlier one no longer fit (Control::scale_on_delay_reuse_tol);
+    /// else 0.
     int          delay_rescales      = 0;
 
     // Inertia

@@ -554,6 +554,8 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
     // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
+    // SMF_BENCH_SCALE_REUSE_TOL (double; negative = recompute): Control::scale_on_delay_reuse_tol.
+    if (const char *e = std::getenv("SMF_BENCH_SCALE_REUSE_TOL")) ctrl.scale_on_delay_reuse_tol = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
     if (const char *e = std::getenv("SMF_BENCH_CACHE_INVERSE_DIAG")) ctrl.cache_inverse_diag = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
@@ -637,6 +639,7 @@ int main(int argc, char **argv) {
 
         std::vector<std::vector<double>> step_solutions(static_cast<std::size_t>(kSeqSteps), b);
         double total_factor_ms = 0.0;
+        int seq_delay_rescales = 0;
         std::vector<double> step_factor_ms;  // successful factors, in order
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
@@ -655,6 +658,7 @@ int main(int argc, char **argv) {
             for (int step = 0; step < kSeqSteps; ++step) {
                 out_f = adapter->factor(seq_values[step]);
                 total_factor_ms += adapter->stats().factor_ms;
+                seq_delay_rescales += adapter->stats().delay_rescales;
                 if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
                 // The IpmSession adapter runs the deferred analysis in factor().
                 if (step == 0 && !has_phases && adapter->stats().has_analyse_phases) {
@@ -736,6 +740,7 @@ int main(int argc, char **argv) {
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
             rec.static_pivots = st.static_pivots;
+            rec.delay_rescales = seq_delay_rescales;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }
@@ -822,6 +827,7 @@ int main(int argc, char **argv) {
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
             rec.static_pivots = st.static_pivots;
+            rec.delay_rescales = st.delay_rescales;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }

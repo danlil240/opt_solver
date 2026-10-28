@@ -435,7 +435,7 @@ add_executable(test_ldlt_aptp test_ldlt_aptp.cpp)
 target_link_libraries(test_ldlt_aptp PRIVATE smf GTest::gtest_main)
 add_test(NAME LdltAptp COMMAND test_ldlt_aptp)
 
-# --- Scale on delay (Control::scale_on_delay_share) ---
+# --- Scale on delay (Control::scale_on_delay_ratio) ---
 
 add_executable(test_scale_on_delay
     test_scale_on_delay.cpp
