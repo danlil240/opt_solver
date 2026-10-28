@@ -46,6 +46,12 @@ struct Info {
     int          matching_reanalyses = 0;
     /// How analyse() decided the auto matching trial.
     MatchingTrial matching_trial     = MatchingTrial::None;
+    /// The trial's predicted factor flops (sum of squared column counts) of
+    /// the matching ordering over the base (AMD/METIS) ordering's, built
+    /// from the matching's initial phase (only when the searches exceeded
+    /// the budget) and from the exact matching. 0 when not computed.
+    double       matching_initial_ratio = 0.0;
+    double       matching_exact_ratio   = 0.0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues

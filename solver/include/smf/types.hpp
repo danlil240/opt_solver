@@ -83,15 +83,18 @@ enum class MatchingTrigger {
 
 // How analyse() decided the auto matching trial (Info::matching_trial; see
 // Control::matching_search_budget).
-//   None            - no trial (not an auto ordering of a KKT-like matrix).
+//   None            - no trial (not an auto ordering of a KKT-like matrix),
+//                     or the trial failed: structurally singular matrix, or
+//                     the matching ordering could not be built.
 //   Exact           - the exact matching decided; its searches stayed
 //                     within the budget.
 //   RejectedInitial - the searches exceeded the budget, and the matching
-//                     ordering of the matching's initial phase was already
-//                     too dear: AMD/METIS kept, no exact matching.
+//                     ordering of the matching's initial phase was clearly
+//                     too dear (past a guard band above the 1.5 flops rule):
+//                     AMD/METIS kept, no exact matching.
 //   ResumedExact    - the searches exceeded the budget, the initial phase's
-//                     matching ordering was cheap enough, so the searches
-//                     resumed and the exact matching decided.
+//                     matching ordering was not clearly too dear, so the
+//                     searches resumed and the exact matching decided.
 enum class MatchingTrial {
     None            = 0,
     Exact           = 1,

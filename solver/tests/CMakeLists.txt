@@ -70,6 +70,10 @@ add_executable(test_symbolic test_symbolic.cpp)
 target_link_libraries(test_symbolic PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME Symbolic COMMAND test_symbolic)
 
+add_executable(test_matching_trial test_matching_trial.cpp)
+target_link_libraries(test_matching_trial PRIVATE smf GTest::GTest GTest::Main)
+add_test(NAME MatchingTrial COMMAND test_matching_trial)
+
 add_executable(test_parallel_nd test_parallel_nd.cpp)
 target_link_libraries(test_parallel_nd PRIVATE smf GTest::GTest GTest::Main)
 add_test(NAME ParallelNd COMMAND test_parallel_nd)

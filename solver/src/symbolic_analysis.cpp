@@ -38,6 +38,20 @@ namespace smf
     // aug3dcqp, stokes128).
     static constexpr double kMatchingFlopsRatio = 1.5;
 
+    // Guard band of the budgeted trial (Control::matching_search_budget):
+    // the matching ordering of the matching's initial phase rejects the
+    // matching ordering outright only past this ratio to the base ordering's
+    // flops; up to it the searches resume and the exact matching decides by
+    // kMatchingFlopsRatio. The initial phase leaves columns unmatched, so its
+    // ratio can sit well above the exact one: over the 50 n >= 10000
+    // indefinite corpus matrices (AutoSerial; AutoParallel with 1 and 10
+    // expected refactors) adopters reach 2.29 (d_pretok; turon_m: 2.27
+    // initial vs 1.35 exact, rejected without the band), while PGLib OPF,
+    // the costliest rejecters, start at 2.55 (case1354). 1.6 x 1.5 = 2.4 sits
+    // between them. It is a margin, not a bound: on adopters near the rule
+    // the initial ratio has exceeded the exact one by up to 1.8x.
+    static constexpr double kMatchingInitialRejectRatio = 1.6 * kMatchingFlopsRatio;
+
     // KKT recognition for the auto policy: a diagonal below kSmallDiagonal
     // times its column's largest off-diagonal cannot be a 1x1 pivot; the
     // matrix is treated as a saddle point when such columns are at least
@@ -305,19 +319,20 @@ namespace smf
         // on PGLib OPF and ncvxqp, where the matching ordering loses), the
         // matching ordering of the matching's initial phase is built instead
         // and decides first, in step 5 once the base ordering's flops are
-        // known: its verdict agreed with the exact one on all 46 corpus
-        // matrices with a trial. A loss ends the trial there; a win resumes
-        // the paused searches, and the exact matching decides as usual.
+        // known: a clear loss (past kMatchingInitialRejectRatio) ends the
+        // trial there; otherwise the paused searches resume and the exact
+        // matching decides as usual.
         std::vector<Int> matching_perm;
         std::unique_ptr<SymmetricMatcher> paused_matcher;
         if (auto_matching)
         {
             auto matcher = std::make_unique<SymmetricMatcher>(C);
-            const long long budget =
-                control.matching_search_budget < 0.0
-                    ? -1
-                    : static_cast<long long>(control.matching_search_budget * 2.0 *
-                                             static_cast<double>(C.row_idx.size()));
+            // In edges scanned: budget x 2 x C's lower entries (diagonal
+            // included), about `budget` passes over the matcher's symmetric
+            // cost graph. Negative, NaN or beyond 1e18 edges: none.
+            const double b = control.matching_search_budget;
+            const double edges = b * 2.0 * static_cast<double>(C.row_idx.size());
+            const long long budget = (b >= 0.0 && edges < 1e18) ? static_cast<long long>(edges) : -1;
             if (matcher->advance(budget))
             {
                 const MatchingResult mr = matcher->current();
@@ -488,11 +503,16 @@ namespace smf
         // then delays pivots by the thousand). Prefer it unless its exact
         // flops exceed AMD's by more than a constant factor.
         // A paused trial decides on its initial matching first (see above).
+        // matching_stats.flops is the candidate ordering's predicted flops,
+        // the same sum of squared exact column counts as factor_flops()
+        // (bitwise: same adjacency, same counts), so the candidate's column
+        // counts are only computed once it is adopted.
         bool rejected_initial = false;
         if (paused_matcher)
         {
-            symbolic_counts(matching_perm.data(), sym1);
-            if (factor_flops(sym1) > kMatchingFlopsRatio * factor_flops(sym0))
+            const double fl0 = factor_flops(sym0);
+            info.matching_initial_ratio = matching_stats.flops / fl0;
+            if (matching_stats.flops > kMatchingInitialRejectRatio * fl0)
             {
                 rejected_initial = true;
                 info.matching_trial = MatchingTrial::RejectedInitial;
@@ -501,6 +521,7 @@ namespace smf
             {
                 paused_matcher->advance(-1);
                 const MatchingResult mr = paused_matcher->current();
+                paused_matcher.reset();
                 auto_matching = mr.status == ErrorCode::Success &&
                                 matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                     &matching_stats, CompressedOrder::Auto,
@@ -513,9 +534,11 @@ namespace smf
         if (auto_matching && !rejected_initial &&
             info.ordering_used != static_cast<int>(OrderingMethod::Matching))
         {
-            const Int depth_m = symbolic_counts(matching_perm.data(), sym1);
-            if (factor_flops(sym1) <= kMatchingFlopsRatio * factor_flops(sym0))
+            const double fl0 = factor_flops(sym0);
+            info.matching_exact_ratio = matching_stats.flops / fl0;
+            if (matching_stats.flops <= kMatchingFlopsRatio * fl0)
             {
+                const Int depth_m = symbolic_counts(matching_perm.data(), sym1);
                 perm = std::move(matching_perm);
                 std::swap(sym0, sym1);
                 depth0 = depth_m;
