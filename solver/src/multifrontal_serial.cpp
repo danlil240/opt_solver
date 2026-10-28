@@ -673,6 +673,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
   to.top_tile_fronts += from.top_tile_fronts;
+  to.top_part_fronts += from.top_part_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
   to.front_work += from.front_work;
@@ -1231,6 +1232,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             failed.store(static_cast<int>(e));
           } else {
             done_order.push_back({tid, P.steps->size() - 1, s});
+            ++P.st.top_part_fronts;
             P.diag_marks.emplace_back(s, P.diag->size());
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
             if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;

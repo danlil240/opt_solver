@@ -90,9 +90,16 @@ struct FactorKeep {
   /// trigger, and what came of it: the matching scale it factored with
   /// (delay_scale), which later factorizations of that analysis into this
   /// FactorKeep start from; or, delay_scale empty, that the values had no
-  /// matching scaling, so later ones run unarmed.
+  /// matching scaling, so later ones with the same zero pattern
+  /// (delay_signature) run unarmed.
   std::uint64_t delay_analysis = 0;
   std::vector<double> delay_scale;
+  /// The backward error of the accuracy probe when delay_scale was fresh;
+  /// a later factor with it must stay close (solve.cpp).
+  double delay_omega = 0.0;
+  /// delay_scale empty: the zero pattern of the values that had no
+  /// matching scaling (another pattern is tried again).
+  std::uint64_t delay_signature = 0;
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };

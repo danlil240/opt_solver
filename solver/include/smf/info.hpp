@@ -91,6 +91,9 @@ struct Info {
     /// Fronts factored as 2D tile tasks at the top of the tree
     /// (Control::top_tiles).
     int          top_tile_fronts        = 0;
+    /// Subtree-parallel engine (parallel_subtrees > 0): fronts of the top
+    /// of the tree factored, after the subtrees (also after a stop).
+    int          top_part_fronts        = 0;
     /// Contribution blocks of small fronts handed to their parent in a
     /// small-front buffer instead of the stack (Control::small_front_kernels).
     int          small_front_handovers  = 0;

@@ -76,8 +76,11 @@ struct Control {
     // 0.1, i.e. 90% of the rows within 26% of the matching property. On
     // the tuning split a kept scale that cost accuracy (cops_pinene_400,
     // omega 1e-8 against 1e-12 fresh) measured 0.18, kept PGLib scales that
-    // stayed accurate 0.01-0.15. Negative: a new matching scaling for every
-    // factorization once the trigger has fired.
+    // stayed accurate 0.01-0.15. A factor with a kept scale also has to pass
+    // an accuracy probe (one solve with a fixed right-hand side: backward
+    // error within 10x of the fresh scale's and at most 1e-9), else the
+    // matching scaling is computed anew. Negative: a new matching scaling
+    // for every factorization once the trigger has fired (no probes).
     double         scale_on_delay_reuse_tol = 0.1;
 
     // Pivoting

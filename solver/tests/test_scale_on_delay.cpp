@@ -427,6 +427,7 @@ TEST(ScaleOnDelay, WorkLimitOnParallelSubtrees) {
         Info i_ref, i_hi, i_lo, i_again;
         ASSERT_EQ(factor_indef(*ak, A, ctrl, i_ref, f_ref, ws), FactorStatus::Success);
         ASSERT_GT(i_ref.parallel_subtrees, 1) << "premise: the subtree engine ran";
+        ASSERT_GT(i_ref.top_part_fronts, 0) << "premise: it has a top part";
         const double work = i_ref.front_work;
         ASSERT_GT(work, 0.0);
         ASSERT_EQ(factor_indef(*ak, A, ctrl, i_hi, f_hi, ws, work), FactorStatus::Success);
@@ -436,8 +437,8 @@ TEST(ScaleOnDelay, WorkLimitOnParallelSubtrees) {
         const double limit = 0.1 * work;
         EXPECT_EQ(factor_indef(*ak, A, ctrl, i_lo, f_lo, ws, limit), FactorStatus::MaxPivotDelays);
         EXPECT_GT(i_lo.front_work, limit);
-        // Stopped in the subtree phase: the top of the tree (its largest
-        // fronts) never ran, so most of the work was skipped.
+        // Stopped in the subtree phase: no front of the top part ran.
+        EXPECT_EQ(i_lo.top_part_fronts, 0);
         EXPECT_LT(i_lo.front_work, 0.5 * work);
         EXPECT_TRUE(f_lo.factor_values.empty());
         ASSERT_EQ(factor_indef(*ak, A, ctrl, i_again, f_again, ws), FactorStatus::Success);
@@ -524,6 +525,99 @@ TEST(ScaleOnDelay, SingularMatrixKeepsStatusAndInertia) {
         EXPECT_TRUE(fk.delay_scale.empty());
         EXPECT_EQ(fk.factor_values, fk_off.factor_values);
     }
+    // The memo holds only for that zero pattern: values with the zero
+    // row and column filled in again (the plain badly scaled KKT) are tried
+    // and rescued.
+    const CscLower full = kkt(kG, kM, 4.1, 3.0);
+    Info i2;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, full, ctrl, i2, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.delay_rescales, 1);
+    EXPECT_EQ(fk.delay_analysis, ak->serial);
+    EXPECT_FALSE(fk.delay_scale.empty());
+    EXPECT_EQ(i2.num_negative, kM);
+}
+
+// A kept scale that fits but whose factor fails the accuracy probe is not
+// kept: the matching scaling is computed anew (the probe compares with the
+// backward error the kept scale had when fresh, FactorKeep::delay_omega).
+TEST(ScaleOnDelay, ReuseThatFailsTheProbeRecomputes) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const Control ctrl = base_control();
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, A, ctrl, i1, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(i1.delay_rescales, 1);
+    ASSERT_EQ(fk.delay_analysis, ak->serial);
+    EXPECT_GT(fk.delay_omega, 0.0);
+    EXPECT_LE(fk.delay_omega, 1e-12);  // the fresh factor's probe
+    const std::vector<double> scale_a = fk.delay_scale;
+
+    // The kept scale fits A exactly (it is A's own); with the recorded
+    // fresh error at 1, the probe passes: reuse.
+    fk.delay_omega = 1.0;
+    Info i2;
+    ASSERT_EQ(s.factor(*ak, A, ctrl, i2, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.delay_rescales, 0);
+    EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_EQ(fk.delay_scale, scale_a);
+
+    // A recorded fresh error of 0 makes any probe error a failure: the
+    // factor is redone with a newly computed matching scaling (the same
+    // one, the values being the same) and the new probe error recorded.
+    fk.delay_omega = 0.0;
+    Info i3;
+    ASSERT_EQ(s.factor(*ak, A, ctrl, i3, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i3.delay_rescales, 1);
+    EXPECT_EQ(fk.delay_scale, scale_a);
+    EXPECT_GT(fk.delay_omega, 0.0);
+    EXPECT_EQ(i3.num_negative, kM);
+    expect_accurate_solve(s, fk, ctrl, A);
+}
+
+// A kept scale that passes the fit test but whose factorization trips the
+// work limit (the scale of other values, the fit test opened up): the try
+// is stopped and the matching scaling of the new values computed and kept.
+TEST(ScaleOnDelay, ReuseThatTripsTheLimitRecomputes) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A2 = kkt(kG, kM, 4.1, 3.0, -0.1, 11);  // another bad scaling
+    Control ctrl = base_control();
+    ctrl.scale_on_delay_reuse_tol = 100.0;  // every kept scale "fits"
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, A, ctrl, i1, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(i1.delay_rescales, 1);
+    // Premise: A2 with A's scale blows up past the limit.
+    {
+        Control uc = ctrl;
+        uc.scale_on_delay_ratio = -1.0;
+        uc.scaling = ScalingMethod::UserSupplied;
+        uc.user_scale = fk.delay_scale.data();
+        FactorKeep f0;
+        Info i0;
+        NumericWorkspace w0;
+        ASSERT_EQ(s.factor(*ak, A2, uc, i0, f0, w0), FactorStatus::Success);
+        ASSERT_GT(work_ratio(*ak, i0), ctrl.scale_on_delay_ratio);
+    }
+    Info i2;
+    ASSERT_EQ(s.factor(*ak, A2, ctrl, i2, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.delay_rescales, 1);
+    EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_LE(work_ratio(*ak, i2), ctrl.scale_on_delay_ratio);
+    EXPECT_EQ(fk.delay_scale, matching_scale_of(*ak, A2));
+    EXPECT_EQ(i2.num_negative, kM);
+    EXPECT_GT(i2.factor_seconds, 0.0);
+    expect_accurate_solve(s, fk, ctrl, A2);
 }
 
 // With the matching ordering Auto applies the analysis' matching scale, of
