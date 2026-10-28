@@ -11,9 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace smf {
 namespace {
@@ -25,6 +28,24 @@ CscLower diagonal5() {
     A.col_ptr = {0, 1, 2, 3, 4, 5};
     A.row_idx = {0, 1, 2, 3, 4};
     A.values = {1, 1, 1, 1, 1};
+    return A;
+}
+
+// opf_like_kkt with every Jacobian entry (an off-diagonal) scaled by
+// 10^(spread * (u - 1/2)), u uniform in [0, 1) from a seeded LCG. The spread
+// of magnitudes makes the matching's greedy initial phase pair columns
+// worse than the full searches do.
+CscLower scaled_opf_kkt(int n_x, int m, unsigned seed, double spread) {
+    CscLower A = opf_like_kkt(n_x, m, seed);
+    std::uint64_t st = seed * 7919u + 13u;
+    for (Int j = 0; j < A.n; ++j) {
+        for (Int q = A.col_ptr[j]; q < A.col_ptr[j + 1]; ++q) {
+            if (A.row_idx[q] == j) continue;
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            const double u = static_cast<double>(st >> 11) / 9007199254740992.0;
+            A.values[q] *= std::pow(10.0, spread * (u - 0.5));
+        }
+    }
     return A;
 }
 
@@ -153,17 +174,88 @@ TEST(MatchingTrial, ResumesInsideGuardBand) {
     expect_same_analysis(*a1, *a2, i1, i2);
 }
 
-// A NaN, infinite or huge budget means no budget: the exact trial.
+// Guard band, the other way: the initial matching ordering sits above the
+// 1.5 rule (1.64 here) but inside the 2.4 guard band, so it is not rejected;
+// the resumed exact matching (1.44) passes and is adopted, with the same
+// ordering and matching scale as the exact trial (budget -1). Corpus
+// analogue: turon_m (2.27 initial, 1.35 exact). The matrix was found by a
+// sweep (scaled_opf_kkt), so the test checks its own band first.
+TEST(MatchingTrial, ResumesInsideGuardBandAndAdopts) {
+    const CscLower A = scaled_opf_kkt(9000, 2000, 6, 1.0);
+    Control exact;
+    exact.matrix_type = MatrixType::RealSymmetricIndefinite;
+    exact.ordering = OrderingMethod::AutoSerial;
+    exact.matching_search_budget = -1.0;
+    Control budgeted = exact;
+    budgeted.matching_search_budget = 0.0;
+    Solver s1, s2;
+    Info i1, i2;
+    auto a1 = s1.analyse(A, exact, i1);
+    auto a2 = s2.analyse(A, budgeted, i2);
+    ASSERT_NE(a1, nullptr);
+    ASSERT_NE(a2, nullptr);
+    ASSERT_GT(i2.matching_initial_ratio, 1.5) << "fixture must start above the rule";
+    ASSERT_LE(i2.matching_initial_ratio, 2.4) << "fixture must lie inside the guard band";
+    ASSERT_LE(i1.matching_exact_ratio, 1.5) << "fixture must pass on the exact matching";
+    EXPECT_EQ(i1.matching_trial, MatchingTrial::Exact);
+    EXPECT_EQ(i2.matching_trial, MatchingTrial::ResumedExact);
+    EXPECT_EQ(i1.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_EQ(i2.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_FALSE(a1->matching_rejected);
+    EXPECT_FALSE(a2->matching_rejected);
+    ASSERT_FALSE(a1->matching_scale.empty());
+    expect_same_analysis(*a1, *a2, i1, i2);
+}
+
+// A NaN, infinite or huge budget means no budget: the exact trial. The
+// analysis (trial verdict, ratios, ordering, matching scale) and the
+// factorization it feeds (inertia, delays, factor size, solution) are
+// bitwise those of budget -1.
 TEST(MatchingTrial, NonFiniteBudgetIsNoBudget) {
     const CscLower A = opf_like_kkt(10000, 1000, 7);
+    const int n = static_cast<int>(A.n);
+    Control ref;
+    ref.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ref.ordering = OrderingMethod::AutoSerial;
+    ref.num_threads = 1;
+    ref.matching_search_budget = -1.0;
+    Solver sr;
+    Info ir;
+    auto ar = sr.analyse(A, ref, ir);
+    ASSERT_NE(ar, nullptr);
+    ASSERT_EQ(ir.matching_trial, MatchingTrial::Exact);
+    ASSERT_EQ(ir.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    ASSERT_FALSE(ar->matching_scale.empty());
+    FactorKeep fr;
+    ASSERT_EQ(sr.factor(*ar, ref, ir, fr), FactorStatus::Success);
+    std::vector<double> xr(static_cast<std::size_t>(n), 1.0);
+    ASSERT_EQ(sr.solve(fr, ref, ir, xr.data(), n), 0);
+
     for (double b : {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(), 1e300}) {
-        Control c;
-        c.matrix_type = MatrixType::RealSymmetricIndefinite;
+        Control c = ref;
         c.matching_search_budget = b;
         Solver s;
         Info i;
-        ASSERT_NE(s.analyse(A, c, i), nullptr);
+        auto a = s.analyse(A, c, i);
+        ASSERT_NE(a, nullptr) << "budget " << b;
         EXPECT_EQ(i.matching_trial, MatchingTrial::Exact) << "budget " << b;
+        EXPECT_EQ(i.matching_initial_ratio, 0.0) << "budget " << b;  // never paused
+        EXPECT_EQ(i.matching_exact_ratio, ir.matching_exact_ratio) << "budget " << b;
+        EXPECT_EQ(i.ordering_used, ir.ordering_used) << "budget " << b;
+        EXPECT_EQ(a->perm, ar->perm) << "budget " << b;
+        EXPECT_FALSE(a->matching_rejected) << "budget " << b;
+        EXPECT_EQ(a->matching_scale, ar->matching_scale) << "budget " << b;
+
+        FactorKeep f;
+        ASSERT_EQ(s.factor(*a, c, i, f), FactorStatus::Success) << "budget " << b;
+        EXPECT_EQ(i.num_negative, ir.num_negative) << "budget " << b;
+        EXPECT_EQ(i.num_zero, ir.num_zero) << "budget " << b;
+        EXPECT_EQ(i.num_positive, ir.num_positive) << "budget " << b;
+        EXPECT_EQ(i.delayed_pivots, ir.delayed_pivots) << "budget " << b;
+        EXPECT_EQ(i.actual_factor_entries, ir.actual_factor_entries) << "budget " << b;
+        std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+        ASSERT_EQ(s.solve(f, c, i, x.data(), n), 0) << "budget " << b;
+        EXPECT_EQ(x, xr) << "budget " << b;
     }
 }
 
@@ -189,6 +281,37 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreads) {
         EXPECT_NE(i1.matching_trial, MatchingTrial::None);
         EXPECT_EQ(i4.matching_trial, i1.matching_trial);
         EXPECT_EQ(i4.matching_initial_ratio, i1.matching_initial_ratio);
+        EXPECT_EQ(a4->perm, a1->perm);
+    }
+}
+
+// The same under AutoParallel (the IPOPT plugin's ordering). Its base
+// ordering can come from a thread-count dependent path (serial METIS at 1
+// thread, parallel nested dissection above), so the flop ratios and the
+// verdict are thread independent only where that path is not taken. These
+// synthetic KKTs have AMD factors too cheap to try METIS, which this test
+// pins.
+TEST(MatchingTrial, DecisionDoesNotDependOnThreadsAutoParallel) {
+    for (const CscLower &A : {opf_like_kkt(10000, 1000, 7), opf_like_kkt(8000, 2000, 1),
+                              opf_like_kkt(6000, 5000, 7)}) {
+        Control c1;
+        c1.matrix_type = MatrixType::RealSymmetricIndefinite;
+        c1.ordering = OrderingMethod::AutoParallel;
+        c1.matching_search_budget = 0.0;
+        c1.num_threads = 1;
+        Control c4 = c1;
+        c4.num_threads = 4;
+        Solver s1, s4;
+        Info i1, i4;
+        auto a1 = s1.analyse(A, c1, i1);
+        auto a4 = s4.analyse(A, c4, i4);
+        ASSERT_NE(a1, nullptr);
+        ASSERT_NE(a4, nullptr);
+        EXPECT_NE(i1.matching_trial, MatchingTrial::None);
+        EXPECT_EQ(i4.matching_trial, i1.matching_trial);
+        EXPECT_EQ(i4.matching_initial_ratio, i1.matching_initial_ratio);
+        EXPECT_EQ(i4.matching_exact_ratio, i1.matching_exact_ratio);
+        EXPECT_EQ(i4.ordering_used, i1.ordering_used);
         EXPECT_EQ(a4->perm, a1->perm);
     }
 }
