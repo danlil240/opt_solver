@@ -16,6 +16,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace smf {
@@ -35,6 +36,10 @@ constexpr double kRealizedDelayShare = 0.05;
 // there), 1e-9 keeps 10x of headroom to the 1e-8 accuracy gate.
 constexpr double kReuseOmegaFactor = 10.0;
 constexpr double kReuseOmegaMax = 1e-9;
+// The fresh error the relative test compares with is at least this: below
+// about 100 eps the probe measures rounding (one reuse of slightly
+// different values can move it 10x), not a stale scale.
+constexpr double kReuseOmegaFloor = 1e-14;
 
 // `values` in the cleaned entry order of ak.
 std::vector<double> cleaned_values(const AnalysisKeep &ak, const FactorValues &values) {
@@ -104,8 +109,9 @@ bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
 // The matching scaling (ScalingMethod::Matching's) of values `cv` of ak's
 // pattern (cleaned order): the analysis' own matching scale, adopted or
 // rejected, when they are the analysed values. Empty when there is none
-// (e.g. structurally singular).
-std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> cv,
+// (e.g. structurally singular). cv is borrowed (moved in and back), not
+// copied.
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv,
                                       int print_level) {
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
@@ -117,10 +123,9 @@ std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double
   C.row_idx = ak.cleaned.row_idx;
   C.values = std::move(cv);
   std::vector<double> scale;
-  if (compute_scaling_for_method(C, ScalingMethod::Matching, scale, print_level) !=
-          ErrorCode::Success ||
-      scale.size() != static_cast<std::size_t>(ak.n))
-    return {};
+  const ErrorCode ec = compute_scaling_for_method(C, ScalingMethod::Matching, scale, print_level);
+  cv = std::move(C.values);
+  if (ec != ErrorCode::Success || scale.size() != static_cast<std::size_t>(ak.n)) return {};
   return scale;
 }
 
@@ -150,15 +155,18 @@ double scale_staleness(const AnalysisKeep &ak, const std::vector<double> &cv,
   return *q;
 }
 
-// Accuracy probe of a factor of the values cv (cleaned order) of ak's
-// pattern: solve A x = b for a fixed right-hand side with one serial solve
-// (the same result at every num_threads in deterministic mode) and return
-// the componentwise backward error max_i |b - A x|_i / (|A| |x| + |b|)_i,
-// the accuracy gate's omega.
-// Infinity when the solve fails or the error is not finite.
-double probe_backward_error(const AnalysisKeep &ak, const std::vector<double> &cv,
+} // namespace
+
+bool scale_on_delay_reuse_passes(double probe_omega, double fresh_omega) {
+  const double base = fresh_omega >= 0.0 ? std::max(fresh_omega, kReuseOmegaFloor)
+                                         : std::numeric_limits<double>::infinity();
+  return probe_omega <= kReuseOmegaFactor * base && probe_omega <= kReuseOmegaMax;
+}
+
+double scale_on_delay_probe(const AnalysisKeep &ak, std::span<const double> cv,
                             const FactorKeep &fkeep, const Control &ctrl) {
   const std::size_t n = static_cast<std::size_t>(ak.n);
+  if (cv.size() != ak.cleaned.row_idx.size()) return std::numeric_limits<double>::infinity();
   const auto &cp = ak.cleaned.col_ptr;
   const auto &ri = ak.cleaned.row_idx;
   std::vector<double> b(n, 0.0);
@@ -198,10 +206,14 @@ double probe_backward_error(const AnalysisKeep &ak, const std::vector<double> &c
     const double den = d[i] + std::abs(b[i]);
     const double e = den > 0.0 ? std::abs(r[i]) / den
                                : (r[i] == 0.0 ? 0.0 : std::numeric_limits<double>::infinity());
-    if (!(e <= omega)) omega = e;  // NaN propagates as "not finite"
+    // Any non-finite row (an overflowed or NaN solution) fails the probe.
+    if (!std::isfinite(e)) return std::numeric_limits<double>::infinity();
+    omega = std::max(omega, e);
   }
-  return std::isfinite(omega) ? omega : std::numeric_limits<double>::infinity();
+  return omega;
 }
+
+namespace {
 
 // Positions (and count) of the exactly zero or non-finite values of cv:
 // whether a matching scaling exists depends on nothing else.
@@ -302,10 +314,18 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       const FactorStatus st = run(ak, c, limit);
       if (st != FactorStatus::MaxPivotDelays && !ran(st)) return finish(st);
       if (st != FactorStatus::MaxPivotDelays) {
-        const auto tp = now();
-        const double omega = probe_backward_error(ak, cv, fkeep, ctrl);
-        extra_seconds += secs(tp, now());
-        if (omega <= kReuseOmegaFactor * kept_omega && omega <= kReuseOmegaMax) {
+        // A factor with zero pivots (Singular) has no solve to probe: it
+        // stands on the fit test and the work limit. Otherwise the probe's
+        // error must stay within kReuseOmegaFactor of the fresh one (no
+        // fresh one recorded: only the cap applies) and under the cap.
+        bool pass = st == FactorStatus::Singular;
+        if (!pass) {
+          const auto tp = now();
+          const double omega = scale_on_delay_probe(ak, cv, fkeep, ctrl);
+          extra_seconds += secs(tp, now());
+          pass = scale_on_delay_reuse_passes(omega, kept_omega);
+        }
+        if (pass) {
           info.scaling_used = static_cast<int>(ScalingMethod::Matching);
           fkeep.delay_analysis = ak.serial;
           fkeep.delay_scale = std::move(kept);
@@ -315,6 +335,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       }
       // The limit tripped or the probe failed: this try is spent.
       extra_seconds += info.factor_seconds;
+      info.delay_stops = 1;
     }
   } else if (!ours || no_matching || !reuse_on) {
     if (!ours || no_matching) {
@@ -322,6 +343,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       const FactorStatus st = run(ak, ctrl, limit);
       if (st != FactorStatus::MaxPivotDelays) return finish(st);
       extra_seconds += info.factor_seconds;
+      info.delay_stops = 1;
     }
   }
   // A new matching scaling of these values.
@@ -344,10 +366,12 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
     info.delay_rescales = 1;
     if (ran(st)) {
       info.scaling_used = static_cast<int>(ScalingMethod::Matching);
-      double omega = std::numeric_limits<double>::infinity();
-      if (reuse_on) {
+      // The fresh scale's probe error, the reuse baseline; none (-1) when
+      // reuse is off or the factor has zero pivots (nothing to solve with).
+      double omega = -1.0;
+      if (reuse_on && st == FactorStatus::Success) {
         const auto tp = now();
-        omega = probe_backward_error(ak, cv, fkeep, ctrl);
+        omega = scale_on_delay_probe(ak, cv, fkeep, ctrl);
         extra_seconds += secs(tp, now());
       }
       fkeep.delay_analysis = ak.serial;
@@ -416,6 +440,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_stops = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
@@ -434,6 +459,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_stops = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
@@ -458,6 +484,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   const FactorValues fv{values.data(), values.size(), true};
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_stops = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);

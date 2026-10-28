@@ -10,6 +10,7 @@
 #include "smf/determinism.hpp"
 #include "smf/factor_indef.hpp"
 #include "smf/info.hpp"
+#include "smf/matrix_market.hpp"
 #include "smf/scaling.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -17,6 +18,9 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <limits>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -521,6 +525,9 @@ TEST(ScaleOnDelay, SingularMatrixKeepsStatusAndInertia) {
         EXPECT_EQ(i1.num_negative, i_off.num_negative);
         EXPECT_GE(i1.num_zero, 1);
         EXPECT_EQ(i1.delay_rescales, 0);
+        // The first call stopped a try; the second, same zero pattern, ran
+        // unarmed: the memo held.
+        EXPECT_EQ(i1.delay_stops, call == 0 ? 1 : 0) << "call " << call;
         EXPECT_EQ(fk.delay_analysis, ak->serial);  // no matching scaling: unarmed from now
         EXPECT_TRUE(fk.delay_scale.empty());
         EXPECT_EQ(fk.factor_values, fk_off.factor_values);
@@ -538,11 +545,72 @@ TEST(ScaleOnDelay, SingularMatrixKeepsStatusAndInertia) {
     EXPECT_EQ(i2.num_negative, kM);
 }
 
-// A kept scale that fits but whose factor fails the accuracy probe is not
-// kept: the matching scaling is computed anew (the probe compares with the
-// backward error the kept scale had when fresh, FactorKeep::delay_omega).
-TEST(ScaleOnDelay, ReuseThatFailsTheProbeRecomputes) {
+// The reuse decision on a probe error: at most 10x the fresh one (floored
+// at 1e-14) and at most 1e-9; no fresh error recorded: the cap only; a NaN
+// or infinite error fails.
+TEST(ScaleOnDelay, ReuseProbeRule) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    // Relative: 10x the fresh error.
+    EXPECT_TRUE(scale_on_delay_reuse_passes(9.9e-11, 1e-11));
+    EXPECT_FALSE(scale_on_delay_reuse_passes(1.1e-10, 1e-11));
+    // The floor: a fresh error near eps does not make rounding fail it.
+    EXPECT_TRUE(scale_on_delay_reuse_passes(9e-14, 1e-16));
+    EXPECT_FALSE(scale_on_delay_reuse_passes(1.1e-13, 1e-16));
+    // The cap, whatever the fresh error.
+    EXPECT_TRUE(scale_on_delay_reuse_passes(1e-9, 1.0));
+    EXPECT_FALSE(scale_on_delay_reuse_passes(1.1e-9, 1.0));
+    EXPECT_FALSE(scale_on_delay_reuse_passes(1.1e-9, -1.0));
+    // No fresh error recorded (negative): the cap only.
+    EXPECT_TRUE(scale_on_delay_reuse_passes(9e-10, -1.0));
+    // Not finite.
+    EXPECT_FALSE(scale_on_delay_reuse_passes(nan, 1.0));
+    EXPECT_FALSE(scale_on_delay_reuse_passes(inf, -1.0));
+}
+
+// The probe: tiny on an accurate factor of its values, and infinite as
+// soon as one row's error is not finite (values with a NaN), never a finite
+// maximum over the other rows.
+TEST(ScaleOnDelay, ProbeErrorAndNaN) {
     const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const Control ctrl = base_control();
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, ctrl, i1, fk), FactorStatus::Success);
+    ASSERT_EQ(i1.delay_rescales, 1);
+    const double omega = scale_on_delay_probe(*ak, A.values, fk, ctrl);
+    std::printf("[ScaleOnDelay] probe of a fresh factor: %.3e (recorded %.3e)\n", omega,
+                fk.delay_omega);
+    EXPECT_GT(omega, 0.0);
+    EXPECT_LT(omega, 1e-12);
+    EXPECT_EQ(omega, fk.delay_omega);  // what the trigger recorded
+    std::vector<double> bad = A.values;
+    bad[bad.size() / 2] = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(scale_on_delay_probe(*ak, bad, fk, ctrl), std::numeric_limits<double>::infinity());
+}
+
+// A real reuse that the probe rejects: PGLib case500's IPOPT capture,
+// factored at the replay's 5 evenly spaced steps into one FactorKeep. On
+// the tuning split the kept scale of step 13 fits step 52 but its factor
+// probes 75x the fresh error there, so step 52 is refactored with a new
+// matching scaling; every step solves to the accuracy gate. Skipped without
+// the (untracked) fixture.
+TEST(ScaleOnDelay, ProbeRejectsAStaleReuseOnPglib) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
+                         "fixtures" / "ipopt_hard" / "pglib_opf_case500_goc__api";
+    const fs::path mtx = dir / "pglib_opf_case500_goc__api.mtx";
+    const fs::path vals_path = dir / "pglib_opf_case500_goc__api.mtx.vals";
+    if (!fs::exists(mtx) || !fs::exists(vals_path)) GTEST_SKIP() << "fixture missing";
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok) << mm.error_message;
+    const CscLower A = std::move(mm.matrix);
+    const std::size_t nnz = A.values.size();
+    std::ifstream in(vals_path, std::ios::binary);
     const Control ctrl = base_control();
     Solver s;
     Info ia;
@@ -550,34 +618,31 @@ TEST(ScaleOnDelay, ReuseThatFailsTheProbeRecomputes) {
     ASSERT_NE(ak.get(), nullptr);
     NumericWorkspace ws;
     FactorKeep fk;
-    Info i1;
-    ASSERT_EQ(s.factor(*ak, A, ctrl, i1, fk, ws), FactorStatus::Success);
-    ASSERT_EQ(i1.delay_rescales, 1);
-    ASSERT_EQ(fk.delay_analysis, ak->serial);
-    EXPECT_GT(fk.delay_omega, 0.0);
-    EXPECT_LE(fk.delay_omega, 1e-12);  // the fresh factor's probe
-    const std::vector<double> scale_a = fk.delay_scale;
-
-    // The kept scale fits A exactly (it is A's own); with the recorded
-    // fresh error at 1, the probe passes: reuse.
-    fk.delay_omega = 1.0;
-    Info i2;
-    ASSERT_EQ(s.factor(*ak, A, ctrl, i2, fk, ws), FactorStatus::Success);
-    EXPECT_EQ(i2.delay_rescales, 0);
-    EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
-    EXPECT_EQ(fk.delay_scale, scale_a);
-
-    // A recorded fresh error of 0 makes any probe error a failure: the
-    // factor is redone with a newly computed matching scaling (the same
-    // one, the values being the same) and the new probe error recorded.
-    fk.delay_omega = 0.0;
-    Info i3;
-    ASSERT_EQ(s.factor(*ak, A, ctrl, i3, fk, ws), FactorStatus::Success);
-    EXPECT_EQ(i3.delay_rescales, 1);
-    EXPECT_EQ(fk.delay_scale, scale_a);
-    EXPECT_GT(fk.delay_omega, 0.0);
-    EXPECT_EQ(i3.num_negative, kM);
-    expect_accurate_solve(s, fk, ctrl, A);
+    std::vector<double> vals(nnz);
+    const std::size_t steps[] = {0, 13, 26, 39, 52};
+    int rescales_at_52 = -1, stops_at_52 = -1, rescales_at_39 = -1;
+    for (const std::size_t step : steps) {
+        in.seekg(static_cast<std::streamoff>(step * nnz * sizeof(double)));
+        in.read(reinterpret_cast<char *>(vals.data()), static_cast<std::streamsize>(nnz * sizeof(double)));
+        ASSERT_TRUE(static_cast<bool>(in)) << "step " << step;
+        Info info;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(vals), ctrl, info, fk, ws),
+                  FactorStatus::Success)
+            << "step " << step;
+        std::printf("[ScaleOnDelay] case500 step %zu: rescales %d stops %d\n", step,
+                    info.delay_rescales, info.delay_stops);
+        if (step == 39) rescales_at_39 = info.delay_rescales;
+        if (step == 52) {
+            rescales_at_52 = info.delay_rescales;
+            stops_at_52 = info.delay_stops;
+        }
+        CscLower M = A;
+        M.values = vals;
+        expect_accurate_solve(s, fk, ctrl, M);
+    }
+    EXPECT_EQ(rescales_at_39, 0);  // reused
+    EXPECT_EQ(rescales_at_52, 1);  // rejected by the probe, recomputed
+    EXPECT_EQ(stops_at_52, 1);
 }
 
 // A kept scale that passes the fit test but whose factorization trips the
@@ -609,14 +674,33 @@ TEST(ScaleOnDelay, ReuseThatTripsTheLimitRecomputes) {
         ASSERT_EQ(s.factor(*ak, A2, uc, i0, f0, w0), FactorStatus::Success);
         ASSERT_GT(work_ratio(*ak, i0), ctrl.scale_on_delay_ratio);
     }
+    // The final factorization alone: A2 with its own matching scaling.
+    double fresh_seconds = 0.0;
+    {
+        const std::vector<double> scale2 = matching_scale_of(*ak, A2);
+        Control uc = ctrl;
+        uc.scale_on_delay_ratio = -1.0;
+        uc.scaling = ScalingMethod::UserSupplied;
+        uc.user_scale = scale2.data();
+        FactorKeep f0;
+        Info i0;
+        NumericWorkspace w0;
+        ASSERT_EQ(s.factor(*ak, A2, uc, i0, f0, w0), FactorStatus::Success);
+        fresh_seconds = i0.factor_seconds;
+    }
     Info i2;
     ASSERT_EQ(s.factor(*ak, A2, ctrl, i2, fk, ws), FactorStatus::Success);
     EXPECT_EQ(i2.delay_rescales, 1);
+    EXPECT_EQ(i2.delay_stops, 1);
     EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
     EXPECT_LE(work_ratio(*ak, i2), ctrl.scale_on_delay_ratio);
     EXPECT_EQ(fk.delay_scale, matching_scale_of(*ak, A2));
     EXPECT_EQ(i2.num_negative, kM);
-    EXPECT_GT(i2.factor_seconds, 0.0);
+    // factor_seconds covers the spent try (16x the work) and the matching
+    // as well as that final factorization.
+    std::printf("[ScaleOnDelay] tripped reuse: %.3f ms, final factorization alone %.3f ms\n",
+                1e3 * i2.factor_seconds, 1e3 * fresh_seconds);
+    EXPECT_GT(i2.factor_seconds, 1.5 * fresh_seconds);
     expect_accurate_solve(s, fk, ctrl, A2);
 }
 
@@ -667,3 +751,4 @@ TEST(ScaleOnDelay, ReplacesStaleAnalysisMatchingScale) {
     EXPECT_EQ(i2.num_negative, kM);
     expect_accurate_solve(s, fk, ctrl, A2);
 }
+

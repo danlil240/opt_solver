@@ -94,9 +94,10 @@ struct FactorKeep {
   /// (delay_signature) run unarmed.
   std::uint64_t delay_analysis = 0;
   std::vector<double> delay_scale;
-  /// The backward error of the accuracy probe when delay_scale was fresh;
-  /// a later factor with it must stay close (solve.cpp).
-  double delay_omega = 0.0;
+  /// The backward error of the accuracy probe (scale_on_delay_probe) when
+  /// delay_scale was fresh; a later factor with it must stay close. -1:
+  /// none recorded (reuse off, or a factor with zero pivots).
+  double delay_omega = -1.0;
   /// delay_scale empty: the zero pattern of the values that had no
   /// matching scaling (another pattern is tried again).
   std::uint64_t delay_signature = 0;

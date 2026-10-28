@@ -56,6 +56,10 @@ struct Info {
     /// an earlier one no longer fit (Control::scale_on_delay_reuse_tol);
     /// else 0.
     int          delay_rescales      = 0;
+    /// 1 when this factor() stopped a factorization at the scale-on-delay
+    /// work limit, or threw away a factor whose kept scale failed the
+    /// accuracy probe (that work was spent), else 0.
+    int          delay_stops         = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues
