@@ -339,7 +339,7 @@ namespace smf
                 auto_matching = mr.status == ErrorCode::Success &&
                                 matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                     &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors);
+                                                    control.expected_refactors, xadj, adj);
                 if (auto_matching)
                     info.matching_trial = MatchingTrial::Exact;
             }
@@ -347,7 +347,7 @@ namespace smf
             {
                 auto_matching = matching_order_from(C, matcher->initial(), kMatchingPairTol, matching_perm,
                                                     analyse_scratch_, &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors);
+                                                    control.expected_refactors, xadj, adj);
                 if (auto_matching)
                     paused_matcher = std::move(matcher);
             }
@@ -505,8 +505,8 @@ namespace smf
         // A paused trial decides on its initial matching first (see above).
         // matching_stats.flops is the candidate ordering's predicted flops,
         // the same sum of squared exact column counts as factor_flops()
-        // (bitwise: same adjacency, same counts), so the candidate's column
-        // counts are only computed once it is adopted.
+        // (bitwise: same adjacency, same counts), and an adopted candidate
+        // takes its etree and counts from matching_stats.etree.
         bool rejected_initial = false;
         if (paused_matcher)
         {
@@ -525,7 +525,7 @@ namespace smf
                 auto_matching = mr.status == ErrorCode::Success &&
                                 matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                     &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors);
+                                                    control.expected_refactors, xadj, adj);
                 if (auto_matching)
                     info.matching_trial = MatchingTrial::ResumedExact;
             }
@@ -538,7 +538,18 @@ namespace smf
             info.matching_exact_ratio = matching_stats.flops / fl0;
             if (matching_stats.flops <= kMatchingFlopsRatio * fl0)
             {
-                const Int depth_m = symbolic_counts(matching_perm.data(), sym1);
+                // The candidate's etree and counts, as its flop prediction
+                // computed them (same adjacency, same routines).
+                Int depth_m;
+                if (matching_stats.etree.size() == 3 * sn_sz)
+                {
+                    std::copy(matching_stats.etree.begin(), matching_stats.etree.end(), sym1);
+                    depth_m = matching_stats.etree_depth;
+                }
+                else
+                {
+                    depth_m = symbolic_counts(matching_perm.data(), sym1);
+                }
                 perm = std::move(matching_perm);
                 std::swap(sym0, sym1);
                 depth0 = depth_m;
