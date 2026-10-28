@@ -411,6 +411,30 @@ TEST(ScaleOnDelay, WorkLimitStopsOnlyPastTheCount) {
     EXPECT_EQ(f_again.factor_values, f_ref.factor_values);
 }
 
+// A factor the work limit stopped is never solved with, not even under
+// continue_on_singular (which lets Singular factors through).
+TEST(ScaleOnDelay, SolveRejectsWorkLimitStoppedFactor) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    Control ctrl = base_control();
+    ctrl.scale_on_delay_ratio = -1.0;
+    ctrl.continue_on_singular = true;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep f;
+    Info info;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, info, f, ws, 0.0), FactorStatus::MaxPivotDelays);
+    std::vector<double> b(static_cast<std::size_t>(A.n), 1.0);
+    SolveWorkspace sws;
+    Info is;
+    EXPECT_EQ(s.solve(f, ctrl, is, b.data(), static_cast<int>(A.n), 1, sws),
+              static_cast<int>(ErrorCode::WorkLimitExceeded));
+    EXPECT_EQ(is.status, ErrorCode::WorkLimitExceeded);
+    EXPECT_TRUE(std::all_of(b.begin(), b.end(), [](double x) { return x == 1.0; }));
+}
+
 // The same on the subtree-parallel engine (a tree split at 4 threads; the
 // threads count the work into one shared total). A limit of a tenth of the
 // work stops while the subtrees are being factored, before the top of the

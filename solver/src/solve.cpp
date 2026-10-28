@@ -539,6 +539,11 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     info.status = ErrorCode::InertiaExceeded;
     return static_cast<int>(ErrorCode::InertiaExceeded);
   }
+  // Stopped at a work limit (factor_indef's work_limit): no factor values.
+  if (fkeep.status == FactorStatus::MaxPivotDelays) {
+    info.status = ErrorCode::WorkLimitExceeded;
+    return static_cast<int>(ErrorCode::WorkLimitExceeded);
+  }
   if (fkeep.status != FactorStatus::Success && !ctrl.continue_on_singular) {
     info.status = (fkeep.status == FactorStatus::NotPositiveDefinite)
                       ? ErrorCode::NotPositiveDefinite
