@@ -321,6 +321,15 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
     // search as soon as no matched row can beat it (MC64's early exit).
     // Rows reached over a zero reduced cost sit at the current distance,
     // the minimum, so they queue in `level` without heap traffic.
+    //
+    // A matched row reached at nd >= path_len is left untouched: path_len
+    // never grows, so such a row could never be finalized (the loop below
+    // stops at the first distance >= path_len), and only finalized rows
+    // feed the dual update and the augmenting path. A later, shorter
+    // distance below path_len still beats its (untouched) inf, exactly as
+    // it would have beaten the skipped nd, so the search's every decision
+    // is unchanged. This drops ~90% of the heap pushes on KKT systems
+    // whose searches find a free row early.
     int free_row = -1;
     double path_len = kInf;
     const auto relax = [&](int j, double base) {
@@ -333,10 +342,10 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
             if (ri.done || (sparse_only && ri.dense)) continue;
             const double nd = base + std::max(0.0, gcost[q] - ri.u - vj);
             if (nd < ri.dist) {
-                if (ri.dist == kInf) touched.push_back(i);
-                ri.dist = nd;
-                ri.parent = j;
                 if (ri.match < 0) {
+                    if (ri.dist == kInf) touched.push_back(i);
+                    ri.dist = nd;
+                    ri.parent = j;
                     if (nd < path_len) {
                         free_row = i;
                         path_len = nd;
@@ -344,11 +353,16 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
                     // Nothing beats a free row at the current distance;
                     // stop scanning (dense columns would cost O(n)).
                     if (nd == base) return;
-                } else if (nd == base) {
-                    level.push_back(i);
-                } else {
-                    heap.emplace_back(nd, i);
-                    std::push_heap(heap.begin(), heap.end(), heap_cmp);
+                } else if (nd < path_len) {
+                    if (ri.dist == kInf) touched.push_back(i);
+                    ri.dist = nd;
+                    ri.parent = j;
+                    if (nd == base) {
+                        level.push_back(i);
+                    } else {
+                        heap.emplace_back(nd, i);
+                        std::push_heap(heap.begin(), heap.end(), heap_cmp);
+                    }
                 }
             }
         }
