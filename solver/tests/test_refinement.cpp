@@ -721,12 +721,36 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
     {
         // This KKT's matching ordering costs more than the auto policy
         // allows, so AMD is kept and the matching scaling is not applied.
+        // (Its unscaled factorization delays enough to fire the
+        // scale-on-delay trigger, which then adds the matching scaling of
+        // its values after the fact: off here, see test_scale_on_delay.)
+        CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
+        FactorKeep fk;
+        std::unique_ptr<AnalysisKeep> ak;
+        Control no_trigger = ctrl;
+        no_trigger.scale_on_delay_ratio = -1.0;
+        solve_accurately(kkt, no_trigger, fk, ak);
+        EXPECT_TRUE(ak->matching_scale.empty());
+        EXPECT_TRUE(fk.scale.empty());
+    }
+    {
+        // With the trigger (the default) the same KKT is factored again with
+        // the matching scaling of its values: here the analysed ones, so the
+        // analysis' rejected trial matching, which is ScalingMethod::
+        // Matching's own.
         CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
         FactorKeep fk;
         std::unique_ptr<AnalysisKeep> ak;
         solve_accurately(kkt, ctrl, fk, ak);
         EXPECT_TRUE(ak->matching_scale.empty());
-        EXPECT_TRUE(fk.scale.empty());
+        ASSERT_FALSE(ak->rejected_matching_scale.empty());
+        EXPECT_EQ(fk.scale, ak->rejected_matching_scale);
+        EXPECT_EQ(fk.delay_analysis, ak->serial);
+        EXPECT_EQ(fk.delay_scale, ak->rejected_matching_scale);
+        std::vector<double> fresh;
+        ASSERT_EQ(compute_scaling_for_method(ak->cleaned, ScalingMethod::Matching, fresh),
+                  ErrorCode::Success);
+        EXPECT_EQ(fresh, ak->rejected_matching_scale);
     }
     {
         // Indefinite tridiagonal with a dominant diagonal of alternating sign.

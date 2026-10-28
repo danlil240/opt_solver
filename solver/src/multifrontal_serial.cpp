@@ -6,6 +6,7 @@
 #include "parallel/tile_tasks.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <atomic>
 #include <condition_variable>
 #include <cmath>
@@ -529,6 +530,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.inertia.zero += kr.inertia.zero;
   st.static_pivots += kr.static_pivots;
   st.flops += kr.flops;
+  st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
 
   if (cx.posdef && p < num_elig) {
@@ -671,8 +673,10 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
   to.top_tile_fronts += from.top_tile_fronts;
+  to.top_part_fronts += from.top_part_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
+  to.front_work += from.front_work;
   to.max_front = std::max(to.max_front, from.max_front);
 }
 
@@ -752,7 +756,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      double static_pivot, double fallback_static_pivot,
                                      double budget_static_pivot,
                                      bool posdef, FactorKeep &fkeep,
-                                     NumericWorkspace &ws, SerialFactorStats &st) {
+                                     NumericWorkspace &ws, SerialFactorStats &st,
+                                     double work_limit) {
   const std::size_t n = static_cast<std::size_t>(keep.n);
   const std::size_t ns = keep.supernodes.size();
 
@@ -828,6 +833,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // limit never trips it and does exactly the work of an unarmed run.
   const int neg_limit = posdef ? -1 : ctrl.max_negative_pivots;
   const bool armed = neg_limit >= 0;
+  // Early stop once the front work exceeds work_limit (the same monotone
+  // argument: an unstopped run's final count decides it). The counts are
+  // integers, summed exactly in any order.
+  const bool work_armed = !posdef && work_limit >= 0.0;
+  const long long work_cap =
+      !work_armed ? -1
+                  : (work_limit >= 9.0e18 ? std::numeric_limits<long long>::max()
+                                          : static_cast<long long>(std::floor(work_limit)));
 
   // Symbolic plan: largest front, factor size, and the peak of the
   // contribution stack when no pivot is delayed.
@@ -993,6 +1006,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         node_budget[static_cast<std::size_t>(sk)] = *bs;
       if (status == ErrorCode::Success && armed && main.st.inertia.negative > neg_limit)
         status = ErrorCode::InertiaExceeded;
+      if (status == ErrorCode::Success && work_armed && main.st.front_work > work_cap)
+        status = ErrorCode::WorkLimitExceeded;
       if (status != ErrorCode::Success) break;
     }
     if (status == ErrorCode::InertiaExceeded)
@@ -1036,11 +1051,20 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // raises InertiaExceeded (unless another error came first).
     std::atomic<int> failed{static_cast<int>(ErrorCode::Success)};
     std::atomic<int> negatives{0};
+    std::atomic<long long> work_done{0};
     const auto count_negatives = [&](int added) {
       if (added <= 0 || negatives.fetch_add(added, std::memory_order_relaxed) + added <= neg_limit)
         return;
       int ok = static_cast<int>(ErrorCode::Success);
       failed.compare_exchange_strong(ok, static_cast<int>(ErrorCode::InertiaExceeded),
+                                     std::memory_order_relaxed);
+    };
+    // work_limit: the same, with the fronts' work.
+    const auto count_work = [&](long long added) {
+      if (added <= 0 || work_done.fetch_add(added, std::memory_order_relaxed) + added <= work_cap)
+        return;
+      int ok = static_cast<int>(ErrorCode::Success);
+      failed.compare_exchange_strong(ok, static_cast<int>(ErrorCode::WorkLimitExceeded),
                                      std::memory_order_relaxed);
     };
     // Workers count no BLAS threads outside their own guards: the caller,
@@ -1078,6 +1102,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
             break;
           const int neg0 = P.st.inertia.negative;
+          const long long work0 = P.st.front_work;
           const Int next_s = k < hi ? keep.postorder[k + 1] : Int{-1};
           const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
                                             budget_regions ? &budget : nullptr, det_tc, next_s);
@@ -1088,6 +1113,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
           P.diag_marks.emplace_back(keep.postorder[k], P.diag->size());
           if (armed) count_negatives(P.st.inertia.negative - neg0);
+          if (work_armed) count_work(P.st.front_work - work0);
         }
         // The subtree root's end state, read by the top part after the join.
         if (budget_regions && complete)
@@ -1187,6 +1213,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
           ErrorCode e;
           const int neg0 = P.st.inertia.negative;
+          const long long work0 = P.st.front_work;
           BudgetState *bs = budget_regions ? &top_state : nullptr;
           {
             // Deterministic mode: BLAS on one thread whatever the front's
@@ -1200,10 +1227,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           --remaining;
           // Under the mutex, so a waiter cannot miss the stop.
           if (e == ErrorCode::Success && armed) count_negatives(P.st.inertia.negative - neg0);
+          if (e == ErrorCode::Success && work_armed) count_work(P.st.front_work - work0);
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e));
           } else {
             done_order.push_back({tid, P.steps->size() - 1, s});
+            ++P.st.top_part_fronts;
             P.diag_marks.emplace_back(s, P.diag->size());
             const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
             if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;

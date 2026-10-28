@@ -14,6 +14,21 @@ namespace smf {
 struct AnalysisKeep; // forward declaration (full definition via
                      // factor_posdef.hpp)
 
+/// The scale-on-delay trigger's accuracy probe (Control::
+/// scale_on_delay_reuse_tol) of a factor of the values `cleaned_values`
+/// (ak.cleaned's entry order): one serial solve with a fixed pseudo-random
+/// right-hand side, returning its componentwise backward error
+/// max_i |b - A x|_i / (|A| |x| + |b|)_i. Infinity when the solve fails or
+/// any row's error is not finite.
+double scale_on_delay_probe(const AnalysisKeep &ak, std::span<const double> cleaned_values,
+                            const FactorKeep &fkeep, const Control &ctrl);
+
+/// Whether a factor with a kept scale stands, given its probe error and the
+/// one recorded when the scale was fresh (negative: none recorded): at most
+/// 10x the fresh error (taken as at least 1e-14, below which the probe
+/// measures rounding) and at most 1e-9. A NaN fails.
+bool scale_on_delay_reuse_passes(double probe_omega, double fresh_omega);
+
 /// Main solver class.
 class Solver {
 public:

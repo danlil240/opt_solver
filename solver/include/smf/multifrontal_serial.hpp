@@ -18,8 +18,13 @@ struct SerialFactorStats {
   int budget_retries = 0;  // fronts refactored static because they overshot Control::delay_budget
   int parallel_subtrees = 0;
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
+  int top_part_fronts = 0;  // subtree engine: fronts of the top part factored (after the subtrees)
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   double flops = 0.0;
+  // Sum over fronts of (fully summed columns) x (rows)^2, as realized: the
+  // delay-inflated counterpart of Info::predicted_flops (Info::front_work).
+  // An integer, so sums are exact in any order.
+  long long front_work = 0;
   int max_front = 0;
   // ErrorCode::InertiaExceeded: predicted flops of the fronts not factored.
   double aborted_flops_skipped = 0.0;
@@ -48,6 +53,12 @@ struct SerialFactorStats {
 /// ErrorCode::InertiaExceeded is returned, `st.inertia` holding the partial
 /// counts and `st.aborted_flops_skipped` the skipped fronts' predicted flops.
 ///
+/// Indefinite with `work_limit` >= 0: as soon as the front work counted so
+/// far (st.front_work, an exact integer sum) exceeds it, the remaining
+/// fronts are skipped and ErrorCode::WorkLimitExceeded is returned. Work is only ever added, so
+/// this happens exactly when the finished factorization's count would
+/// exceed it, and a run within the limit does the work of an unarmed one.
+///
 /// Indefinite with `static_pivot` > 0: every front static-pivots (no
 /// delays). `fallback_static_pivot` > 0 (Control::fallback_static_pivot_tol,
 /// absolute): only a root front, or a front receiving more delayed columns
@@ -65,6 +76,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Control &ctrl, double eff_small,
                                      double static_pivot, double fallback_static_pivot,
                                      double budget_static_pivot, bool posdef, FactorKeep &fkeep,
-                                     NumericWorkspace &ws, SerialFactorStats &st);
+                                     NumericWorkspace &ws, SerialFactorStats &st,
+                                     double work_limit = -1.0);
 
 } // namespace smf

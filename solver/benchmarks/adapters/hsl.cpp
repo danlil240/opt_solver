@@ -336,6 +336,7 @@ public:
         stats_.inertia_neg = info.num_negative;
         stats_.inertia_zero = info.num_zero;
         stats_.delayed_pivots = info.delayed_pivots;
+        stats_.delay_rescales = info.delay_rescales;
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
         stats_.aptp_failed_columns = info.aptp_failed_columns;
