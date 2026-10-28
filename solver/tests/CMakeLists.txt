@@ -434,3 +434,15 @@ add_test(NAME LeanEngine COMMAND test_lean_engine)
 add_executable(test_ldlt_aptp test_ldlt_aptp.cpp)
 target_link_libraries(test_ldlt_aptp PRIVATE smf GTest::gtest_main)
 add_test(NAME LdltAptp COMMAND test_ldlt_aptp)
+
+# --- Scale on delay (Control::scale_on_delay_share) ---
+
+add_executable(test_scale_on_delay
+    test_scale_on_delay.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_scale_on_delay PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_scale_on_delay PRIVATE psapi)
+endif()
+add_test(NAME ScaleOnDelay COMMAND test_scale_on_delay)

@@ -45,6 +45,12 @@ struct AnalysisKeep {
     /// and kept AMD or METIS: the matching's scaling would not pay off
     /// without its ordering (ScalingMethod::Auto applies none).
     bool                     matching_rejected = false;
+    /// matching_rejected with the exact matching computed (Info::
+    /// matching_trial Exact or ResumedExact): its scaling of the analysed
+    /// values, which ScalingMethod::Auto does not apply; the scale-on-delay
+    /// trigger (Control::scale_on_delay_ratio) reuses it when it factors
+    /// those same values. Else empty.
+    std::vector<double>      rejected_matching_scale;
     Int                      n = 0;             ///< matrix order (= cleaned.n)
     /// Auto ordering of an indefinite matrix with values that did not end
     /// up with the matching ordering: factor() may re-analyse with it

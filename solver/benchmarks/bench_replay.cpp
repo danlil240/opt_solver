@@ -552,6 +552,8 @@ int main(int argc, char **argv) {
     // refines with smf::refine whenever its factor has static pivots.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_PIVOT_TOL")) ctrl.static_pivot_tol = std::atof(e);
     if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
+    // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
+    if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
     if (const char *e = std::getenv("SMF_BENCH_CACHE_INVERSE_DIAG")) ctrl.cache_inverse_diag = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
@@ -690,10 +692,10 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d inertia=%d/%d/%d\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
-                                 fst.static_pivots, fst.delayed_pivots, fst.inertia_pos, fst.inertia_neg,
-                                 fst.inertia_zero);
+                                 fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.inertia_pos,
+                                 fst.inertia_neg, fst.inertia_zero, fst.factor_ms);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {

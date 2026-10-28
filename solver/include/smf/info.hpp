@@ -46,6 +46,14 @@ struct Info {
     int          matching_reanalyses = 0;
     /// How analyse() decided the auto matching trial.
     MatchingTrial matching_trial     = MatchingTrial::None;
+    /// Indefinite factor(): the scaling the returned factor was computed
+    /// with (a ScalingMethod value; Auto reports what it resolved to: None,
+    /// or Matching for the analysis' or the scale-on-delay matching scale).
+    int          scaling_used        = 0;
+    /// 1 when this factor() stopped a factorization at the scale-on-delay
+    /// threshold (Control::scale_on_delay_ratio) and factored again with the
+    /// matching scaling of its values, else 0.
+    int          delay_rescales      = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues
@@ -57,6 +65,11 @@ struct Info {
     LongInt      predicted_factor_entries = 0;
     double       predicted_flops        = 0.0;
     double       actual_flops           = 0.0;
+    /// Indefinite factor(): sum over fronts of (fully summed columns) x
+    /// (rows)^2 as factored, delayed columns included; without delays it is
+    /// predicted_flops. The scale-on-delay trigger's work measure
+    /// (Control::scale_on_delay_ratio).
+    double       front_work             = 0.0;
     int          delayed_pivots         = 0;
     int          static_pivots          = 0;  ///< pivots perturbed by static pivoting
     /// False iff this factorization perturbed a pivot by static pivoting

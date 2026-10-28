@@ -338,15 +338,15 @@ bool finalize_factor_from_front_results(
 
 FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
                           const Control &ctrl, Info &info,
-                          FactorKeep &fkeep, NumericWorkspace &ws) {
+                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit) {
   FactorValues values;
   if (!resolve_factor_values(keep, updated, values)) values.data = nullptr;
-  return factor_indef(keep, values, ctrl, info, fkeep, ws);
+  return factor_indef(keep, values, ctrl, info, fkeep, ws, work_limit);
 }
 
 FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
                           const Control &ctrl, Info &info,
-                          FactorKeep &fkeep, NumericWorkspace &ws) {
+                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit) {
   const auto t0 = std::chrono::steady_clock::now();
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
@@ -358,6 +358,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_tile_fronts = 0;
   info.small_front_handovers = 0;
   info.aborted_flops_skipped = 0.0;
+  info.front_work = 0.0;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
 
@@ -386,6 +387,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     scaling = keep.matching_scale.empty() ? ScalingMethod::None
                                           : ScalingMethod::UserSupplied;
     user_scale = keep.matching_scale.data();
+    info.scaling_used = static_cast<int>(keep.matching_scale.empty() ? ScalingMethod::None
+                                                                     : ScalingMethod::Matching);
+  } else {
+    info.scaling_used = static_cast<int>(scaling);
   }
   double matrix_max_abs = 0.0;
   const ErrorCode map_err = map_values_to_permuted(
@@ -397,6 +402,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.status = map_err;
     return FactorStatus::Singular;
   }
+  // Scale on delay: Auto applying the analysis' matching scale to the
+  // analysed values applies their own matching scaling, the one a stop
+  // would try next, so it does not stop.
+  if (work_limit >= 0.0 && ctrl.scaling == ScalingMethod::Auto && !keep.matching_scale.empty() &&
+      ws.clean_values == keep.cleaned.values)
+    work_limit = -1.0;
 
   fkeep.scale.clear();
   if (scaling != ScalingMethod::None && keep.n > 0) {
@@ -521,8 +532,24 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
         eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
-        fkeep, ws, st);
+        fkeep, ws, st, work_limit);
     blas_threads.reset();
+    if (err == kWorkLimitExceeded) {
+      // Stopped at the scale-on-delay threshold: the factor is unusable.
+      std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
+      fkeep.factor_values.clear();
+      info.status = ErrorCode::Success;
+      info.factor_status = FactorStatus::MaxPivotDelays;
+      fkeep.status = FactorStatus::MaxPivotDelays;
+      info.delayed_pivots = st.delayed;
+      info.static_pivots = st.static_pivots;
+      info.aptp_failed_columns = st.aptp_failed;
+      info.actual_flops = st.flops;
+      info.front_work = st.front_work;
+      info.factor_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+      return FactorStatus::MaxPivotDelays;
+    }
     if (err == ErrorCode::InertiaExceeded) {
       // Too many negative pivots: stopped early, the factor is unusable.
       std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});
@@ -542,6 +569,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.num_negative = st.inertia.negative;
       info.num_zero = st.inertia.zero;
       info.actual_flops = st.flops;
+      info.front_work = st.front_work;
       info.aborted_flops_skipped = st.aborted_flops_skipped;
       info.factor_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -570,6 +598,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.numerical_rank = static_cast<int>(keep.n) - st.inertia.zero;
     info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
     info.actual_flops = st.flops;
+    info.front_work = st.front_work;
     info.max_front_size = std::max(info.max_front_size, st.max_front);
     info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);
     info.arena_peak_bytes = static_cast<long>(
@@ -648,6 +677,23 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   }
 
   info.delayed_pivots = total_delayed;
+  // work_limit: this engine has no early stop; checked on the finished
+  // factor, as max_negative_pivots below. Its fronts report accepted and
+  // delayed columns, which stand in for the fully summed ones.
+  double front_work = 0.0;
+  for (const FrontResult &fr : ws.node_results)
+    front_work += static_cast<double>(fr.num_accepted + fr.delayed_count) * fr.front_size *
+                  static_cast<double>(fr.front_size);
+  info.front_work = front_work;
+  if (work_limit >= 0.0 && front_work > work_limit) {
+    fkeep.factor_values.clear();
+    info.status = ErrorCode::Success;
+    info.factor_status = FactorStatus::MaxPivotDelays;
+    fkeep.status = FactorStatus::MaxPivotDelays;
+    info.factor_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return FactorStatus::MaxPivotDelays;
+  }
   info.num_positive = total_inertia.positive;
   info.num_negative = total_inertia.negative;
   info.num_zero = total_inertia.zero;
@@ -679,10 +725,32 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   return fkeep.status;
 }
 
+double delay_free_kernel_flops(const AnalysisKeep &keep) {
+  double total = 0.0;
+  for (std::size_t s = 0; s < keep.supernodes.size(); ++s) {
+    const double f = static_cast<double>(keep.front_size(static_cast<Int>(s)));
+    const Int p = keep.supernodes[s].width();
+    for (Int k = 0; k < p; ++k) {
+      const double r = f - static_cast<double>(k) - 1.0;
+      total += r + r * (r + 1.0);
+    }
+  }
+  return total;
+}
+
+double delay_free_front_work(const AnalysisKeep &keep) {
+  double total = 0.0;
+  for (std::size_t s = 0; s < keep.supernodes.size(); ++s) {
+    const double f = static_cast<double>(keep.front_size(static_cast<Int>(s)));
+    total += static_cast<double>(keep.supernodes[s].width()) * f * f;
+  }
+  return total;
+}
+
 FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
-                          Info &info, FactorKeep &fkeep) {
+                          Info &info, FactorKeep &fkeep, double work_limit) {
   NumericWorkspace ws;
-  return factor_indef(keep, keep.cleaned, ctrl, info, fkeep, ws);
+  return factor_indef(keep, keep.cleaned, ctrl, info, fkeep, ws, work_limit);
 }
 
 } // namespace smf

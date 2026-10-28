@@ -42,6 +42,31 @@ struct Control {
     // ScalingMethod::UserSupplied: n positive factors in original index
     // order, read during factor() (MA97's user `scale` argument).
     const double*  user_scale    = nullptr;
+    // Scaling on delay (negative: off). Under ScalingMethod::Auto, an
+    // indefinite factorization with plain threshold pivoting at pivot_u >=
+    // 1e-6 (kWeakPivotRatio; never IPOPT's u = 1e-8), no static pivoting
+    // (static_pivot_tol, fallback_static_pivot_tol) and no delay_budget
+    // stops as soon as its front work (Info::front_work: fully summed
+    // columns x rows^2 per front, as factored) exceeds scale_on_delay_ratio
+    // times that of the same factorization without delays (Info::
+    // predicted_flops), and is redone with the maximum-product matching
+    // scaling of its own values (that of ScalingMethod::Matching). What the
+    // delays cost decides, not how many there are: delays that inflate the
+    // fronts a few times over (a dense KKT, a cheap one) are not worth a
+    // matching per factorization; a cascade, or the badly scaled KKTs it
+    // marks, are (16: on the tuning split the easy cases stay below 9, the
+    // ones the matching rescues start at 28). This covers both what Auto
+    // applies: no scaling (the analysis kept AMD or METIS) and the analysis'
+    // matching scale, which is of the analysed values and can be stale for
+    // later ones (factoring the analysed values themselves it never stops).
+    // The FactorKeep remembers the analysis: later factor() calls of it into
+    // the same FactorKeep use the matching scaling of their values from the
+    // start (a scale kept from an earlier IPM iterate loses accuracy), so
+    // the stopped try is paid once. Info::delay_rescales and
+    // Info::scaling_used report it. Work is only ever added, so the decision
+    // is the one the finished factorization's count would give: identical at
+    // every num_threads in deterministic mode.
+    double         scale_on_delay_ratio = 16.0;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter

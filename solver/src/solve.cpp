@@ -2,6 +2,8 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/determinism.hpp"
+#include "smf/factor_indef.hpp"
+#include "smf/ldlt_kernel.hpp"
 #include "smf/scaling.hpp"
 #include "smf/solve_diag.hpp"
 #include "smf/solve_forward.hpp"
@@ -9,6 +11,7 @@
 #include "smf/workspace.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -71,33 +74,117 @@ std::shared_ptr<AnalysisKeep> matching_reanalysis(const AnalysisKeep &ak, std::v
   return std::shared_ptr<AnalysisKeep>(std::move(re));
 }
 
-// Indefinite factor() with the realized-delay matching trigger: `run`
-// factors with a given analysis. A keep that already holds a matching
-// re-analysis factors with it; otherwise, under RealizedDelays, a factor
-// that delays more than kRealizedDelayShare * n pivots re-analyses once with
-// the matching ordering and factors again. `values` (called only then)
-// gives the factored values for that re-analysis. The normal path adds no
-// work.
+// Control::scale_on_delay_ratio applies: ScalingMethod::Auto, plain
+// threshold pivoting at u >= kWeakPivotRatio (never IPOPT's 1e-8), no
+// static pivoting or delay budget.
+bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
+  return ctrl.scale_on_delay_ratio >= 0.0 && ctrl.scaling == ScalingMethod::Auto &&
+         ctrl.matrix_type == MatrixType::RealSymmetricIndefinite && ak.n > 0 &&
+         ctrl.pivot_u >= kWeakPivotRatio && ctrl.static_pivot_tol == 0.0 &&
+         ctrl.fallback_static_pivot_tol == 0.0 && ctrl.delay_budget < 0;
+}
+
+// The matching scaling (ScalingMethod::Matching's) of values `cv` of ak's
+// pattern (cleaned order): the analysis' own matching scale, adopted or
+// rejected, when they are the analysed values. Empty when there is none
+// (e.g. structurally singular).
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> cv,
+                                      int print_level) {
+  if (cv.size() != ak.cleaned.row_idx.size()) return {};
+  const std::vector<double> &analysed =
+      !ak.matching_scale.empty() ? ak.matching_scale : ak.rejected_matching_scale;
+  if (!analysed.empty() && cv == ak.cleaned.values) return analysed;
+  CscLower C;
+  C.n = ak.n;
+  C.col_ptr = ak.cleaned.col_ptr;
+  C.row_idx = ak.cleaned.row_idx;
+  C.values = std::move(cv);
+  std::vector<double> scale;
+  if (compute_scaling_for_method(C, ScalingMethod::Matching, scale, print_level) !=
+          ErrorCode::Success ||
+      scale.size() != static_cast<std::size_t>(ak.n))
+    return {};
+  return scale;
+}
+
+// Scale on delay (Control::scale_on_delay_ratio): `run(keep, ctrl, limit)`
+// factors with a front-work limit. Once the trigger has fired for this
+// analysis and FactorKeep, every factorization uses the matching scaling of
+// its own values. Otherwise the factorization runs as Auto resolves it (the
+// analysis' matching scale with the matching ordering, else none) and stops
+// once its front work exceeds the ratio times the delay-free one; it is
+// then redone with the matching scaling of its values, and the FactorKeep
+// remembers the analysis. Without a matching scaling (structurally
+// singular) the factorization runs as Auto resolves it, to the end.
+template <class Values, class Run>
+FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, Info &info,
+                                   FactorKeep &fkeep, Values &&values, Run &&run) {
+  const bool sticky = fkeep.delay_matching_analysis == &ak;
+  fkeep.delay_matching_analysis = nullptr;
+  FactorStatus st = FactorStatus::MaxPivotDelays;
+  double first_seconds = 0.0;
+  if (!sticky) {
+    const double limit = std::floor(ctrl.scale_on_delay_ratio * delay_free_front_work(ak));
+    st = run(ak, ctrl, limit);
+    if (st != FactorStatus::MaxPivotDelays) return st;
+    first_seconds = info.factor_seconds;
+  }
+  // Over the threshold now or before: the matching scaling of these values.
+  const auto t0 = std::chrono::steady_clock::now();
+  std::vector<double> scale = matching_scale_of(ak, values(), ctrl.print_level);
+  const double scale_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  if (scale.empty()) {
+    st = run(ak, ctrl, -1.0);
+  } else {
+    Control c = ctrl;
+    c.scaling = ScalingMethod::UserSupplied;
+    c.user_scale = scale.data();
+    st = run(ak, c, -1.0);
+    info.scaling_used = static_cast<int>(ScalingMethod::Matching);
+    info.delay_rescales = sticky ? 0 : 1;
+    fkeep.delay_matching_analysis = &ak;
+  }
+  // factor_seconds covers the whole call: the stopped try, the scaling and
+  // the factorization.
+  info.factor_seconds += first_seconds + scale_seconds;
+  return st;
+}
+
+// Indefinite factor() with the realized-delay matching trigger and the
+// scale-on-delay trigger: `run(keep, ctrl, work_limit)` factors with a
+// given analysis. A keep that already holds a matching re-analysis factors
+// with it; otherwise, under RealizedDelays, a factor that delays more than
+// kRealizedDelayShare * n pivots re-analyses once with the matching ordering
+// and factors again. When the RealizedDelays trigger is not pending,
+// Control::scale_on_delay_ratio may apply (factor_scale_on_delay). `values`
+// (called only when a trigger fires) gives the factored values in cleaned
+// order. The normal path adds no work.
 template <class Values, class Run>
 FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control &ctrl,
-                                          Info &info, Values &&values, Run &&run) {
+                                          Info &info, FactorKeep &fkeep, Values &&values,
+                                          Run &&run) {
   info.matching_reanalyses = 0;
+  info.delay_rescales = 0;
   if (ak.matching_reanalysis) {
-    const FactorStatus st = run(*ak.matching_reanalysis);
+    const FactorStatus st = run(*ak.matching_reanalysis, ctrl, -1.0);
     info.ordering_used = static_cast<int>(OrderingMethod::Matching);
     return st;
   }
+  const bool realized_pending = ctrl.matching_trigger == MatchingTrigger::RealizedDelays &&
+                                ak.matching_trigger_eligible && !ak.matching_reanalysis_tried;
+  if (!realized_pending && scale_on_delay_armed(ak, ctrl))
+    return factor_scale_on_delay(ak, ctrl, info, fkeep, values, run);
   // delayed_pivots is reset at the start of a factorization: an input error
   // returns before that (status != Success), so only a factorization that
   // ran to the end (Success, or Singular reported as SingularMatrix; an
   // input or allocation error reports its own ErrorCode) may fire it.
   info.delayed_pivots = 0;
   info.aptp_failed_columns = 0;
-  const FactorStatus st = run(ak);
+  const FactorStatus st = run(ak, ctrl, -1.0);
   const bool ran = st == FactorStatus::Success ||
                    (st == FactorStatus::Singular && info.status == ErrorCode::SingularMatrix);
-  if (ctrl.matching_trigger != MatchingTrigger::RealizedDelays || !ak.matching_trigger_eligible ||
-      ak.matching_reanalysis_tried || !ran ||
+  if (!realized_pending || !ran ||
       static_cast<double>(info.delayed_pivots) <= kRealizedDelayShare * static_cast<double>(ak.n))
     return st;
   ak.matching_reanalysis_tried = true;
@@ -108,7 +195,7 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
       std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   if (!re) return st;
   ak.matching_reanalysis = std::move(re);
-  const FactorStatus st2 = run(*ak.matching_reanalysis);
+  const FactorStatus st2 = run(*ak.matching_reanalysis, ctrl, -1.0);
   // factor_seconds covers the whole call: both factorizations and the
   // re-analysis between them.
   info.factor_seconds += first_seconds + analyse_seconds;
@@ -125,9 +212,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
   } else {
-    st = factor_with_matching_trigger(ak, ctrl, info, [&] { return ak.cleaned.values; },
-                                      [&](const AnalysisKeep &k) {
-      return factor_indef(k, ctrl, info, fkeep);
+    st = factor_with_matching_trigger(ak, ctrl, info, fkeep, [&] { return ak.cleaned.values; },
+                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
+      return factor_indef(k, c, info, fkeep, limit);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);
@@ -146,8 +233,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
       return resolve_factor_values(ak, updated, fv) ? cleaned_values(ak, fv)
                                                     : std::vector<double>{};
     };
-    st = factor_with_matching_trigger(ak, ctrl, info, values, [&](const AnalysisKeep &k) {
-      return factor_indef(k, updated, ctrl, info, fkeep, ws);
+    st = factor_with_matching_trigger(ak, ctrl, info, fkeep, values,
+                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
+      return factor_indef(k, updated, c, info, fkeep, ws, limit);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);
@@ -162,9 +250,10 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);
   } else {
-    st = factor_with_matching_trigger(ak, ctrl, info, [&] { return cleaned_values(ak, fv); },
-                                      [&](const AnalysisKeep &k) {
-      return factor_indef(k, fv, ctrl, info, fkeep, ws);
+    st = factor_with_matching_trigger(ak, ctrl, info, fkeep,
+                                      [&] { return cleaned_values(ak, fv); },
+                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
+      return factor_indef(k, fv, c, info, fkeep, ws, limit);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);

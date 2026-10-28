@@ -84,6 +84,13 @@ struct FactorKeep {
   int band_kd = 0;                 ///< lower half-bandwidth for banded SPD factor
   std::vector<double> band_factor; ///< banded Cholesky factor (ldab=band_kd+1, col-major)
   std::vector<double> scale;       ///< positive diagonal scaling S applied during factorization
+  /// Control::scale_on_delay_ratio: the analysis whose factorization into
+  /// this FactorKeep last fired the delay trigger (only compared, never
+  /// dereferenced). Later factorizations of it into this FactorKeep use the
+  /// matching scaling of their own values from the start (a new analysis
+  /// that happens to get the same address inherits that: harmless, any
+  /// matching scaling is valid). Null: none.
+  const AnalysisKeep *delay_matching_analysis = nullptr;
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };
