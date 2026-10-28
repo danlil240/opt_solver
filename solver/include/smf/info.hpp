@@ -50,6 +50,12 @@ struct Info {
     /// the matching ordering over the base (AMD/METIS) ordering's, built
     /// from the matching's initial phase (only when the searches exceeded
     /// the budget) and from the exact matching. 0 when not computed.
+    /// matching_initial_ratio is set as soon as the initial ordering is
+    /// compared, so it stays set when the resumed exact matching then
+    /// fails (matching_trial None, matching_exact_ratio 0); a trial
+    /// rejected on the initial ordering (RejectedInitial) has no exact
+    /// ratio, and one whose searches stayed within the budget (Exact) no
+    /// initial ratio.
     double       matching_initial_ratio = 0.0;
     double       matching_exact_ratio   = 0.0;
 
