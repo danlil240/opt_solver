@@ -30,22 +30,28 @@ struct Control {
     // the analysis it is given (one re-analysis, stored inside it): do not
     // factor the same AnalysisKeep from two threads at once.
     MatchingTrigger matching_trigger = MatchingTrigger::Predicted;
-    // Work budget of the Predicted trial's matching searches, in passes over
-    // the matrix's symmetric graph: budget x 2 x the lower entries of the
-    // cleaned matrix (diagonal included) edges scanned. A search is charged
-    // its columns' full lengths even when it stops early in a dense column,
-    // so matrices with dense rows (OPF, KKT) reach it sooner. Negative, NaN
-    // or infinite: no budget (the exact trial). 0: whenever a search is left
-    // after the initial phase, decide on that phase first. Past the budget
-    // the trial first decides on the matching's initial phase (see
-    // MatchingTrial): a clear loss ends it; otherwise the searches resume and
+    // Work budget of the Predicted trial's matching searches. It is a
+    // multiple of the lower-triangle entries of the cleaned matrix, diagonal
+    // included: the searches may scan budget x 2 x that many edges (2 x the
+    // lower entries is about the edge count of the matcher's symmetric graph,
+    // so the budget reads as passes over it). The check runs before each
+    // search, so the last search may overshoot, and a search is charged its
+    // columns' full lengths even when it stops early in a dense column:
+    // matrices with dense rows (OPF, KKT) reach the budget sooner. Negative,
+    // NaN or infinite: no budget (the exact trial). 0: whenever a search is
+    // left after the initial phase, decide on that phase first. Past the
+    // budget the trial first decides on the matching's initial phase (see
+    // MatchingTrial): a clear loss (initial flop ratio past 2.4 = 1.6 x the
+    // 1.5 rule, the guard band) ends it; otherwise the searches resume and
     // the exact matching decides, so the budget only spares the searches of
     // clear losers. Why 2: on the 46 corpus matrices with a trial (n >=
     // 10000) the full searches cost at most 1.61 passes on 15 (no pause, 24%
     // headroom), 2.2 to 5.2 on 6 and 10 to 263 on the other 25 (PGLib OPF,
-    // TSOPF, ncvxqp: the costly ones it is for). Any value from 2 to 8 pauses
-    // the same 25; 2 also pauses the 6 cheap middle ones (e.g. darcy003,
-    // turon_m), where the outcome is the same and the saving small.
+    // TSOPF, ncvxqp: the costly ones it is for). A value from 5.2 to 10
+    // would pause only those 25; 2 also pauses 5 of the 6 middle ones
+    // (darcy003, mario002, turon_m, stokes128, boyd1), where the outcome is
+    // the same and the saving small (the sixth, aug3dcqp at 2.22, finishes
+    // inside its last search).
     double         matching_search_budget = 2.0;
 
     // Scaling
