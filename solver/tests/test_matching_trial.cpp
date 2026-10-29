@@ -285,6 +285,43 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreads) {
     }
 }
 
+// A dear base factor (predicted flops times expected_refactors at least
+// 4.5e5 per row) resumes the paused searches without the initial
+// matching's verdict: no initial ratio, and the analysis is the exact
+// trial's. Here the many expected refactors make a cheap factor dear, and
+// the matrix is one whose initial matching rejects otherwise (see
+// RejectsOnInitialMatchingPastBudget), so the exact matching decides
+// instead; serially and with threads.
+TEST(MatchingTrial, DearBaseFactorResumesWithoutInitialVerdict) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    for (int threads : {1, 4}) {
+        Control exact;
+        exact.matrix_type = MatrixType::RealSymmetricIndefinite;
+        exact.ordering = OrderingMethod::AutoSerial;
+        exact.matching_search_budget = -1.0;
+        exact.num_threads = threads;
+        Control budgeted = exact;
+        budgeted.matching_search_budget = 0.0;
+        Control cheap = budgeted;
+        exact.expected_refactors = 1000000;
+        budgeted.expected_refactors = 1000000;
+        Solver s1, s2, s3;
+        Info i1, i2, i3;
+        auto a1 = s1.analyse(A, exact, i1);
+        auto a2 = s2.analyse(A, budgeted, i2);
+        auto a3 = s3.analyse(A, cheap, i3);
+        ASSERT_NE(a1, nullptr);
+        ASSERT_NE(a2, nullptr);
+        ASSERT_NE(a3, nullptr);
+        EXPECT_EQ(i3.matching_trial, MatchingTrial::RejectedInitial) << "threads " << threads;
+        EXPECT_EQ(i1.matching_trial, MatchingTrial::Exact) << "threads " << threads;
+        EXPECT_EQ(i2.matching_trial, MatchingTrial::ResumedExact) << "threads " << threads;
+        EXPECT_EQ(i2.matching_initial_ratio, 0.0) << "threads " << threads;
+        EXPECT_EQ(a2->rejected_matching_scale, a1->rejected_matching_scale) << "threads " << threads;
+        expect_same_analysis(*a1, *a2, i1, i2);
+    }
+}
+
 // With threads the trial runs on a worker thread, concurrently with the base
 // ordering (and stopped once the initial matching rejects). Every budget
 // path (exact within the budget, resumed, rejected on the initial matching,

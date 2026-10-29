@@ -49,7 +49,9 @@ struct Info {
     /// The trial's predicted factor flops (sum of squared column counts) of
     /// the matching ordering over the base (AMD/METIS) ordering's, built
     /// from the matching's initial phase (only when the searches exceeded
-    /// the budget) and from the exact matching. 0 when not computed.
+    /// the budget and the base ordering's factor was not dear enough to
+    /// resume them outright) and from the exact matching. 0 when not
+    /// computed.
     /// matching_initial_ratio is set as soon as the initial ordering is
     /// compared, so it stays set when the resumed exact matching then
     /// fails (matching_trial None, matching_exact_ratio 0); a trial

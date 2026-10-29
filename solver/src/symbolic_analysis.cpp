@@ -58,6 +58,20 @@ namespace smf
     // the initial ratio has exceeded the exact one by up to 1.8x.
     static constexpr double kMatchingInitialRejectRatio = 1.6 * kMatchingFlopsRatio;
 
+    // Past the budget, a base ordering whose predicted flops (times
+    // Control::expected_refactors) reach this per row resumes the searches
+    // without the initial matching's verdict: the initial ordering (AMD,
+    // often METIS too) then costs as much as the rest of the trial, which
+    // the factorization dwarfs anyway. It can only turn a rejection into
+    // the exact trial's verdict (a resumed trial is bitwise the exact one).
+    // Over the 50 n >= 10000 indefinite corpus matrices (1 thread, one
+    // refactor) every initial rejection has at most 7.1e4 (turon_m; PGLib
+    // OPF <= 820, darcy003 2.2e3), while TSOPF_FS_b300* (9e6-1.5e7) and
+    // ncvxqp3/5/7 (1.3e6-2.1e6) spent 0.3-1.2 s on the initial ordering
+    // before resuming. Equal to kMetisFlopsPerRow (ordering.hpp), the
+    // point from which AMD's factor counts as dear.
+    static constexpr double kMatchingResumeFlopsPerRow = 4.5e5;
+
     // KKT recognition for the auto policy: a diagonal below kSmallDiagonal
     // times its column's largest off-diagonal cannot be a 1x1 pivot; the
     // matrix is treated as a saddle point when such columns are at least
@@ -451,7 +465,8 @@ namespace smf
         // the paused searches resume and the exact matching decides as
         // usual. The initial ordering is built there too, so that it can
         // stop at AMD once AMD's flops already pass (its METIS candidate
-        // could only lower them, and the ordering itself is discarded).
+        // could only lower them, and the ordering itself is discarded), or
+        // be skipped when the base factor is dear (kMatchingResumeFlopsPerRow).
         // With threads, the trial runs concurrently (ConcurrentTrial) and is
         // decided at the same point, with the same results.
         std::vector<Int> matching_perm;
@@ -645,8 +660,12 @@ namespace smf
         bool rejected_initial = false;
         // The initial matching's verdict: builds its ordering and returns
         // whether it passes (false with auto_matching false: no ordering).
+        // A dear base factor passes without it (kMatchingResumeFlopsPerRow).
         const auto initial_passes = [&](const MatchingResult &initial) {
             const double fl0 = factor_flops(sym0);
+            if (fl0 * static_cast<double>(std::max(1, control.expected_refactors)) >=
+                kMatchingResumeFlopsPerRow * static_cast<double>(n))
+                return true;
             const double reject_flops = kMatchingInitialRejectRatio * fl0;
             auto_matching = matching_order_from(C, initial, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                 &matching_stats, CompressedOrder::Auto,

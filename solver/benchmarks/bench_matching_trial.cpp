@@ -188,10 +188,11 @@ int main(int argc, char **argv) {
         // compressed ordering with AMD only / Auto (AMD, METIS when dear),
         // ox_auto = the exact matching's (Auto); r_amd = predicted flops of
         // the initial matching's compressed AMD ordering over the base AMD
-        // ordering's; then analyse()'s phases.
-        std::printf("%-28s %7s | %8s %8s %8s | %8s %8s %4s | %8s %4s | %6s | %8s %8s %8s %8s | %-8s\n",
+        // ordering's, and fl0/n = the base AMD ordering's predicted flops
+        // per row; then analyse()'s phases.
+        std::printf("%-28s %7s | %8s %8s %8s | %8s %8s %4s | %8s %4s | %6s %9s | %8s %8s %8s %8s | %-8s\n",
                     "matrix", "n", "ctor", "budget", "rest", "oi_amd", "oi_auto", "usd", "ox_auto", "usd",
-                    "r_amd", "an_ord", "an_cnt", "an_mat", "analyse", "trial");
+                    "r_amd", "fl0/n", "an_ord", "an_cnt", "an_mat", "analyse", "trial");
         const auto med = [](std::vector<double> v) {
             std::sort(v.begin(), v.end());
             return v[v.size() / 2];
@@ -275,10 +276,10 @@ int main(int argc, char **argv) {
                 t_cnt.push_back(1000.0 * last.analyse_phases.etree_counts);
                 t_mat.push_back(1000.0 * last.analyse_phases.matching);
             }
-            std::printf("%-28s %7d | %8.2f %8.2f %8.2f | %8.2f %8.2f %4d | %8.2f %4d | %6.3f | %8.2f "
+            std::printf("%-28s %7d | %8.2f %8.2f %8.2f | %8.2f %8.2f %4d | %8.2f %4d | %6.3f %9.3g | %8.2f "
                         "%8.2f %8.2f %8.2f | %-8s%s\n",
                         id.c_str(), static_cast<int>(n), med(t_ctor), med(t_budget), med(t_rest), med(t_oia),
-                        med(t_oiu), used_i, med(t_oxu), used_x, r_amd, med(t_ord), med(t_cnt),
+                        med(t_oiu), used_i, med(t_oxu), used_x, r_amd, fl0 / static_cast<double>(n), med(t_ord), med(t_cnt),
                         med(t_mat), med(t_an), trial_name(last.matching_trial), paused ? "" : " (in budget)");
             std::fflush(stdout);
         }
