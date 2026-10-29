@@ -34,9 +34,20 @@ running natively. Windows paths are translated to `/mnt/<drive>/...`, and the
 built-in generated cases (smoke, tridiag, KKT stage models) are first written
 to `build/wsl_cases/*.mtx` with `bench_replay --export-mtx`.
 
-The driver is started with `OMP_NUM_THREADS=<threads>`, `OPENBLAS_NUM_THREADS`,
-and the two settings SSIDS requires, `OMP_CANCELLATION=TRUE` and
-`OMP_PROC_BIND=TRUE`. If WSL, the distro or the driver is missing, records come
+The driver is started with `OMP_NUM_THREADS=<threads>` and
+`OMP_THREAD_LIMIT=<threads>`, single-threaded BLAS (`OPENBLAS_NUM_THREADS=1`,
+`MKL_NUM_THREADS=1`), and the two settings SSIDS requires,
+`OMP_CANCELLATION=TRUE` and `OMP_PROC_BIND=TRUE`.
+
+- SSIDS sizes its OpenMP regions from the hwloc topology, not from
+  `OMP_NUM_THREADS`. With only that variable set, a 1-thread run used all 16
+  physical cores. `OMP_THREAD_LIMIT` is what caps it.
+- Threaded BLAS inside SSIDS's own tasks oversubscribes the cores.
+
+SSIDS records made before 2026-10-29 used the old environment and are not
+thread-accurate.
+
+If WSL, the distro or the driver is missing, records come
 back as `Unavailable` (with the reason) and the case is skipped, like any other
 unavailable solver.
 
