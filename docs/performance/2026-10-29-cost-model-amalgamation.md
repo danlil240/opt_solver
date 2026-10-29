@@ -12,8 +12,10 @@ All numbers are smf against smf on one binary, 1 thread, Ryzen desktop, interlea
 
   | split | hard_indef | large_kkt | small_kkt | spd |
   |---|---|---|---|---|
-  | tuning | **0.78** | 0.96 | 1.00 | 0.93 |
+  | tuning | **0.78** | 0.96 | 1.00 | 0.93* |
   | held-out | **0.83** | 0.95 | 1.00 | 0.97 |
+
+  \* From the sweep that overlapped another session's 1-thread SSIDS run (section 4). nd24k's 0.60 is confirmed on the quiet machine at 8/16 threads (0.59-0.61). The other SPD cases move ±3%, within that run's noise: read them as neutral.
 
   Wall time is 0.93 (tuning) and 0.94 (held-out); solve and analyse are unchanged.
 - **Headline cases (factor):** flops change by +0-5% and delays fall (ncvxqp3 441 → 70, bratu3d 449 → 33).
@@ -82,7 +84,7 @@ c-big's merges have tiny z and are taken at any α. α ≥ 8 over-merges TSOPF's
 
 **Minimum CB size** (α = 4): the factor geomean on 16 cases is 0.854 / 0.861 / 0.864 / 0.880 for 32 / 64 / 128 / 256 rows. At 32 rows, kkt_pde_opt stores 50% more entries (64: +29%; 128: none). 128 leaves the fronts of small problems as the old rule builds them.
 
-**Interleaved A/B, all 97 tuning case-tracks** (factor, B/A against the old rule, 3 rounds):
+**Interleaved A/B, all 97 tuning case-tracks** (factor, B/A against the old rule, 3 rounds). This sweep ran from 21:49 to 22:36. Another session's 1-thread SSIDS benchmark ran alongside it from 21:48 to 22:29. The variants were interleaved per case, so they saw the same load, but differences under about 10-15% between them are not resolved:
 
 | variant | hard_indef (42) | large_kkt (21) | small_kkt (26) | spd (8) | all |
 |---|---|---|---|---|---|
@@ -113,8 +115,8 @@ On the dev set at u = 1e-8 the guard changes only elec's tree: same supernode co
 
 Interleaved A/B, 1 thread, 3 rounds, smf against smf.
 
-- **SPD:** neither the delay guard nor the pre-check applies to SPD (both are indefinite-only), so the SPD rows come from the α 2 / CB ≥ 128 variant of the tuning sweep.
-- **Clean run:** the final runs had the machine to themselves. Part of the sweep in section 2 overlapped another session's SSIDS benchmark. Interleaving kept that comparison fair, but its absolute times are noisier: c-big's Smf-rule baseline read 18.5-20.7 s there against 15.7 s here.
+- **SPD:** neither the delay guard nor the pre-check applies to SPD (both are indefinite-only), so the SPD rows come from the α 2 / CB ≥ 128 variant of the tuning sweep. That sweep overlapped the SSIDS run, so only nd24k's large gain (0.60, confirmed clean at 8/16 threads) is a measured win. The other SPD cases (±3%) count as neutral.
+- **Clean run:** the final runs (held-out 22:37-22:43, tuning 22:43-22:55, threads 22:56-23:14) started after the SSIDS run ended (22:29) and had the machine to themselves. Part of the sweep in section 2 overlapped another session's SSIDS benchmark. Interleaving kept that comparison fair, but its absolute times are noisier: c-big's Smf-rule baseline read 18.5-20.7 s there against 15.7 s here.
 
 **Shifted geomean B/A (shift 10 ms):**
 
