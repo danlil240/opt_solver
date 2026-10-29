@@ -13,6 +13,8 @@ Per (class, track, thread count) it reports, for a chosen split:
     with no record in a thread-count table (e.g. a serial-only solver in the
     8-thread table) is reported as missing for that table,
   * solved counts, accuracy failures and hard failures per solver,
+  * implausible records: factor throughput above --max-gflops-per-thread x
+    threads (a mis-threaded run); excluded like failures and listed,
   * backward error after refinement (worst eta_inf / omega),
   * median time per phase: analyse, first factorization, warm refactorization,
     solve + refine (a library's internal refinement is part of its solve time),
@@ -44,6 +46,15 @@ from typing import Any, Iterable
 ETA_GATE = 1e-10
 OMEGA_GATE = 1e-8
 DEFAULT_SHIFT_MS = 10.0
+# Throughput gate: a record whose factorization ran faster than this many
+# GFLOP/s per thread (its own flops over its first-factorization time) cannot
+# be a real measurement at its thread count. It is reported as implausible:
+# never solved, never the best competitor, listed per table. 165 = 1.2 x the
+# 136 GF/s of single-thread OpenBLAS DGEMM (AVX-512) on the benchmark host,
+# Ryzen 9 9950X3D, measured 2026-10-29; no sparse factorization beats dense
+# GEMM. It caught SSIDS "1-thread" records that ran on 16 cores (up to
+# 1300 GF/s). Records without positive finite flops are not judged.
+DEFAULT_MAX_GFLOPS_PER_THREAD = 165.0
 DEFAULT_TAUS = [1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]
 CLASS_ORDER = ["small_kkt", "large_kkt", "hard_indef", "spd"]
 INDEF_COMPETITORS = ("ma57", "ma97", "ssids", "mkl_pardiso", "mumps")
@@ -88,10 +99,36 @@ def is_accurate(rec: dict[str, Any]) -> bool:
     return True
 
 
-def record_status(rec: dict[str, Any]) -> str:
+def factor_gflops(rec: dict[str, Any]) -> float | None:
+    """GFLOP/s of flops over the record's whole factor time; None without
+    positive finite flops or a factor time. flops is one factorization's count,
+    so for a warm sequence (factor_ms sums batch_count steps) this is a lower
+    bound: a step whose flops do not match the timed step (a fast first
+    factorization, delay-heavy later ones) can never trip the gate."""
+    flops = rec.get("flops")
+    t = rec.get("factor_ms")
+    if not _finite(flops) or flops <= 0 or not _finite(t) or t <= 0:
+        return None
+    return flops / t / 1e6
+
+
+def is_implausible(rec: dict[str, Any],
+                   max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> bool:
+    """Factor throughput above max_gflops_per_thread x threads (<= 0: off)."""
+    if max_gflops_per_thread <= 0:
+        return False
+    g = factor_gflops(rec)
+    threads = max(1, int(rec.get("threads", 1) or 1))
+    return g is not None and g > max_gflops_per_thread * threads
+
+
+def record_status(rec: dict[str, Any],
+                  max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> str:
     outcome = rec.get("outcome")
     if outcome == "Unavailable":
         return "unavailable"
+    if outcome in ("Success", "Inaccurate") and is_implausible(rec, max_gflops_per_thread):
+        return "implausible"
     if outcome == "Success":
         return "ok" if is_accurate(rec) else "inaccurate"
     if outcome == "Inaccurate":
@@ -162,11 +199,15 @@ def _median(xs: Iterable[float | None]) -> float | None:
     return statistics.median(vals) if vals else None
 
 
-def aggregate(recs: list[dict[str, Any]]) -> dict[str, Any]:
+def aggregate(recs: list[dict[str, Any]],
+              max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> dict[str, Any]:
     """Collapse the measured trials of one (case, track, threads, solver)."""
-    statuses = [record_status(r) for r in recs]
+    statuses = [record_status(r, max_gflops_per_thread) for r in recs]
+    gflops = [g for g in (factor_gflops(r) for r in recs) if g is not None]
     if all(s == "unavailable" for s in statuses):
         status = "unavailable"
+    elif any(s == "implausible" for s in statuses):
+        status = "implausible"
     elif all(s == "ok" for s in statuses):
         status = "ok"
     elif any(s == "failed" for s in statuses):
@@ -188,6 +229,7 @@ def aggregate(recs: list[dict[str, Any]]) -> dict[str, Any]:
                       and _finite((r.get("validation") or {}).get("omega"))), default=None),
         "inertia": inertia_tuple(recs[-1]),
         "n": recs[-1].get("n"),
+        "gflops": max(gflops, default=None),
     }
 
 
@@ -256,7 +298,8 @@ def _inertia_reference(per_solver: dict[str, dict[str, Any]], subject: str):
 
 def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = "all",
           shift_ms: float = DEFAULT_SHIFT_MS, subject: str = "smf",
-          classes: set[str] | None = None) -> dict[str, Any]:
+          classes: set[str] | None = None,
+          max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> dict[str, Any]:
     cases: dict[tuple[str, str], dict[str, Any]] = {}
     for c in manifest.get("cases", []):
         if split != "all" and c.get("split") != split:
@@ -279,7 +322,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         lambda: collections.defaultdict(dict))
     for (key, threads, sid), recs in grouped.items():
         cls = cases[key].get("class", "unclassified")
-        tables[(cls, key[1], threads)][key[0]][sid] = aggregate(recs)
+        tables[(cls, key[1], threads)][key[0]][sid] = aggregate(recs, max_gflops_per_thread)
 
     result: dict[str, Any] = {}
     for (cls, track, threads), per_case in tables.items():
@@ -288,6 +331,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         eligible = [s for s in competitor_set(cls) if s != subject]
         missing_competitors = [s for s in eligible if s not in solver_ids]
         stats = {s: {"total": 0, "solved": 0, "inaccurate": 0, "failed": 0,
+                     "implausible": 0,
                      "unavailable": 0, "inertia_pass": 0, "inertia_checked": 0,
                      "eta_max": None, "omega_max": None,
                      "wall_median_ms": None,
@@ -300,6 +344,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         unsolved_subject = 0
         no_competitor = 0
         report_only: dict[str, dict[str, dict[str, Any]]] = {}
+        implausible: list[dict[str, Any]] = []
         times: dict[str, dict[str, float | None]] = {s: {} for s in solver_ids}
 
         for mid, per in per_case.items():
@@ -323,7 +368,12 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                     for k, v in a["phases"].items():
                         phase_vals[sid][k].append(v)
                 else:
-                    st["inaccurate" if a["status"] == "inaccurate" else "failed"] += 1
+                    if a["status"] == "implausible":
+                        st["implausible"] += 1
+                        implausible.append({"case": mid, "solver": sid, "gflops": a["gflops"],
+                                            "wall_ms": a["wall_ms"]})
+                    else:
+                        st["inaccurate" if a["status"] == "inaccurate" else "failed"] += 1
                     times[sid][mid] = None
                 for key_, val in (("eta_max", a["eta"]), ("omega_max", a["omega"])):
                     if val is not None:
@@ -365,6 +415,8 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 "missing_competitors": missing_competitors,
             },
             "report_only": report_only,
+            "implausible": sorted(implausible, key=lambda i: (i["case"], i["solver"])),
+            "max_gflops_per_thread": max_gflops_per_thread,
             "times": times,
             "n_cases": len(per_case) - len(report_only),
         }
@@ -452,6 +504,17 @@ def render(result: dict[str, Any], split: str) -> str:
                             out.append(f"| {mid} | {sid} | {a['status']} | {_fmt(a['wall_ms'])} | "
                                        f"{_fmt(a['eta'])} | {_fmt(a['omega'])} | {a['inertia']} |")
                     out.append("")
+                if g["implausible"]:
+                    cap = g["max_gflops_per_thread"]
+                    out.append(f"Implausible (factor faster than {cap:g} GF/s x {threads} "
+                               f"thread(s); not solved, not a competitor, counted in total only):")
+                    out.append("")
+                    out.append("| case | solver | factor GF/s | wall ms |")
+                    out.append("|---|---|---:|---:|")
+                    for i in g["implausible"]:
+                        out.append(f"| {i['case']} | {i['solver']} | {_fmt(i['gflops'])} | "
+                                   f"{_fmt(i['wall_ms'])} |")
+                    out.append("")
     return "\n".join(out) + "\n"
 
 
@@ -480,6 +543,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="comma-separated class filter")
     ap.add_argument("--subject", default="smf")
     ap.add_argument("--shift-ms", type=float, default=DEFAULT_SHIFT_MS)
+    ap.add_argument("--max-gflops-per-thread", type=float, default=DEFAULT_MAX_GFLOPS_PER_THREAD,
+                    help="factor throughput above this x threads marks a record implausible "
+                         "(0 = off; default %(default)g, the benchmark host's DGEMM peak x 1.2)")
     ap.add_argument("--profile-csv", default=None,
                     help="directory receiving one profile CSV per class/track/thread count")
     ap.add_argument("--output", default=None)
@@ -488,10 +554,16 @@ def main(argv: list[str] | None = None) -> int:
     records = load_records(pathlib.Path(args.records))
     manifest = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
     classes = {c for c in args.classes.split(",") if c} or None
-    result = score(records, manifest, args.split, args.shift_ms, args.subject, classes)
+    result = score(records, manifest, args.split, args.shift_ms, args.subject, classes,
+                   args.max_gflops_per_thread)
     if not result:
         print("error: no records matched the manifest/split", file=sys.stderr)
         return 2
+    n_bad = sum(len(g["implausible"]) for t in result.values() for th in t.values()
+                for g in th.values())
+    if n_bad:
+        print(f"warning: {n_bad} implausible (case, solver, threads) result(s) excluded; "
+              f"see the 'Implausible' sections", file=sys.stderr)
     md = render(result, args.split)
     print(md)
     if args.output:

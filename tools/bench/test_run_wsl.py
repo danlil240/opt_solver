@@ -34,6 +34,17 @@ class WslCommandTests(unittest.TestCase):
         self.assertEqual(args[args.index("--case") + 1], "c1")
         self.assertIn("--warmup", args)
 
+    def test_thread_env_caps_openmp_and_keeps_blas_serial(self):
+        # SSIDS ignores OMP_NUM_THREADS (hwloc sizes its regions): the thread
+        # limit is what caps it, and BLAS threads would oversubscribe.
+        cmd = run_wsl.wsl_command(["--case", "c"], threads=8, driver="/d", distro="Ubuntu")
+        env = cmd[cmd.index("/usr/bin/env") + 1:cmd.index("/d")]
+        self.assertIn("OMP_NUM_THREADS=8", env)
+        self.assertIn("OMP_THREAD_LIMIT=8", env)
+        self.assertIn("OPENBLAS_NUM_THREADS=1", env)
+        self.assertIn("MKL_NUM_THREADS=1", env)
+        self.assertNotIn("OPENBLAS_NUM_THREADS=8", env)
+
     def test_solver_set(self):
         self.assertIn("ssids", run_wsl.WSL_SOLVERS)
         self.assertNotIn("smf", run_wsl.WSL_SOLVERS)

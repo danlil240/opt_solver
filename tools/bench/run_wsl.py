@@ -31,6 +31,12 @@ DISTRO = os.environ.get("SMF_WSL_DISTRO", "Ubuntu")
 _PATH_OPTIONS = {"--manifest", "--mtx", "--seq-values", "--JsonlOut"}
 # SSIDS requires OMP_CANCELLATION and OMP_PROC_BIND (it aborts or warns without).
 _SSIDS_ENV = ("OMP_CANCELLATION=TRUE", "OMP_PROC_BIND=TRUE")
+# SSIDS sizes its OpenMP regions from the hwloc topology (every physical core),
+# not from OMP_NUM_THREADS: with OMP_NUM_THREADS=1 alone a "1-thread" run used
+# 16 threads (cfd2 factor 150 ms vs 822 ms on one). OMP_THREAD_LIMIT caps the
+# whole process. BLAS stays single-threaded: SSIDS parallelises over its own
+# tasks, and threaded OpenBLAS inside them oversubscribes the cores (bmwcra_1
+# got slower with threads: 188, 506, 1058 ms at "1", 8, 16).
 
 _DRIVE = re.compile(r"^([A-Za-z]):[\\/]*(.*)$")
 
@@ -75,8 +81,8 @@ def wsl_command(args: List[str], threads: int, driver: Optional[str] = None,
     for a in args:
         translated.append(to_wsl_path(a) if prev in _PATH_OPTIONS else a)
         prev = a
-    env = [f"OMP_NUM_THREADS={threads}", f"OPENBLAS_NUM_THREADS={threads}",
-           f"MKL_NUM_THREADS={threads}", *_SSIDS_ENV]
+    env = [f"OMP_NUM_THREADS={threads}", f"OMP_THREAD_LIMIT={threads}",
+           "OPENBLAS_NUM_THREADS=1", "MKL_NUM_THREADS=1", *_SSIDS_ENV]
     # Killing wsl.exe on a Windows-side timeout does not kill the Linux
     # process, so the driver runs under coreutils timeout (TERM, then KILL 5 s
     # later) and dies on its own.

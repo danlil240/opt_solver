@@ -56,6 +56,52 @@ class TestScore(unittest.TestCase):
         self.assertEqual(row["best_solver_counts"], {"ma57": 1})
 
 
+    def test_implausible_throughput_is_not_a_competitor(self):
+        # A "1-thread" record whose factor ran at 280 GF/s (rec(): factor_ms =
+        # 0.6 * wall = 6 ms) cannot be one thread: it is neither solved nor
+        # the best competitor, and it is listed.
+        m = manifest([case("a", "hard_indef", "tuning")])
+        fast = rec("a", "ssids", 10.0, flops=280e9 * 0.006)
+        records = [rec("a", "smf", 100.0), rec("a", "ma57", 200.0), fast]
+        res = score.score(records, m, split="tuning", shift_ms=10.0)
+        g = res["hard_indef"]["recommended"][1]
+        self.assertEqual(g["ratio"]["best_solver_counts"], {"ma57": 1})
+        self.assertTrue(math.isclose(g["ratio"]["geomean"], 110.0 / 210.0))
+        s = g["solvers"]["ssids"]
+        self.assertEqual((s["total"], s["solved"], s["implausible"]), (1, 0, 1))
+        self.assertEqual([(i["case"], i["solver"]) for i in g["implausible"]], [("a", "ssids")])
+        self.assertTrue(math.isclose(g["implausible"][0]["gflops"], 280.0))
+        md = score.render(res, "tuning")
+        self.assertIn("Implausible", md)
+        self.assertIn("| a | ssids |", md)
+
+    def test_throughput_cap_scales_with_threads_and_can_be_disabled(self):
+        m = manifest([case("a", "hard_indef", "tuning")])
+        records = [rec("a", "smf", 100.0, threads=2), rec("a", "ma57", 200.0, threads=2),
+                   rec("a", "ssids", 10.0, threads=2, flops=280e9 * 0.006)]  # 140 GF/s/thread
+        res = score.score(records, m, split="tuning", shift_ms=10.0)
+        self.assertEqual(res["hard_indef"]["recommended"][2]["ratio"]["best_solver_counts"],
+                         {"ssids": 1})
+        one = [rec("a", "smf", 100.0), rec("a", "ssids", 10.0, flops=280e9 * 0.006)]
+        off = score.score(one, m, split="tuning", shift_ms=10.0, max_gflops_per_thread=0)
+        self.assertEqual(off["hard_indef"]["recommended"][1]["solvers"]["ssids"]["implausible"], 0)
+
+    def test_throughput_gate_uses_whole_factor_time_of_warm_sequences(self):
+        # SSIDS pde_control_250: a 124 ms first step, then heavy steps; flops
+        # (5.62e10) is a later step's count. First-step time would read 452
+        # GF/s; over all steps it is 1.8 GF/s.
+        r = rec("a", "ssids", 31730.0, mode="warm_sequence", batch_count=5,
+                factor_ms=31211.0, first_factor_ms=124.1, refactor_ms=5012.1, flops=5.62e10)
+        self.assertTrue(math.isclose(score.factor_gflops(r), 5.62e10 / 31211.0 / 1e6))
+        self.assertEqual(score.record_status(r), "ok")
+
+    def test_throughput_gate_skips_missing_or_bogus_flops(self):
+        # MA97 reports zero or negative flops: no basis for a judgement.
+        for flops in (None, 0, -1.02e9, float("nan")):
+            r = rec("a", "ma97", 1.0, flops=flops)
+            self.assertIsNone(score.factor_gflops(r), flops)
+            self.assertEqual(score.record_status(r), "ok")
+
     def test_split_filter(self):
         m = manifest([case("a", "spd", "tuning"), case("b", "spd", "heldout")])
         records = [rec("a", "smf", 10.0), rec("a", "cholmod", 20.0),
