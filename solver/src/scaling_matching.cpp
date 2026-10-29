@@ -1,6 +1,9 @@
 #include "smf/scaling_matching.hpp"
 
+#include "indexed_min_heap.hpp"
+
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -26,13 +29,18 @@ struct CostGraph {
 ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     const int n = static_cast<int>(A.n);
     std::vector<Int> count(static_cast<std::size_t>(n) + 1, 0);
+    // Cleaned input (each column's rows strictly increasing, none above the
+    // diagonal, as analyse() passes it) expands without duplicates: column
+    // j gets rows jj < j from the earlier columns, then its own rows >= j.
+    bool cleaned = true;
     for (int j = 0; j < n; ++j) {
-        for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
-             p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+        const Int p0 = A.col_ptr[static_cast<std::size_t>(j)];
+        for (Int p = p0; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
             const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
             if (!std::isfinite(A.values[static_cast<std::size_t>(p)])) {
                 return ErrorCode::IllegalValue;
             }
+            if (i < j || (p > p0 && i <= A.row_idx[static_cast<std::size_t>(p) - 1])) cleaned = false;
             ++count[static_cast<std::size_t>(j) + 1];
             if (i != j) ++count[static_cast<std::size_t>(i) + 1];
         }
@@ -41,8 +49,20 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
         count[static_cast<std::size_t>(j) + 1] += count[static_cast<std::size_t>(j)];
     }
     const std::size_t nnz = static_cast<std::size_t>(count[static_cast<std::size_t>(n)]);
-    std::vector<int> raw_row(nnz);
-    std::vector<double> raw_val(nnz);
+    g.ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    g.row.resize(nnz);
+    g.cost.resize(nnz);
+    g.col_max.assign(static_cast<std::size_t>(n), 0.0);
+    // Without duplicates the expanded entries go straight into g, where the
+    // merge below would have copied each one unchanged.
+    std::vector<int> raw_row_buf;
+    std::vector<double> raw_val_buf;
+    if (!cleaned) {
+        raw_row_buf.resize(nnz);
+        raw_val_buf.resize(nnz);
+    }
+    int *const raw_row = cleaned ? g.row.data() : raw_row_buf.data();
+    double *const raw_val = cleaned ? g.cost.data() : raw_val_buf.data();
     std::vector<Int> next(count.begin(), count.end() - 1);
     for (int j = 0; j < n; ++j) {
         for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
@@ -65,32 +85,37 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     // the column, not the output slot: dropping a column's zeros moves `out`
     // back, so slots left by the previous column can lie past the next
     // column's start and would swallow its entries as false duplicates.
-    g.ptr.assign(static_cast<std::size_t>(n) + 1, 0);
-    g.row.resize(nnz);
-    g.cost.resize(nnz);
-    g.col_max.assign(static_cast<std::size_t>(n), 0.0);
-    std::vector<int> seen_in(static_cast<std::size_t>(n), -1);
-    std::vector<Int> slot_of(static_cast<std::size_t>(n), -1);
+    // Cleaned input skips the merge: column j already sits at
+    // [count[j], count[j+1]) of g, and is compacted from there to `out`
+    // (never past the read position).
+    std::vector<int> seen_in(cleaned ? 0 : static_cast<std::size_t>(n), -1);
+    std::vector<Int> slot_of(cleaned ? 0 : static_cast<std::size_t>(n), -1);
     Int out = 0;
     for (int j = 0; j < n; ++j) {
         const Int begin = out;
-        for (Int q = count[static_cast<std::size_t>(j)]; q < count[static_cast<std::size_t>(j) + 1]; ++q) {
-            const int i = raw_row[static_cast<std::size_t>(q)];
-            if (seen_in[static_cast<std::size_t>(i)] == j) {
-                g.cost[static_cast<std::size_t>(slot_of[static_cast<std::size_t>(i)])] +=
-                    raw_val[static_cast<std::size_t>(q)];
-            } else {
-                seen_in[static_cast<std::size_t>(i)] = j;
-                slot_of[static_cast<std::size_t>(i)] = out;
-                g.row[static_cast<std::size_t>(out)] = i;
-                g.cost[static_cast<std::size_t>(out)] = raw_val[static_cast<std::size_t>(q)];
-                ++out;
+        Int read = begin;  // the column's merged entries: [read, out)
+        if (cleaned) {
+            read = count[static_cast<std::size_t>(j)];
+            out = count[static_cast<std::size_t>(j) + 1];
+        } else {
+            for (Int q = count[static_cast<std::size_t>(j)]; q < count[static_cast<std::size_t>(j) + 1]; ++q) {
+                const int i = raw_row[static_cast<std::size_t>(q)];
+                if (seen_in[static_cast<std::size_t>(i)] == j) {
+                    g.cost[static_cast<std::size_t>(slot_of[static_cast<std::size_t>(i)])] +=
+                        raw_val[static_cast<std::size_t>(q)];
+                } else {
+                    seen_in[static_cast<std::size_t>(i)] = j;
+                    slot_of[static_cast<std::size_t>(i)] = out;
+                    g.row[static_cast<std::size_t>(out)] = i;
+                    g.cost[static_cast<std::size_t>(out)] = raw_val[static_cast<std::size_t>(q)];
+                    ++out;
+                }
             }
         }
         // g.cost holds the merged value for now; compact out zeros.
         Int w = begin;
         double cmax = 0.0;
-        for (Int q = begin; q < out; ++q) {
+        for (Int q = read; q < out; ++q) {
             const double av = std::abs(g.cost[static_cast<std::size_t>(q)]);
             if (av > 0.0) {
                 g.row[static_cast<std::size_t>(w)] = g.row[static_cast<std::size_t>(q)];
@@ -116,17 +141,14 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     return ErrorCode::Success;
 }
 
-// Per-row state of the searches, packed so that relaxing an edge touches
-// one cache line of its row instead of five arrays (the searches are
-// bound by these random row accesses). `match` is the row's matched
-// column (-1: free); `done` and `dense` are flags.
+// The per-row state every scanned edge reads: the row dual and the search
+// distance, 16 bytes, so four rows share a cache line (the searches are
+// bound by these random row accesses). The row's match, parent and flags,
+// needed only once a row's distance improves or it is finalized, live in
+// separate arrays of the matcher.
 struct RowState {
     double u;      // row dual
     double dist;   // tentative search distance (inf when untouched)
-    int match;     // matched column, or -1
-    int parent;    // column the search reached the row from
-    std::uint8_t done;
-    std::uint8_t dense;
 };
 
 constexpr double kInf = std::numeric_limits<double>::infinity();
@@ -146,6 +168,10 @@ struct SymmetricMatcher::State {
     ErrorCode status = ErrorCode::Success;
     CostGraph g;
     std::vector<RowState> rs;
+    std::vector<int> row_match;           // matched column of each row, or -1
+    std::vector<int> row_parent;          // column the search reached the row from
+    std::vector<std::uint8_t> row_done;   // finalized by the current search
+    std::vector<std::uint8_t> row_dense;  // dense row/column (see the constructor)
     std::vector<double> v;  // column duals
     std::vector<Int> col_to_row;
     int matched = 0;
@@ -159,11 +185,17 @@ struct SymmetricMatcher::State {
     std::vector<Int> init_col_to_row;
     std::vector<double> init_u, init_v;
     // Search scratch.
+    // Each holds at most n rows per search (a row is touched, finalized and
+    // queued at the current distance at most once), so they are sized n
+    // once and filled through counters.
     std::vector<int> touched, finalized, level;
-    std::vector<std::pair<double, int>> heap;
+    // Rows queued above the current distance, one entry per row, popped in
+    // (distance, row) order: the order of the binary heap of (distance,
+    // row) pairs with lazy duplicates it replaces (see IndexedMinHeap).
+    IndexedMinHeap heap;
 
-    bool dense(int i) const { return rs[static_cast<std::size_t>(i)].dense != 0; }
-    bool search(int start_col, bool sparse_only);
+    bool dense(int i) const { return row_dense[static_cast<std::size_t>(i)] != 0; }
+    bool search(int start_col);
     void dense_duals();
     MatchingResult result(const std::vector<Int> &c2r, const std::vector<double> *u,
                           const std::vector<double> *vcol) const;
@@ -191,8 +223,18 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
     const int *const grow = g.row.data();
     const double *const gcost = g.cost.data();
 
-    s.rs.assign(static_cast<std::size_t>(n), RowState{kInf, kInf, -1, -1, 0, 0});
+    s.rs.assign(static_cast<std::size_t>(n), RowState{kInf, kInf});
+    s.heap.reset(n);
+    s.touched.resize(static_cast<std::size_t>(n));
+    s.finalized.resize(static_cast<std::size_t>(n));
+    s.level.resize(static_cast<std::size_t>(n));
+    s.row_match.assign(static_cast<std::size_t>(n), -1);
+    s.row_parent.assign(static_cast<std::size_t>(n), -1);
+    s.row_done.assign(static_cast<std::size_t>(n), 0);
+    s.row_dense.assign(static_cast<std::size_t>(n), 0);
     RowState *const R = s.rs.data();
+    int *const M = s.row_match.data();
+    std::uint8_t *const D = s.row_dense.data();
 
     // Dense rows/columns (AMD's threshold, 10 sqrt(n) entries) are where
     // almost every column's cheapest entry lives in KKT systems with a few
@@ -206,12 +248,12 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
         const double threshold = std::max(16.0, 10.0 * std::sqrt(static_cast<double>(n)));
         for (int j = 0; j < n; ++j) {
             if (static_cast<double>(gptr[j + 1] - gptr[j]) > threshold) {
-                R[j].dense = 1;
+                D[j] = 1;
                 s.any_dense = true;
             }
         }
     }
-    const auto is_dense = [R](int i) { return R[i].dense != 0; };
+    const auto is_dense = [D](int i) { return D[i] != 0; };
 
     // Initial duals on the sparse part: u[i] = min_j cost(i, j);
     // v[j] = min_i cost(i, j) - u[i]. Rows or columns without sparse entries
@@ -250,8 +292,8 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
         if (is_dense(j)) continue;
         for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
             const int i = grow[q];
-            if (!is_dense(i) && R[i].match < 0 && reduced(q, j) <= 0.0) {
-                R[i].match = j;
+            if (!is_dense(i) && M[i] < 0 && reduced(q, j) <= 0.0) {
+                M[i] = j;
                 col_to_row[static_cast<std::size_t>(j)] = i;
                 ++matched;
                 break;
@@ -267,22 +309,22 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
         for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
             const int i = grow[q];
             if (is_dense(i) || reduced(q, j) > 0.0) continue;
-            const int jj = R[i].match;
+            const int jj = M[i];
             if (jj < 0) continue;
             Int &c = cursor[static_cast<std::size_t>(jj)];
             int free_row = -1;
             for (; c < gptr[jj + 1]; ++c) {
                 const int k = grow[c];
-                if (!is_dense(k) && R[k].match < 0 && reduced(c, jj) <= 0.0) {
+                if (!is_dense(k) && M[k] < 0 && reduced(c, jj) <= 0.0) {
                     free_row = k;
                     ++c;
                     break;
                 }
             }
             if (free_row < 0) continue;
-            R[free_row].match = jj;
+            M[free_row] = jj;
             col_to_row[static_cast<std::size_t>(jj)] = free_row;
-            R[i].match = j;
+            M[i] = j;
             col_to_row[static_cast<std::size_t>(j)] = i;
             ++matched;
             break;
@@ -294,6 +336,14 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<Stat
     s.init_u.resize(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) s.init_u[static_cast<std::size_t>(i)] = R[i].u;
     s.init_v = v;
+
+    // Phase 1 hides the dense rows from its searches by a distance of -inf,
+    // which no candidate distance beats (dense_duals() restores inf).
+    if (s.any_dense) {
+        for (int i = 0; i < n; ++i) {
+            if (is_dense(i)) R[i].dist = -kInf;
+        }
+    }
 }
 
 SymmetricMatcher::~SymmetricMatcher() = default;
@@ -303,24 +353,43 @@ ErrorCode SymmetricMatcher::status() const { return s_->status; }
 long long SymmetricMatcher::work() const { return s_->work; }
 
 // Shortest augmenting path from a free column (Dijkstra on reduced costs); on
-// success the duals are updated and the matching augmented. With
-// sparse_only, dense rows are invisible.
-bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
+// success the duals are updated and the matching augmented. In phase 1 the
+// dense rows are invisible (their distance is -inf, see the constructor).
+bool SymmetricMatcher::State::search(int start_col) {
     RowState *const R = rs.data();
+    int *const M = row_match.data();
+    int *const P = row_parent.data();
+    std::uint8_t *const DN = row_done.data();
     const Int *const gptr = g.ptr.data();
     const int *const grow = g.row.data();
     const double *const gcost = g.cost.data();
-    const auto heap_cmp = std::greater<std::pair<double, int>>();
-    touched.clear();
-    finalized.clear();
+    int *const T = touched.data();
+    int *const F = finalized.data();
+    int *const L = level.data();
+    // The counters index fixed-size lists of n entries (see State): a row
+    // is touched, finalized and queued at the current distance at most once
+    // per search, which the debug asserts below check.
+    std::size_t n_touched = 0, n_final = 0, n_level = 0;
     heap.clear();
-    level.clear();
     std::size_t level_head = 0;
 
     // Free rows are never expanded: the closest one seen so far ends the
     // search as soon as no matched row can beat it (MC64's early exit).
     // Rows reached over a zero reduced cost sit at the current distance,
     // the minimum, so they queue in `level` without heap traffic.
+    //
+    // A matched row reached at nd >= path_len is left untouched: path_len
+    // never grows, so such a row could never be finalized (the loop below
+    // stops at the first distance >= path_len), and only finalized rows
+    // feed the dual update and the augmenting path. A later, shorter
+    // distance below path_len still beats its (untouched) inf, exactly as
+    // it would have beaten the skipped nd, so the search's every decision
+    // is unchanged. This drops ~90% of the heap pushes on KKT systems
+    // whose searches find a free row early.
+    //
+    // Finalized rows need no test either: a row is finalized at a distance
+    // <= base (base never decreases), and every candidate distance is
+    // base + a non-negative reduced cost, so it never beats theirs.
     int free_row = -1;
     double path_len = kInf;
     const auto relax = [&](int j, double base) {
@@ -330,13 +399,15 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
         for (Int q = gptr[j]; q < qend; ++q) {
             const int i = grow[q];
             RowState &ri = R[i];
-            if (ri.done || (sparse_only && ri.dense)) continue;
             const double nd = base + std::max(0.0, gcost[q] - ri.u - vj);
             if (nd < ri.dist) {
-                if (ri.dist == kInf) touched.push_back(i);
-                ri.dist = nd;
-                ri.parent = j;
-                if (ri.match < 0) {
+                if (M[i] < 0) {
+                    if (ri.dist == kInf) {
+                        assert(n_touched < static_cast<std::size_t>(n));
+                        T[n_touched++] = i;
+                    }
+                    ri.dist = nd;
+                    P[i] = j;
                     if (nd < path_len) {
                         free_row = i;
                         path_len = nd;
@@ -344,11 +415,19 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
                     // Nothing beats a free row at the current distance;
                     // stop scanning (dense columns would cost O(n)).
                     if (nd == base) return;
-                } else if (nd == base) {
-                    level.push_back(i);
-                } else {
-                    heap.emplace_back(nd, i);
-                    std::push_heap(heap.begin(), heap.end(), heap_cmp);
+                } else if (nd < path_len) {
+                    if (ri.dist == kInf) {
+                        assert(n_touched < static_cast<std::size_t>(n));
+                        T[n_touched++] = i;
+                    }
+                    ri.dist = nd;
+                    P[i] = j;
+                    if (nd == base) {
+                        assert(n_level < static_cast<std::size_t>(n));
+                        L[n_level++] = i;
+                    } else {
+                        heap.push_or_decrease(i, nd);
+                    }
                 }
             }
         }
@@ -358,24 +437,26 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
     double base = 0.0;
     while (true) {
         int i;
-        if (level_head < level.size()) {
+        if (level_head < n_level) {
             if (base >= path_len) break;
-            i = level[level_head++];
-            if (R[i].done) continue;
+            i = L[level_head++];
+            if (DN[i]) continue;
         } else {
-            level.clear();
+            n_level = 0;
             level_head = 0;
-            if (heap.empty() || heap.front().first >= path_len) break;
-            std::pop_heap(heap.begin(), heap.end(), heap_cmp);
-            const auto [d, hi] = heap.back();
-            heap.pop_back();
-            if (R[hi].done || d > R[hi].dist) continue;
+            if (heap.empty() || heap.top_key() >= path_len) break;
+            const double d = heap.top_key();
+            const int hi = heap.top_id();
+            heap.pop();
+            // A row moved to `level` keeps its older, larger entry.
+            if (DN[hi] || d > R[hi].dist) continue;
             i = hi;
             base = d;
         }
-        R[i].done = 1;
-        finalized.push_back(i);
-        relax(R[i].match, base);
+        DN[i] = 1;
+        assert(n_final < static_cast<std::size_t>(n));
+        F[n_final++] = i;
+        relax(M[i], base);
     }
 
     if (free_row >= 0) {
@@ -383,10 +464,11 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
         // their matched columns keeps reduced costs >= 0 and makes the
         // path tight.
         v[static_cast<std::size_t>(start_col)] += path_len;
-        for (int i : finalized) {
+        for (std::size_t k = 0; k < n_final; ++k) {
+            const int i = F[k];
             const double delta = path_len - R[i].dist;
             R[i].u -= delta;
-            const int mc = R[i].match;
+            const int mc = M[i];
             if (mc >= 0) {
                 v[static_cast<std::size_t>(mc)] += delta;
             }
@@ -395,18 +477,19 @@ bool SymmetricMatcher::State::search(int start_col, bool sparse_only) {
         // Augment along the path from free_row back to start_col.
         int r = free_row;
         while (r >= 0) {
-            const int c = R[r].parent;
+            const int c = P[r];
             const int prev_r = (c == start_col) ? -1 : static_cast<int>(col_to_row[static_cast<std::size_t>(c)]);
-            R[r].match = c;
+            M[r] = c;
             col_to_row[static_cast<std::size_t>(c)] = r;
             r = prev_r;
         }
         ++matched;
     }
 
-    for (int i : touched) {
+    for (std::size_t k = 0; k < n_touched; ++k) {
+        const int i = T[k];
         R[i].dist = kInf;
-        R[i].done = 0;
+        DN[i] = 0;
     }
     return free_row >= 0;
 }
@@ -419,7 +502,10 @@ void SymmetricMatcher::State::dense_duals() {
     const int *const grow = g.row.data();
     const double *const gcost = g.cost.data();
     for (int j = 0; j < n; ++j) {
-        if (dense(j)) R[j].u = kInf;
+        if (dense(j)) {
+            R[j].u = kInf;
+            R[j].dist = kInf;  // visible to the phase-3 searches
+        }
     }
     for (int j = 0; j < n; ++j) {
         if (dense(j)) continue;
@@ -454,7 +540,7 @@ bool SymmetricMatcher::advance(long long work_budget) {
             const int j = s.next_col;
             if (!s.dense(j) && s.col_to_row[static_cast<std::size_t>(j)] < 0) {
                 if (out_of_budget()) return false;
-                s.search(j, s.any_dense);
+                s.search(j);
             }
         }
         if (s.any_dense) s.dense_duals();
@@ -466,7 +552,7 @@ bool SymmetricMatcher::advance(long long work_budget) {
         const int j = s.next_col;
         if (s.col_to_row[static_cast<std::size_t>(j)] < 0) {
             if (out_of_budget()) return false;
-            if (!s.search(j, false)) {
+            if (!s.search(j)) {
                 s.status = ErrorCode::SingularMatrix;
                 s.phase = 4;
                 return true;

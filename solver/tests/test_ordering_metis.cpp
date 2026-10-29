@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
+#include "smf/etree.hpp"
+#include "smf/ordering.hpp"
 #include "smf/ordering_metis.hpp"
+#include "smf/supernode.hpp"
 #include "smf/scaling_matching.hpp"
 #include "smf/check_matrix.hpp"
 #include "smf/matrix_market.hpp"
@@ -218,6 +221,46 @@ TEST(MetisOrdering, MatchingOrderFromPartialMatching)
         EXPECT_GT(part.pairs, 0);
         EXPECT_LT(part.pairs, full.pairs);
         EXPECT_EQ(part.nodes, n - part.pairs);
+    }
+}
+
+// stats->etree / etree_depth are the returned ordering's etree, postorder,
+// column counts and depth, exactly as analyse() computes them (analyse()
+// adopts them instead of recomputing), and a caller-supplied adjacency of A
+// gives the same result as the one matching_order_from builds itself.
+TEST(MetisOrdering, MatchingOrderStatsCarryTheOrderingsEtree)
+{
+    const int g = 30, m = 200, n = g * g + m;
+    const smf::CscLower A = kkt_grid(g, m);
+    const smf::MatchingResult mr = smf::compute_symmetric_matching(A);
+    ASSERT_EQ(mr.status, smf::ErrorCode::Success);
+    const auto sn = static_cast<std::size_t>(n);
+    std::vector<smf::Int> xadj(sn + 1), adj(smf::lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+    smf::lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), xadj.data(), adj.data());
+    for (smf::CompressedOrder how : {smf::CompressedOrder::Amd, smf::CompressedOrder::Metis,
+                                     smf::CompressedOrder::Auto}) {
+        std::vector<smf::Int> perm, perm2, work;
+        smf::MatchingOrderStats st, st2;
+        ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, perm, work, &st, how));
+        ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, perm2, work, &st2, how, 1, xadj.data(), adj.data()));
+        EXPECT_EQ(perm, perm2);
+        EXPECT_EQ(st.etree, st2.etree);
+        EXPECT_EQ(st.etree_depth, st2.etree_depth);
+        EXPECT_EQ(st.flops, st2.flops);
+        EXPECT_EQ(st.used, st2.used);
+
+        std::vector<smf::Int> iperm(sn), tree(3 * sn), w(4 * sn + 1);
+        for (int i = 0; i < n; ++i) iperm[static_cast<std::size_t>(perm[static_cast<std::size_t>(i)])] = i;
+        smf::Int *parent = tree.data(), *post = parent + sn, *cc = post + sn;
+        smf::etree_from_adjacency(n, xadj.data(), adj.data(), perm.data(), iperm.data(), parent, w.data());
+        const smf::Int depth = smf::etree_postorder(n, parent, post, w.data());
+        smf::filled_column_counts_from_adjacency(n, xadj.data(), adj.data(), perm.data(), iperm.data(), parent,
+                                                 post, cc, w.data());
+        EXPECT_EQ(st.etree, tree);
+        EXPECT_EQ(st.etree_depth, depth);
+        double fl = 0.0;
+        for (std::size_t j = 0; j < sn; ++j) fl += static_cast<double>(cc[j]) * static_cast<double>(cc[j]);
+        EXPECT_EQ(st.flops, fl);
     }
 }
 

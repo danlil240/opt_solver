@@ -32,7 +32,7 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
 
 bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pair_tol, std::vector<Int> &perm,
                          std::vector<Int> &amd_work, MatchingOrderStats *stats, CompressedOrder how,
-                         int expected_refactors) {
+                         int expected_refactors, const Int *a_xadj, const Int *a_adj) {
     const Int n = A.n;
     const auto sn = static_cast<std::size_t>(n);
     if (n == 0 || A.values.size() != A.row_idx.size() || mr.col_to_row.size() != sn || mr.scale.size() != sn)
@@ -168,24 +168,31 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
     };
 
     // Predicted flops (sum of exact column counts squared) of an ordering
-    // of A, from A's symmetric adjacency (built on first use).
+    // of A, from A's symmetric adjacency (the caller's, or built on first
+    // use). The ordering's elimination tree, postorder and column counts
+    // are left in `tree` (3n) and its depth in `depth`.
     std::vector<Int> axadj, aadj, sym;
-    const auto predicted_flops = [&](const std::vector<Int> &p) {
-        if (axadj.empty()) {
-            axadj.resize(sn + 1);
-            aadj.resize(lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
-            lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), axadj.data(), aadj.data());
-            sym.resize(8 * sn + 1);
+    const auto predicted_flops = [&](const std::vector<Int> &p, std::vector<Int> &tree, Int &depth) {
+        if (sym.empty()) {
+            if (a_xadj == nullptr || a_adj == nullptr) {
+                axadj.resize(sn + 1);
+                aadj.resize(lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+                lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), axadj.data(), aadj.data());
+                a_xadj = axadj.data();
+                a_adj = aadj.data();
+            }
+            sym.resize(5 * sn + 1);
         }
+        tree.resize(3 * sn);
         Int *iperm = sym.data();
-        Int *parent = iperm + sn;
+        Int *work = iperm + sn;  // 4n + 1
+        Int *parent = tree.data();
         Int *post = parent + sn;
         Int *cc = post + sn;
-        Int *work = cc + sn;  // 4n + 1
         for (Int i = 0; i < n; ++i) iperm[p[static_cast<std::size_t>(i)]] = i;
-        etree_from_adjacency(n, axadj.data(), aadj.data(), p.data(), iperm, parent, work);
-        etree_postorder(n, parent, post, work);
-        filled_column_counts_from_adjacency(n, axadj.data(), aadj.data(), p.data(), iperm, parent,
+        etree_from_adjacency(n, a_xadj, a_adj, p.data(), iperm, parent, work);
+        depth = etree_postorder(n, parent, post, work);
+        filled_column_counts_from_adjacency(n, a_xadj, a_adj, p.data(), iperm, parent,
                                             post, cc, work);
         double fl = 0.0;
         for (Int j = 0; j < n; ++j) {
@@ -204,7 +211,9 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
     expand(node_perm, perm);
     CompressedOrder used = CompressedOrder::Amd;
     const bool need_flops = stats != nullptr || how == CompressedOrder::Auto;
-    double flops = need_flops ? predicted_flops(perm) : 0.0;
+    std::vector<Int> tree, cand_tree;  // the kept / the METIS ordering's
+    Int depth = 0, cand_depth = 0;
+    double flops = need_flops ? predicted_flops(perm, tree, depth) : 0.0;
 
     // METIS nested dissection on the same compressed graph, a pair weighing
     // two vertices. Auto tries it only where AMD's factor is expensive per
@@ -224,11 +233,13 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
                           miperm.data())) {
             std::vector<Int> metis_perm;
             expand(mperm, metis_perm);
-            const double mflops = need_flops ? predicted_flops(metis_perm) : 0.0;
+            const double mflops = need_flops ? predicted_flops(metis_perm, cand_tree, cand_depth) : 0.0;
             if (how == CompressedOrder::Metis || mflops < flops) {
                 perm = std::move(metis_perm);
                 flops = mflops;
                 used = CompressedOrder::Metis;
+                tree.swap(cand_tree);
+                depth = cand_depth;
             }
         }
     }
@@ -239,6 +250,8 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
         stats->scale = mr.scale;
         stats->flops = flops;
         stats->used = used;
+        stats->etree = std::move(tree);
+        stats->etree_depth = depth;
     }
     return true;
 }

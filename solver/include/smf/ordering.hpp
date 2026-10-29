@@ -88,6 +88,12 @@ struct MatchingOrderStats {
     double flops = 0.0;
     /// The compressed-graph ordering that was kept (Amd or Metis).
     CompressedOrder used = CompressedOrder::Amd;
+    /// The returned ordering's elimination tree, its postorder and exact
+    /// column counts (3n: parent, postorder, counts, laid out as analyse()
+    /// keeps them) and the tree's depth, as the flop prediction computed
+    /// them; empty when no flops were predicted.
+    std::vector<Int> etree;
+    Int etree_depth = 0;
 };
 
 /// Matching-based compressed ordering for symmetric indefinite matrices:
@@ -111,12 +117,15 @@ struct MatchingResult;
 /// partial (SymmetricMatcher::initial()): free columns stay unpaired and
 /// each open path of matched columns is split into pairs from its head.
 /// stats->scale is mr.scale. False when mr does not fit A or AMD is
-/// unavailable.
+/// unavailable. a_xadj / a_adj: A's symmetric adjacency from
+/// lower_csc_adjacency, when the caller has it (analyse() does); built
+/// here for the flop prediction otherwise.
 bool matching_order_from(const CscLower& A, const MatchingResult& mr, double pair_tol,
                          std::vector<Int>& perm, std::vector<Int>& amd_work,
                          MatchingOrderStats* stats = nullptr,
                          CompressedOrder how = CompressedOrder::Auto,
-                         int expected_refactors = 1);
+                         int expected_refactors = 1,
+                         const Int* a_xadj = nullptr, const Int* a_adj = nullptr);
 
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.
