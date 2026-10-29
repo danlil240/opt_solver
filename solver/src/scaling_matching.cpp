@@ -32,18 +32,68 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     // Cleaned input (each column's rows strictly increasing, none above the
     // diagonal, as analyse() passes it) expands without duplicates: column
     // j gets rows jj < j from the earlier columns, then its own rows >= j.
+    // Its nonzeros per column and largest |a_ij| are counted here as well.
     bool cleaned = true;
+    g.ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    g.col_max.assign(static_cast<std::size_t>(n), 0.0);
+    Int *const nz_count = g.ptr.data() + 1;
+    double *const cmax = g.col_max.data();
     for (int j = 0; j < n; ++j) {
         const Int p0 = A.col_ptr[static_cast<std::size_t>(j)];
         for (Int p = p0; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
             const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
-            if (!std::isfinite(A.values[static_cast<std::size_t>(p)])) {
+            const double av = std::abs(A.values[static_cast<std::size_t>(p)]);
+            if (!std::isfinite(av)) {
                 return ErrorCode::IllegalValue;
             }
             if (i < j || (p > p0 && i <= A.row_idx[static_cast<std::size_t>(p) - 1])) cleaned = false;
             ++count[static_cast<std::size_t>(j) + 1];
             if (i != j) ++count[static_cast<std::size_t>(i) + 1];
+            if (av > 0.0) {
+                ++nz_count[j];
+                cmax[j] = std::max(cmax[j], av);
+                if (i != j) {
+                    ++nz_count[i];
+                    cmax[i] = std::max(cmax[i], av);
+                }
+            }
         }
+    }
+    if (cleaned) {
+        // No duplicates to merge: the nonzeros go straight to their slots
+        // with their costs, one log per stored entry, in the order the
+        // expansion below would leave them (bitwise the same graph).
+        for (int j = 0; j < n; ++j) {
+            if (cmax[j] <= 0.0) return ErrorCode::SingularMatrix;
+            g.ptr[static_cast<std::size_t>(j) + 1] += g.ptr[static_cast<std::size_t>(j)];
+        }
+        const std::size_t nnz = static_cast<std::size_t>(g.ptr[static_cast<std::size_t>(n)]);
+        g.row.resize(nnz);
+        g.cost.resize(nnz);
+        std::vector<double> log_cmax(static_cast<std::size_t>(n));
+        for (int j = 0; j < n; ++j) log_cmax[static_cast<std::size_t>(j)] = std::log(cmax[j]);
+        std::vector<Int> next(g.ptr.begin(), g.ptr.end() - 1);
+        int *const grow = g.row.data();
+        double *const gcost = g.cost.data();
+        for (int j = 0; j < n; ++j) {
+            const double lj = log_cmax[static_cast<std::size_t>(j)];
+            for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+                 p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+                const double av = std::abs(A.values[static_cast<std::size_t>(p)]);
+                if (!(av > 0.0)) continue;
+                const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
+                const double la = std::log(av);
+                const std::size_t qj = static_cast<std::size_t>(next[static_cast<std::size_t>(j)]++);
+                grow[qj] = i;
+                gcost[qj] = std::max(0.0, lj - la);
+                if (i != j) {
+                    const std::size_t qi = static_cast<std::size_t>(next[static_cast<std::size_t>(i)]++);
+                    grow[qi] = j;
+                    gcost[qi] = std::max(0.0, log_cmax[static_cast<std::size_t>(i)] - la);
+                }
+            }
+        }
+        return ErrorCode::Success;
     }
     for (int j = 0; j < n; ++j) {
         count[static_cast<std::size_t>(j) + 1] += count[static_cast<std::size_t>(j)];
@@ -53,16 +103,10 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     g.row.resize(nnz);
     g.cost.resize(nnz);
     g.col_max.assign(static_cast<std::size_t>(n), 0.0);
-    // Without duplicates the expanded entries go straight into g, where the
-    // merge below would have copied each one unchanged.
-    std::vector<int> raw_row_buf;
-    std::vector<double> raw_val_buf;
-    if (!cleaned) {
-        raw_row_buf.resize(nnz);
-        raw_val_buf.resize(nnz);
-    }
-    int *const raw_row = cleaned ? g.row.data() : raw_row_buf.data();
-    double *const raw_val = cleaned ? g.cost.data() : raw_val_buf.data();
+    std::vector<int> raw_row_buf(nnz);
+    std::vector<double> raw_val_buf(nnz);
+    int *const raw_row = raw_row_buf.data();
+    double *const raw_val = raw_val_buf.data();
     std::vector<Int> next(count.begin(), count.end() - 1);
     for (int j = 0; j < n; ++j) {
         for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
@@ -85,51 +129,42 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     // the column, not the output slot: dropping a column's zeros moves `out`
     // back, so slots left by the previous column can lie past the next
     // column's start and would swallow its entries as false duplicates.
-    // Cleaned input skips the merge: column j already sits at
-    // [count[j], count[j+1]) of g, and is compacted from there to `out`
-    // (never past the read position).
-    std::vector<int> seen_in(cleaned ? 0 : static_cast<std::size_t>(n), -1);
-    std::vector<Int> slot_of(cleaned ? 0 : static_cast<std::size_t>(n), -1);
+    std::vector<int> seen_in(static_cast<std::size_t>(n), -1);
+    std::vector<Int> slot_of(static_cast<std::size_t>(n), -1);
     Int out = 0;
     for (int j = 0; j < n; ++j) {
         const Int begin = out;
-        Int read = begin;  // the column's merged entries: [read, out)
-        if (cleaned) {
-            read = count[static_cast<std::size_t>(j)];
-            out = count[static_cast<std::size_t>(j) + 1];
-        } else {
-            for (Int q = count[static_cast<std::size_t>(j)]; q < count[static_cast<std::size_t>(j) + 1]; ++q) {
-                const int i = raw_row[static_cast<std::size_t>(q)];
-                if (seen_in[static_cast<std::size_t>(i)] == j) {
-                    g.cost[static_cast<std::size_t>(slot_of[static_cast<std::size_t>(i)])] +=
-                        raw_val[static_cast<std::size_t>(q)];
-                } else {
-                    seen_in[static_cast<std::size_t>(i)] = j;
-                    slot_of[static_cast<std::size_t>(i)] = out;
-                    g.row[static_cast<std::size_t>(out)] = i;
-                    g.cost[static_cast<std::size_t>(out)] = raw_val[static_cast<std::size_t>(q)];
-                    ++out;
-                }
+        for (Int q = count[static_cast<std::size_t>(j)]; q < count[static_cast<std::size_t>(j) + 1]; ++q) {
+            const int i = raw_row[static_cast<std::size_t>(q)];
+            if (seen_in[static_cast<std::size_t>(i)] == j) {
+                g.cost[static_cast<std::size_t>(slot_of[static_cast<std::size_t>(i)])] +=
+                    raw_val[static_cast<std::size_t>(q)];
+            } else {
+                seen_in[static_cast<std::size_t>(i)] = j;
+                slot_of[static_cast<std::size_t>(i)] = out;
+                g.row[static_cast<std::size_t>(out)] = i;
+                g.cost[static_cast<std::size_t>(out)] = raw_val[static_cast<std::size_t>(q)];
+                ++out;
             }
         }
         // g.cost holds the merged value for now; compact out zeros.
         Int w = begin;
-        double cmax = 0.0;
-        for (Int q = read; q < out; ++q) {
+        double col_max = 0.0;
+        for (Int q = begin; q < out; ++q) {
             const double av = std::abs(g.cost[static_cast<std::size_t>(q)]);
             if (av > 0.0) {
                 g.row[static_cast<std::size_t>(w)] = g.row[static_cast<std::size_t>(q)];
                 g.cost[static_cast<std::size_t>(w)] = av;
-                cmax = std::max(cmax, av);
+                col_max = std::max(col_max, av);
                 ++w;
             }
         }
         out = w;
-        if (cmax <= 0.0) {
+        if (col_max <= 0.0) {
             return ErrorCode::SingularMatrix;
         }
-        g.col_max[static_cast<std::size_t>(j)] = cmax;
-        const double log_cmax = std::log(cmax);
+        g.col_max[static_cast<std::size_t>(j)] = col_max;
+        const double log_cmax = std::log(col_max);
         for (Int q = begin; q < out; ++q) {
             double &c = g.cost[static_cast<std::size_t>(q)];
             c = std::max(0.0, log_cmax - std::log(c));

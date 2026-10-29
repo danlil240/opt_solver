@@ -285,6 +285,44 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreads) {
     }
 }
 
+// With threads the trial runs on a worker thread, concurrently with the base
+// ordering (and stopped once the initial matching rejects). Every budget
+// path (exact within the budget, resumed, rejected on the initial matching,
+// guard band) gives the serial analysis: verdict, both ratios, ordering,
+// matching scales and rejected flag.
+TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
+    const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(8000, 2000, 1),
+                             opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 6, 1.0)};
+    for (const CscLower &A : mats) {
+        for (double budget : {-1.0, 0.0, 2.0}) {
+            Control c1;
+            c1.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c1.ordering = OrderingMethod::AutoSerial;
+            c1.matching_search_budget = budget;
+            c1.num_threads = 1;
+            Control c4 = c1;
+            c4.num_threads = 4;
+            Solver s1, s4;
+            Info i1, i4;
+            auto a1 = s1.analyse(A, c1, i1);
+            ASSERT_NE(a1, nullptr);
+            ASSERT_NE(i1.matching_trial, MatchingTrial::None);
+            for (int rep = 0; rep < 2; ++rep) {  // the second reuses s4's buffers
+                auto a4 = s4.analyse(A, c4, i4);
+                ASSERT_NE(a4, nullptr);
+                EXPECT_EQ(i4.matching_trial, i1.matching_trial) << "budget " << budget;
+                EXPECT_EQ(i4.matching_initial_ratio, i1.matching_initial_ratio) << "budget " << budget;
+                EXPECT_EQ(i4.matching_exact_ratio, i1.matching_exact_ratio) << "budget " << budget;
+                EXPECT_EQ(i4.ordering_used, i1.ordering_used) << "budget " << budget;
+                EXPECT_EQ(a4->perm, a1->perm) << "budget " << budget;
+                EXPECT_EQ(a4->matching_scale, a1->matching_scale) << "budget " << budget;
+                EXPECT_EQ(a4->rejected_matching_scale, a1->rejected_matching_scale) << "budget " << budget;
+                EXPECT_EQ(a4->matching_rejected, a1->matching_rejected) << "budget " << budget;
+            }
+        }
+    }
+}
+
 // The same under AutoParallel (the IPOPT plugin's ordering). Its base
 // ordering can come from a thread-count dependent path (serial METIS at 1
 // thread, parallel nested dissection above), so the flop ratios and the

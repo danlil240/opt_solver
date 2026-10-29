@@ -32,7 +32,7 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
 
 bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pair_tol, std::vector<Int> &perm,
                          std::vector<Int> &amd_work, MatchingOrderStats *stats, CompressedOrder how,
-                         int expected_refactors, const Int *a_xadj, const Int *a_adj) {
+                         int expected_refactors, const Int *a_xadj, const Int *a_adj, double enough_flops) {
     const Int n = A.n;
     const auto sn = static_cast<std::size_t>(n);
     if (n == 0 || A.values.size() != A.row_idx.size() || mr.col_to_row.size() != sn || mr.scale.size() != sn)
@@ -220,10 +220,13 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
     // row (the AutoParallel rule of analyse()) and keeps the cheaper one.
     // (A 0.8x margin was tried for ncvxqp1's u = 1e-8 accuracy: its METIS
     // ordering predicts 0.355x AMD's flops, so the margin changed nothing.)
+    // With enough_flops, a caller that only asks whether the kept ordering's
+    // flops reach it is answered by AMD's alone when they do not.
     bool try_metis = how == CompressedOrder::Metis;
     if (how == CompressedOrder::Auto)
         try_metis = flops * static_cast<double>(std::max(1, expected_refactors)) >=
-                    kMetisFlopsPerRow * static_cast<double>(n);
+                        kMetisFlopsPerRow * static_cast<double>(n) &&
+                    !(enough_flops >= 0.0 && flops <= enough_flops);
     if (try_metis && !cadj.empty()) {
         std::vector<Int> vwgt(snodes), mperm(snodes), miperm(snodes);
         for (Int J = 0; J < nnodes; ++J)

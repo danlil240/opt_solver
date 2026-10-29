@@ -119,13 +119,17 @@ struct MatchingResult;
 /// stats->scale is mr.scale. False when mr does not fit A or AMD is
 /// unavailable. a_xadj / a_adj: A's symmetric adjacency from
 /// lower_csc_adjacency, when the caller has it (analyse() does); built
-/// here for the flop prediction otherwise.
+/// here for the flop prediction otherwise. enough_flops >= 0 (Auto only):
+/// the caller only needs to know whether the kept ordering's predicted
+/// flops exceed it, so METIS is not tried once AMD's do not (perm and stats
+/// are then AMD's, which may cost more than METIS would have).
 bool matching_order_from(const CscLower& A, const MatchingResult& mr, double pair_tol,
                          std::vector<Int>& perm, std::vector<Int>& amd_work,
                          MatchingOrderStats* stats = nullptr,
                          CompressedOrder how = CompressedOrder::Auto,
                          int expected_refactors = 1,
-                         const Int* a_xadj = nullptr, const Int* a_adj = nullptr);
+                         const Int* a_xadj = nullptr, const Int* a_adj = nullptr,
+                         double enough_flops = -1.0);
 
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.

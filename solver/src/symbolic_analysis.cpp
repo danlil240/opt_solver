@@ -11,10 +11,16 @@
 #include "smf/supernode.hpp"
 #include "smf/sym_graph.hpp"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <exception>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <system_error>
+#include <thread>
 
 namespace smf
 {
@@ -66,6 +72,128 @@ namespace smf
     // Below this order delays stay cheap (fronts are bounded by n) and the
     // matching's fixed cost would dominate (optim20: n <= 4000).
     static constexpr Int kAutoMatchingMinN = 10000;
+
+    // The auto matching trial's searches and exact matching ordering on a
+    // worker thread (Control::num_threads > 1), overlapping the base
+    // ordering, its counts and the initial matching's ordering on the
+    // calling thread. It computes what the serial trial computes, in the
+    // same order: the budgeted searches, then (within the budget) the exact
+    // matching's ordering, or (past it) a snapshot of the initial matching
+    // and the remaining searches and the exact ordering, which the calling
+    // thread stops once the initial matching rejects (both would be
+    // discarded). Stopping is checked between search slices and before the
+    // ordering, never inside them, so it changes no result.
+    class ConcurrentTrial
+    {
+    public:
+        ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, const Int *xadj,
+                        const Int *adj, std::vector<Int> &amd_work)
+            : C_(C), budget_(budget), refactors_(expected_refactors), xadj_(xadj), adj_(adj), amd_work_(amd_work)
+        {
+            try
+            {
+                thread_ = std::thread([this] { run(); });
+            }
+            catch (const std::system_error &)
+            {
+                run(); // no thread: the trial runs here, unstoppable
+            }
+        }
+        ~ConcurrentTrial()
+        {
+            stop();
+            if (thread_.joinable())
+                thread_.join();
+        }
+        ConcurrentTrial(const ConcurrentTrial &) = delete;
+        ConcurrentTrial &operator=(const ConcurrentTrial &) = delete;
+
+        // Waits for the budgeted searches: true when they finished (the
+        // exact ordering follows), false when the budget stopped them
+        // (initial() is then the matching's initial phase).
+        bool within_budget()
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ready_cv_.wait(lock, [this] { return phase1_ready_; });
+            if (error_)
+            {
+                lock.unlock();
+                finish();
+            }
+            return within_;
+        }
+        const MatchingResult &initial() const { return initial_; }
+        void stop() { stop_.store(true, std::memory_order_relaxed); }
+        // Waits for the worker and rethrows what it threw. Afterwards
+        // ordered() says whether the exact matching was perfect and its
+        // ordering built (perm, stats).
+        void finish()
+        {
+            if (thread_.joinable())
+                thread_.join();
+            if (error_)
+                std::rethrow_exception(error_);
+        }
+        bool ordered() const { return ordered_; }
+        std::vector<Int> perm;
+        MatchingOrderStats stats;
+
+    private:
+        void run()
+        {
+            try
+            {
+                SymmetricMatcher matcher(C_);
+                const bool within = matcher.advance(budget_);
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    within_ = within;
+                    if (!within)
+                        initial_ = matcher.initial();
+                    phase1_ready_ = true;
+                }
+                ready_cv_.notify_all();
+                // A slice of about one pass over the cost graph between
+                // stop checks.
+                const long long slice = std::max<long long>(2 * static_cast<long long>(C_.row_idx.size()), 1);
+                while (!stopped() && !matcher.advance(matcher.work() + slice))
+                {
+                }
+                if (stopped())
+                    return;
+                const MatchingResult mr = matcher.current();
+                ordered_ = mr.status == ErrorCode::Success &&
+                           matching_order_from(C_, mr, kMatchingPairTol, perm, amd_work_, &stats,
+                                               CompressedOrder::Auto, refactors_, xadj_, adj_);
+            }
+            catch (...)
+            {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    error_ = std::current_exception();
+                    phase1_ready_ = true;
+                }
+                ready_cv_.notify_all();
+            }
+        }
+        bool stopped() const { return stop_.load(std::memory_order_relaxed); }
+
+        const CscLower &C_;
+        const long long budget_;
+        const int refactors_;
+        const Int *const xadj_;
+        const Int *const adj_;
+        std::vector<Int> &amd_work_;
+        std::thread thread_;
+        std::mutex mutex_;
+        std::condition_variable ready_cv_;
+        bool phase1_ready_ = false;
+        bool within_ = false;
+        MatchingResult initial_;
+        std::atomic<bool> stop_{false};
+        bool ordered_ = false;
+        std::exception_ptr error_;
+    };
 
     static bool is_auto_ordering(OrderingMethod m)
     {
@@ -317,22 +445,33 @@ namespace smf
         // The matching's shortest-path searches run under
         // Control::matching_search_budget. Past it (they dominate the trial
         // on PGLib OPF and ncvxqp, where the matching ordering loses), the
-        // matching ordering of the matching's initial phase is built instead
-        // and decides first, in step 5 once the base ordering's flops are
-        // known: a clear loss (past kMatchingInitialRejectRatio) ends the
-        // trial there; otherwise the paused searches resume and the exact
-        // matching decides as usual.
+        // matching ordering of the matching's initial phase decides first,
+        // in step 5 once the base ordering's flops are known: a clear loss
+        // (past kMatchingInitialRejectRatio) ends the trial there; otherwise
+        // the paused searches resume and the exact matching decides as
+        // usual. The initial ordering is built there too, so that it can
+        // stop at AMD once AMD's flops already pass (its METIS candidate
+        // could only lower them, and the ordering itself is discarded).
+        // With threads, the trial runs concurrently (ConcurrentTrial) and is
+        // decided at the same point, with the same results.
         std::vector<Int> matching_perm;
         std::unique_ptr<SymmetricMatcher> paused_matcher;
-        if (auto_matching)
+        std::unique_ptr<ConcurrentTrial> concurrent;
+        // In edges scanned: budget x 2 x C's lower entries (diagonal
+        // included), about `budget` passes over the matcher's symmetric
+        // cost graph. Negative, NaN or beyond 1e18 edges: none.
+        const double budget_passes = control.matching_search_budget;
+        const double budget_edges = budget_passes * 2.0 * static_cast<double>(C.row_idx.size());
+        const long long budget =
+            (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
+        if (auto_matching && control.num_threads > 1)
+        {
+            concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors, xadj, adj,
+                                                           analyse_scratch_worker_);
+        }
+        else if (auto_matching)
         {
             auto matcher = std::make_unique<SymmetricMatcher>(C);
-            // In edges scanned: budget x 2 x C's lower entries (diagonal
-            // included), about `budget` passes over the matcher's symmetric
-            // cost graph. Negative, NaN or beyond 1e18 edges: none.
-            const double b = control.matching_search_budget;
-            const double edges = b * 2.0 * static_cast<double>(C.row_idx.size());
-            const long long budget = (b >= 0.0 && edges < 1e18) ? static_cast<long long>(edges) : -1;
             if (matcher->advance(budget))
             {
                 const MatchingResult mr = matcher->current();
@@ -345,11 +484,7 @@ namespace smf
             }
             else
             {
-                auto_matching = matching_order_from(C, matcher->initial(), kMatchingPairTol, matching_perm,
-                                                    analyse_scratch_, &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors, xadj, adj);
-                if (auto_matching)
-                    paused_matcher = std::move(matcher);
+                paused_matcher = std::move(matcher);
             }
         }
         lap(phases.matching);
@@ -508,16 +643,48 @@ namespace smf
         // (bitwise: same adjacency, same counts), and an adopted candidate
         // takes its etree and counts from matching_stats.etree.
         bool rejected_initial = false;
-        if (paused_matcher)
-        {
+        // The initial matching's verdict: builds its ordering and returns
+        // whether it passes (false with auto_matching false: no ordering).
+        const auto initial_passes = [&](const MatchingResult &initial) {
             const double fl0 = factor_flops(sym0);
+            const double reject_flops = kMatchingInitialRejectRatio * fl0;
+            auto_matching = matching_order_from(C, initial, kMatchingPairTol, matching_perm, analyse_scratch_,
+                                                &matching_stats, CompressedOrder::Auto,
+                                                control.expected_refactors, xadj, adj, reject_flops);
+            if (!auto_matching)
+                return false;
             info.matching_initial_ratio = matching_stats.flops / fl0;
-            if (matching_stats.flops > kMatchingInitialRejectRatio * fl0)
+            if (matching_stats.flops <= reject_flops)
+                return true;
+            rejected_initial = true;
+            info.matching_trial = MatchingTrial::RejectedInitial;
+            return false;
+        };
+        if (concurrent)
+        {
+            const bool within = concurrent->within_budget();
+            const bool resume = !within && initial_passes(concurrent->initial());
+            if (within || resume)
             {
-                rejected_initial = true;
-                info.matching_trial = MatchingTrial::RejectedInitial;
+                concurrent->finish();
+                auto_matching = concurrent->ordered();
+                if (auto_matching)
+                {
+                    matching_perm = std::move(concurrent->perm);
+                    matching_stats = std::move(concurrent->stats);
+                    info.matching_trial = within ? MatchingTrial::Exact : MatchingTrial::ResumedExact;
+                }
             }
             else
+            {
+                concurrent->stop();
+                concurrent->finish();
+            }
+            concurrent.reset();
+        }
+        if (paused_matcher)
+        {
+            if (initial_passes(paused_matcher->initial()))
             {
                 paused_matcher->advance(-1);
                 const MatchingResult mr = paused_matcher->current();
