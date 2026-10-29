@@ -58,19 +58,22 @@ namespace smf
     // the initial ratio has exceeded the exact one by up to 1.8x.
     static constexpr double kMatchingInitialRejectRatio = 1.6 * kMatchingFlopsRatio;
 
-    // Past the budget, a base ordering whose predicted flops (times
-    // Control::expected_refactors) reach this per row resumes the searches
-    // without the initial matching's verdict: the initial ordering (AMD,
-    // often METIS too) then costs as much as the rest of the trial, which
-    // the factorization dwarfs anyway. It can only turn a rejection into
-    // the exact trial's verdict (a resumed trial is bitwise the exact one).
+    // Past the budget, a dear factor resumes the searches without the
+    // initial matching's verdict: a base ordering, or the initial matching's
+    // compressed AMD ordering, whose predicted flops (times
+    // Control::expected_refactors) reach this per row. The initial ordering
+    // (AMD, and METIS, which the Auto compressed ordering tries from the
+    // same threshold) then costs as much as the rest of the trial, which the
+    // factorization dwarfs anyway. It can only turn a rejection into the
+    // exact trial's verdict (a resumed trial is bitwise the exact one).
     // Over the 50 n >= 10000 indefinite corpus matrices (1 thread, one
-    // refactor) every initial rejection has at most 7.1e4 (turon_m; PGLib
-    // OPF <= 820, darcy003 2.2e3), while TSOPF_FS_b300* (9e6-1.5e7) and
-    // ncvxqp3/5/7 (1.3e6-2.1e6) spent 0.3-1.2 s on the initial ordering
-    // before resuming. Equal to kMetisFlopsPerRow (ordering.hpp), the
-    // point from which AMD's factor counts as dear.
-    static constexpr double kMatchingResumeFlopsPerRow = 4.5e5;
+    // refactor) every initial rejection has base flops of at most 7.1e4 per
+    // row (turon_m; PGLib OPF <= 820, darcy003 2.2e3) and compressed AMD
+    // flops of at most 2.7e5 (turon_m), while TSOPF_FS_b300* (9e6-1.5e7
+    // base) and ncvxqp3/5/7 (1.3e6-2.1e6 base) spent 0.3-1.2 s on the
+    // initial ordering before resuming, and cvxqp3 (2.8e5 base, 7.8e5
+    // compressed) 85 ms. Equal to kMetisFlopsPerRow (ordering.hpp).
+    static constexpr double kMatchingResumeFlopsPerRow = kMetisFlopsPerRow;
 
     // KKT recognition for the auto policy: a diagonal below kSmallDiagonal
     // times its column's largest off-diagonal cannot be a 1x1 pivot; the
@@ -463,10 +466,9 @@ namespace smf
         // in step 5 once the base ordering's flops are known: a clear loss
         // (past kMatchingInitialRejectRatio) ends the trial there; otherwise
         // the paused searches resume and the exact matching decides as
-        // usual. The initial ordering is built there too, so that it can
-        // stop at AMD once AMD's flops already pass (its METIS candidate
-        // could only lower them, and the ordering itself is discarded), or
-        // be skipped when the base factor is dear (kMatchingResumeFlopsPerRow).
+        // usual. The initial ordering is built there too (compressed AMD
+        // only), once the base flops are known, or skipped when the base
+        // factor is dear (kMatchingResumeFlopsPerRow).
         // With threads, the trial runs concurrently (ConcurrentTrial) and is
         // decided at the same point, with the same results.
         std::vector<Int> matching_perm;
@@ -658,22 +660,29 @@ namespace smf
         // (bitwise: same adjacency, same counts), and an adopted candidate
         // takes its etree and counts from matching_stats.etree.
         bool rejected_initial = false;
-        // The initial matching's verdict: builds its ordering and returns
-        // whether it passes (false with auto_matching false: no ordering).
-        // A dear base factor passes without it (kMatchingResumeFlopsPerRow).
+        // The initial matching's verdict: returns whether the paused
+        // searches resume (false with auto_matching false: no ordering).
+        // A dear factor resumes them outright (kMatchingResumeFlopsPerRow):
+        // the base ordering's, before any initial ordering is built, or the
+        // initial matching's compressed AMD ordering's, which is dear
+        // exactly when the Auto compressed ordering would try METIS too.
+        // Otherwise AMD's ordering decides alone, as Auto would. The verdict
+        // only resumes or rejects (the ordering itself is discarded), and
+        // skipping METIS can only turn a rejection into a resumed, i.e.
+        // exact, trial.
         const auto initial_passes = [&](const MatchingResult &initial) {
             const double fl0 = factor_flops(sym0);
-            if (fl0 * static_cast<double>(std::max(1, control.expected_refactors)) >=
-                kMatchingResumeFlopsPerRow * static_cast<double>(n))
+            const double dear_flops = kMatchingResumeFlopsPerRow * static_cast<double>(n) /
+                                      static_cast<double>(std::max(1, control.expected_refactors));
+            if (fl0 >= dear_flops)
                 return true;
-            const double reject_flops = kMatchingInitialRejectRatio * fl0;
             auto_matching = matching_order_from(C, initial, kMatchingPairTol, matching_perm, analyse_scratch_,
-                                                &matching_stats, CompressedOrder::Auto,
-                                                control.expected_refactors, xadj, adj, reject_flops);
+                                                &matching_stats, CompressedOrder::Amd,
+                                                control.expected_refactors, xadj, adj);
             if (!auto_matching)
                 return false;
             info.matching_initial_ratio = matching_stats.flops / fl0;
-            if (matching_stats.flops <= reject_flops)
+            if (matching_stats.flops <= kMatchingInitialRejectRatio * fl0 || matching_stats.flops >= dear_flops)
                 return true;
             rejected_initial = true;
             info.matching_trial = MatchingTrial::RejectedInitial;
