@@ -89,15 +89,28 @@ void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
 /// `rule`: Amalgamation::SmfPlusCholmod also takes a merge CHOLMOD's default
 /// relaxation would (merged pivots ns, zero share z of the merged node: ns <= 4,
 /// no new zeros, ns <= 16 and z < 0.8, ns <= 48 and z < 0.1, or z < 0.05),
-/// ignoring nemin. Smf is bit-identical to the rule above.
+/// ignoring nemin. Amalgamation::CostModel also merges a child whose
+/// contribution block has qc >= 128 rows when the words that merge saves (no
+/// child front to zero, no block to copy out and extend-add: ~3 qc^2) cost
+/// more than the flops it adds (pc pivots padded with z = fp - qc explicit
+/// zeros under a parent front of fp rows: pc z (pc + fp + qc)), also ignoring
+/// nemin. Smf is bit-identical to the rule above.
 ///
 /// `work` (optional): amalgamate_relaxed_work_size(n) ints of caller-owned
 /// workspace (contents need not be initialised); null allocates its own.
+///
+/// `zero_diagonal` (optional, length n, same numbering; CostModel only): 1
+/// marks a column whose diagonal is zero in the analysed values. A width-1
+/// leaf supernode of such a column delays into its parent for certain, and
+/// CostModel takes no merge into or out of a group that receives such a
+/// delay (merging a chain of them piles the delays into one front, which
+/// the model does not count). Null: no guard.
 void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                         std::vector<Int> &order, std::vector<Supernode> &snodes,
                         const std::uint8_t *keep_with_parent = nullptr,
                         Int *work = nullptr,
-                        Amalgamation rule = Amalgamation::Smf);
+                        Amalgamation rule = Amalgamation::Smf,
+                        const std::uint8_t *zero_diagonal = nullptr);
 
 /// Ints of workspace amalgamate_relaxed needs for n columns.
 std::size_t amalgamate_relaxed_work_size(Int n);

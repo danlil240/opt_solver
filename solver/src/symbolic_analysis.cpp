@@ -595,10 +595,29 @@ namespace smf
                     ++info.pairs_split;
             }
         }
+        // Columns with a zero (or no) diagonal in the analysed values, in
+        // the postordered numbering (CostModel's delay guard).
+        std::vector<std::uint8_t> zero_diag;
+        if (control.amalgamation == Amalgamation::CostModel &&
+            control.matrix_type == MatrixType::RealSymmetricIndefinite &&
+            C.values.size() == C.row_idx.size())
+        {
+            zero_diag.assign(sn_sz, 0);
+            for (Int k = 0; k < n; ++k)
+            {
+                const Int old = perm[static_cast<std::size_t>(post0[k])];
+                const Int p0 = C.col_ptr[static_cast<std::size_t>(old)];
+                const bool has = p0 < C.col_ptr[static_cast<std::size_t>(old) + 1] &&
+                                 C.row_idx[static_cast<std::size_t>(p0)] == old;
+                zero_diag[static_cast<std::size_t>(k)] =
+                    (!has || C.values[static_cast<std::size_t>(p0)] == 0.0) ? 1 : 0;
+            }
+        }
         amalgamate_relaxed(n, parent1, colcount1, static_cast<Int>(control.nemin),
                            order, snodes,
                            keep_with_parent.empty() ? nullptr : keep_with_parent.data(),
-                           amal_work, control.amalgamation);
+                           amal_work, control.amalgamation,
+                           zero_diag.empty() ? nullptr : zero_diag.data());
 
         // Final permutation and its elimination tree (relabelled, not rebuilt).
         for (Int k = 0; k < n; ++k)

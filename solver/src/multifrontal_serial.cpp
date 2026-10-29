@@ -156,6 +156,11 @@ struct FactorContext {
   const AptpParams *tile_aprm = nullptr;
   // Control::small_front_kernels: FrontPass::sbuf path for small fronts.
   bool small_fronts = false;
+  // Work limit (scale on delay; -1 = off): a front whose own work would take
+  // the count past it is not factored. work_shared: the threads' shared
+  // count (null: the pass's own, the serial engine).
+  long long work_cap = -1;
+  const std::atomic<long long> *work_shared = nullptr;
 };
 
 // Threads of a front at the top of the tree: its share of the BLAS-thread
@@ -385,6 +390,24 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
     }
   };
+  // A front's work (eligible columns x rows^2, as counted below) is known
+  // before its kernel runs. Work is only ever added, so a front that would
+  // take the count past the limit means the finished run exceeds it too:
+  // stop before this front instead of after it (the same decision; a
+  // delay cascade's last front can be most of the work). Its work is
+  // counted, so a stopped run reports front work past the limit either way.
+  if (cx.work_cap >= 0) {
+    const long long w = static_cast<long long>(num_elig) * f * f;
+    const long long done = cx.work_shared != nullptr
+                               ? cx.work_shared->load(std::memory_order_relaxed)
+                               : P.st.front_work;
+    if (done + w > cx.work_cap) {
+      P.st.front_work += w;
+      for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+      release_child_blocks();
+      return ErrorCode::WorkLimitExceeded;
+    }
+  }
   LdltKernelResult kr;
   int aptp_failed = 0;
   const int64_t tile_growths0 = P.tiles != nullptr ? P.tiles->growths : 0;
@@ -977,7 +1000,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
-                           ctrl.small_front_kernels};
+                           ctrl.small_front_kernels, work_cap};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1040,18 +1063,18 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       passes.push_back(&P);
     }
     node_blocks.resize(ns);
+    std::atomic<long long> work_done{0};
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, tiles_on ? &tile_aprm : nullptr,
-                           ctrl.small_front_kernels};
+                           ctrl.small_front_kernels, work_cap, &work_done};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
     // raises InertiaExceeded (unless another error came first).
     std::atomic<int> failed{static_cast<int>(ErrorCode::Success)};
     std::atomic<int> negatives{0};
-    std::atomic<long long> work_done{0};
     const auto count_negatives = [&](int added) {
       if (added <= 0 || negatives.fetch_add(added, std::memory_order_relaxed) + added <= neg_limit)
         return;
