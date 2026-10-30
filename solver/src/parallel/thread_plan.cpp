@@ -339,6 +339,13 @@ bool plan_trace_enabled() {
   return on;
 }
 
+bool plan_is_serial(double total, const ThreadCosts &c) {
+  if (total < kTreeParallelMinWork || !(total > 0.0)) return true;
+  const bool no_negative =
+      c.per_thread >= 0.0 && c.per_top_front >= 0.0 && c.per_split_front_thread >= 0.0;
+  return no_negative && total <= 4.0 * c.per_thread;
+}
+
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c) {
   const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, max_threads);
   std::vector<std::pair<int, double>> costs;

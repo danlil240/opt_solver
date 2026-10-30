@@ -606,6 +606,107 @@ TEST(ThreadPlan, SplitCapStopsAtCap) {
     EXPECT_EQ(plan_threads(bal.view(), 16, c).threads, 16);
 }
 
+// plan_is_serial's per-thread bound, total <= 4 per_thread, is the model's
+// and sharp: 1024 equal leaves under zero-work internal nodes at exactly
+// the bound tie at T = 2 (1 kept), and 10% above it 2 threads win. Any tree
+// shape at or below it, any max_threads and cost set, picks 1.
+TEST(ThreadPlan, SerialBoundFromPerThreadCost) {
+    ThreadCosts c;
+    c.per_thread = 1e8;  // bound 4e8, above kTreeParallelMinWork
+    const double bound = 4.0 * c.per_thread;
+    ASSERT_GT(bound, kTreeParallelMinWork);
+    Synth at;
+    binary(at, -1, 10, bound / 1024.0, 0.0);
+    Synth above;
+    binary(above, -1, 10, 1.1 * bound / 1024.0, 0.0);
+    EXPECT_TRUE(plan_is_serial(bound, c));
+    EXPECT_FALSE(plan_is_serial(1.1 * bound, c));
+    for (const int max_threads : {2, 3, 4, 8, 12, 16})
+        EXPECT_EQ(plan_threads(at.view(), max_threads, c).threads, 1) << "max " << max_threads;
+    EXPECT_GT(plan_threads(above.view(), 16, c).threads, 1);
+
+    // Other shapes scaled to the bound or below.
+    Synth rooty;  // a heavy split root over balanced subtrees
+    const Int root = rooty.add(-1, 0.25 * bound, true);
+    binary(rooty, root, 8, 0.375 * bound / 256.0, 0.0);
+    binary(rooty, root, 8, 0.375 * bound / 256.0, 0.0, true);
+    Synth wide;  // 4096 leaves under one root
+    const Int wroot = wide.add(-1, 0.0);
+    for (int i = 0; i < 4096; ++i) wide.add(wroot, bound / 4096.0);
+    Synth half;
+    binary(half, -1, 12, 0.5 * bound / 4096.0, 1.0);
+    const ThreadCosts sets[] = {c, ThreadCosts{1e8, 0.0, 0.0, 1}, ThreadCosts{1e8, 1e3, 1e5, 16}};
+    for (Synth *s : {&at, &rooty, &wide, &half}) {
+        const TreeView t = s->view();
+        double total = 0.0;
+        for (const double w : t.work) total += w;
+        ASSERT_LE(total, bound);
+        for (const ThreadCosts &k : sets) {
+            EXPECT_TRUE(plan_is_serial(total, k));
+            for (const int max_threads : {2, 3, 4, 8, 12, 16})
+                EXPECT_EQ(plan_threads(t, max_threads, k).threads, 1) << "max " << max_threads;
+        }
+    }
+
+    // A negative cost voids the per-thread bound; kTreeParallelMinWork
+    // stands whatever the costs.
+    ThreadCosts neg = c;
+    neg.per_top_front = -1.0;
+    EXPECT_FALSE(plan_is_serial(bound, neg));
+    EXPECT_TRUE(plan_is_serial(0.5 * kTreeParallelMinWork, neg));
+    EXPECT_TRUE(plan_is_serial(0.0, ThreadCosts{}));
+    // The defaults: the per-thread bound (2.8e6) lies below the minimum work.
+    EXPECT_TRUE(plan_is_serial(kTreeParallelMinWork - 1.0, ThreadCosts{}));
+    EXPECT_FALSE(plan_is_serial(kTreeParallelMinWork, ThreadCosts{}));
+}
+
+// The factorization skips the plan on a tree plan_is_serial rules serial:
+// no plan is cached (NumericWorkspace::thread_plan stays empty) and no
+// tree-parallel buffers or partition are made, at 16 threads with
+// auto_threads on, with a light tree (below kTreeParallelMinWork) and with
+// a heavier one under a per-thread cost that rules it out. The same heavier
+// tree under the default costs builds its plan.
+TEST(ThreadPlan, SerialBoundSkipsPlan) {
+    const auto tree_work = [](const AnalysisKeep &keep) {
+        double w = 0.0;
+        for (std::size_t s = 0; s < keep.supernodes.size(); ++s) {
+            const double f = static_cast<double>(keep.front_size(static_cast<Int>(s)));
+            w += f * f * static_cast<double>(keep.supernodes[s].width());
+        }
+        return w;
+    };
+    struct Case {
+        int m;
+        double per_thread;
+        bool serial;
+    };
+    for (const Case cs : {Case{30, 7e5, true}, Case{120, 1e12, true}, Case{120, 7e5, false}}) {
+        const CscLower A = laplacian_2d(cs.m);
+        Control ctrl;
+        ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+        ctrl.num_threads = 16;
+        ctrl.thread_cost_per_thread = cs.per_thread;
+        Solver solver;
+        Info info;
+        auto ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        const double total = tree_work(*ak);
+        ThreadCosts costs;
+        costs.per_thread = cs.per_thread;
+        ASSERT_EQ(plan_is_serial(total, costs), cs.serial) << "premise, m=" << cs.m;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        ASSERT_EQ(solver.factor(*ak, A.values, ctrl, info, fk, ws), FactorStatus::Success);
+        if (cs.serial) {
+            EXPECT_EQ(info.threads_used, 1) << "m=" << cs.m;
+            EXPECT_EQ(ws.thread_plan.analysis, 0u) << "m=" << cs.m << ": a plan was built";
+            EXPECT_TRUE(ws.tree_par == nullptr) << "m=" << cs.m;
+        } else {
+            EXPECT_EQ(ws.thread_plan.analysis, ak->serial) << "m=" << cs.m;
+        }
+    }
+}
+
 // The trace text: one plan-factor line per candidate and the chosen count.
 TEST(ThreadPlan, FactorTraceFormat) {
     Synth bal;

@@ -821,12 +821,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                   : (work_limit >= 9.0e18 ? std::numeric_limits<long long>::max()
                                           : static_cast<long long>(std::floor(work_limit)));
 
-  // Symbolic plan: largest front, factor size, and the peak of the
-  // contribution stack when no pivot is delayed.
+  // Symbolic plan: largest front, factor size, the peak of the
+  // contribution stack when no pivot is delayed, and the tree's work (sum of
+  // f^2 p, tree_view's unit) for plan_is_serial.
   std::size_t max_f = 1;
   std::size_t max_work = 1;
   std::size_t pred_factor = 0;
   std::size_t pred_rows = 0;
+  double tree_work = 0.0;
   ws.cb_value_off.resize(ns);
   ws.cb_row_off.resize(ns);
   ws.cb_size.resize(ns);
@@ -845,6 +847,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                     static_cast<int>(p) >= aptp_min_elig ? aptp : nullptr));
       pred_factor += f * p;
       pred_rows += f;
+      const double fd = static_cast<double>(f);
+      tree_work += fd * fd * static_cast<double>(p);
       for (const Int c : keep.children(s)) {
         const std::size_t ci = static_cast<std::size_t>(c);
         if (ws.cb_size[ci] > 0) {
@@ -929,6 +933,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Without a delay budget the subtrees run as partition_tasks' tasks
   // (light adjacent subtrees merged). The partition depends on the tree and
   // its thread count alone: ws.tree_par->partition keeps it.
+  //
+  // A tree whose work alone rules out every T > 1 (plan_is_serial: below
+  // kTreeParallelMinWork, or within the per-thread cost) takes the serial
+  // engine without the plan, the tree view or the partition, all of which
+  // would come out serial (about 1 ms per analysis on boyd1, ns ~ 90k).
+  // The plan trace (SMF_BENCH_PLAN_TRACE) still evaluates the plan.
   int threads = 1;
   std::vector<Int> tv_parent;
   std::vector<double> tv_work;
@@ -944,7 +954,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                  ctrl.thread_cost_per_split_front_thread,
                                  ctrl.thread_split_scaling_cap};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
-  if (ctrl.auto_threads && want_threads > 1) {
+  const bool below_min_work = tree_work < kTreeParallelMinWork;
+  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(tree_work, thread_costs) &&
+      !plan_trace_enabled()) {
+    want_threads = 1;
+  } else if (ctrl.auto_threads && want_threads > 1) {
     auto &pc = ws.thread_plan;
     if (pc.analysis != keep.serial || pc.num_threads != ctrl.num_threads ||
         pc.per_thread != thread_costs.per_thread ||
@@ -982,9 +996,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     return &pp;
   };
   const TreeParallelBuffers::Partition *part = nullptr;
+  // Below kTreeParallelMinWork both partitions are empty: none.
   if (delay_budget >= 0 && ns >= 2) {
-    part = partition(kBudgetNominalThreads, true);
-  } else if (want_threads > 1) {
+    if (!below_min_work) part = partition(kBudgetNominalThreads, true);
+  } else if (want_threads > 1 && !below_min_work) {
     part = partition(want_threads, false);
   }
   const std::vector<std::pair<std::size_t, std::size_t>> no_subtrees;

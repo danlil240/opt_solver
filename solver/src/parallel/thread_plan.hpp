@@ -133,6 +133,18 @@ struct ThreadPlan {
 // run as tile tasks.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 
+// True when plan_threads picks 1 for every tree of this total work (the sum
+// of f^2 p over its fronts) and every max_threads, so the plan need not be
+// built: below kTreeParallelMinWork (no candidate past 1), or, with no
+// negative cost, at most 4 per_thread. Every T > 1 costs at least
+// sub_total / T + top_total / T + T per_thread = total / T + T per_thread,
+// which reaches total when total <= 4 per_thread (the difference is
+// per_thread (T - 2)^2 / T at total = 4 per_thread), so cost(1) = total is
+// the least (rounding stays far inside the 2% tie band). Below 2^53 the
+// work sums are exact integers in any order, so a total summed in another
+// order than plan_threads' meets kTreeParallelMinWork exactly as its does.
+bool plan_is_serial(double total, const ThreadCosts &c);
+
 // The candidate thread counts of both models, ascending: 1, 2, 4, 8, ...
 // below max_threads, and max_threads (1 alone below 2).
 std::vector<int> candidate_threads(int max_threads);
