@@ -911,6 +911,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // fronts there. The plan depends on the tree, num_threads, the costs and
   // the split fronts (tiles_on) alone: ws.thread_plan keeps it for the
   // refactorizations of this analysis.
+  //
+  // Without a delay budget the subtrees run as partition_tasks' tasks
+  // (light adjacent subtrees merged).
   int threads = 1;
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
   std::vector<std::uint8_t> top;
@@ -950,7 +953,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (delay_budget >= 0 && ns >= 2) {
     subtrees = partition_subtrees(view(), kBudgetNominalThreads, kTreeParallelMinWork, top);
   } else if (want_threads > 1) {
-    subtrees = partition_subtrees(view(), want_threads, kTreeParallelMinWork, top);
+    subtrees = partition_tasks(view(), want_threads, kTreeParallelMinWork, top);
   }
   if (want_threads > 1 && subtrees.size() >= 2)
     threads = std::min<int>(want_threads, static_cast<int>(subtrees.size()));
@@ -1083,8 +1086,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       ws.ensure_pool(threads).run(job, /*workers_count_blas=*/false);
     };
 
-    // Phase 1: subtrees, heaviest first, one thread each on serial BLAS.
-    // Each thread's step ranges per subtree become the solve's parallel
+    // Phase 1: subtrees (budget regions, or partition_tasks' tasks of
+    // merged subtrees), heaviest first, one thread each on serial BLAS.
+    // Each thread's step ranges per range become the solve's parallel
     // layout.
     st.threads_used = threads;
     using PhaseClock = std::chrono::steady_clock;

@@ -232,8 +232,125 @@ TEST(ThreadPlan, PartitionCoversTree) {
         EXPECT_EQ(covered[s] + top[s], 1) << "supernode " << s;
 }
 
+namespace {
+
+// Checks a partition of t: [lo, hi] postorder ranges that are disjoint,
+// each closed under children (a node's parent is in the same range, in the
+// top part, or none), covering with the top part every node exactly once.
+// Returns each range's work.
+std::vector<double> check_ranges(const TreeView &t,
+                                 const std::vector<std::pair<std::size_t, std::size_t>> &ranges,
+                                 const std::vector<std::uint8_t> &top) {
+    const std::size_t ns = t.parent.size();
+    std::vector<std::size_t> pos(ns);
+    for (std::size_t k = 0; k < t.postorder.size(); ++k)
+        pos[static_cast<std::size_t>(t.postorder[k])] = k;
+    std::vector<int> covered(ns, 0);
+    std::vector<double> works;
+    for (const auto &[lo, hi] : ranges) {
+        EXPECT_LE(lo, hi);
+        EXPECT_LT(hi, ns);
+        double w = 0.0;
+        for (std::size_t k = lo; k <= hi && k < ns; ++k) {
+            const std::size_t s = static_cast<std::size_t>(t.postorder[k]);
+            ++covered[s];
+            w += t.work[s];
+            const Int p = t.parent[s];
+            if (p < 0) continue;
+            const std::size_t pk = pos[static_cast<std::size_t>(p)];
+            EXPECT_TRUE((pk >= lo && pk <= hi) || top[static_cast<std::size_t>(p)] == 1)
+                << "node " << s << " escapes its range";
+        }
+        works.push_back(w);
+    }
+    for (std::size_t s = 0; s < ns; ++s)
+        EXPECT_EQ(covered[s] + top[s], 1) << "supernode " << s;
+    return works;
+}
+
+} // namespace
+
+// A comb: a 20-front chain of heavy fronts (the top part), each with 500
+// tiny leaves, the bottom one also with 4000 tiny leaves and one heavier
+// leaf. partition_subtrees keeps one range per leaf (the delay budget's
+// regions); partition_tasks merges each run of adjacent leaves into
+// grain-sized tasks, never across a chain front, and leaves the heavy leaf
+// alone.
+TEST(ThreadPlan, TasksMergeTinySubtrees) {
+    Synth comb;
+    std::vector<Int> chain;
+    Int c = -1;
+    // The bottom front holds most of the work, so that every chain front
+    // is heavier than total / (4 T) at every T.
+    for (int i = 0; i < 20; ++i) chain.push_back(c = comb.add(c, i == 19 ? 1e8 : 2e6));
+    std::size_t leaves = 0;
+    for (const Int ci : chain) {
+        for (int j = 0; j < 500; ++j, ++leaves) comb.add(ci, 10.0 + (j % 7));
+    }
+    for (int j = 0; j < 4000; ++j, ++leaves) comb.add(chain.back(), 5.0);
+    const Int heavy = comb.add(chain.back(), 2e5);
+    ++leaves;
+    const TreeView t = comb.view();
+    double total = 0.0;
+    for (const double w : comb.work) total += w;
+    ASSERT_GT(total, kTreeParallelMinWork) << "premise: heavy enough to partition";
+
+    for (const int T : {2, 4, 8, 16}) {
+        std::vector<std::uint8_t> btop, ttop;
+        const auto sub = partition_subtrees(t, T, kTreeParallelMinWork, btop);
+        const auto tasks = partition_tasks(t, T, kTreeParallelMinWork, ttop);
+        EXPECT_EQ(btop, ttop) << "T = " << T;
+        for (const Int ci : chain) EXPECT_EQ(ttop[static_cast<std::size_t>(ci)], 1);
+
+        // The budget partition: one single-leaf range per leaf, heaviest
+        // first (ties: the larger node first).
+        ASSERT_EQ(sub.size(), leaves) << "T = " << T;
+        const std::vector<double> sw = check_ranges(t, sub, btop);
+        for (std::size_t i = 0; i < sub.size(); ++i) {
+            EXPECT_EQ(sub[i].first, sub[i].second);
+            if (i > 0) {
+                const Int a = t.postorder[sub[i - 1].first], b = t.postorder[sub[i].first];
+                EXPECT_TRUE(sw[i - 1] > sw[i] || (sw[i - 1] == sw[i] && a > b)) << i;
+            }
+        }
+
+        // The tasks: a valid partition with the same top part, far fewer
+        // ranges, each within the grain unless a single subtree (the heavy
+        // leaf), heaviest first.
+        const std::vector<double> tw = check_ranges(t, tasks, ttop);
+        EXPECT_LT(tasks.size(), leaves / 20) << "T = " << T;
+        EXPECT_GE(tasks.size(), chain.size()) << "runs never cross a chain front";
+        double sub_total = 0.0;
+        for (const double w : sw) sub_total += w;
+        const double grain = task_grain(sub_total, T);
+        EXPECT_LE(tasks.size(), static_cast<std::size_t>(2.0 * kTaskGrainsPerThread * T) +
+                                    chain.size() + 1);
+        bool heavy_alone = false;
+        for (std::size_t i = 0; i < tasks.size(); ++i) {
+            if (tasks[i].first == tasks[i].second &&
+                t.postorder[tasks[i].first] == heavy)
+                heavy_alone = true;
+            else
+                EXPECT_LE(tw[i], grain * (1.0 + 1e-12)) << "task " << i;
+            if (i > 0) EXPECT_GE(tw[i - 1], tw[i]);
+        }
+        EXPECT_TRUE(heavy_alone) << "T = " << T;
+
+        // The plan's terms describe the tasks.
+        const PartitionCount pc = partition_count(t, T, kTreeParallelMinWork);
+        EXPECT_EQ(pc.subtrees, tasks.size());
+        EXPECT_EQ(pc.top, chain.size());
+        for (const auto &k : factor_plan_terms(t, T)) {
+            if (k.threads != T) continue;
+            EXPECT_EQ(k.max_subtree, *std::max_element(tw.begin(), tw.end()));
+            EXPECT_NEAR(k.sub_total, sub_total, 1e-9 * sub_total);
+        }
+    }
+}
+
 // plan_threads counts each candidate's partition without the heap; the
-// counts must be partition_subtrees' sizes.
+// counts must be partition_tasks' sizes, and its top part
+// partition_subtrees' (the tasks merge whole subtrees of that split).
 TEST(ThreadPlan, PartitionCountMatchesPartition) {
     Synth bal;
     binary(bal, -1, 12, 1e7, 1e5);
@@ -264,13 +381,17 @@ TEST(ThreadPlan, PartitionCountMatchesPartition) {
                               tree_view(*ak, false, parent, work, split)};
     for (std::size_t v = 0; v < std::size(views); ++v) {
         for (const int T : {1, 2, 3, 4, 8, 12, 16, 64}) {
-            std::vector<std::uint8_t> top;
+            std::vector<std::uint8_t> top, ttop;
             const auto sub = partition_subtrees(views[v], T, kTreeParallelMinWork, top);
+            const auto tasks = partition_tasks(views[v], T, kTreeParallelMinWork, ttop);
             const PartitionCount pc = partition_count(views[v], T, kTreeParallelMinWork);
             std::size_t ntop = 0;
             for (const auto x : top) ntop += x;
-            EXPECT_EQ(pc.subtrees, sub.size()) << "tree " << v << ", T = " << T;
+            EXPECT_EQ(pc.subtrees, tasks.size()) << "tree " << v << ", T = " << T;
+            EXPECT_LE(tasks.size(), sub.size()) << "tree " << v << ", T = " << T;
             EXPECT_EQ(pc.top, ntop) << "tree " << v << ", T = " << T;
+            EXPECT_EQ(ttop, top) << "tree " << v << ", T = " << T;
+            if (!sub.empty()) check_ranges(views[v], tasks, ttop);
         }
     }
 }

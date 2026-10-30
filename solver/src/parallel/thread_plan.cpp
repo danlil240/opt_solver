@@ -85,23 +85,56 @@ void subtree_sums(const TreeView &t, SubtreeSums &u) {
     if (t.parent[s] < 0) u.total += u.work[s];
 }
 
+// A postorder index range [lo, hi] of whole subtrees and its work.
+struct Range {
+  std::size_t lo = 0, hi = 0;
+  double work = 0.0;
+};
+
+// partition_tasks' tasks of the partition at this target, in ascending
+// postorder: its subtrees (the nodes not heavier than the target whose
+// parent is, or that are roots) walked in postorder, adjacent ones merged
+// while the merged work stays within task_grain(sub_total, threads).
+// sub_total: the subtrees' work, summed in postorder. A second walk, so
+// that no list of every subtree is built.
+void merged_tasks(const TreeView &t, const SubtreeSums &u, double target, double sub_total,
+                  int threads, std::vector<Range> &out) {
+  const double grain = task_grain(sub_total, threads);
+  out.clear();
+  for (const Int s : t.postorder) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const Int p = t.parent[si];
+    if (u.work[si] > target || (p >= 0 && !(u.work[static_cast<std::size_t>(p)] > target)))
+      continue;
+    const Range r{u.first[si], u.at[si], u.work[si]};
+    if (!out.empty() && out.back().hi + 1 == r.lo && out.back().work + r.work <= grain) {
+      out.back().hi = r.hi;
+      out.back().work += r.work;
+    } else {
+      out.push_back(r);
+    }
+  }
+}
+
 // The two phases of a candidate thread count, from the partition at this
-// target (the one partition_subtrees makes, without its heap: subtree work
-// never decreases towards the root, so the top part is exactly the nodes
-// heavier than the target, and the subtrees are the other nodes whose
-// parent is in the top part, or that are roots).
+// target (partition_subtrees' split without its heap: subtree work never
+// decreases towards the root, so the top part is exactly the nodes heavier
+// than the target, and the subtrees are the other nodes whose parent is in
+// the top part, or that are roots), its subtrees merged into
+// partition_tasks' tasks.
 struct PhaseTerms {
   PartitionCount pc;
   double sub_total = 0.0;       // phase 1: work inside the subtrees
-  double max_subtree = 0.0;     //   and its heaviest subtree
+  double max_subtree = 0.0;     //   and its heaviest task
   double top_total = 0.0;       // phase 2: work of the top part
   double cp_top = 0.0;          //   its heaviest path, split fronts / threads
   std::size_t split_top = 0;    //   its split fronts
   double split_top_work = 0.0;  //   and their work
 };
 
-void phase_terms(const TreeView &t, const std::vector<double> &sub, double target, int threads,
-                 std::vector<double> &below, PhaseTerms &pt) {
+void phase_terms(const TreeView &t, const SubtreeSums &u, double target, int threads,
+                 std::vector<double> &below, std::vector<Range> &ranges, PhaseTerms &pt) {
+  const std::vector<double> &sub = u.work;
   pt = PhaseTerms{};
   below.assign(t.parent.size(), 0.0);  // heaviest top path below each top node
   for (const Int s : t.postorder) {
@@ -123,11 +156,12 @@ void phase_terms(const TreeView &t, const std::vector<double> &sub, double targe
         pt.cp_top = std::max(pt.cp_top, path);
       }
     } else if (p < 0 || sub[static_cast<std::size_t>(p)] > target) {
-      ++pt.pc.subtrees;
       pt.sub_total += sub[si];
-      pt.max_subtree = std::max(pt.max_subtree, sub[si]);
     }
   }
+  merged_tasks(t, u, target, pt.sub_total, threads, ranges);
+  pt.pc.subtrees = ranges.size();
+  for (const Range &r : ranges) pt.max_subtree = std::max(pt.max_subtree, r.work);
 }
 
 // The tie rule of both models over (thread count, cost) pairs in ascending
@@ -176,13 +210,48 @@ partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<
   return subtrees;
 }
 
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_tasks(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top) {
+  // partition_subtrees' split without its heap (see phase_terms: the top
+  // part is the nodes heavier than the target).
+  const std::size_t ns = t.parent.size();
+  SubtreeSums u;
+  subtree_sums(t, u);
+  top.assign(ns, 0);
+  if (u.total < min_work) return {};
+  const double target = u.total / (4.0 * threads);
+  double sub_total = 0.0;
+  for (const Int s : t.postorder) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const Int p = t.parent[si];
+    if (u.work[si] > target) {
+      top[si] = 1;
+    } else if (p < 0 || u.work[static_cast<std::size_t>(p)] > target) {
+      sub_total += u.work[si];
+    }
+  }
+  std::vector<Range> ranges;
+  merged_tasks(t, u, target, sub_total, threads, ranges);
+  // Heaviest first, ties as the heap pops them: the larger node first (the
+  // node at a range's end, its last subtree's root).
+  std::sort(ranges.begin(), ranges.end(), [&t](const Range &a, const Range &b) {
+    if (a.work != b.work) return a.work > b.work;
+    return t.postorder[a.hi] > t.postorder[b.hi];
+  });
+  std::vector<std::pair<std::size_t, std::size_t>> tasks;
+  tasks.reserve(ranges.size());
+  for (const Range &r : ranges) tasks.emplace_back(r.lo, r.hi);
+  return tasks;
+}
+
 PartitionCount partition_count(const TreeView &t, int threads, double min_work) {
   SubtreeSums u;
   subtree_sums(t, u);
   if (u.total < min_work) return {};
   PhaseTerms pt;
   std::vector<double> below;
-  phase_terms(t, u.work, u.total / (4.0 * threads), threads, below, pt);
+  std::vector<Range> ranges;
+  phase_terms(t, u, u.total / (4.0 * threads), threads, below, ranges, pt);
   return pt.pc;
 }
 
@@ -202,10 +271,11 @@ std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_thread
   out[0].total = total;
   if (max_threads < 2 || total < kTreeParallelMinWork || !(total > 0.0)) return out;
   std::vector<double> below;
+  std::vector<Range> ranges;
   for (const int T : candidate_threads(max_threads)) {
     if (T == 1) continue;
     PhaseTerms pt;
-    phase_terms(t, u.work, total / (4.0 * T), T, below, pt);
+    phase_terms(t, u, total / (4.0 * T), T, below, ranges, pt);
     FactorPlanTerms k;
     k.threads = T;
     k.ok = pt.pc.subtrees >= 2;

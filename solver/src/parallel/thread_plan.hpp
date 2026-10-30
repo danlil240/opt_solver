@@ -63,13 +63,39 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
 // last] postorder index ranges, heaviest first, and marks the top part.
 // Leaves too heavy to split stay in the top part. Returns nothing (and no
 // top part) when the tree's work is below min_work.
+// The delay budget's regions (multifrontal_serial.cpp) are these subtrees.
 std::vector<std::pair<std::size_t, std::size_t>>
 partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top);
 
-// The sizes of partition_subtrees' result (subtrees, top-part nodes) in
-// O(nodes) without building it: what plan_threads costs per candidate.
+// The phase-1 tasks of the tree-parallel factorization without a delay
+// budget: partition_subtrees' subtrees, with runs of light ones merged into
+// tasks of at most task_grain(sub_total, threads) work, sub_total the
+// subtrees' work. Ranges merge in ascending postorder, only when adjacent
+// (the first one's last index + 1 is the next one's first) and while the
+// merged work stays within the grain; a subtree heavier than the grain
+// stays alone. A merged range is a union of whole subtrees, so it is still
+// closed under children and runs as one subtree does. Heaviest first (ties:
+// the larger node at the range's end first, the heap's order), with
+// partition_subtrees' top part. Without the merge, a tree that splits into
+// thousands of one-front subtrees under a few top fronts pays a dispatch
+// and a solve range per front.
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_tasks(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top);
+
+// partition_tasks' merge grain: sub_total / (kTaskGrainsPerThread threads).
+// Two adjacent merged tasks weigh more than a grain together, so there are
+// at most about 2 kTaskGrainsPerThread merged tasks per thread, and a
+// heaviest-first schedule of tasks within a grain ends within a grain of
+// sub_total / threads.
+inline constexpr double kTaskGrainsPerThread = 16.0;
+inline double task_grain(double sub_total, int threads) {
+  return sub_total / (kTaskGrainsPerThread * static_cast<double>(threads));
+}
+
+// The sizes of partition_tasks' result (tasks, top-part nodes) in O(nodes)
+// without building it: what plan_threads costs per candidate.
 struct PartitionCount {
-  std::size_t subtrees = 0;
+  std::size_t subtrees = 0;  // tasks
   std::size_t top = 0;
 };
 PartitionCount partition_count(const TreeView &t, int threads, double min_work);
@@ -87,13 +113,13 @@ struct ThreadPlan {
 
 // The thread count of least cost among 1, 2, 4, 8, ... and max_threads (at
 // most max_threads); on a tie within 2%, the smaller. cost(1) = total. For
-// T > 1, the engine's two phases on partition_subtrees' split at T threads
-// (T is no candidate when that gives fewer than 2 subtrees): the subtrees in
+// T > 1, the engine's two phases on partition_tasks' split at T threads (T
+// is no candidate when that gives fewer than 2 tasks): the tasks in
 // parallel, a barrier, then the top part:
 //   cost(T) = max(max_subtree, sub_total / T) + max(cp_top(T), top_total / T)
 //             + T per_thread + top(T) per_top_front,
 // with sub_total / max_subtree the work inside the subtrees / of the
-// heaviest one, top_total the top part's work, cp_top(T) the heaviest path
+// heaviest task, top_total the top part's work, cp_top(T) the heaviest path
 // through top nodes only (split fronts' work / T), and top(T) the number of
 // top nodes.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
@@ -104,7 +130,7 @@ std::vector<int> candidate_threads(int max_threads);
 
 // The terms plan_threads costs, per candidate thread count (independent of
 // the cost constants). T = 1 carries the tree's total alone (cost(1) =
-// total). For T > 1: ok when the partition gives at least 2 subtrees, the
+// total). For T > 1: ok when partition_tasks gives at least 2 tasks, the
 // phase terms of the cost formula above, top_fronts = top(T), and the
 // top-part fronts that run as tile tasks (split) with their work.
 struct FactorPlanTerms {

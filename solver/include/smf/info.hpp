@@ -105,7 +105,10 @@ struct Info {
     /// fronts of Control::top_tiles whatever the kernel). Those the
     /// fallback could not pivot either are also in delayed_pivots.
     int          aptp_failed_columns    = 0;
-    int          parallel_subtrees      = 0;  ///< subtrees factored concurrently (0 = serial)
+    /// Subtree ranges factored concurrently (0 = serial): delay-budget
+    /// regions, else tasks of adjacent light subtrees merged (thread_plan.hpp,
+    /// partition_tasks).
+    int          parallel_subtrees      = 0;
     /// Fronts factored as 2D tile tasks at the top of the tree
     /// (Control::top_tiles).
     int          top_tile_fronts        = 0;
