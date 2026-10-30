@@ -57,6 +57,7 @@ struct AdapterStats {
     double subtree_ms = 0.0;
     double top_ms = 0.0;
     double gather_ms = 0.0;
+    int solve_threads = 1;  // FactorKeep::solve_threads of the last factor
     // smf adapter: smf::refine() of the last solve, -1 when it did not run.
     int refine_iterations = -1;
     bool refine_fgmres = false;  // RefinementResult::method_used == Fgmres

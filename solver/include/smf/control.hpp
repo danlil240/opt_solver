@@ -242,6 +242,17 @@ struct Control {
     // The cost model's terms in front-work units (f^2 p): calibration hooks.
     double         thread_cost_per_thread    = 1e5;
     double         thread_cost_per_top_front = 5e3;
+    // The solve's thread count, chosen at factorization time from its own
+    // cost model (thread_plan.hpp, plan_solve_threads; FactorKeep::
+    // solve_threads) when the factorization leaves a parallel solve layout:
+    // the subtrees (the larger of the heaviest and their work / T), then
+    // the top part's heaviest path, plus these terms per thread, per top
+    // step and per top row and thread (the zeroed and summed buffers), in
+    // step-work units (p f). Calibration hooks, pending the board's
+    // calibration.
+    double         solve_cost_per_thread   = 2e4;
+    double         solve_cost_per_top_step = 2e3;
+    double         solve_cost_per_top_row  = 2.0;
     // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
     // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
     // TPP at every thread count): fronts of at least 512 rows at the top of

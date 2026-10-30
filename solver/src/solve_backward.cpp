@@ -357,12 +357,14 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   };
 
   // Parallel layout (see solve_forward): the top of the tree first, then
-  // the independent subtrees concurrently.
+  // the independent subtrees concurrently, on at most FactorKeep::
+  // solve_threads.
   const std::size_t nsub = fkeep.solve_subtrees.size();
-  const int threads = (use_steps && num_threads > 1 && nsub >= 2 &&
+  const int want = std::min(num_threads, fkeep.solve_threads);
+  const int threads = (use_steps && want > 1 && nsub >= 2 &&
                        static_cast<LongInt>(fkeep.solve_top_parent.size()) ==
                            static_cast<LongInt>(fkeep.solve_steps.size()) - fkeep.solve_top_begin)
-                          ? std::min<int>(num_threads, static_cast<int>(nsub))
+                          ? std::min<int>(want, static_cast<int>(nsub))
                           : 1;
 
   std::vector<double> &b_loc = ws.loc;

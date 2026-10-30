@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <iterator>
+#include <span>
 #include <vector>
 
 using namespace smf;
@@ -269,4 +270,28 @@ TEST(ThreadPlan, PartitionCountMatchesPartition) {
             EXPECT_EQ(pc.top, ntop) << "tree " << v << ", T = " << T;
         }
     }
+}
+
+// The solve's model: two light subtrees under a 5000-step chain of top
+// steps. Every parallel candidate pays the chain serially plus a hand-off
+// per top step (5000 x 2e3 against 2.7e5 of work), so the solve is serial.
+TEST(ThreadPlan, SolveChainTopIsSerial) {
+    const std::vector<double> sub{1e4, 1e4};
+    const std::vector<double> top(5000, 50.0);
+    std::vector<Int> chain_parent(5000);
+    for (std::size_t i = 0; i < chain_parent.size(); ++i) chain_parent[i] = static_cast<Int>(i) + 1;
+    chain_parent.back() = -1;
+    EXPECT_EQ(plan_solve_threads(sub, top, chain_parent, 4000, 16, {}), 1);
+}
+
+// 64 heavy subtrees under 3 light top steps: the subtree phase scales.
+TEST(ThreadPlan, SolveBalancedSubtreesParallel) {
+    const std::vector<double> sub64(64, 1e6);
+    const std::vector<double> top3{1e3, 1e3, 1e3};
+    const std::vector<Int> parent3{2, 2, -1};
+    EXPECT_GE(plan_solve_threads(sub64, top3, parent3, 300, 16, {}), 8);
+    // max_threads caps it, and fewer than 2 subtrees or threads is serial.
+    EXPECT_EQ(plan_solve_threads(sub64, top3, parent3, 300, 4, {}), 4);
+    EXPECT_EQ(plan_solve_threads(sub64, top3, parent3, 300, 1, {}), 1);
+    EXPECT_EQ(plan_solve_threads(std::span<const double>(sub64).first(1), top3, parent3, 300, 16, {}), 1);
 }

@@ -122,6 +122,26 @@ void phase_terms(const TreeView &t, const std::vector<double> &sub, double targe
   }
 }
 
+// The candidate rule of both models (max_threads >= 2): 1, 2, 4, 8, ...
+// and max_threads, cost_of(T) < 0 meaning T is no candidate; in ascending
+// thread count, the first within 2% of the least cost. Returns it and its
+// cost.
+template <class CostOf>
+std::pair<int, double> least_cost_threads(int max_threads, double cost1, CostOf cost_of) {
+  std::vector<std::pair<int, double>> costs{{1, cost1}};
+  const auto add = [&](int T) {
+    const double cost = cost_of(T);
+    if (cost >= 0.0) costs.emplace_back(T, cost);
+  };
+  for (int T = 2; T < max_threads; T *= 2) add(T);
+  add(max_threads);
+  double least = cost1;
+  for (const auto &k : costs) least = std::min(least, k.second);
+  for (const auto &k : costs)
+    if (k.second <= least * 1.02) return k;
+  return costs.front();
+}
+
 } // namespace
 
 std::vector<std::pair<std::size_t, std::size_t>>
@@ -170,36 +190,62 @@ ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c
   const double total = u.total;
   if (total < kTreeParallelMinWork || !(total > 0.0)) return plan;
 
-  std::vector<int> candidates;
-  for (int T = 2; T < max_threads; T *= 2) candidates.push_back(T);
-  candidates.push_back(max_threads);
-
-  struct Cost {
-    int threads;
-    double cost;
-  };
-  std::vector<Cost> costs{{1, total}};
   std::vector<double> below;
-  for (const int T : candidates) {
+  const auto [threads, cost] = least_cost_threads(max_threads, total, [&](int T) {
     PhaseTerms pt;
     phase_terms(t, u.work, total / (4.0 * T), T, below, pt);
-    if (pt.pc.subtrees < 2) continue;
-    const double cost = std::max(pt.max_subtree, pt.sub_total / T) +
-                        std::max(pt.cp_top, pt.top_total / T) + T * c.per_thread +
-                        static_cast<double>(pt.pc.top) * c.per_top_front;
-    costs.push_back({T, cost});
-  }
-  double least = total;
-  for (const Cost &k : costs) least = std::min(least, k.cost);
-  // Ascending thread counts: the first within 2% of the least cost.
-  for (const Cost &k : costs) {
-    if (k.cost <= least * 1.02) {
-      plan.threads = k.threads;
-      plan.predicted_speedup = total / k.cost;
-      break;
-    }
-  }
+    if (pt.pc.subtrees < 2) return -1.0;
+    return std::max(pt.max_subtree, pt.sub_total / T) + std::max(pt.cp_top, pt.top_total / T) +
+           T * c.per_thread + static_cast<double>(pt.pc.top) * c.per_top_front;
+  });
+  plan.threads = threads;
+  plan.predicted_speedup = total / cost;
   return plan;
+}
+
+int plan_solve_threads(std::span<const double> subtree_work, std::span<const double> top_work,
+                       std::span<const Int> top_parent, std::size_t top_rows, int max_threads,
+                       const SolveCosts &c) {
+  if (max_threads < 2 || subtree_work.size() < 2) return 1;
+  double sub_total = 0.0, max_subtree = 0.0, top_total = 0.0;
+  for (const double w : subtree_work) {
+    sub_total += w;
+    max_subtree = std::max(max_subtree, w);
+  }
+  for (const double w : top_work) top_total += w;
+
+  // Heaviest top path, children before parents (the order of a step's
+  // pending children reaching zero; top_parent need not be ascending).
+  const std::size_t nt = top_work.size();
+  std::vector<int> pending(nt, 0);
+  for (std::size_t i = 0; i < nt; ++i)
+    if (top_parent[i] >= 0) ++pending[static_cast<std::size_t>(top_parent[i])];
+  std::vector<double> below(nt, 0.0);  // heaviest path below each step
+  std::vector<std::size_t> ready;
+  for (std::size_t i = 0; i < nt; ++i)
+    if (pending[i] == 0) ready.push_back(i);
+  double cp_top = 0.0;
+  while (!ready.empty()) {
+    const std::size_t i = ready.back();
+    ready.pop_back();
+    const double path = top_work[i] + below[i];
+    const Int p = top_parent[i];
+    if (p < 0) {
+      cp_top = std::max(cp_top, path);
+      continue;
+    }
+    const std::size_t pi = static_cast<std::size_t>(p);
+    below[pi] = std::max(below[pi], path);
+    if (--pending[pi] == 0) ready.push_back(pi);
+  }
+
+  const double n_top = static_cast<double>(nt);
+  const double rows = static_cast<double>(top_rows);
+  return least_cost_threads(max_threads, sub_total + top_total, [&](int T) {
+           return std::max(max_subtree, sub_total / T) + cp_top + T * c.per_thread +
+                  n_top * c.per_top_step + T * rows * c.per_top_row;
+         })
+      .first;
 }
 
 } // namespace smf

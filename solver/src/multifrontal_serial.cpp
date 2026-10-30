@@ -871,6 +871,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_steps.reserve(ns);
   fkeep.solve_subtrees.clear();
+  fkeep.solve_threads = 1;
   fkeep.inline_d = !posdef;
   fkeep.solve_top_begin = 0;
   fkeep.solve_top_rows.clear();
@@ -1370,6 +1371,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Leave the stack bookkeeping consistent for the next planning pass.
   if (status != ErrorCode::Success) {
     fkeep.solve_subtrees.clear();
+    fkeep.solve_threads = 1;
     std::fill(ws.cb_size.begin(), ws.cb_size.end(), Int{0});
     std::fill(ws.cb_delayed.begin(), ws.cb_delayed.end(), Int{0});
     return status;
@@ -1383,6 +1385,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // per-thread buffers.
     if (fkeep.solve_top_slot.size() != n) fkeep.solve_top_slot.assign(n, -1);
     else std::fill(fkeep.solve_top_slot.begin(), fkeep.solve_top_slot.end(), Int{-1});
+    std::vector<double> top_work;  // p f per step, the solve's cost model
+    top_work.reserve(fkeep.solve_steps.size() - static_cast<std::size_t>(fkeep.solve_top_begin));
     for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin);
          k < fkeep.solve_steps.size(); ++k) {
       const SolveStep &step = fkeep.solve_steps[k];
@@ -1392,7 +1396,22 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             static_cast<Int>(fkeep.solve_top_rows.size());
         fkeep.solve_top_rows.push_back(rows[i]);
       }
+      top_work.push_back(static_cast<double>(step.p) * step.f);
     }
+    // The solve's own thread count: its subtrees and top part weigh
+    // differently from the factorization's (p f, not f^2 p).
+    std::vector<double> sub_work;
+    sub_work.reserve(fkeep.solve_subtrees.size());
+    for (const auto &[b, e] : fkeep.solve_subtrees) {
+      double w = 0.0;
+      for (auto k = static_cast<std::size_t>(b); k < static_cast<std::size_t>(e); ++k)
+        w += static_cast<double>(fkeep.solve_steps[k].p) * fkeep.solve_steps[k].f;
+      sub_work.push_back(w);
+    }
+    fkeep.solve_threads = plan_solve_threads(
+        sub_work, top_work, fkeep.solve_top_parent, fkeep.solve_top_rows.size(), ctrl.num_threads,
+        SolveCosts{ctrl.solve_cost_per_thread, ctrl.solve_cost_per_top_step,
+                   ctrl.solve_cost_per_top_row});
   }
   return ErrorCode::Success;
 }

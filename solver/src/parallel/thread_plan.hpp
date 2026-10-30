@@ -97,4 +97,27 @@ struct ThreadPlan {
 // top nodes.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 
+// Cost model terms of the parallel triangular solve, in step-work units
+// (p f per front). Control::solve_cost_per_thread, solve_cost_per_top_step,
+// solve_cost_per_top_row.
+struct SolveCosts {
+  double per_thread = 2e4;    // starting and joining one thread
+  double per_top_step = 2e3;  // handing one top step between threads
+  double per_top_row = 2.0;   // zeroing and summing one top row's buffer, per thread
+};
+
+// The solve's thread count (FactorKeep::solve_threads) for a parallel solve
+// layout: subtree_work / top_work the p f work of each subtree / top step,
+// top_parent the top steps' tree (FactorKeep::solve_top_parent), top_rows
+// the top part's pivot rows. Candidates and tie rule as plan_threads';
+// cost(1) = sum(subtree) + sum(top), and for T > 1 the subtrees in parallel,
+// then the top part as a DAG, with the per-thread buffers of top rows:
+//   cost(T) = max(max_subtree, sum(subtree) / T) + cp_top + T per_thread
+//             + n_top per_top_step + T top_rows per_top_row,
+// cp_top the heaviest path through top_parent. Fewer than 2 subtrees (the
+// solve then runs serially) or max_threads < 2: 1.
+int plan_solve_threads(std::span<const double> subtree_work, std::span<const double> top_work,
+                       std::span<const Int> top_parent, std::size_t top_rows, int max_threads,
+                       const SolveCosts &c);
+
 } // namespace smf

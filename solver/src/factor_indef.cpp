@@ -283,6 +283,7 @@ bool finalize_factor_from_front_results(
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
+  fkeep.solve_threads = 1;
   std::vector<Int> fallback_order;
   const std::vector<Int> *order_ptr = &keep.solve_postorder;
   if (order_ptr->empty()) {

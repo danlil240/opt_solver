@@ -61,6 +61,8 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
     return false;
 
   fkeep.use_banded_spd = true;
+  // The band solve: no step layout to run in parallel.
+  fkeep.solve_threads = 1;
   fkeep.band_n = n_i;
   fkeep.band_kd = kd_i;
   fkeep.band_factor = std::move(ab);
@@ -73,6 +75,7 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
+  fkeep.solve_threads = 1;
   fkeep.solve_steps.reserve(keep.solve_postorder.size());
 
   std::size_t row_count = 0;

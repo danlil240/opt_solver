@@ -344,6 +344,7 @@ public:
         stats_.subtree_ms = info.subtree_seconds * 1e3;
         stats_.top_ms = info.top_seconds * 1e3;
         stats_.gather_ms = info.gather_seconds * 1e3;
+        stats_.solve_threads = fk_.solve_threads;
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
         stats_.aptp_failed_columns = info.aptp_failed_columns;

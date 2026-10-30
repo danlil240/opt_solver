@@ -173,6 +173,7 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
     } else {
         ASSERT_GE(fk.solve_subtrees.size(), 2u) << "no parallel solve layout";
         ASSERT_FALSE(fk.solve_top_rows.empty());
+        EXPECT_GE(fk.solve_threads, 2) << "parallel solve not chosen";
     }
 
     const int n = static_cast<int>(A.n), nrhs = 3;
@@ -517,6 +518,46 @@ TEST(TreeParallel, ThreadPlanCacheFollowsItsInputs) {
     // Another analysis on the same workspace: its own plan (the chain: 1).
     EXPECT_EQ(threads_used(*ak_band, band, band_ctrl), 1);
     EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);
+}
+
+// FactorKeep::solve_threads (the solve's own cost model) and the call's
+// num_threads both cap the parallel solve: it runs on at most the smaller.
+TEST(TreeParallel, SolveThreadsCappedByCall) {
+    const CscLower A = laplacian_2d(200);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::METIS;
+    ctrl.num_threads = 8;
+    ctrl.auto_threads = false;  // small test trees
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, A, ctrl, info, fk, nws), FactorStatus::Success);
+    ASSERT_GE(fk.solve_subtrees.size(), 2u) << "premise: parallel solve layout";
+    EXPECT_GE(fk.solve_threads, 2);
+
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    const auto solve_on = [&](int threads, SolveWorkspace &sws) {
+        Control c = ctrl;
+        c.num_threads = threads;
+        std::vector<double> x = b;
+        EXPECT_EQ(solver.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+        EXPECT_LT(smf::bench::validate(A, b, x, 1).eta_inf, 1e-12) << threads << " threads";
+    };
+    SolveWorkspace sws;
+    solve_on(2, sws);
+    ASSERT_NE(sws.pool.get(), nullptr);
+    EXPECT_LE(sws.pool->size(), 2);
+
+    // A factor whose solve is serial: no solve pool at any num_threads.
+    fk.solve_threads = 1;
+    SolveWorkspace serial_ws;
+    solve_on(8, serial_ws);
+    EXPECT_EQ(serial_ws.pool.get(), nullptr);
 }
 
 TEST(TreeParallel, PhaseTimesReported) {

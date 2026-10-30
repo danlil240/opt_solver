@@ -566,6 +566,27 @@ int main(int argc, char **argv) {
         ctrl.thread_cost_per_thread = std::strtod(e, &end);
         if (end != nullptr && *end == ',') ctrl.thread_cost_per_top_front = std::strtod(end + 1, nullptr);
     }
+    // SMF_BENCH_SOLVE_COSTS = "per_thread,per_top_step,per_top_row" (Control::
+    // solve_cost_per_thread, solve_cost_per_top_step, solve_cost_per_top_row;
+    // step-work units). Anything but exactly three numbers keeps the defaults.
+    if (const char *e = std::getenv("SMF_BENCH_SOLVE_COSTS")) {
+        double v[3];
+        const char *p = e;
+        bool ok = true;
+        for (int i = 0; i < 3 && ok; ++i) {
+            char *end = nullptr;
+            v[i] = std::strtod(p, &end);
+            ok = end != p && *end == (i < 2 ? ',' : '\0');
+            p = end + (i < 2 ? 1 : 0);
+        }
+        if (ok) {
+            ctrl.solve_cost_per_thread = v[0];
+            ctrl.solve_cost_per_top_step = v[1];
+            ctrl.solve_cost_per_top_row = v[2];
+        } else {
+            std::fprintf(stderr, "warning: SMF_BENCH_SOLVE_COSTS=\"%s\" is not three comma-separated numbers; keeping the defaults\n", e);
+        }
+    }
     // SMF_BENCH_SCALE_REUSE_TOL (double; negative = recompute): Control::scale_on_delay_reuse_tol.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_REUSE_TOL")) ctrl.scale_on_delay_reuse_tol = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
@@ -708,12 +729,12 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
                                  fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
-                                 fst.gather_ms);
+                                 fst.gather_ms, fst.solve_threads);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {
