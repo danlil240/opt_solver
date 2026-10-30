@@ -3,6 +3,7 @@
 #include "smf/determinism.hpp"
 #include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
+#include "smf/solve_pool.hpp"
 #include "parallel/tile_tasks.hpp"
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -1097,13 +1099,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     };
     // Workers count no BLAS threads outside their own guards: the caller,
     // worker 0, stops counting its outer guard before the others start.
-    const auto run_pool = [threads](const auto &fn) {
+    // The threads persist in ws.pool between phases and factorizations, and
+    // count no BLAS threads outside the guards the jobs set.
+    const auto run_pool = [threads, &ws](const auto &fn) {
       BlasIdleScope idle;
-      std::vector<std::thread> pool;
-      pool.reserve(static_cast<std::size_t>(threads) - 1);
-      for (int t = 1; t < threads; ++t) pool.emplace_back(fn, t);
-      fn(0);
-      for (auto &th : pool) th.join();
+      const std::function<void(int)> job(std::cref(fn));
+      ws.ensure_pool(threads).run(job, /*workers_count_blas=*/false);
     };
 
     // Phase 1: subtrees, heaviest first, one thread each on serial BLAS.

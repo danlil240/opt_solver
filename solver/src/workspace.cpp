@@ -28,6 +28,14 @@ SolvePool &SolveWorkspace::ensure_pool(int nthreads) {
     return *pool;
 }
 
+SolvePool &NumericWorkspace::ensure_pool(int nthreads) {
+    if (!pool || pool->size() != nthreads) {
+        pool.reset();
+        pool = std::make_shared<SolvePool>(nthreads);
+    }
+    return *pool;
+}
+
 void NumericWorkspace::prepare_for_analysis(const AnalysisKeep &ak) {
     const std::size_t ns = ak.supernodes.size();
     const std::size_t clean_nnz = ak.cleaned.values.size();

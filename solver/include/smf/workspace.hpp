@@ -67,6 +67,7 @@ struct NumericWorkspace {
     std::vector<Int> cb_delayed;       ///< per-supernode delayed columns (leading rows of its block)
     std::vector<int> cb_owner;         ///< per-supernode pass whose stack holds its block (0 = serial)
     std::shared_ptr<TreeParallelBuffers> tree_par; ///< per-thread buffers of the tree-parallel factorization
+    std::shared_ptr<SolvePool> pool;               ///< worker threads of the tree-parallel factorization
 
     int warmup_calls = 0;
     int64_t front_heap_allocations_last_call = 0;
@@ -74,6 +75,8 @@ struct NumericWorkspace {
     std::size_t peak_pool_bytes = 0;
 
     void prepare_for_analysis(const AnalysisKeep &ak);
+    /// The pool with `nthreads` threads (re-created when the count changes).
+    SolvePool &ensure_pool(int nthreads);
     std::vector<double> acquire_contrib(std::size_t elems, bool &allocated_new);
     void release_contrib(std::vector<double> &&buf);
 };

@@ -10,16 +10,20 @@
 #include "smf/determinism.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/solve_pool.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace smf;
@@ -461,4 +465,119 @@ TEST(TreeParallel, PhaseTimesReported) {
     EXPECT_GE(par.info.gather_seconds, 0.0);
     EXPECT_LE(par.info.subtree_seconds + par.info.top_seconds + par.info.gather_seconds,
               par.info.factor_seconds);
+}
+
+// The factorization's worker threads live in the workspace's pool: repeated
+// factorizations start no new threads.
+TEST(TreeParallel, PoolPersistsAcrossFactorizations) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.num_threads = 4;
+    ctrl.parallel_min_work = 2e7;  // small test trees
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    const long long t0 = SolvePool::threads_started();
+    for (int r = 0; r < 3; ++r)
+        ASSERT_EQ(s.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    ASSERT_GE(info.parallel_subtrees, 2);
+    EXPECT_EQ(SolvePool::threads_started() - t0, 3);  // one pool of 4: three workers, once
+}
+
+// Idle workers count no BLAS threads.
+TEST(TreeParallel, IdlePoolHoldsNoBlasThreads) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.num_threads = 4;
+    ctrl.parallel_min_work = 2e7;  // small test trees
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    const int before = blas_threads_active();
+    ASSERT_EQ(s.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+    ASSERT_GE(info.parallel_subtrees, 2);
+    ASSERT_NE(ws.pool.get(), nullptr);
+    EXPECT_EQ(blas_threads_active(), before);
+    // Still so after the workers have gone through their spin and sleep.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    EXPECT_EQ(blas_threads_active(), before);
+}
+
+// The pool is recreated when the thread count changes.
+TEST(TreeParallel, PoolFollowsThreadCount) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.parallel_min_work = 2e7;  // small test trees
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    SolveWorkspace sws;
+    FactorKeep fk;
+    long long started = 0;  // by the factorizations only: the solve has its own pool
+    for (const int threads : {4, 8, 4}) {
+        ctrl.num_threads = threads;
+        const long long t0 = SolvePool::threads_started();
+        ASSERT_EQ(s.factor(*ak, A, ctrl, info, fk, ws), FactorStatus::Success);
+        started += SolvePool::threads_started() - t0;
+        ASSERT_EQ(info.threads_used, threads);
+        std::vector<double> x(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+        const std::vector<double> b = x;
+        ASSERT_EQ(s.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+        EXPECT_LT(smf::bench::validate(A, b, x, 1).eta_inf, 1e-12) << threads << " threads";
+    }
+    EXPECT_EQ(started, 3 + 7 + 3);
+}
+
+// Two workspaces factoring at once, each with its own pool, do not interfere.
+TEST(TreeParallel, TwoWorkspacesConcurrently) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.num_threads = 4;
+    ctrl.parallel_min_work = 2e7;  // small test trees
+    std::atomic<int> bad{0};
+    const auto body = [&] {
+        Solver s;
+        Info info;
+        auto ak = s.analyse(A, ctrl, info);
+        if (!ak) {
+            ++bad;
+            return;
+        }
+        NumericWorkspace ws;
+        SolveWorkspace sws;
+        FactorKeep fk;
+        for (int r = 0; r < 5; ++r) {
+            if (s.factor(*ak, A, ctrl, info, fk, ws) != FactorStatus::Success) {
+                ++bad;
+                return;
+            }
+            std::vector<double> x(static_cast<std::size_t>(A.n));
+            for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+            const std::vector<double> b = x;
+            if (s.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws) != 0 ||
+                !(smf::bench::validate(A, b, x, 1).eta_inf < 1e-12))
+                ++bad;
+        }
+    };
+    std::thread t1(body), t2(body);
+    t1.join();
+    t2.join();
+    EXPECT_EQ(bad.load(), 0);
 }
