@@ -3,6 +3,7 @@
 #include "smf/blas_thread_guard.hpp"
 
 #include <chrono>
+#include <exception>
 
 namespace smf {
 
@@ -13,6 +14,18 @@ constexpr auto kSpin = std::chrono::microseconds(50);
 inline void cpu_relax() { solve_pool_relax(); }
 
 std::atomic<long long> g_threads_started{0};
+
+// Runs one thread's share of a job. An exception cannot propagate: the other
+// threads still run the job on the caller's stack (and wait on its mutexes),
+// which unwinding would destroy. Fail fast, as an exception escaping a plain
+// std::thread did before the pool.
+inline void run_share(const std::function<void(int)> &job, int tid) noexcept {
+    try {
+        job(tid);
+    } catch (...) {
+        std::terminate();
+    }
+}
 
 // Spins until ready() or kSpin elapses; true when ready() held.
 template <class Pred> bool spin_until(Pred ready) {
@@ -59,7 +72,7 @@ void SolvePool::run(const std::function<void(int)> &fn, bool workers_count_blas)
         generation_.fetch_add(1, std::memory_order_release);
     }
     wake_.notify_all();
-    fn(0);
+    run_share(fn, 0);
     if (spin_until([&] { return pending_.load(std::memory_order_acquire) == 0; })) return;
     std::unique_lock<std::mutex> lk(mtx_);
     done_.wait(lk, [&] { return pending_.load(std::memory_order_acquire) == 0; });
@@ -99,11 +112,11 @@ void SolvePool::worker(int tid) {
                     counts_blas = job_counts_blas_;
                 }
                 if (counts_blas) break;
-                (*job)(tid);
+                run_share(*job, tid);
                 finish();
             }
         }
-        (*job)(tid);
+        run_share(*job, tid);
         finish();
     }
 }
