@@ -101,6 +101,10 @@ struct FactorKeep {
   /// delay_scale empty: the zero pattern of the values that had no
   /// matching scaling (another pattern is tried again).
   std::uint64_t delay_signature = 0;
+  /// Control::scale_on_delay_next_ratio: the factorization of
+  /// delay_analysis was let through but costly, so the next one runs as
+  /// Auto resolves it under the tighter limit (delay_scale is empty).
+  bool delay_next = false;
   // keep the analysis tree for the solve phase
   const AnalysisKeep *analysis = nullptr;
 };

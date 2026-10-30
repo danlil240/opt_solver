@@ -87,6 +87,18 @@ struct Control {
     // count would give: identical at every num_threads in deterministic
     // mode.
     double         scale_on_delay_ratio = 16.0;
+    // A factorization that the work limit lets through as Auto resolves it,
+    // but whose front work still exceeds scale_on_delay_next_ratio times the
+    // delay-free one, leaves the next factor() of that analysis into that
+    // FactorKeep to run under scale_on_delay_next_ratio as its limit
+    // instead: delays that heavy often grow into a cascade over an IPOPT
+    // sequence, and a try under the full ratio costs up to that many times
+    // the delay-free work before it stops (pde_control_250 on the cost-model
+    // tree: 1.4 s, against a 0.1 s factorization). A one-off spike
+    // (cops_elec_200: 2.2, 8.5, 2.2) passes the tighter limit unscaled and
+    // pays no matching. Not after a factor with the analysed values' own
+    // matching scale (a new one would be the same). Negative: off.
+    double         scale_on_delay_next_ratio = 4.0;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:

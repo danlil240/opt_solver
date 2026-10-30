@@ -245,8 +245,10 @@ std::uint64_t zero_signature(const std::vector<double> &cv) {
 // (no fit, the limit trips, or the probe fails) it computes a new matching
 // scaling. Without a matching scaling (structurally singular values) the
 // factorization runs as Auto resolves it, to the end, and later ones run
-// unarmed while the values' zero pattern stays the same. Only a
-// factorization that ran to the end updates the FactorKeep.
+// unarmed while the values' zero pattern stays the same. A first try let
+// through past Control::scale_on_delay_next_ratio leaves the next one to
+// run under that ratio as its limit. Only a factorization that ran to the
+// end updates the FactorKeep.
 template <class Values, class Run>
 FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, Info &info,
                                    FactorKeep &fkeep, Values &&values, Run &&run) {
@@ -258,16 +260,19 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   const auto secs = [](auto t0, auto t1) { return std::chrono::duration<double>(t1 - t0).count(); };
   const bool reuse_on = ctrl.scale_on_delay_reuse_tol >= 0.0;
   const bool ours = fkeep.delay_analysis == ak.serial;
+  const bool next = ours && fkeep.delay_next;
   std::vector<double> kept;
   double kept_omega = std::numeric_limits<double>::infinity();
   std::uint64_t no_matching_signature = 0;
-  const bool no_matching = ours && fkeep.delay_scale.empty();
+  const bool no_matching = ours && !next && fkeep.delay_scale.empty();
+  const bool first_try = !ours || no_matching || next;
   if (ours) {
     kept = std::move(fkeep.delay_scale);
     kept_omega = fkeep.delay_omega;
     no_matching_signature = fkeep.delay_signature;
   }
   fkeep.delay_analysis = 0;
+  fkeep.delay_next = false;
   fkeep.delay_scale.clear();
   // Work outside factor_indef (value copies, the fit test, probes,
   // matchings, stopped tries): added to factor_seconds on every return.
@@ -299,8 +304,9 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       return finish(st);
     }
   }
-  const double limit = std::floor(ctrl.scale_on_delay_ratio * delay_free_front_work(ak));
-  if (ours && !no_matching && reuse_on) {
+  const double free_work = delay_free_front_work(ak);
+  const double limit = std::floor(ctrl.scale_on_delay_ratio * free_work);
+  if (!first_try && reuse_on) {
     // Start from the kept scale while it still fits the new values.
     get_values();
     const auto t0 = now();
@@ -337,11 +343,31 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       extra_seconds += info.factor_seconds;
       info.delay_stops = 1;
     }
-  } else if (!ours || no_matching || !reuse_on) {
-    if (!ours || no_matching) {
-      // First try: as Auto resolves it, under the work limit.
-      const FactorStatus st = run(ak, ctrl, limit);
-      if (st != FactorStatus::MaxPivotDelays) return finish(st);
+  } else if (first_try || !reuse_on) {
+    if (first_try) {
+      // First try: as Auto resolves it, under the work limit (the tighter
+      // one after a costly factorization, Control::scale_on_delay_next_ratio).
+      const double try_limit =
+          next && ctrl.scale_on_delay_next_ratio >= 0.0
+              ? std::min(limit, std::floor(ctrl.scale_on_delay_next_ratio * free_work))
+              : limit;
+      const FactorStatus st = run(ak, ctrl, try_limit);
+      if (st != FactorStatus::MaxPivotDelays) {
+        // Let through, but costly: the next one runs under the tighter limit.
+        if (ran(st) && ctrl.scale_on_delay_next_ratio >= 0.0 &&
+            info.front_work > ctrl.scale_on_delay_next_ratio * free_work) {
+          bool own_scale = false;
+          if (info.scaling_used == static_cast<int>(ScalingMethod::Matching)) {
+            get_values();
+            own_scale = cv == ak.cleaned.values;
+          }
+          if (!own_scale) {
+            fkeep.delay_analysis = ak.serial;
+            fkeep.delay_next = true;
+          }
+        }
+        return finish(st);
+      }
       extra_seconds += info.factor_seconds;
       info.delay_stops = 1;
     }

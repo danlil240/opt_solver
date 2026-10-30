@@ -781,3 +781,55 @@ TEST(ScaleOnDelay, ReplacesStaleAnalysisMatchingScale) {
     expect_accurate_solve(s, fk, ctrl, A2);
 }
 
+
+// Control::scale_on_delay_next_ratio: a factorization the work limit lets
+// through, but past the next ratio, is kept as it is; the next one of that
+// analysis into that FactorKeep runs under the next ratio as its limit. If
+// its delays stay heavy that tighter try stops and the matching scaling
+// takes over; values that factor cheaply pass it unscaled. Off (negative),
+// the next one runs under the full limit.
+TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);  // the same bad scaling
+    const CscLower E = kkt(kG, kM, 4.1, 0.0);    // well scaled
+    Control ctrl = base_control();
+    const double r = unscaled_ratio(A, ctrl);
+    ASSERT_GT(r, 4.0) << "premise: the delays inflate the work";
+    ASSERT_LT(unscaled_ratio(E, ctrl), 0.5 * r) << "premise: E factors cheaply";
+    ctrl.scale_on_delay_ratio = 2.0 * r;  // lets A through
+    ctrl.scale_on_delay_next_ratio = 0.5 * r;
+
+    struct Case { const CscLower *next_values; bool on; bool rescales; };
+    for (const Case cs : {Case{&A1, true, true}, Case{&A1, false, false}, Case{&E, true, false}}) {
+        Control c = ctrl;
+        if (!cs.on) c.scale_on_delay_next_ratio = -1.0;
+        Solver s;
+        Info info;
+        auto ak = s.analyse(A, c, info);
+        ASSERT_NE(ak.get(), nullptr);
+        ASSERT_TRUE(ak->matching_scale.empty());
+        NumericWorkspace ws;
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, i1, fk, ws),
+                  FactorStatus::Success);
+        EXPECT_EQ(i1.delay_rescales, 0);
+        EXPECT_EQ(i1.delay_stops, 0);
+        EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::None));
+        EXPECT_EQ(fk.delay_next, cs.on);
+        expect_accurate_solve(s, fk, c, A);
+
+        const CscLower &B = *cs.next_values;
+        Info i2;
+        ASSERT_EQ(s.factor(*ak, B, c, i2, fk, ws), FactorStatus::Success);
+        EXPECT_FALSE(fk.delay_next);
+        EXPECT_EQ(i2.delay_stops, cs.rescales ? 1 : 0);
+        EXPECT_EQ(i2.delay_rescales, cs.rescales ? 1 : 0);
+        EXPECT_EQ(i2.scaling_used, static_cast<int>(cs.rescales ? ScalingMethod::Matching
+                                                                : ScalingMethod::None));
+        if (cs.rescales) EXPECT_EQ(fk.delay_scale, matching_scale_of(*ak, B));
+        EXPECT_EQ(i2.num_positive, kG * kG);
+        EXPECT_EQ(i2.num_negative, kM);
+        expect_accurate_solve(s, fk, c, B);
+    }
+}
