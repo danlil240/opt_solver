@@ -238,8 +238,9 @@ struct RefSymbolic {
 
 // The reference pipeline (analyse before the fast path) for the auto/AMD
 // orderings: identity for banded matrices, else AMD on the lower CSC; etree
-// and counts from the row form; postorder relabel; relaxed amalgamation.
-RefSymbolic reference_symbolic(const CscLower &C, Int nemin) {
+// and counts from the row form; postorder relabel; relaxed amalgamation
+// with `rule` (CostModel on an indefinite matrix: with its zero diagonals).
+RefSymbolic reference_symbolic(const CscLower &C, Int nemin, Amalgamation rule, bool indefinite) {
     const Int n = C.n;
     Int bw = 0;
     for (Int j = 0; j < n; ++j)
@@ -264,9 +265,19 @@ RefSymbolic reference_symbolic(const CscLower &C, Int nemin) {
         parent1[k] = et.parent[old] >= 0 ? inv_po[et.parent[old]] : -1;
         cc1[k] = cc[old];
     }
+    std::vector<std::uint8_t> zero_diag;
+    if (rule == Amalgamation::CostModel && indefinite) {
+        zero_diag.assign(perm.size(), 0);
+        for (Int k = 0; k < n; ++k) {
+            const Int old = perm[et.postorder[k]];
+            const Int p0 = C.col_ptr[old];
+            zero_diag[k] = (p0 == C.col_ptr[old + 1] || C.row_idx[p0] != old || C.values[p0] == 0.0) ? 1 : 0;
+        }
+    }
     RefSymbolic ref;
     std::vector<Int> order;
-    amalgamate_relaxed(n, parent1.data(), cc1.data(), nemin, order, ref.snodes);
+    amalgamate_relaxed(n, parent1.data(), cc1.data(), nemin, order, ref.snodes, nullptr, nullptr,
+                       rule, zero_diag.empty() ? nullptr : zero_diag.data());
     std::vector<Int> inv_order(perm.size());
     for (Int k = 0; k < n; ++k) inv_order[order[k]] = k;
     ref.perm.resize(perm.size());
@@ -322,7 +333,8 @@ void expect_fast_path_matches(const CscLower &A, MatrixType type) {
     Solver solver;
     auto ak = solver.analyse(A, ctrl, info);
     ASSERT_NE(ak, nullptr);
-    const RefSymbolic ref = reference_symbolic(C, static_cast<Int>(ctrl.nemin));
+    const RefSymbolic ref = reference_symbolic(C, static_cast<Int>(ctrl.nemin), ctrl.amalgamation,
+                                               type == MatrixType::RealSymmetricIndefinite);
     EXPECT_EQ(ak->perm, ref.perm);
     EXPECT_EQ(ak->etree.parent, ref.parent);
     ASSERT_EQ(ak->supernodes.size(), ref.snodes.size());

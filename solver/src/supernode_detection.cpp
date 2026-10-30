@@ -13,6 +13,43 @@ namespace smf
     static constexpr LongInt kAmalgamateFreeZeros = 16;
     static constexpr double kAmalgamateMaxZeroShare = 0.3;
 
+    // Amalgamation::CostModel (see cb_merge_pays): the cost of moving one
+    // word of a contribution block, in flops, and the smallest contribution
+    // block (rows) the rule considers. Tuned on the front-tier tuning split
+    // at 1 thread: 2 and 4 gave the same factor times, 8 and 16 doubled
+    // TSOPF_FS_b300_c2's flops, and 2 stores less (TSOPF_FS_b300: +22% factor
+    // entries against +37%). Blocks of 32 or 64 rows gained nothing more
+    // and padded small KKTs (kkt_pde_opt: +50% entries at 32); from 128 the
+    // fronts of small problems stay as the Smf rule leaves them.
+    static constexpr double kCostWordFlops = 2.0;
+    static constexpr LongInt kCostMinBlock = 128;
+
+    // Cost model of merging a child front into its parent (Amalgamation::
+    // CostModel). The child has pc pivots and a contribution block of qc
+    // rows, the parent's front fp rows (its pivots, those of the children
+    // merged into it so far, and the rows below). The child's block lies
+    // inside the parent's front, so merging pads each child column with
+    // z = fp - qc explicit zeros.
+    // Saved: the child's front is no longer zeroed (fc^2 / 2 words), its
+    // block no longer copied out (qc^2) and extend-added (qc^2 / 2 read,
+    // qc^2 / 2 read-modify-write); the parent's front grows by pc rows,
+    // pc fp + pc^2 / 2 more words to zero. Net: pc z - 3 qc^2 words.
+    // Added: the child's pivots now update the whole merged front, pc z
+    // (pc + fp + qc) flops more (F(p, q) = p^3/3 + p^2 q + p q^2 for p
+    // pivots over q rows below; the difference is exactly zero for z = 0).
+    // Merge when the flops added cost less than the words saved.
+    static bool cb_merge_pays(LongInt pc, LongInt qc, LongInt fp)
+    {
+        if (qc < kCostMinBlock)
+            return false;
+        const double alpha = kCostWordFlops;
+        const double z = static_cast<double>(std::max<LongInt>(fp - qc, 0));
+        const double dpc = static_cast<double>(pc);
+        const double dqc = static_cast<double>(qc);
+        const double added = dpc * z * (dpc + static_cast<double>(fp) + dqc + alpha);
+        return added < 3.0 * alpha * dqc * dqc;
+    }
+
     // Column counts by Gilbert, Ng & Peyton (1994), as CSparse's cs_counts:
     // each row subtree contributes only through its skeleton (leaves) and
     // least common ancestors, found with path-compressed union-find, so the
@@ -335,7 +372,7 @@ namespace smf
     void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                             std::vector<Int> &order, std::vector<Supernode> &snodes,
                             const std::uint8_t *keep_with_parent, Int *work,
-                            Amalgamation rule)
+                            Amalgamation rule, const std::uint8_t *zero_diagonal)
     {
         order.resize(static_cast<std::size_t>(n));
         snodes.clear();
@@ -436,6 +473,17 @@ namespace smf
                     forced[static_cast<std::size_t>(sj)] = 1;
             }
         }
+        // CostModel's delay guard (zero_diagonal given): receives[g] = group
+        // g's front receives a certain delay, the column of a width-1 leaf
+        // with a zero diagonal (no 1x1 pivot, no partner for a 2x2: it is
+        // delayed to its parent and pivots there). The cost model counts no
+        // delays: merging a chain of such parents piles all their delayed
+        // columns into one front, where they pad each other (cops_elec_200 at
+        // u = 1e-8: 200 delays into one 800-row front, flops +37%, factor
+        // +47%). CostModel merges neither into nor out of such a group.
+        std::vector<std::uint8_t> receives;
+        if (rule == Amalgamation::CostModel && zero_diagonal != nullptr)
+            receives.assign(nsz, 0);
         if (nemin > 1 || !forced.empty())
         {
             std::fill(fill, fill + nsn, LongInt{0});
@@ -464,6 +512,16 @@ namespace smf
                         take = !(added > kAmalgamateFreeZeros &&
                                  static_cast<double>(zeros) >
                                      kAmalgamateMaxZeroShare * static_cast<double>(entries));
+                    const bool certain = !receives.empty() && nelim[si] == 1 &&
+                                         nchildren[static_cast<std::size_t>(first[si])] == 0 &&
+                                         zero_diagonal[static_cast<std::size_t>(first[si])] != 0;
+                    if (!take && rule == Amalgamation::CostModel && nemin > 1 &&
+                        (receives.empty() || (receives[si] == 0 && receives[pi] == 0)))
+                    {
+                        const LongInt qc = colcount[static_cast<std::size_t>(first[si + 1]) - 1] - 1;
+                        const LongInt qp = colcount[static_cast<std::size_t>(first[pi + 1]) - 1] - 1;
+                        take = cb_merge_pays(nelim[si], qc, nelim[pi] + qp);
+                    }
                     if (!take && rule == Amalgamation::SmfPlusCholmod && nemin > 1)
                     {
                         // CHOLMOD's default relaxation (nrelax 4/16/48, zrelax
@@ -474,9 +532,15 @@ namespace smf
                                (k <= 48 && z < 0.1) || z < 0.05;
                     }
                     if (!take)
+                    {
+                        if (certain)
+                            receives[pi] = 1;
                         continue;
+                    }
                 }
                 group[si] = p;
+                if (!receives.empty() && receives[si] != 0)
+                    receives[pi] = 1;
                 nelim[pi] += nelim[si];
                 fill[pi] += fill[si];
             }

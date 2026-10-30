@@ -10,6 +10,7 @@
 //                      [--case substring] [-v] [--nemin k] [--ordering m]
 //                      [--scaling s] [--threads t] [--u pivot_u]
 //                      [--top-tiles 0|1] [--tile-nb nb] [--deterministic]
+//                      [--amalg smf|cholmod|cost]
 //        bench_profile --sample analyse|factor|solve|all --case substring
 //                      [--seconds S] [--lines]
 //
@@ -153,6 +154,7 @@ int main(int argc, char **argv) {
     int top_tiles = -1, tile_nb = -1;
     bool deterministic = false;
     double pivot_u = -1.0;
+    int amalg = -1;  // smf::Amalgamation, -1: the Control default
     std::string sample_phase;
     double sample_seconds = 3.0;
     bool sample_lines = false;
@@ -170,6 +172,10 @@ int main(int argc, char **argv) {
         else if (a == "--seconds" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--lines") sample_lines = true;
         else if (a == "--deterministic") deterministic = true;
+        else if (a == "--amalg" && i + 1 < argc) {
+            const std::string k = argv[++i];
+            amalg = k == "smf" ? 0 : k == "cholmod" ? 1 : k == "cost" ? 2 : -1;
+        }
         if (a == "--manifest" && i + 1 < argc) manifest = argv[++i];
         else if (a == "--solvers" && i + 1 < argc) solvers_arg = argv[++i];
         else if (a == "--repeats" && i + 1 < argc) repeats = std::atoi(argv[++i]);
@@ -197,6 +203,7 @@ int main(int argc, char **argv) {
             ctrl.matrix_type = c.spd ? smf::MatrixType::RealSymmetricPositiveDefinite
                                      : smf::MatrixType::RealSymmetricIndefinite;
             if (nemin > 0) ctrl.nemin = nemin;
+            if (amalg >= 0) ctrl.amalgamation = static_cast<smf::Amalgamation>(amalg);
             if (ordering >= 0) ctrl.ordering = static_cast<smf::OrderingMethod>(ordering);
             if (scaling >= 0) ctrl.scaling = static_cast<smf::ScalingMethod>(scaling);
             if (pivot_u >= 0.0) ctrl.pivot_u = pivot_u;
@@ -287,6 +294,7 @@ int main(int argc, char **argv) {
         ctrl.matrix_type = c.spd ? smf::MatrixType::RealSymmetricPositiveDefinite
                                  : smf::MatrixType::RealSymmetricIndefinite;
         if (nemin > 0) ctrl.nemin = nemin;
+        if (amalg >= 0) ctrl.amalgamation = static_cast<smf::Amalgamation>(amalg);
         ctrl.num_threads = threads;
         ctrl.deterministic = deterministic;
         if (top_tiles >= 0) ctrl.top_tiles = top_tiles != 0;

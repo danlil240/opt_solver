@@ -431,3 +431,71 @@ TEST(LeanEngine, TinyUPrefers2x2OverNearNullPartner) {
     ASSERT_EQ(solver.solve(fk, ctrl, sinfo, x.data(), static_cast<int>(A.n)), 0);
     EXPECT_LE(componentwise_error(A, x, b), 1e-12);
 }
+
+namespace {
+
+/// 7-point Laplacian of a g x g x g grid plus `shift` on the diagonal
+/// (SPD), optionally bordered by m constraint rows [H A^T; A 0]: row r
+/// anchors grid node 2r (coefficient 2 + u, full row rank) and couples its
+/// x- and y-neighbours. Separators of hundreds of rows give the large
+/// contribution blocks the CostModel amalgamation rule is about.
+CscLower grid_kkt(int g, int m, double shift, std::mt19937 &rng) {
+    std::uniform_real_distribution<double> u(-0.5, 0.5);
+    const int n1 = g * g * g;
+    std::map<std::pair<int, int>, double> e;
+    const auto id = [g](int x, int y, int z) { return (z * g + y) * g + x; };
+    for (int z = 0; z < g; ++z)
+        for (int y = 0; y < g; ++y)
+            for (int x = 0; x < g; ++x) {
+                const int k = id(x, y, z);
+                e[{k, k}] = 6.0 + shift;
+                if (x + 1 < g) e[{id(x + 1, y, z), k}] = -1.0;
+                if (y + 1 < g) e[{id(x, y + 1, z), k}] = -1.0;
+                if (z + 1 < g) e[{id(x, y, z + 1), k}] = -1.0;
+            }
+    for (int r = 0; r < m; ++r) {
+        const int row = n1 + r, a = 2 * r;
+        e[{row, a}] = 2.0 + u(rng);
+        if (a + 1 < n1) e[{row, a + 1}] = u(rng);
+        if (a + g < n1) e[{row, a + g}] = u(rng);
+        e[{row, row}] = 0.0;
+    }
+    return to_lower_csc(n1 + m, e);
+}
+
+} // namespace
+
+// Amalgamation::CostModel merges narrow fronts into their parents where the
+// contribution block traffic saved outweighs the padding flops; the factor
+// stays exact: KKT inertia (n1, m, 0), backward error at roundoff, and fewer
+// supernodes than the Smf rule on a grid whose separators carry large blocks.
+TEST(LeanEngine, CostModelAmalgamationExact) {
+    std::mt19937 rng(2026);
+    const int g = 18, m = 900;
+    const CscLower K = grid_kkt(g, m, 0.0, rng);
+    const CscLower S = grid_kkt(g, 0, 0.1, rng);
+    for (const CscLower *A : {&K, &S}) {
+        const bool spd = A == &S;
+        Int nsn[2] = {0, 0};
+        for (const Amalgamation rule : {Amalgamation::Smf, Amalgamation::CostModel}) {
+            Control ctrl;
+            ctrl.matrix_type = spd ? MatrixType::RealSymmetricPositiveDefinite
+                                   : MatrixType::RealSymmetricIndefinite;
+            ctrl.amalgamation = rule;
+            Solver solver;
+            Info info;
+            auto ak = solver.analyse(*A, ctrl, info);
+            ASSERT_NE(ak, nullptr);
+            nsn[rule == Amalgamation::CostModel] = ak->num_supernodes();
+            const RunResult rr = factor_and_solve(*A, ctrl, rng);
+            ASSERT_EQ(rr.status, FactorStatus::Success) << "spd=" << spd;
+            if (!spd) {
+                EXPECT_EQ(rr.info.num_positive, g * g * g);
+                EXPECT_EQ(rr.info.num_negative, m);
+                EXPECT_EQ(rr.info.num_zero, 0);
+            }
+            EXPECT_LT(rr.berr, 1e-13) << "spd=" << spd << " rule=" << static_cast<int>(rule);
+        }
+        EXPECT_LT(nsn[1], nsn[0]) << "spd=" << spd;
+    }
+}

@@ -116,9 +116,14 @@ double unscaled_ratio(const CscLower &A, Control ctrl) {
     return work_ratio(*ak, i);
 }
 
+// The test KKTs are sized for the trigger on the Smf rule's tree: with
+// CostModel's wider fronts the same delays inflate the front work less
+// (FiresOnBadlyScaledKkt: work ratio 9.5 against 24+), and these tests are
+// about the trigger, not the tree.
 Control base_control() {
     Control c;
     c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.amalgamation = Amalgamation::Smf;
     return c;  // Auto scaling, pivot_u = 0.01, default trigger ratio
 }
 
