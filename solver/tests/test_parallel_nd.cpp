@@ -125,7 +125,7 @@ double predicted_flops(const smf::CscLower& A, smf::OrderingMethod method, const
     ctrl.ordering = method;
     ctrl.user_perm = perm;
     ctrl.num_threads = 1;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     smf::Info info;
     smf::Solver solver;
     auto ak = solver.analyse(A, ctrl, info);

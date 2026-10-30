@@ -160,7 +160,7 @@ TEST(TaskBudget, ConcurrentInstancesAndDeepTree) {
             ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
             ctrl.nemin = 1;
             ctrl.num_threads = 2;
-            ctrl.parallel_min_work = 2e7;  // small test trees
+            ctrl.auto_threads = false;  // small test trees
             ctrl.tree_parallel = true;
             ctrl.memory_budget_bytes = 65536;
             Info info;

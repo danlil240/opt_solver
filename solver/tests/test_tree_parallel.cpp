@@ -89,7 +89,7 @@ struct Run {
 
 Run factor_and_solve(const CscLower &A, Control ctrl, int threads, int refactors = 1) {
     ctrl.num_threads = threads;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver solver;
     Run run;
     auto ak = solver.analyse(A, ctrl, run.info);
@@ -157,7 +157,7 @@ namespace {
 // re-created at a different size).
 void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = false) {
     ctrl.num_threads = 4;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver solver;
     Info info;
     auto ak = solver.analyse(A, ctrl, info);
@@ -181,7 +181,7 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
 
     Control serial = ctrl;
     serial.num_threads = 1;
-    serial.parallel_min_work = 2e7;  // small test trees
+    serial.auto_threads = false;  // small test trees
     SolveWorkspace sws1;
     std::vector<double> x1 = b;
     ASSERT_EQ(solver.solve(fk, serial, info, x1.data(), n, nrhs, sws1), 0);
@@ -191,7 +191,7 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
     SolveWorkspace sws;
     for (const int threads : {4, 4, 3}) {
         par.num_threads = threads;
-        par.parallel_min_work = 2e7;  // small test trees
+        par.auto_threads = false;  // small test trees
         std::vector<double> x = b;
         ASSERT_EQ(solver.solve(fk, par, info, x.data(), n, nrhs, sws), 0);
         EXPECT_LT(max_rel_diff(x1, x), 1e-12) << threads << " threads";
@@ -287,7 +287,7 @@ struct RefinedRun {
 // double), then the normwise backward error.
 RefinedRun factor_refined(const CscLower &A, Control ctrl, int threads) {
     ctrl.num_threads = threads;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver solver;
     RefinedRun run;
     auto ak = solver.analyse(A, ctrl, run.info);
@@ -396,7 +396,7 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     for (const int threads : {8, 3}) {
         ctrl.num_threads = threads;
-        ctrl.parallel_min_work = 2e7;  // small test trees
+        ctrl.auto_threads = false;  // small test trees
         Solver solver;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -414,13 +414,29 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
     }
 }
 
-// Control::parallel_min_work: a tree with less front work than that factors
-// on one thread at any num_threads (the same factor as num_threads = 1);
-// below the floor it is shared.
-TEST(TreeParallel, LightTreeStaysSerial) {
-    const CscLower A = laplacian_2d(120);
+// Control::auto_threads: a chain-like tree (a banded matrix) repays no
+// thread, so it factors on one at num_threads = 16; with auto_threads off
+// the same tree is partitioned for all 16. (Bandwidth 30, not 10: at 10 the
+// tree's front work, 6.5e6, is below the 2e7 partition floor.)
+TEST(TreeParallel, AutoThreadsPicksSerialForChain) {
+    constexpr int n = 20000;
+    constexpr int bw = 30;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(2.0 * bw + 1.0);
+        for (int i = j + 1; i <= std::min(n - 1, j + bw); ++i) {
+            A.row_idx.push_back(i);
+            A.values.push_back(-1.0);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.num_threads = 16;
     Solver solver;
     Info info;
     auto ak = solver.analyse(A, ctrl, info);
@@ -430,21 +446,21 @@ TEST(TreeParallel, LightTreeStaysSerial) {
         const double f = static_cast<double>(ak->front_size(static_cast<Int>(s)));
         work += static_cast<double>(ak->supernodes[s].width()) * f * f;
     }
-    ASSERT_GT(work, 2e7) << "premise: heavy enough for the old floor";
-    ASSERT_LT(work, Control{}.parallel_min_work) << "premise: below the default";
+    ASSERT_GT(work, 2e7) << "premise: heavy enough to partition";
 
-    for (const double floor : {Control{}.parallel_min_work, 2e7}) {
+    for (const bool auto_threads : {true, false}) {
         Control c = ctrl;
-        c.num_threads = 4;
-        c.parallel_min_work = floor;
+        c.auto_threads = auto_threads;
         NumericWorkspace nws;
         FactorKeep fk;
         Info fi;
         ASSERT_EQ(solver.factor(*ak, A, c, fi, fk, nws), FactorStatus::Success);
-        if (floor > work)
+        if (auto_threads) {
+            EXPECT_EQ(fi.threads_used, 1);
             EXPECT_EQ(fi.parallel_subtrees, 0);
-        else
+        } else {
             EXPECT_GE(fi.parallel_subtrees, 2);
+        }
     }
 }
 
@@ -475,7 +491,7 @@ TEST(TreeParallel, PoolPersistsAcrossFactorizations) {
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
     ctrl.num_threads = 4;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver s;
     Info info;
     auto ak = s.analyse(A, ctrl, info);
@@ -496,7 +512,7 @@ TEST(TreeParallel, IdlePoolHoldsNoBlasThreads) {
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
     ctrl.num_threads = 4;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver s;
     Info info;
     auto ak = s.analyse(A, ctrl, info);
@@ -519,7 +535,7 @@ TEST(TreeParallel, PoolFollowsThreadCount) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     Solver s;
     Info info;
     auto ak = s.analyse(A, ctrl, info);
@@ -550,7 +566,7 @@ TEST(TreeParallel, TwoWorkspacesConcurrently) {
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
     ctrl.num_threads = 4;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     std::atomic<int> bad{0};
     const auto body = [&] {
         Solver s;

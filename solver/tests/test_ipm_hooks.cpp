@@ -176,7 +176,7 @@ Control grid_ctrl(int threads) {
     c.ordering = OrderingMethod::AMD;
     c.scaling = ScalingMethod::None;
     c.num_threads = threads;
-    c.parallel_min_work = 2e7;  // small test trees
+    c.auto_threads = false;  // small test trees
     return c;
 }
 
@@ -549,7 +549,7 @@ TEST(IpmHooks, TaskParallelEngineReportsSameStatus) {
     // checked on its finished factor so the status is the same.
     Control c = indef_ctrl();
     c.num_threads = 4;
-    c.parallel_min_work = 2e7;  // small test trees
+    c.auto_threads = false;  // small test trees
     c.tree_parallel = true;
     Harness h(small_kkt(), c);
     ASSERT_NE(h.ak.get(), nullptr);
@@ -649,7 +649,7 @@ ReanalysisResult reanalyse_and_check(const CscLower &A, int threads) {
     ReanalysisResult r;
     Control c = delay_ctrl();
     c.num_threads = threads;
-    c.parallel_min_work = 2e7;  // small test trees
+    c.auto_threads = false;  // small test trees
     Harness first(A, c);
     EXPECT_NE(first.ak.get(), nullptr);
     if (!first.ak) return r;
@@ -666,7 +666,7 @@ ReanalysisResult reanalyse_and_check(const CscLower &A, int threads) {
 
     Control c2 = delay_ctrl(&ro.perm);
     c2.num_threads = threads;
-    c2.parallel_min_work = 2e7;  // small test trees
+    c2.auto_threads = false;  // small test trees
     c2.user_pair_first = ro.pairs.empty() ? nullptr : ro.pairs.data();
     c2.user_num_pairs = static_cast<Int>(ro.pairs.size() / 2);
     Harness second(A, c2);
@@ -749,7 +749,7 @@ TEST(IpmHooks, TreeParallelRealizedOrderIsTopologicalAndStable) {
 
     Control c4 = delay_ctrl();
     c4.num_threads = 4;
-    c4.parallel_min_work = 2e7;  // small test trees
+    c4.auto_threads = false;  // small test trees
     Harness h(A, c4);
     ASSERT_NE(h.ak.get(), nullptr);
     for (int rep = 0; rep < 5; ++rep) {
@@ -764,7 +764,7 @@ TEST(IpmHooks, TreeParallelRealizedOrderIsTopologicalAndStable) {
 
     Control c4b = delay_ctrl(&ro_serial.perm);
     c4b.num_threads = 4;
-    c4b.parallel_min_work = 2e7;  // small test trees
+    c4b.auto_threads = false;  // small test trees
     c4b.user_pair_first = ro_serial.pairs.empty() ? nullptr : ro_serial.pairs.data();
     c4b.user_num_pairs = static_cast<Int>(ro_serial.pairs.size() / 2);
     Harness g(A, c4b);
@@ -985,7 +985,7 @@ TEST(IpmHooks, FallbackBudgetCapsDelays) {
     for (const int threads : {1, 4}) {
         Control c = delay_ctrl();
         c.num_threads = threads;
-        c.parallel_min_work = 2e7;  // small test trees
+        c.auto_threads = false;  // small test trees
         Harness off(grid_kkt(110, 7), c);
         ASSERT_EQ(off.factor(-1), FactorStatus::Success);
         ASSERT_GT(off.info.delayed_pivots, 0);

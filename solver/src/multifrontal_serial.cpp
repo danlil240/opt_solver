@@ -5,6 +5,7 @@
 #include "smf/ldlt_kernel.hpp"
 #include "smf/solve_pool.hpp"
 #include "parallel/tile_tasks.hpp"
+#include "parallel/thread_plan.hpp"
 #include "parallel/top_scheduler.hpp"
 
 #include <algorithm>
@@ -18,7 +19,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 #include <utility>
 #include <span>
@@ -173,10 +173,6 @@ struct TileCtx {
   TileHelpers *helpers = nullptr;
 };
 
-// Fronts at least this large are factored as 2D tile tasks at the top of the
-// tree (Control::top_tiles).
-constexpr int kTopTileMinFront = 512;
-
 // Running delay budget state (Control::delay_budget) of a sequence of
 // fronts: the delays counted so far and whether the budget is spent (the
 // count reached it, or a front would have taken it past it). Once spent,
@@ -322,8 +318,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   const bool fallback_front = cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym);
   // 2D tile tasks (top of the tree): APTP block structure whatever the
   // front kernel, on the same plain threshold fronts.
-  bool tiled = tc != nullptr && P.tiles != nullptr && cx.tile_aprm != nullptr &&
-               f >= kTopTileMinFront && !fallback_front && !budget_front;
+  bool tiled = tc != nullptr && P.tiles != nullptr && tiles_front(cx.tile_aprm != nullptr, f) &&
+               !fallback_front && !budget_front;
   const AptpParams *aprm = tiled ? cx.tile_aprm
                            : (cx.aprm != nullptr && !fallback_front && !budget_front &&
                               num_elig >= cx.aptp_min_elig)
@@ -714,68 +710,10 @@ double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
   return p * f * f;
 }
 
-// Below this much front work (sum of f^2 p) a tree is not partitioned
-// (one delay-budget region).
-constexpr double kTreeParallelMinWork = 2e7;
-
-
 // Control::delay_budget counts delays per region of a tree partition made
 // with this nominal thread count, whatever Control::num_threads is, so every
 // thread count makes the same static/threshold choice per front.
 constexpr int kBudgetNominalThreads = 16;
-
-// Tree parallelism: split the assembly tree into independent subtrees of
-// bounded work (largest-first, the heaviest subtree root moves to the top
-// part until every remaining subtree is below total / (4 threads)). Returns
-// the subtrees as [first, last] postorder index ranges, heaviest first, and
-// marks the top part. Leaves too heavy to split stay in the top part, where
-// BLAS is threaded. Returns nothing when the tree is too light to share.
-std::vector<std::pair<std::size_t, std::size_t>>
-partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8_t> &top,
-                   double min_work) {
-  const std::size_t ns = keep.supernodes.size();
-  std::vector<double> work(ns, 0.0);
-  std::vector<std::size_t> first(ns), at(ns);
-  for (std::size_t k = 0; k < keep.postorder.size(); ++k) {
-    const std::size_t si = static_cast<std::size_t>(keep.postorder[k]);
-    const Supernode &sn = keep.supernodes[si];
-    const double f = static_cast<double>(keep.front_size(static_cast<Int>(si)));
-    work[si] = f * f * static_cast<double>(sn.width());
-    first[si] = k;
-    at[si] = k;
-    for (const Int c : keep.children(static_cast<Int>(si))) {
-      const std::size_t ci = static_cast<std::size_t>(c);
-      work[si] += work[ci];
-      first[si] = std::min(first[si], first[ci]);
-    }
-  }
-  double total = 0.0;
-  using Item = std::pair<double, Int>;
-  std::priority_queue<Item> heap;
-  for (std::size_t s = 0; s < ns; ++s) {
-    if (keep.supernodes[s].parent < 0) {
-      total += work[s];
-      heap.emplace(work[s], static_cast<Int>(s));
-    }
-  }
-  top.assign(ns, 0);
-  if (total < min_work) return {};
-  const double target = total / (4.0 * threads);
-  while (!heap.empty() && heap.top().first > target) {
-    const Int s = heap.top().second;
-    heap.pop();
-    top[static_cast<std::size_t>(s)] = 1;
-    for (const Int c : keep.children(s))
-      heap.emplace(work[static_cast<std::size_t>(c)], c);
-  }
-  std::vector<std::pair<std::size_t, std::size_t>> subtrees;
-  while (!heap.empty()) {
-    const std::size_t s = static_cast<std::size_t>(heap.top().second);
-    heap.pop();
-    subtrees.emplace_back(first[s], at[s]);
-  }
-  return subtrees;
-}
 
 } // namespace
 
@@ -849,9 +787,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (det) enable_blas_reproducibility();
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
-  const bool tiles_on = ctrl.top_tiles && (ctrl.num_threads > 1 || det) && !posdef &&
-                        prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0 &&
-                        ctrl.pivot_u >= kWeakPivotRatio;
+  const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
   // Deterministic mode: the tile context of the fronts outside the top
   // phase (one thread, no helpers).
   const TileCtx serial_tc{};
@@ -967,17 +903,33 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // With a delay budget the partition is the budget's (kBudgetNominalThreads),
   // for every num_threads including 1: its subtrees are the budget's counting
   // regions, so scheduling uses them as they are.
+  //
+  // Control::auto_threads: at most the thread count plan_threads picks for
+  // the tree (else num_threads); below 2, the serial engine. Deterministic
+  // mode's results do not depend on it: every thread count tiles the same
+  // fronts there.
   int threads = 1;
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
   std::vector<std::uint8_t> top;
+  std::vector<Int> tv_parent;
+  std::vector<double> tv_work;
+  std::vector<std::uint8_t> tv_split;
+  TreeView tv;
+  if (ns >= 2 && (delay_budget >= 0 || ctrl.num_threads > 1))
+    tv = tree_view(keep, tiles_on, tv_parent, tv_work, tv_split);
+  int want_threads = ns >= 2 ? ctrl.num_threads : 1;
+  if (ctrl.auto_threads && want_threads > 1)
+    want_threads = plan_threads(tv, ctrl.num_threads,
+                                ThreadCosts{ctrl.thread_cost_per_thread,
+                                            ctrl.thread_cost_per_top_front})
+                       .threads;
   if (delay_budget >= 0 && ns >= 2) {
-    subtrees = partition_subtrees(keep, kBudgetNominalThreads, top, kTreeParallelMinWork);
-  } else if (ctrl.num_threads > 1 && ns >= 2) {
-    subtrees = partition_subtrees(keep, ctrl.num_threads, top,
-                                  std::max(kTreeParallelMinWork, ctrl.parallel_min_work));
+    subtrees = partition_subtrees(tv, kBudgetNominalThreads, kTreeParallelMinWork, top);
+  } else if (want_threads > 1) {
+    subtrees = partition_subtrees(tv, want_threads, kTreeParallelMinWork, top);
   }
-  if (ctrl.num_threads > 1 && subtrees.size() >= 2)
-    threads = std::min<int>(ctrl.num_threads, static_cast<int>(subtrees.size()));
+  if (want_threads > 1 && subtrees.size() >= 2)
+    threads = std::min<int>(want_threads, static_cast<int>(subtrees.size()));
 
   // Delay budget regions (Control::delay_budget). Without a partition (a
   // tree too light to split): one running count over the whole postorder.

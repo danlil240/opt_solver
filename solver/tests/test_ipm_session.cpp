@@ -72,7 +72,7 @@ Control ipopt_control() {
     c.scaling = ScalingMethod::None;
     c.pivot_u = 1e-8;
     c.num_threads = 1;
-    c.parallel_min_work = 2e7;  // small test trees
+    c.auto_threads = false;  // small test trees
     c.continue_on_singular = true;
     c.expected_refactors = 10;
     c.solve_use_blas3_single_rhs = true;
@@ -620,7 +620,7 @@ Control delay_ctrl() {
     c.ordering = OrderingMethod::AMD;
     c.scaling = ScalingMethod::None;
     c.num_threads = 1;
-    c.parallel_min_work = 2e7;  // small test trees
+    c.auto_threads = false;  // small test trees
     c.nemin = 1;
     c.pivot_u = 0.5;
     return c;

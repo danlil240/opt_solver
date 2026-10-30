@@ -939,7 +939,7 @@ TEST(Refinement, Acopf160) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     ctrl.num_threads = 1;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     ctrl.pivot_u = 1e-8;
     Info info;
     Solver solver;

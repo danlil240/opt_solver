@@ -317,6 +317,12 @@ target_link_libraries(test_top_scheduler PRIVATE smf GTest::gtest_main)
 add_test(NAME TopScheduler COMMAND test_top_scheduler)
 set_tests_properties(TopScheduler PROPERTIES TIMEOUT 120)
 
+# Thread-count model and tree partition of the subtree-parallel factorization.
+add_executable(test_thread_plan test_thread_plan.cpp)
+target_include_directories(test_thread_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_thread_plan PRIVATE smf GTest::gtest_main)
+add_test(NAME ThreadPlan COMMAND test_thread_plan)
+
 # --- IPM mode: engine hooks (max_negative_pivots) ---
 
 add_executable(test_ipm_hooks

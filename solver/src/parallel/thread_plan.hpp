@@ -1,0 +1,94 @@
+#pragma once
+// Tree partition and thread count of the subtree-parallel factorization
+// (multifrontal_serial.cpp).
+//
+// The partition splits the assembly tree into independent subtrees (phase
+// 1, one thread each) and a top part (phase 2, TopScheduler). The thread
+// count comes from a cost model on the tree: a T-thread run takes at least
+// the heaviest root-to-leaf path (fronts run as tile tasks count 1/T) and
+// total / T, plus a cost per thread and per top-part front. Work is f^2 p
+// per front, the unit of Info::predicted_flops.
+
+#include "smf/analysis.hpp"
+#include "smf/control.hpp"
+#include "smf/types.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <utility>
+#include <vector>
+
+namespace smf {
+
+// Below this much front work (sum of f^2 p) a tree is not partitioned
+// (one delay-budget region, and no candidate thread count beyond 1).
+inline constexpr double kTreeParallelMinWork = 2e7;
+
+// Fronts at least this large are factored as 2D tile tasks at the top of the
+// tree (Control::top_tiles).
+inline constexpr int kTopTileMinFront = 512;
+
+// Control::top_tiles for a factorization: the plain threshold-pivoting
+// fronts (indefinite, no static or in-order pivoting, pivot_u >=
+// kWeakPivotRatio) are tiled at more than one thread, and in deterministic
+// mode at every thread count. static_pivot / min_abs_pivot: the kernel's.
+bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double min_abs_pivot,
+                  bool det);
+
+// Per front, with top_tiles_on: a front of front_rows rows is tiled (unless
+// it turns into a fallback or delay-budget static front, decided while
+// factoring).
+inline bool tiles_front(bool tiles_on, int front_rows) {
+  return tiles_on && front_rows >= kTopTileMinFront;
+}
+
+struct TreeView {                       // one entry per supernode
+  std::span<const Int> postorder;
+  std::span<const Int> parent;          // -1: root
+  std::span<const double> work;         // f^2 p
+  std::span<const std::uint8_t> split;  // 1: runs as tile tasks at > 1 thread
+};
+
+// The view of keep's assembly tree; fills the buffers it points into.
+// tiles_on: top_tiles_on(...) at more than one thread.
+TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &parent,
+                   std::vector<double> &work, std::vector<std::uint8_t> &split);
+
+// Splits the tree into independent subtrees of bounded work (largest-first:
+// the heaviest subtree root moves to the top part until every remaining
+// subtree is below total / (4 threads)). Returns the subtrees as [first,
+// last] postorder index ranges, heaviest first, and marks the top part.
+// Leaves too heavy to split stay in the top part. Returns nothing (and no
+// top part) when the tree's work is below min_work.
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top);
+
+// The sizes of partition_subtrees' result (subtrees, top-part nodes) in
+// O(nodes) without building it: what plan_threads costs per candidate.
+struct PartitionCount {
+  std::size_t subtrees = 0;
+  std::size_t top = 0;
+};
+PartitionCount partition_count(const TreeView &t, int threads, double min_work);
+
+// Cost model terms, in work units (f^2 p). Control::thread_cost_per_thread
+// and thread_cost_per_top_front.
+struct ThreadCosts {
+  double per_thread = 1e5;     // starting and joining one thread
+  double per_top_front = 5e3;  // handing one top-part front between threads
+};
+struct ThreadPlan {
+  int threads = 1;
+  double predicted_speedup = 1.0;  // total / cost(threads)
+};
+
+// The thread count of least cost among 1, 2, 4, 8, ... and max_threads (at
+// most max_threads); on a tie within 2%, the smaller. cost(1) = total; for T
+// > 1, cost(T) = max(cp(T), total / T) + T per_thread + top(T)
+// per_top_front, with cp(T) the heaviest root-to-leaf sum of work / (split ?
+// T : 1) and top(T) the top-part size of partition_subtrees at T threads (T
+// is no candidate when that gives fewer than 2 subtrees).
+ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
+
+} // namespace smf

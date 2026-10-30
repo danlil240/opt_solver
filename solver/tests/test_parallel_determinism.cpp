@@ -146,7 +146,7 @@ TEST(ParallelDeterminism, SerialReproducible) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.num_threads = 1;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
 
     Solver solver;
     Info info;
@@ -198,7 +198,7 @@ TEST(ParallelDeterminism, DeterministicMode) {
         Control ctrl;
         ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
         ctrl.num_threads = 1;
-        ctrl.parallel_min_work = 2e7;  // small test trees
+        ctrl.auto_threads = false;  // small test trees
         ctrl.deterministic = true;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -217,7 +217,7 @@ TEST(ParallelDeterminism, DeterministicMode) {
         Control ctrl;
         ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
         ctrl.num_threads = 1;
-        ctrl.parallel_min_work = 2e7;  // small test trees
+        ctrl.auto_threads = false;  // small test trees
         ctrl.deterministic = false;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -250,7 +250,7 @@ TEST(ParallelDeterminism, MultiThread_Residual) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.num_threads = 4;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     ctrl.deterministic = true;
 
     Info info;
@@ -364,7 +364,7 @@ DetRun det_run(const DetCase &c, int threads) {
     Control ctrl;
     ctrl.matrix_type = c.type;
     ctrl.num_threads = threads;
-    ctrl.parallel_min_work = 2e7;  // small test trees
+    ctrl.auto_threads = false;  // small test trees
     ctrl.deterministic = true;
     ctrl.ordering = c.ordering;
     // Cached L11^-1 (built at factor time) is part of what must reproduce.

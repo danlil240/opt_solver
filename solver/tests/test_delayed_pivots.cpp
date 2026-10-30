@@ -243,7 +243,7 @@ TEST(DelayedPivots, ParallelThreadsConsistency) {
         ctrl.nemin = 1;
         ctrl.pivot_u = 0.01;
         ctrl.num_threads = threads;
-        ctrl.parallel_min_work = 2e7;  // small test trees
+        ctrl.auto_threads = false;  // small test trees
         ctrl.deterministic = true;
 
         Info info;
@@ -706,7 +706,7 @@ TEST(DelayedPivots, BudgetDeterministicUnderThreads) {
     Info ref;
     for (int threads : {1, 2, 8, 2}) {
         ctrl.num_threads = threads;
-        ctrl.parallel_min_work = 2e7;  // small test trees
+        ctrl.auto_threads = false;  // small test trees
         NumericWorkspace ws;
         FactorKeep fk;
         Info ri;
@@ -906,7 +906,7 @@ TEST(DelayedPivots, SmallFrontPathMatchesGeneric) {
         Control on = budget_control();
         on.delay_budget = c.budget;
         on.num_threads = c.threads;
-        on.parallel_min_work = 2e7;  // small test trees
+        on.auto_threads = false;  // small test trees
         on.deterministic = c.threads > 1;
         on.fallback_static_pivot_tol = c.fallback;
         Control off = on;

@@ -557,8 +557,15 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
-    // SMF_BENCH_PARALLEL_MIN_WORK (double): Control::parallel_min_work.
-    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_MIN_WORK")) ctrl.parallel_min_work = std::atof(e);
+    // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
+    if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
+    // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" (Control::
+    // thread_cost_per_thread, thread_cost_per_top_front; work units).
+    if (const char *e = std::getenv("SMF_BENCH_THREAD_COSTS")) {
+        char *end = nullptr;
+        ctrl.thread_cost_per_thread = std::strtod(e, &end);
+        if (end != nullptr && *end == ',') ctrl.thread_cost_per_top_front = std::strtod(end + 1, nullptr);
+    }
     // SMF_BENCH_SCALE_REUSE_TOL (double; negative = recompute): Control::scale_on_delay_reuse_tol.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_REUSE_TOL")) ctrl.scale_on_delay_reuse_tol = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
