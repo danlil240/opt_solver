@@ -292,6 +292,8 @@ One outlier: pde_control_120 (recommended track) at +45% peak RSS. That is the s
 ## Follow-ups
 
 1. **Re-tune scale-on-delay on the new tree.** That means the ratio, and possibly a trigger in flops instead of eligible × rows². The two recommended-track losses in section 5 come from there.
+   - *2026-10-30:* the ratio alone does not do it. Ratios 8, 6 and 4 fix pde_control (2.77 s → 1.97, 1.53 and 0.99 s), but they start rescaling cops_elec_200 (1.6x → 2.7x behind MA97) and case300 (+33%).
+   - The ratio stays at 16, and the cops_polygon_200 replay step is accepted. See section 4 of `2026-10-30-branches-and-scoreboard.md`.
 2. **TPP pivot search in wide, delay-heavy fronts.** Merged fronts process delay cascades at half the work units per second of the old tree's. Failed pivot attempts are not counted as work and look quadratic in the eligible columns. A profile of pde_control_250 step 3 (bench_profile `--sample factor`) would show it.
 3. **A delay-aware cost term.** Treating expected delays as extra pivots and rows of a front would generalize the zero-diagonal guard, which only knows certain delays.
 4. **In-place assembly of the last child** (task item 2, not done). Fronts are assembled at their factor offset, and CBs live on a separate packed stack. Overlaying them needs a full-square CB layout or a front stack. After this rule c-big runs at ~60 GF/s against 11, so the measured gain left is smaller than when it was proposed.
