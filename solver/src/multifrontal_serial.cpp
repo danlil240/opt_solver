@@ -75,6 +75,19 @@ struct TreeParallelBuffers {
   std::vector<Thread> threads;
   // Deterministic mode, serial path: tile-task scratch of the main pass.
   TileWorkspace serial_tiles;
+  // The last partition of the tree (partition_subtrees with a delay budget,
+  // else partition_tasks) with what it depends on: the analysis, the
+  // thread count and which of the two. Refactorizations of an analysis
+  // reuse it instead of walking the tree again.
+  struct Partition {
+    std::uint64_t analysis = 0;  // AnalysisKeep::serial; 0: none
+    std::size_t ns = 0;
+    int threads = 0;
+    bool budget = false;
+    std::vector<std::pair<std::size_t, std::size_t>> ranges;
+    std::vector<std::uint8_t> top;
+  };
+  Partition partition;
 };
 
 namespace {
@@ -913,10 +926,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // refactorizations of this analysis.
   //
   // Without a delay budget the subtrees run as partition_tasks' tasks
-  // (light adjacent subtrees merged).
+  // (light adjacent subtrees merged). The partition depends on the tree and
+  // its thread count alone: ws.tree_par->partition keeps it.
   int threads = 1;
-  std::vector<std::pair<std::size_t, std::size_t>> subtrees;
-  std::vector<std::uint8_t> top;
   std::vector<Int> tv_parent;
   std::vector<double> tv_work;
   std::vector<std::uint8_t> tv_split;
@@ -950,11 +962,31 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     plan_threads(view(), ctrl.num_threads,
                  ThreadCosts{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front});
   }
+  const auto partition = [&](int nthreads, bool budget) {
+    if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
+    auto &pp = ws.tree_par->partition;
+    if (pp.analysis != keep.serial || pp.ns != ns || pp.threads != nthreads ||
+        pp.budget != budget) {
+      pp.analysis = 0;  // until rebuilt
+      pp.ranges = budget ? partition_subtrees(view(), nthreads, kTreeParallelMinWork, pp.top)
+                         : partition_tasks(view(), nthreads, kTreeParallelMinWork, pp.top);
+      pp.analysis = keep.serial;
+      pp.ns = ns;
+      pp.threads = nthreads;
+      pp.budget = budget;
+    }
+    return &pp;
+  };
+  const TreeParallelBuffers::Partition *part = nullptr;
   if (delay_budget >= 0 && ns >= 2) {
-    subtrees = partition_subtrees(view(), kBudgetNominalThreads, kTreeParallelMinWork, top);
+    part = partition(kBudgetNominalThreads, true);
   } else if (want_threads > 1) {
-    subtrees = partition_tasks(view(), want_threads, kTreeParallelMinWork, top);
+    part = partition(want_threads, false);
   }
+  const std::vector<std::pair<std::size_t, std::size_t>> no_subtrees;
+  const std::vector<std::uint8_t> no_top;
+  const auto &subtrees = part != nullptr ? part->ranges : no_subtrees;
+  const auto &top = part != nullptr ? part->top : no_top;
   if (want_threads > 1 && subtrees.size() >= 2)
     threads = std::min<int>(want_threads, static_cast<int>(subtrees.size()));
 
@@ -1288,22 +1320,22 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       // run to run; this order does not, and only the solve of a non-inline
       // factor reads it (entry by entry, in any order).
       {
+        // Each front's entries [b, e) in its pass, by its position in the
+        // postorder (b = e: none).
         struct Chunk {
-          std::size_t post;
-          int pass;
-          std::size_t b, e;
+          int pass = 0;
+          std::size_t b = 0, e = 0;
         };
-        std::vector<Chunk> chunks;
+        std::vector<Chunk> chunks(keep.postorder.size());
         for (int t = 0; t < threads; ++t) {
           std::size_t b = 0;
           for (const auto &[node, end] : tpass[static_cast<std::size_t>(t)].diag_marks) {
-            if (end > b) chunks.push_back({post_pos[static_cast<std::size_t>(node)], t, b, end});
+            if (end > b) chunks[post_pos[static_cast<std::size_t>(node)]] = {t, b, end};
             b = end;
           }
         }
-        std::sort(chunks.begin(), chunks.end(),
-                  [](const Chunk &a, const Chunk &b) { return a.post < b.post; });
         for (const Chunk &c : chunks) {
+          if (c.e == c.b) continue;
           const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
           fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
                                     d.begin() + static_cast<std::ptrdiff_t>(c.e));
