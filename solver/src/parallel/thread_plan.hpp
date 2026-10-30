@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -97,6 +98,43 @@ struct ThreadPlan {
 // top nodes.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 
+// The candidate thread counts of both models, ascending: 1, 2, 4, 8, ...
+// below max_threads, and max_threads (1 alone below 2).
+std::vector<int> candidate_threads(int max_threads);
+
+// The terms plan_threads costs, per candidate thread count (independent of
+// the cost constants). T = 1 carries the tree's total alone (cost(1) =
+// total). For T > 1: ok when the partition gives at least 2 subtrees, the
+// phase terms of the cost formula above, top_fronts = top(T), and the
+// top-part fronts that run as tile tasks (split) with their work.
+struct FactorPlanTerms {
+  int threads = 1;
+  bool ok = true;
+  double sub_total = 0.0;
+  double max_subtree = 0.0;
+  double top_total = 0.0;
+  double cp_top = 0.0;
+  std::size_t top_fronts = 0;
+  std::size_t split_top_fronts = 0;
+  double split_top_work = 0.0;
+  double total = 0.0;
+};
+
+// Candidate 1 alone when max_threads < 2 or the tree's work is below
+// kTreeParallelMinWork; else one entry per candidate_threads(max_threads).
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads);
+
+// cost(T) of plan_threads from one candidate's terms; < 0 when !ok.
+double factor_plan_cost(const FactorPlanTerms &k, const ThreadCosts &c);
+
+// The plan trace (SMF_BENCH_PLAN_TRACE=1, printed to stderr when a plan is
+// computed): one "plan-factor T=.." line per candidate, then "plan-factor
+// chosen=..". tools/bench/fit_thread_costs.py parses it.
+std::string factor_plan_trace(std::span<const FactorPlanTerms> terms, int chosen);
+
+// SMF_BENCH_PLAN_TRACE=1 in the environment (read once).
+bool plan_trace_enabled();
+
 // Cost model terms of the parallel triangular solve, in step-work units
 // (p f per front). Control::solve_cost_per_thread, solve_cost_per_top_step,
 // solve_cost_per_top_row.
@@ -119,5 +157,26 @@ struct SolveCosts {
 int plan_solve_threads(std::span<const double> subtree_work, std::span<const double> top_work,
                        std::span<const Int> top_parent, std::size_t top_rows, int max_threads,
                        const SolveCosts &c);
+
+// The terms plan_solve_threads costs (the same at every thread count).
+struct SolvePlanTerms {
+  std::size_t subtrees = 0;
+  double sub_total = 0.0;
+  double max_subtree = 0.0;
+  double top_total = 0.0;
+  double top_cp = 0.0;  // cp_top above
+  std::size_t n_top = 0;
+  std::size_t top_rows = 0;
+};
+SolvePlanTerms solve_plan_terms(std::span<const double> subtree_work,
+                                std::span<const double> top_work, std::span<const Int> top_parent,
+                                std::size_t top_rows);
+
+// cost(T) of plan_solve_threads (T = 1: sub_total + top_total).
+double solve_plan_cost(const SolvePlanTerms &k, int threads, const SolveCosts &c);
+
+// The plan trace: one "plan-solve T=.." line per candidate_threads(
+// max_threads), then "plan-solve chosen=..".
+std::string solve_plan_trace(const SolvePlanTerms &k, int max_threads, int chosen);
 
 } // namespace smf

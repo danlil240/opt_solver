@@ -11,9 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <iterator>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 using namespace smf;
@@ -294,4 +297,180 @@ TEST(ThreadPlan, SolveBalancedSubtreesParallel) {
     EXPECT_EQ(plan_solve_threads(sub64, top3, parent3, 300, 4, {}), 4);
     EXPECT_EQ(plan_solve_threads(sub64, top3, parent3, 300, 1, {}), 1);
     EXPECT_EQ(plan_solve_threads(std::span<const double>(sub64).first(1), top3, parent3, 300, 16, {}), 1);
+}
+
+namespace {
+
+// The 2% tie rule over (T, cost) pairs in ascending T, cost < 0 meaning no
+// candidate, written out independently of least_cost_threads.
+int pick_least(const std::vector<std::pair<int, double>> &costs) {
+    double least = costs.front().second;
+    for (const auto &k : costs)
+        if (k.second >= 0.0) least = std::min(least, k.second);
+    for (const auto &k : costs)
+        if (k.second >= 0.0 && k.second <= least * 1.02) return k.first;
+    return 1;
+}
+
+} // namespace
+
+// The plan trace's terms are the model's: factor_plan_terms gives one entry
+// per candidate (1, 2, 4, ..., max), the cost written out from its fields
+// is factor_plan_cost and picks plan_threads' count, and each candidate's
+// top-part count is partition_count's.
+TEST(ThreadPlan, FactorTermsReproducePlan) {
+    Synth bal;
+    binary(bal, -1, 12, 1e7, 1e5);
+    Synth cat;
+    Int s = -1;
+    for (int i = 0; i < 10000; ++i) {
+        s = cat.add(s, 2e3);
+        cat.add(s, 1e3);
+    }
+    Synth rooty;
+    const Int root = rooty.add(-1, 1.5e9);
+    binary(rooty, root, 9, 1e6, 1e3);
+    binary(rooty, root, 9, 1e6, 1e3);
+    Synth tiled;  // a split root over one split and one plain subtree root
+    const Int troot = tiled.add(-1, 5e10, true);
+    binary(tiled, troot, 9, 1e6, 1e3, true);
+    binary(tiled, troot, 9, 1e6, 1e3);
+    Synth light;  // below kTreeParallelMinWork: 1 alone
+    binary(light, -1, 3, 1e5, 1e3);
+
+    const TreeView views[] = {bal.view(), cat.view(), rooty.view(), tiled.view(), light.view()};
+    const ThreadCosts costs[] = {ThreadCosts{}, ThreadCosts{2e4, 1e3}, ThreadCosts{5e5, 2e4}};
+    for (std::size_t v = 0; v < std::size(views); ++v) {
+        for (const int max_threads : {1, 3, 8, 12, 16}) {
+            const auto terms = factor_plan_terms(views[v], max_threads);
+            ASSERT_FALSE(terms.empty());
+            EXPECT_EQ(terms[0].threads, 1);
+            EXPECT_TRUE(terms[0].ok);
+            const bool candidates = max_threads >= 2 && terms[0].total >= kTreeParallelMinWork;
+            if (!candidates) {
+                EXPECT_EQ(terms.size(), 1u) << "tree " << v;
+            } else {
+                std::vector<int> want;
+                for (int T = 2; T < max_threads; T *= 2) want.push_back(T);
+                want.push_back(max_threads);
+                ASSERT_EQ(terms.size(), want.size() + 1) << "tree " << v;
+                for (std::size_t i = 0; i < want.size(); ++i) {
+                    const auto &k = terms[i + 1];
+                    EXPECT_EQ(k.threads, want[i]);
+                    EXPECT_EQ(k.total, terms[0].total);
+                    const PartitionCount pc =
+                        partition_count(views[v], k.threads, kTreeParallelMinWork);
+                    EXPECT_EQ(k.top_fronts, pc.top);
+                    EXPECT_EQ(k.ok, pc.subtrees >= 2);
+                    EXPECT_LE(k.split_top_fronts, k.top_fronts);
+                    EXPECT_LE(k.split_top_work, k.top_total);
+                }
+            }
+            for (const ThreadCosts &c : costs) {
+                std::vector<std::pair<int, double>> by_hand;
+                for (const auto &k : terms) {
+                    double cost = k.total;
+                    if (k.threads > 1) {
+                        const double T = k.threads;
+                        cost = !k.ok ? -1.0
+                                     : std::max(k.max_subtree, k.sub_total / T) +
+                                           std::max(k.cp_top, k.top_total / T) + T * c.per_thread +
+                                           static_cast<double>(k.top_fronts) * c.per_top_front;
+                    }
+                    EXPECT_EQ(factor_plan_cost(k, c), cost);
+                    by_hand.emplace_back(k.threads, cost);
+                }
+                const ThreadPlan p = plan_threads(views[v], max_threads, c);
+                EXPECT_EQ(p.threads, pick_least(by_hand)) << "tree " << v << ", max " << max_threads;
+            }
+        }
+    }
+
+    // The split fronts of the top part: the tiled root at every candidate,
+    // its work / T on the top path.
+    const auto terms = factor_plan_terms(tiled.view(), 16);
+    ASSERT_EQ(terms.size(), 5u);
+    for (std::size_t i = 1; i < terms.size(); ++i) {
+        EXPECT_GE(terms[i].split_top_fronts, 1u);
+        EXPECT_GE(terms[i].split_top_work, 5e10);
+        EXPECT_LT(terms[i].cp_top, 5e10 / terms[i].threads + 1e9);
+    }
+}
+
+// The trace text: one plan-factor line per candidate and the chosen count.
+TEST(ThreadPlan, FactorTraceFormat) {
+    Synth bal;
+    binary(bal, -1, 12, 1e7, 1e5);
+    const auto terms = factor_plan_terms(bal.view(), 4);
+    const std::string text = factor_plan_trace(terms, 4);
+    const std::string first = text.substr(0, text.find('\n'));
+    EXPECT_EQ(first.rfind("plan-factor T=1 ok=1 sub_total=", 0), 0u) << first;
+    EXPECT_NE(text.find("\nplan-factor T=2 ok=1 sub_total="), std::string::npos) << text;
+    EXPECT_NE(text.find(" split_top_fronts=0 split_top_work=0 total="), std::string::npos) << text;
+    EXPECT_NE(text.find("\nplan-factor T=4 ok=1 "), std::string::npos) << text;
+    EXPECT_NE(text.find("\nplan-factor chosen=4\n"), std::string::npos) << text;
+}
+
+// The solve's terms: solve_plan_cost is the documented formula and picks
+// plan_solve_threads' count; the trace prints them per candidate.
+TEST(ThreadPlan, SolveTermsReproducePlan) {
+    const std::vector<double> sub64(64, 1e6);
+    const std::vector<double> top3{1e3, 2e3, 4e3};
+    const std::vector<Int> parent3{2, 2, -1};
+    const std::vector<double> sub2{1e4, 1e4};
+    const std::vector<double> top5000(5000, 50.0);
+    std::vector<Int> chain_parent(5000);
+    for (std::size_t i = 0; i < chain_parent.size(); ++i) chain_parent[i] = static_cast<Int>(i) + 1;
+    chain_parent.back() = -1;
+
+    struct Case {
+        std::span<const double> sub, top;
+        std::span<const Int> parent;
+        std::size_t rows;
+    };
+    const Case cases[] = {{sub64, top3, parent3, 300},
+                          {sub64, top3, parent3, 300000},
+                          {sub2, top5000, chain_parent, 4000}};
+    const SolveCosts costs[] = {SolveCosts{}, SolveCosts{5e3, 5e2, 0.5}, SolveCosts{1e5, 5e3, 4.0}};
+    for (const Case &k : cases) {
+        const SolvePlanTerms st = solve_plan_terms(k.sub, k.top, k.parent, k.rows);
+        EXPECT_EQ(st.n_top, k.top.size());
+        EXPECT_EQ(st.top_rows, k.rows);
+        if (k.top.size() == 3) {
+            EXPECT_EQ(st.sub_total, 6.4e7);
+            EXPECT_EQ(st.max_subtree, 1e6);
+            EXPECT_EQ(st.top_total, 7e3);
+            EXPECT_EQ(st.top_cp, 6e3);  // 2e3 + 4e3
+        }
+        for (const SolveCosts &c : costs) {
+            for (const int max_threads : {2, 3, 8, 16}) {
+                std::vector<std::pair<int, double>> by_hand{{1, st.sub_total + st.top_total}};
+                for (const int T : candidate_threads(max_threads)) {
+                    if (T == 1) continue;
+                    const double cost = std::max(st.max_subtree, st.sub_total / T) + st.top_cp +
+                                        T * c.per_thread +
+                                        static_cast<double>(st.n_top) * c.per_top_step +
+                                        T * static_cast<double>(st.top_rows) * c.per_top_row;
+                    EXPECT_EQ(solve_plan_cost(st, T, c), cost);
+                    by_hand.emplace_back(T, cost);
+                }
+                EXPECT_EQ(solve_plan_cost(st, 1, c), st.sub_total + st.top_total);
+                EXPECT_EQ(plan_solve_threads(k.sub, k.top, k.parent, k.rows, max_threads, c),
+                          pick_least(by_hand));
+            }
+        }
+    }
+    EXPECT_EQ(candidate_threads(1), std::vector<int>{1});
+    EXPECT_EQ(candidate_threads(12), (std::vector<int>{1, 2, 4, 8, 12}));
+    EXPECT_EQ(candidate_threads(16), (std::vector<int>{1, 2, 4, 8, 16}));
+
+    const SolvePlanTerms st = solve_plan_terms(sub64, top3, parent3, 300);
+    const std::string text = solve_plan_trace(st, 4, 2);
+    EXPECT_EQ(text.rfind("plan-solve T=1 sub_total=6.4e+07 max_subtree=1e+06 top_total=7000 "
+                         "top_cp=6000 n_top=3 top_rows=300\n",
+                         0),
+              0u)
+        << text;
+    EXPECT_NE(text.find("\nplan-solve T=4 sub_total="), std::string::npos) << text;
+    EXPECT_NE(text.find("\nplan-solve chosen=2\n"), std::string::npos) << text;
 }

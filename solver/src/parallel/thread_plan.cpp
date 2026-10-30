@@ -5,6 +5,8 @@
 #include "smf/ldlt_kernel.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <queue>
 
 namespace smf {
@@ -90,10 +92,12 @@ void subtree_sums(const TreeView &t, SubtreeSums &u) {
 // parent is in the top part, or that are roots).
 struct PhaseTerms {
   PartitionCount pc;
-  double sub_total = 0.0;    // phase 1: work inside the subtrees
-  double max_subtree = 0.0;  //   and its heaviest subtree
-  double top_total = 0.0;    // phase 2: work of the top part
-  double cp_top = 0.0;       //   and its heaviest path, split fronts / threads
+  double sub_total = 0.0;       // phase 1: work inside the subtrees
+  double max_subtree = 0.0;     //   and its heaviest subtree
+  double top_total = 0.0;       // phase 2: work of the top part
+  double cp_top = 0.0;          //   its heaviest path, split fronts / threads
+  std::size_t split_top = 0;    //   its split fronts
+  double split_top_work = 0.0;  //   and their work
 };
 
 void phase_terms(const TreeView &t, const std::vector<double> &sub, double target, int threads,
@@ -106,6 +110,10 @@ void phase_terms(const TreeView &t, const std::vector<double> &sub, double targe
     if (sub[si] > target) {
       ++pt.pc.top;
       pt.top_total += t.work[si];
+      if (t.split[si] != 0) {
+        ++pt.split_top;
+        pt.split_top_work += t.work[si];
+      }
       const double w = t.split[si] != 0 ? t.work[si] / threads : t.work[si];
       const double path = w + below[si];
       if (p >= 0) {
@@ -122,24 +130,20 @@ void phase_terms(const TreeView &t, const std::vector<double> &sub, double targe
   }
 }
 
-// The candidate rule of both models (max_threads >= 2): 1, 2, 4, 8, ...
-// and max_threads, cost_of(T) < 0 meaning T is no candidate; in ascending
-// thread count, the first within 2% of the least cost. Returns it and its
-// cost.
-template <class CostOf>
-std::pair<int, double> least_cost_threads(int max_threads, double cost1, CostOf cost_of) {
-  std::vector<std::pair<int, double>> costs{{1, cost1}};
-  const auto add = [&](int T) {
-    const double cost = cost_of(T);
-    if (cost >= 0.0) costs.emplace_back(T, cost);
-  };
-  for (int T = 2; T < max_threads; T *= 2) add(T);
-  add(max_threads);
-  double least = cost1;
-  for (const auto &k : costs) least = std::min(least, k.second);
+// The tie rule of both models over (thread count, cost) pairs in ascending
+// thread count, the first T = 1 and a cost < 0 meaning no candidate: the
+// first within 2% of the least cost. Returns it and its cost.
+std::pair<int, double> least_cost_threads(std::span<const std::pair<int, double>> costs) {
+  double least = costs.front().second;
   for (const auto &k : costs)
-    if (k.second <= least * 1.02) return k;
+    if (k.second >= 0.0) least = std::min(least, k.second);
+  for (const auto &k : costs)
+    if (k.second >= 0.0 && k.second <= least * 1.02) return k;
   return costs.front();
+}
+
+void append_line(std::string &out, const char *line, int n) {
+  if (n > 0) out.append(line, static_cast<std::size_t>(n));
 }
 
 } // namespace
@@ -182,37 +186,108 @@ PartitionCount partition_count(const TreeView &t, int threads, double min_work) 
   return pt.pc;
 }
 
-ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c) {
-  ThreadPlan plan;
-  if (max_threads < 2) return plan;
+std::vector<int> candidate_threads(int max_threads) {
+  std::vector<int> out{1};
+  if (max_threads < 2) return out;
+  for (int T = 2; T < max_threads; T *= 2) out.push_back(T);
+  out.push_back(max_threads);
+  return out;
+}
+
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads) {
   SubtreeSums u;
   subtree_sums(t, u);
   const double total = u.total;
-  if (total < kTreeParallelMinWork || !(total > 0.0)) return plan;
-
+  std::vector<FactorPlanTerms> out(1);
+  out[0].total = total;
+  if (max_threads < 2 || total < kTreeParallelMinWork || !(total > 0.0)) return out;
   std::vector<double> below;
-  const auto [threads, cost] = least_cost_threads(max_threads, total, [&](int T) {
+  for (const int T : candidate_threads(max_threads)) {
+    if (T == 1) continue;
     PhaseTerms pt;
     phase_terms(t, u.work, total / (4.0 * T), T, below, pt);
-    if (pt.pc.subtrees < 2) return -1.0;
-    return std::max(pt.max_subtree, pt.sub_total / T) + std::max(pt.cp_top, pt.top_total / T) +
-           T * c.per_thread + static_cast<double>(pt.pc.top) * c.per_top_front;
-  });
+    FactorPlanTerms k;
+    k.threads = T;
+    k.ok = pt.pc.subtrees >= 2;
+    k.sub_total = pt.sub_total;
+    k.max_subtree = pt.max_subtree;
+    k.top_total = pt.top_total;
+    k.cp_top = pt.cp_top;
+    k.top_fronts = pt.pc.top;
+    k.split_top_fronts = pt.split_top;
+    k.split_top_work = pt.split_top_work;
+    k.total = total;
+    out.push_back(k);
+  }
+  return out;
+}
+
+double factor_plan_cost(const FactorPlanTerms &k, const ThreadCosts &c) {
+  if (k.threads <= 1) return k.total;
+  if (!k.ok) return -1.0;
+  const int T = k.threads;
+  return std::max(k.max_subtree, k.sub_total / T) + std::max(k.cp_top, k.top_total / T) +
+         T * c.per_thread + static_cast<double>(k.top_fronts) * c.per_top_front;
+}
+
+std::string factor_plan_trace(std::span<const FactorPlanTerms> terms, int chosen) {
+  std::string out;
+  char line[512];
+  for (const auto &k : terms)
+    append_line(out, line,
+                std::snprintf(line, sizeof line,
+                              "plan-factor T=%d ok=%d sub_total=%.6g max_subtree=%.6g "
+                              "top_total=%.6g cp_top=%.6g top_fronts=%d split_top_fronts=%d "
+                              "split_top_work=%.6g total=%.6g\n",
+                              k.threads, k.ok ? 1 : 0, k.sub_total, k.max_subtree, k.top_total,
+                              k.cp_top, static_cast<int>(k.top_fronts),
+                              static_cast<int>(k.split_top_fronts), k.split_top_work, k.total));
+  append_line(out, line, std::snprintf(line, sizeof line, "plan-factor chosen=%d\n", chosen));
+  return out;
+}
+
+bool plan_trace_enabled() {
+  static const bool on = [] {
+#if defined(_MSC_VER)
+    char *e = nullptr;
+    std::size_t len = 0;
+    const bool set = _dupenv_s(&e, &len, "SMF_BENCH_PLAN_TRACE") == 0 && e != nullptr &&
+                     std::atoi(e) != 0;
+    std::free(e);
+    return set;
+#else
+    const char *e = std::getenv("SMF_BENCH_PLAN_TRACE");
+    return e != nullptr && std::atoi(e) != 0;
+#endif
+  }();
+  return on;
+}
+
+ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c) {
+  const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, max_threads);
+  std::vector<std::pair<int, double>> costs;
+  costs.reserve(terms.size());
+  for (const auto &k : terms) costs.emplace_back(k.threads, factor_plan_cost(k, c));
+  const auto [threads, cost] = least_cost_threads(costs);
+  ThreadPlan plan;
   plan.threads = threads;
-  plan.predicted_speedup = total / cost;
+  plan.predicted_speedup = cost > 0.0 ? terms.front().total / cost : 1.0;
+  if (plan_trace_enabled()) std::fputs(factor_plan_trace(terms, threads).c_str(), stderr);
   return plan;
 }
 
-int plan_solve_threads(std::span<const double> subtree_work, std::span<const double> top_work,
-                       std::span<const Int> top_parent, std::size_t top_rows, int max_threads,
-                       const SolveCosts &c) {
-  if (max_threads < 2 || subtree_work.size() < 2) return 1;
-  double sub_total = 0.0, max_subtree = 0.0, top_total = 0.0;
+SolvePlanTerms solve_plan_terms(std::span<const double> subtree_work,
+                                std::span<const double> top_work, std::span<const Int> top_parent,
+                                std::size_t top_rows) {
+  SolvePlanTerms k;
+  k.subtrees = subtree_work.size();
+  k.n_top = top_work.size();
+  k.top_rows = top_rows;
   for (const double w : subtree_work) {
-    sub_total += w;
-    max_subtree = std::max(max_subtree, w);
+    k.sub_total += w;
+    k.max_subtree = std::max(k.max_subtree, w);
   }
-  for (const double w : top_work) top_total += w;
+  for (const double w : top_work) k.top_total += w;
 
   // Heaviest top path, children before parents (the order of a step's
   // pending children reaching zero; top_parent need not be ascending).
@@ -224,28 +299,61 @@ int plan_solve_threads(std::span<const double> subtree_work, std::span<const dou
   std::vector<std::size_t> ready;
   for (std::size_t i = 0; i < nt; ++i)
     if (pending[i] == 0) ready.push_back(i);
-  double cp_top = 0.0;
   while (!ready.empty()) {
     const std::size_t i = ready.back();
     ready.pop_back();
     const double path = top_work[i] + below[i];
     const Int p = top_parent[i];
     if (p < 0) {
-      cp_top = std::max(cp_top, path);
+      k.top_cp = std::max(k.top_cp, path);
       continue;
     }
     const std::size_t pi = static_cast<std::size_t>(p);
     below[pi] = std::max(below[pi], path);
     if (--pending[pi] == 0) ready.push_back(pi);
   }
+  return k;
+}
 
-  const double n_top = static_cast<double>(nt);
-  const double rows = static_cast<double>(top_rows);
-  return least_cost_threads(max_threads, sub_total + top_total, [&](int T) {
-           return std::max(max_subtree, sub_total / T) + cp_top + T * c.per_thread +
-                  n_top * c.per_top_step + T * rows * c.per_top_row;
-         })
-      .first;
+double solve_plan_cost(const SolvePlanTerms &k, int threads, const SolveCosts &c) {
+  if (threads <= 1) return k.sub_total + k.top_total;
+  const int T = threads;
+  const double n_top = static_cast<double>(k.n_top);
+  const double rows = static_cast<double>(k.top_rows);
+  return std::max(k.max_subtree, k.sub_total / T) + k.top_cp + T * c.per_thread +
+         n_top * c.per_top_step + T * rows * c.per_top_row;
+}
+
+std::string solve_plan_trace(const SolvePlanTerms &k, int max_threads, int chosen) {
+  std::string out;
+  char line[512];
+  for (const int T : candidate_threads(max_threads))
+    append_line(out, line,
+                std::snprintf(line, sizeof line,
+                              "plan-solve T=%d sub_total=%.6g max_subtree=%.6g top_total=%.6g "
+                              "top_cp=%.6g n_top=%d top_rows=%zu\n",
+                              T, k.sub_total, k.max_subtree, k.top_total, k.top_cp,
+                              static_cast<int>(k.n_top), k.top_rows));
+  append_line(out, line, std::snprintf(line, sizeof line, "plan-solve chosen=%d\n", chosen));
+  return out;
+}
+
+int plan_solve_threads(std::span<const double> subtree_work, std::span<const double> top_work,
+                       std::span<const Int> top_parent, std::size_t top_rows, int max_threads,
+                       const SolveCosts &c) {
+  const bool parallel = max_threads >= 2 && subtree_work.size() >= 2;
+  const bool trace = plan_trace_enabled();
+  if (!parallel && !trace) return 1;
+  const SolvePlanTerms k = solve_plan_terms(subtree_work, top_work, top_parent, top_rows);
+  int chosen = 1;
+  if (parallel) {
+    std::vector<std::pair<int, double>> costs;
+    for (const int T : candidate_threads(max_threads))
+      costs.emplace_back(T, solve_plan_cost(k, T, c));
+    chosen = least_cost_threads(costs).first;
+  }
+  if (trace) std::fputs(solve_plan_trace(k, parallel ? max_threads : 1, chosen).c_str(), stderr);
+  return chosen;
 }
 
 } // namespace smf
