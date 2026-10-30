@@ -71,9 +71,18 @@ enum class OrderingMethod {
 //                     nemin): merged pivots <= 4, no new zeros, <= 16 with
 //                     zero share < 0.8, <= 48 with < 0.1, or any size with
 //                     < 0.05. Collapses chains of thin top fronts.
+//   CostModel       - the SMF rule, or a merge whose saved contribution-
+//                     block traffic (copy out, zeroing, extend-add of a
+//                     block of at least 128 rows) outweighs the padding
+//                     flops it adds (independent of nemin; nemin 1 still
+//                     means no amalgamation). Merges the narrow fronts
+//                     with large blocks of hard KKT trees. Not across a
+//                     front that receives a certain delay (a single-column
+//                     leaf with a zero diagonal in the analysed values).
 enum class Amalgamation {
     Smf            = 0,
-    SmfPlusCholmod = 1
+    SmfPlusCholmod = 1,
+    CostModel      = 2
 };
 
 enum class MatchingTrigger {
@@ -93,8 +102,10 @@ enum class MatchingTrigger {
 //                     too dear (past a guard band above the 1.5 flops rule):
 //                     AMD/METIS kept, no exact matching.
 //   ResumedExact    - the searches exceeded the budget, the initial phase's
-//                     matching ordering was not clearly too dear, so the
-//                     searches resumed and the exact matching decided.
+//                     matching ordering was not clearly too dear (or the
+//                     base ordering's factor was dear enough not to ask),
+//                     so the searches resumed and the exact matching
+//                     decided.
 enum class MatchingTrial {
     None            = 0,
     Exact           = 1,

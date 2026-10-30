@@ -537,11 +537,12 @@ int main(int argc, char **argv) {
         else if (k == "aptp") ctrl.front_kernel = smf::FrontKernel::Aptp;
         else if (k == "auto") ctrl.front_kernel = smf::FrontKernel::Auto;
     }
-    // SMF_BENCH_AMALGAMATION = smf | cholmod (merge rule).
+    // SMF_BENCH_AMALGAMATION = smf | cholmod | cost (merge rule).
     if (const char *e = std::getenv("SMF_BENCH_AMALGAMATION")) {
         const std::string k = e;
         if (k == "smf") ctrl.amalgamation = smf::Amalgamation::Smf;
         else if (k == "cholmod") ctrl.amalgamation = smf::Amalgamation::SmfPlusCholmod;
+        else if (k == "cost") ctrl.amalgamation = smf::Amalgamation::CostModel;
     }
     if (const char *e = std::getenv("SMF_BENCH_APTP_NB")) ctrl.aptp_nb = std::atoi(e);
     if (const char *e = std::getenv("SMF_BENCH_APTP_IB")) ctrl.aptp_ib = std::atoi(e);

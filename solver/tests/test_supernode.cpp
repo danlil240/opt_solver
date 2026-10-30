@@ -282,6 +282,115 @@ TEST(Supernode, CholmodRuleRespectsZeroShare) {
     EXPECT_EQ(chol.size(), 2u);
 }
 
+// Lower trapezoid of every node (pivot block lower triangle plus the rows
+// below): what the solve reads. The upper triangle of a pivot block is
+// stored but never read.
+static long long lower_entries(const std::vector<Supernode> &sn, const std::vector<Int> &order,
+                               const std::vector<Int> &colcount) {
+    long long total = 0;
+    for (const auto &s : sn) {
+        const long long k = s.width();
+        const long long q = colcount[static_cast<std::size_t>(order[static_cast<std::size_t>(s.col_end) - 1])] - 1;
+        total += k * (k + 1) / 2 + k * q;
+    }
+    return total;
+}
+
+// CostModel: each 10-column node of the thin chain hands its parent a
+// contribution block of ~1600-1800 rows that lies in the parent's front but
+// for one row, so merging pads 10 zeros per node and saves ~3 x 1700^2 words
+// of block traffic. The whole chain merges, adding almost no zeros below the
+// pivot block (+0.6%; the 200 x 200 pivot block's upper triangle is new
+// storage the solve does not read).
+TEST(Supernode, CostModelMergesLargeBlocks) {
+    std::vector<Int> parent, colcount, order;
+    thin_chain(parent, colcount, 20, 10, 1800);
+    const Int n = 200;
+    std::vector<Supernode> base, cost;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, base);
+    ASSERT_EQ(base.size(), 20u);
+    const long long e0 = lower_entries(base, order, colcount);
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, cost, nullptr, nullptr,
+                       Amalgamation::CostModel);
+    EXPECT_EQ(cost.size(), 1u);
+    EXPECT_LT(static_cast<double>(lower_entries(cost, order, colcount)),
+              1.01 * static_cast<double>(e0));
+    // nemin 1 still means no amalgamation.
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 1, order, cost, nullptr, nullptr,
+                       Amalgamation::CostModel);
+    EXPECT_EQ(cost.size(), 20u);
+}
+
+// CostModel refuses a merge whose padding flops exceed the traffic saved: a
+// 50-column child with a 200-row block under a 2100-row parent front would
+// pad each child column with 1900 zeros, ~2e8 flops against 3 x 200^2 words.
+TEST(Supernode, CostModelRefusesPaddedMerge) {
+    const Int w = 50, n = 2 * w;
+    std::vector<Int> parent(static_cast<std::size_t>(n)), colcount(static_cast<std::size_t>(n)), order;
+    for (Int j = 0; j < n; ++j) {
+        parent[static_cast<std::size_t>(j)] = (j + 1 < n) ? j + 1 : -1;
+        const Int node = j / w, t = j % w;
+        colcount[static_cast<std::size_t>(j)] = (node == 0) ? 250 - t : 2100 - t;
+    }
+    std::vector<Supernode> cost;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, cost, nullptr, nullptr,
+                       Amalgamation::CostModel);
+    EXPECT_EQ(cost.size(), 2u);
+}
+
+// The CostModel delay guard, on a cops_elec-like tree: a chain of 40 single
+// columns c_i (each block exactly its parent's front: no padding) under a
+// dense 200-column root, each c_i also the parent of a leaf L_i with a zero
+// diagonal (rows L_i, c_i, root). Smf groups the chain 8 columns at a time
+// and absorbs most leaves into those groups. Unguarded, CostModel merges the
+// whole chain into the root, the leaves stay apart and all of them would
+// delay into that one front; with the zero diagonals given, it leaves the
+// tree as Smf builds it.
+TEST(Supernode, CostModelDelayGuard) {
+    const Int m = 40, W = 200, n = 2 * m + W;
+    std::vector<Int> parent(static_cast<std::size_t>(n)), colcount(static_cast<std::size_t>(n)), order;
+    std::vector<std::uint8_t> zero(static_cast<std::size_t>(n), 0);
+    for (Int i = 0; i < m; ++i) {
+        const auto L = static_cast<std::size_t>(2 * i), c = L + 1;
+        parent[L] = 2 * i + 1;
+        colcount[L] = 3;
+        zero[L] = 1;
+        parent[c] = (i + 1 < m) ? 2 * i + 3 : 2 * m;
+        colcount[c] = 1 + (m - 1 - i) + W;
+    }
+    for (Int j = 0; j < W; ++j) {
+        parent[static_cast<std::size_t>(2 * m + j)] = (j + 1 < W) ? 2 * m + j + 1 : -1;
+        colcount[static_cast<std::size_t>(2 * m + j)] = W - j;
+    }
+    std::vector<Supernode> base, cost, guarded;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, base);
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, cost, nullptr, nullptr,
+                       Amalgamation::CostModel);
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, guarded, nullptr, nullptr,
+                       Amalgamation::CostModel, zero.data());
+    // The root (last in postorder) holds the chain when it merged.
+    EXPECT_GE(cost.back().width(), W + m);
+    EXPECT_GT(cost.size(), base.size());  // leaves left apart
+    EXPECT_EQ(guarded.size(), base.size());
+    EXPECT_EQ(guarded.back().width(), base.back().width());
+}
+
+// Blocks below the CostModel's minimum (128 rows) stay with the Smf rule:
+// small fronts, cheap to move and where merging mostly adds solve-phase
+// zeros, are left exactly as Smf leaves them.
+TEST(Supernode, CostModelLeavesSmallBlocks) {
+    std::vector<Int> parent, colcount, order, order2;
+    thin_chain(parent, colcount, 5, 10, 120);
+    const Int n = 50;
+    std::vector<Supernode> base, cost;
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, base);
+    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order2, cost, nullptr, nullptr,
+                       Amalgamation::CostModel);
+    EXPECT_EQ(base.size(), 5u);
+    ASSERT_EQ(cost.size(), base.size());
+    EXPECT_EQ(order2, order);
+}
+
 } // namespace smf
 
 #include <random>
