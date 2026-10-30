@@ -222,13 +222,20 @@ struct Control {
     int            num_threads   = 1;
     // auto_threads (num_threads > 1): the factorization runs on as many of
     // the num_threads threads as its assembly tree repays, by a cost model
-    // (src/parallel/thread_plan.hpp) of the engine's two phases at T threads:
-    // the subtrees (the larger of the heaviest subtree and their work / T),
-    // then the top part (the larger of its heaviest path, fronts run as tile
-    // tasks counting 1/T, and its work / T), plus thread_cost_per_thread per
-    // thread and thread_cost_per_top_front per top-part front; candidates
-    // 1, 2, 4, 8, ... and num_threads. The choice is cached per analysis in
-    // the NumericWorkspace. Fewer than 2 threads: the serial
+    // (src/parallel/thread_plan.hpp) of the engine's two phases at T threads.
+    // The subtree phase runs on serial BLAS (BlasSerialGuard); the top
+    // fronts run one after another or side by side, each under a
+    // BlasThreadGuard with its share of the threads, or as tile tasks.
+    // Both models (this and the solve's, solve_cost_* below) price work in
+    // flops plus a per-thread and per-front term. The factor model: the
+    // subtrees (the larger of the heaviest subtree and their work / T), then
+    // the top part (the larger of its heaviest path, fronts run as tile
+    // tasks counting 1/T, and its work, whose tile-split share speeds up to
+    // thread_split_scaling_cap threads only), plus thread_cost_per_thread per
+    // thread, thread_cost_per_top_front per top-part front and
+    // thread_cost_per_split_front_thread per split front and thread;
+    // candidates 1, 2, 4, 8, ... and num_threads. The choice is cached per
+    // analysis in the NumericWorkspace. Fewer than 2 threads: the serial
     // engine (Info::threads_used = 1). The choice never changes deterministic
     // mode's results. Front-tier board, factor time at 16 threads against 1
     // with all threads used: robot_arm_8k 7.7x slower (11.8k of its 22.7k
@@ -241,12 +248,32 @@ struct Control {
     // auto_threads = false: the tree is partitioned for num_threads threads
     // whenever its front work reaches 2e7, and the solve runs on the
     // factorization's thread count (FactorKeep::solve_threads; at most the
-    // solve call's num_threads and the solve subtrees) with neither cost
-    // model consulted, so thread counts are fixed for scaling measurements.
+    // solve call's num_threads and the solve subtrees); neither cost
+    // model chooses a count (both are evaluated for the plan trace alone,
+    // SMF_BENCH_PLAN_TRACE), so thread counts are fixed for scaling
+    // measurements.
     bool           auto_threads  = true;
-    // The cost model's terms in front-work units (f^2 p): calibration hooks.
-    double         thread_cost_per_thread    = 1e5;
+    // The factor cost model's terms in front-work units (f^2 p). Fitted
+    // offline on the Ryzen 9950X3D (2 CCDs of 8 cores) against measured
+    // factor times at 1/2/4/8/16 threads with auto_threads off (truth data:
+    // benchmarks/results/thread_sched_truth2, fit summary fit.md there,
+    // tools/bench/fit_thread_costs.py): loss 3.36 against 4.15 for the
+    // previous defaults (per_thread 1e5, no split terms); picks slower than
+    // 1 thread by more than 5%: 0; 16-thread-max picks slower than the
+    // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
+    // per_thread 5e5-7e5 with per_split_front_thread 2e5-5e5 at a cap of
+    // 7-8 all lie within about 3% of that loss.
+    double         thread_cost_per_thread    = 7e5;
     double         thread_cost_per_top_front = 5e3;
+    // Per tile-split top front and thread (team set-up and barriers).
+    double         thread_cost_per_split_front_thread = 3e5;
+    // Threads past which a tile-split front's work stops speeding up. 8 is
+    // the core count of one CCD on the 9950X3D where it was fitted: tile
+    // teams spanning both CCDs gained nothing, and aug3dcqp, bratu3d and
+    // TSOPF_FS_b300_c3 (recommended track) and ncvxqp7 (ipopt) ran 5-26%
+    // slower at 16 threads than at 8. Open follow-up: detect the size of
+    // the L3-sharing cluster at run time. Values below 1 count as 1.
+    int            thread_split_scaling_cap  = 8;
     // The solve's thread count, chosen at factorization time from its own
     // cost model (thread_plan.hpp, plan_solve_threads; FactorKeep::
     // solve_threads) when the factorization leaves a parallel solve layout
@@ -254,11 +281,13 @@ struct Control {
     // the subtrees (the larger of the heaviest and their work / T), then
     // the top part's heaviest path, plus these terms per thread, per top
     // step and per top row and thread (the zeroed and summed buffers), in
-    // step-work units (p f). Calibration hooks, pending the board's
-    // calibration.
+    // step-work units (p f). Fitted like the factor terms above (same truth
+    // data, fit.md): loss 2.46 against 8.08 for the previous defaults
+    // (per_top_step 2e3, per_top_row 2.0); picks slower than 1 thread by
+    // more than 5%: 0.
     double         solve_cost_per_thread   = 2e4;
-    double         solve_cost_per_top_step = 2e3;
-    double         solve_cost_per_top_row  = 2.0;
+    double         solve_cost_per_top_step = 100;
+    double         solve_cost_per_top_row  = 1.0;
     // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
     // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
     // TPP at every thread count): fronts of at least 512 rows at the top of

@@ -559,12 +559,38 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
-    // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" (Control::
-    // thread_cost_per_thread, thread_cost_per_top_front; work units).
+    // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,
+    // per_top_front,per_split_front_thread,split_cap" (Control::
+    // thread_cost_per_thread, thread_cost_per_top_front,
+    // thread_cost_per_split_front_thread, thread_split_scaling_cap; work
+    // units, the cap an integer). Anything else keeps the defaults.
     if (const char *e = std::getenv("SMF_BENCH_THREAD_COSTS")) {
-        char *end = nullptr;
-        ctrl.thread_cost_per_thread = std::strtod(e, &end);
-        if (end != nullptr && *end == ',') ctrl.thread_cost_per_top_front = std::strtod(end + 1, nullptr);
+        double v[4] = {0, 0, 0, 0};
+        int n = 0;
+        const char *p = e;
+        bool ok = true;
+        while (ok && n < 4) {
+            char *end = nullptr;
+            v[n] = std::strtod(p, &end);
+            ok = end != p && (*end == ',' || *end == '\0');
+            if (!ok) break;
+            ++n;
+            p = end;
+            if (*p == '\0') break;
+            ++p;  // the comma; a trailing one leaves p at the end and fails the next parse
+        }
+        ok = ok && *p == '\0' && (n == 2 || n == 4) &&
+             (n < 4 || (v[3] == std::floor(v[3]) && v[3] >= 1 && v[3] < 1e6));
+        if (ok) {
+            ctrl.thread_cost_per_thread = v[0];
+            ctrl.thread_cost_per_top_front = v[1];
+            if (n == 4) {
+                ctrl.thread_cost_per_split_front_thread = v[2];
+                ctrl.thread_split_scaling_cap = static_cast<int>(v[3]);
+            }
+        } else {
+            std::fprintf(stderr, "warning: SMF_BENCH_THREAD_COSTS=\"%s\" is not two or four comma-separated numbers (the last a positive integer); keeping the defaults\n", e);
+        }
     }
     // SMF_BENCH_SOLVE_COSTS = "per_thread,per_top_step,per_top_row" (Control::
     // solve_cost_per_thread, solve_cost_per_top_step, solve_cost_per_top_row;

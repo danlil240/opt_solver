@@ -121,7 +121,8 @@ TEST(ThreadPlan, BalancedTreeUsesAllThreads) {
 
 // A root with 98% of the work: unsplit, the top phase alone takes 0.98 of
 // the serial time, so no thread count gains more than 2% (the tie rule
-// keeps the smallest); split into tiles it scales.
+// keeps the smallest); split into tiles it scales (to 16 threads with the
+// split cap lifted to 16; SplitCapStopsAtCap has the default cap of 8).
 TEST(ThreadPlan, SerialRootCapsThreads) {
     for (const bool root_split : {false, true}) {
         Synth rooty;
@@ -129,7 +130,9 @@ TEST(ThreadPlan, SerialRootCapsThreads) {
         binary(rooty, root, 9, 1e6, 1e3);
         binary(rooty, root, 9, 1e6, 1e3);
         const TreeView t = rooty.view();
-        const ThreadPlan p = plan_threads(t, 16, {});
+        ThreadCosts costs;
+        costs.split_cap = 16;
+        const ThreadPlan p = plan_threads(t, 16, costs);
         if (root_split) {
             EXPECT_EQ(p.threads, 16);
         } else {
@@ -342,7 +345,7 @@ TEST(ThreadPlan, TasksMergeTinySubtrees) {
         EXPECT_EQ(pc.top, chain.size());
         for (const auto &k : factor_plan_terms(t, T)) {
             if (k.threads != T) continue;
-            EXPECT_EQ(k.max_subtree, *std::max_element(tw.begin(), tw.end()));
+            EXPECT_DOUBLE_EQ(k.max_subtree, *std::max_element(tw.begin(), tw.end()));
             EXPECT_NEAR(k.sub_total, sub_total, 1e-9 * sub_total);
         }
     }
@@ -460,7 +463,12 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
     binary(light, -1, 3, 1e5, 1e3);
 
     const TreeView views[] = {bal.view(), cat.view(), rooty.view(), tiled.view(), light.view()};
-    const ThreadCosts costs[] = {ThreadCosts{}, ThreadCosts{2e4, 1e3}, ThreadCosts{5e5, 2e4}};
+    const ThreadCosts costs[] = {ThreadCosts{},
+                                 ThreadCosts{2e4, 1e3},
+                                 ThreadCosts{5e5, 2e4},
+                                 ThreadCosts{1e5, 5e3, 0.0, 16},
+                                 ThreadCosts{2e5, 5e3, 1e6, 4},
+                                 ThreadCosts{1e5, 5e3, 3e5, 0}};
     for (std::size_t v = 0; v < std::size(views); ++v) {
         for (const int max_threads : {1, 3, 8, 12, 16}) {
             const auto terms = factor_plan_terms(views[v], max_threads);
@@ -478,7 +486,7 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
                 for (std::size_t i = 0; i < want.size(); ++i) {
                     const auto &k = terms[i + 1];
                     EXPECT_EQ(k.threads, want[i]);
-                    EXPECT_EQ(k.total, terms[0].total);
+                    EXPECT_DOUBLE_EQ(k.total, terms[0].total);
                     const PartitionCount pc =
                         partition_count(views[v], k.threads, kTreeParallelMinWork);
                     EXPECT_EQ(k.top_fronts, pc.top);
@@ -493,12 +501,18 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
                     double cost = k.total;
                     if (k.threads > 1) {
                         const double T = k.threads;
+                        const double cap = std::max(1, c.split_cap);
+                        const double top =
+                            std::max(k.cp_top, (k.top_total - k.split_top_work) / T +
+                                                   k.split_top_work / std::min(T, cap));
                         cost = !k.ok ? -1.0
-                                     : std::max(k.max_subtree, k.sub_total / T) +
-                                           std::max(k.cp_top, k.top_total / T) + T * c.per_thread +
-                                           static_cast<double>(k.top_fronts) * c.per_top_front;
+                                     : std::max(k.max_subtree, k.sub_total / T) + top +
+                                           T * c.per_thread +
+                                           static_cast<double>(k.top_fronts) * c.per_top_front +
+                                           static_cast<double>(k.split_top_fronts) * T *
+                                               c.per_split_front_thread;
                     }
-                    EXPECT_EQ(factor_plan_cost(k, c), cost);
+                    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), cost);
                     by_hand.emplace_back(k.threads, cost);
                 }
                 const ThreadPlan p = plan_threads(views[v], max_threads, c);
@@ -516,6 +530,80 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
         EXPECT_GE(terms[i].split_top_work, 5e10);
         EXPECT_LT(terms[i].cp_top, 5e10 / terms[i].threads + 1e9);
     }
+}
+
+// factor_plan_cost, the terms written out by hand: the split work speeds up
+// to split_cap threads, each split front costs per_split_front_thread per
+// thread, cp_top is taken as traced.
+TEST(ThreadPlan, FactorCostSplitTerms) {
+    FactorPlanTerms k;
+    k.threads = 16;
+    k.ok = true;
+    k.sub_total = 1.6e9;
+    k.max_subtree = 1e7;
+    k.top_total = 8e9;
+    k.cp_top = 1e8;
+    k.top_fronts = 40;
+    k.split_top_fronts = 3;
+    k.split_top_work = 6.4e9;
+    k.total = 1e10;
+
+    // Subtrees 1.6e9 / 16 = 1e8; top: (8e9 - 6.4e9) / 16 + 6.4e9 / 8 = 9e8;
+    // 16 * 7e5 + 40 * 5e3 + 3 * 16 * 3e5 = 2.58e7.
+    ThreadCosts c{7e5, 5e3, 3e5, 8};
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 1025800000.0);
+    // Uncapped (cap = T): top = 1e8 + 4e8.
+    c.split_cap = 16;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 625800000.0);
+    c.split_cap = 64;  // beyond T: min(T, cap) = T
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 625800000.0);
+    // Below 1 counts as 1: the split work runs on one thread.
+    for (const int cap : {0, 1, -3}) {
+        c.split_cap = cap;
+        EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 6625800000.0) << "cap " << cap;
+    }
+    // cp_top floors the top phase.
+    c.split_cap = 8;
+    k.cp_top = 2e9;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 1e8 + 2e9 + 2.58e7);
+    k.cp_top = 1e8;
+
+    // T = 4 is under the cap: (8e9 - 6.4e9) / 4 + 6.4e9 / 4 = 2e9, subtrees
+    // 4e8, 4 * 7e5 + 40 * 5e3 + 3 * 4 * 3e5 = 6.6e6.
+    k.threads = 4;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 2406600000.0);
+    // No split fronts: the per-split term and the cap vanish.
+    k.split_top_fronts = 0;
+    k.split_top_work = 0.0;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 4e8 + 2e9 + 4 * 7e5 + 40 * 5e3);
+    // T = 1 is the total; !ok is -1.
+    k.threads = 1;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), 1e10);
+    k.threads = 16;
+    k.ok = false;
+    EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), -1.0);
+}
+
+// A tree whose work is a tile-split root: capped at 8 threads, 16 buys
+// nothing and costs 8 more threads' terms, so the plan stops at 8; uncapped
+// it takes 16.
+TEST(ThreadPlan, SplitCapStopsAtCap) {
+    Synth rooty;
+    const Int root = rooty.add(-1, 5e10, true);
+    binary(rooty, root, 9, 1e6, 1e3);
+    binary(rooty, root, 9, 1e6, 1e3);
+    const TreeView t = rooty.view();
+    ThreadCosts c;  // the defaults: cap 8
+    EXPECT_EQ(c.split_cap, 8);
+    const ThreadPlan capped = plan_threads(t, 16, c);
+    EXPECT_EQ(capped.threads, 8);
+    c.split_cap = 16;
+    EXPECT_EQ(plan_threads(t, 16, c).threads, 16);
+    // The cap never limits a tree with no split work.
+    Synth bal;
+    binary(bal, -1, 12, 1e7, 1e5);
+    c.split_cap = 8;
+    EXPECT_EQ(plan_threads(bal.view(), 16, c).threads, 16);
 }
 
 // The trace text: one plan-factor line per candidate and the chosen count.
@@ -558,10 +646,10 @@ TEST(ThreadPlan, SolveTermsReproducePlan) {
         EXPECT_EQ(st.n_top, k.top.size());
         EXPECT_EQ(st.top_rows, k.rows);
         if (k.top.size() == 3) {
-            EXPECT_EQ(st.sub_total, 6.4e7);
-            EXPECT_EQ(st.max_subtree, 1e6);
-            EXPECT_EQ(st.top_total, 7e3);
-            EXPECT_EQ(st.top_cp, 6e3);  // 2e3 + 4e3
+            EXPECT_DOUBLE_EQ(st.sub_total, 6.4e7);
+            EXPECT_DOUBLE_EQ(st.max_subtree, 1e6);
+            EXPECT_DOUBLE_EQ(st.top_total, 7e3);
+            EXPECT_DOUBLE_EQ(st.top_cp, 6e3);  // 2e3 + 4e3
         }
         for (const SolveCosts &c : costs) {
             for (const int max_threads : {2, 3, 8, 16}) {
@@ -572,10 +660,10 @@ TEST(ThreadPlan, SolveTermsReproducePlan) {
                                         T * c.per_thread +
                                         static_cast<double>(st.n_top) * c.per_top_step +
                                         T * static_cast<double>(st.top_rows) * c.per_top_row;
-                    EXPECT_EQ(solve_plan_cost(st, T, c), cost);
+                    EXPECT_DOUBLE_EQ(solve_plan_cost(st, T, c), cost);
                     by_hand.emplace_back(T, cost);
                 }
-                EXPECT_EQ(solve_plan_cost(st, 1, c), st.sub_total + st.top_total);
+                EXPECT_DOUBLE_EQ(solve_plan_cost(st, 1, c), st.sub_total + st.top_total);
                 EXPECT_EQ(plan_solve_threads(k.sub, k.top, k.parent, k.rows, max_threads, c),
                           pick_least(by_hand));
             }

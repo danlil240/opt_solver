@@ -80,6 +80,7 @@ struct TreeParallelBuffers {
   // thread count and which of the two. Refactorizations of an analysis
   // reuse it instead of walking the tree again.
   struct Partition {
+    // Kept between calls (and across refactorizations): O(ns) memory.
     std::uint64_t analysis = 0;  // AnalysisKeep::serial; 0: none
     std::size_t ns = 0;
     int threads = 0;
@@ -939,28 +940,31 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     have_tv = true;
     return tv;
   };
+  const ThreadCosts thread_costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
+                                 ctrl.thread_cost_per_split_front_thread,
+                                 ctrl.thread_split_scaling_cap};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
   if (ctrl.auto_threads && want_threads > 1) {
     auto &pc = ws.thread_plan;
     if (pc.analysis != keep.serial || pc.num_threads != ctrl.num_threads ||
-        pc.per_thread != ctrl.thread_cost_per_thread ||
-        pc.per_top_front != ctrl.thread_cost_per_top_front || pc.tiles_on != tiles_on) {
-      pc.threads = plan_threads(view(), ctrl.num_threads,
-                                ThreadCosts{ctrl.thread_cost_per_thread,
-                                            ctrl.thread_cost_per_top_front})
-                       .threads;
+        pc.per_thread != thread_costs.per_thread ||
+        pc.per_top_front != thread_costs.per_top_front ||
+        pc.per_split_front_thread != thread_costs.per_split_front_thread ||
+        pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on) {
+      pc.threads = plan_threads(view(), ctrl.num_threads, thread_costs).threads;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
-      pc.per_thread = ctrl.thread_cost_per_thread;
-      pc.per_top_front = ctrl.thread_cost_per_top_front;
+      pc.per_thread = thread_costs.per_thread;
+      pc.per_top_front = thread_costs.per_top_front;
+      pc.per_split_front_thread = thread_costs.per_split_front_thread;
+      pc.split_cap = thread_costs.split_cap;
       pc.tiles_on = tiles_on;
     }
     want_threads = pc.threads;
   } else if (want_threads > 1 && plan_trace_enabled()) {
     // auto_threads off: the plan is evaluated for SMF_BENCH_PLAN_TRACE only
     // (its terms do not depend on auto_threads) and not used.
-    plan_threads(view(), ctrl.num_threads,
-                 ThreadCosts{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front});
+    plan_threads(view(), ctrl.num_threads, thread_costs);
   }
   const auto partition = [&](int nthreads, bool budget) {
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();

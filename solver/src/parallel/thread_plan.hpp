@@ -86,7 +86,7 @@ partition_tasks(const TreeView &t, int threads, double min_work, std::vector<std
 // Two adjacent merged tasks weigh more than a grain together, so there are
 // at most about 2 kTaskGrainsPerThread merged tasks per thread, and a
 // heaviest-first schedule of tasks within a grain ends within a grain of
-// sub_total / threads.
+// sub_total / threads. Swept at 4 to 64 per thread in Task 6a2: within noise.
 inline constexpr double kTaskGrainsPerThread = 16.0;
 inline double task_grain(double sub_total, int threads) {
   return sub_total / (kTaskGrainsPerThread * static_cast<double>(threads));
@@ -100,11 +100,15 @@ struct PartitionCount {
 };
 PartitionCount partition_count(const TreeView &t, int threads, double min_work);
 
-// Cost model terms, in work units (f^2 p). Control::thread_cost_per_thread
-// and thread_cost_per_top_front.
+// Cost model terms, in work units (f^2 p). Control::thread_cost_per_thread,
+// thread_cost_per_top_front, thread_cost_per_split_front_thread and
+// thread_split_scaling_cap (the fitted defaults and their evidence are
+// there).
 struct ThreadCosts {
-  double per_thread = 1e5;     // starting and joining one thread
-  double per_top_front = 5e3;  // handing one top-part front between threads
+  double per_thread = 7e5;              // starting and joining one thread
+  double per_top_front = 5e3;           // handing one top-part front between threads
+  double per_split_front_thread = 3e5;  // a tile-split front's team set-up, per thread
+  int split_cap = 8;                    // threads past which split work stops speeding up (< 1: 1)
 };
 struct ThreadPlan {
   int threads = 1;
@@ -116,12 +120,17 @@ struct ThreadPlan {
 // T > 1, the engine's two phases on partition_tasks' split at T threads (T
 // is no candidate when that gives fewer than 2 tasks): the tasks in
 // parallel, a barrier, then the top part:
-//   cost(T) = max(max_subtree, sub_total / T) + max(cp_top(T), top_total / T)
-//             + T per_thread + top(T) per_top_front,
+//   cost(T) = max(max_subtree, sub_total / T) + top(T)
+//             + T per_thread + top_fronts(T) per_top_front
+//             + split_fronts(T) T per_split_front_thread,
+//   top(T) = max(cp_top(T), (top_total - split_work) / T
+//                           + split_work / min(T, split_cap)),
 // with sub_total / max_subtree the work inside the subtrees / of the
-// heaviest task, top_total the top part's work, cp_top(T) the heaviest path
-// through top nodes only (split fronts' work / T), and top(T) the number of
-// top nodes.
+// heaviest task, top_total the top part's work, split_work that of its
+// tile-split fronts (which stop speeding up past split_cap threads),
+// cp_top(T) the heaviest path through top nodes only (split fronts' work /
+// T), top_fronts(T) the number of top nodes and split_fronts(T) of them
+// run as tile tasks.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 
 // The candidate thread counts of both models, ascending: 1, 2, 4, 8, ...
@@ -166,8 +175,8 @@ bool plan_trace_enabled();
 // solve_cost_per_top_row.
 struct SolveCosts {
   double per_thread = 2e4;    // starting and joining one thread
-  double per_top_step = 2e3;  // handing one top step between threads
-  double per_top_row = 2.0;   // zeroing and summing one top row's buffer, per thread
+  double per_top_step = 100;  // handing one top step between threads
+  double per_top_row = 1.0;   // zeroing and summing one top row's buffer, per thread
 };
 
 // The solve's thread count (FactorKeep::solve_threads) for a parallel solve

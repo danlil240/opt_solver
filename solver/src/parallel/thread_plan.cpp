@@ -296,8 +296,14 @@ double factor_plan_cost(const FactorPlanTerms &k, const ThreadCosts &c) {
   if (k.threads <= 1) return k.total;
   if (!k.ok) return -1.0;
   const int T = k.threads;
-  return std::max(k.max_subtree, k.sub_total / T) + std::max(k.cp_top, k.top_total / T) +
-         T * c.per_thread + static_cast<double>(k.top_fronts) * c.per_top_front;
+  // Split fronts' work speeds up to split_cap threads only; cp_top keeps
+  // dividing them by T, as traced.
+  const int cap = std::max(1, c.split_cap);
+  const double top =
+      std::max(k.cp_top, (k.top_total - k.split_top_work) / T + k.split_top_work / std::min(T, cap));
+  return std::max(k.max_subtree, k.sub_total / T) + top + T * c.per_thread +
+         static_cast<double>(k.top_fronts) * c.per_top_front +
+         static_cast<double>(k.split_top_fronts) * T * c.per_split_front_thread;
 }
 
 std::string factor_plan_trace(std::span<const FactorPlanTerms> terms, int chosen) {
