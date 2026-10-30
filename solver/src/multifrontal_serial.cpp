@@ -5,11 +5,11 @@
 #include "smf/ldlt_kernel.hpp"
 #include "smf/solve_pool.hpp"
 #include "parallel/tile_tasks.hpp"
+#include "parallel/top_scheduler.hpp"
 
 #include <algorithm>
 #include <limits>
 #include <atomic>
-#include <condition_variable>
 #include <cmath>
 #include <cstddef>
 #include <cassert>
@@ -1162,125 +1162,87 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     for (int t = 0; t < threads; ++t)
       phase1_steps[static_cast<std::size_t>(t)] = tpass[static_cast<std::size_t>(t)].steps->size();
 
-    // Phase 2: the top of the tree as a task DAG. A node is ready once its
-    // children are factored; ready nodes run concurrently under a budget of
-    // `threads` BLAS threads in total (oversubscribing MKL's spinning teams
-    // is ruinous): a front takes its share of the free threads among the
-    // fronts ready with it, so sibling separators run side by side and the
-    // root, alone, gets them all.
+    // Phase 2: the top of the tree as a task DAG (TopScheduler). A node is
+    // ready once its children are factored; ready nodes run concurrently
+    // under a budget of `threads` BLAS threads in total (oversubscribing
+    // MKL's spinning teams is ruinous): a front takes its share of the free
+    // threads among the fronts ready with it, so sibling separators run side
+    // by side and the root, alone, gets them all. The thread that factors a
+    // front's last child continues with that front itself: the top part is
+    // mostly long chains of small fronts, which then run without hand-offs
+    // or wake-ups between threads.
     // Stacks are no longer popped (a worker's blocks are consumed out of
-    // order); the top part holds only tens of blocks.
-    std::vector<Int> pending(ns, 0), ready;
-    std::size_t remaining = 0;
+    // order).
+    std::vector<Int> top_nodes;            // local index -> supernode
+    std::vector<Int> top_local(ns, -1);    // supernode -> local index (-1: not top)
     for (std::size_t si = 0; si < ns; ++si) {
       if (!top[si]) continue;
-      ++remaining;
-      for (const Int c : keep.children(static_cast<Int>(si)))
-        if (top[static_cast<std::size_t>(c)]) ++pending[si];
-      if (pending[si] == 0) ready.push_back(static_cast<Int>(si));
+      top_local[si] = static_cast<Int>(top_nodes.size());
+      top_nodes.push_back(static_cast<Int>(si));
     }
+    std::vector<Int> top_parent(top_nodes.size(), -1);
+    for (std::size_t i = 0; i < top_nodes.size(); ++i) {
+      const Int par = keep.supernodes[static_cast<std::size_t>(top_nodes[i])].parent;
+      if (par >= 0) top_parent[i] = top_local[static_cast<std::size_t>(par)];
+    }
+    // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
+    // offers blas_threads - 1 places to the scheduler, taken by the workers
+    // that the BLAS-thread budget leaves idle; they run its tasks on serial
+    // BLAS.
+    TopScheduler sched(std::move(top_parent), threads);
+    // Each top front's step index in its thread's pass (by local index).
+    std::vector<std::size_t> top_step(top_nodes.size(), 0);
+    if (failed.load() == static_cast<int>(ErrorCode::Success) && !top_nodes.empty()) {
+      run_pool([&](int tid) {
+        FrontPass &P = tpass[static_cast<std::size_t>(tid)];
+        // false stops every thread: an error here, or a stop raised by
+        // another thread (an error, or a limit crossed by the counts).
+        sched.work(tid, [&](Int local, int blas_threads, int) {
+          if (failed.load() != static_cast<int>(ErrorCode::Success)) return false;
+          const Int s = top_nodes[static_cast<std::size_t>(local)];
+          // Delay budget of a top front: its children's end states, all
+          // final once it is ready (written before the scheduler recorded
+          // their completion, under its lock, or by this thread).
+          BudgetState top_state;
+          if (budget_regions) top_state = top_in_state(s);
+          const int neg0 = P.st.inertia.negative;
+          const long long work0 = P.st.front_work;
+          ErrorCode e;
+          {
+            // Deterministic mode: BLAS on one thread whatever the front's
+            // share (its tile tasks still recruit blas_threads - 1 helpers).
+            BlasThreadGuard blas(det ? 1 : blas_threads);
+            const TileCtx tc{blas_threads, &sched};
+            e = process_front(cx, P, 1 + tid, s, false, budget_regions ? &top_state : nullptr, &tc);
+          }
+          if (e != ErrorCode::Success) {
+            failed.store(static_cast<int>(e));
+            return false;
+          }
+          if (armed) count_negatives(P.st.inertia.negative - neg0);
+          if (work_armed) count_work(P.st.front_work - work0);
+          top_step[static_cast<std::size_t>(local)] = P.steps->size() - 1;
+          ++P.st.top_part_fronts;
+          P.diag_marks.emplace_back(s, P.diag->size());
+          if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
+          // The counts above may have raised the stop.
+          return failed.load() == static_cast<int>(ErrorCode::Success);
+        });
+      });
+    }
+    // Top fronts in completion order, which is topological: the solve
+    // layout of the top part.
     struct Done {
       int pass = 0;
       std::size_t step = 0;
       Int node = -1;
     };
     std::vector<Done> done_order;
-    done_order.reserve(remaining);
-    std::mutex mtx;
-    std::condition_variable cv;
-    int free_threads = threads;
-    // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
-    // offers blas_threads - 1 places to the pool, taken by the workers that
-    // the BLAS-thread budget leaves idle; they run its tasks on serial BLAS.
-    struct PoolHelpers final : TileHelpers {
-      std::mutex *mtx = nullptr;
-      std::condition_variable *cv = nullptr;
-      std::vector<std::pair<TileRunner *, int>> offers;
-      void offer(TileRunner &job, int slots) override {
-        std::lock_guard<std::mutex> lk(*mtx);
-        offers.emplace_back(&job, slots);
-        cv->notify_all();
-      }
-      void withdraw(TileRunner &job) override {
-        std::lock_guard<std::mutex> lk(*mtx);
-        for (std::size_t i = 0; i < offers.size(); ++i)
-          if (offers[i].first == &job) {
-            offers.erase(offers.begin() + static_cast<std::ptrdiff_t>(i));
-            break;
-          }
-      }
-    } helpers;
-    helpers.mtx = &mtx;
-    helpers.cv = &cv;
-    helpers.offers.reserve(static_cast<std::size_t>(threads));
-    if (failed.load() == static_cast<int>(ErrorCode::Success)) {
-      run_pool([&](int tid) {
-        FrontPass &P = tpass[static_cast<std::size_t>(tid)];
-        for (;;) {
-          Int s = -1;
-          int blas_threads = 1;
-          // Delay budget of a top front: its children's end states, all final
-          // (and published under the mutex) once it is ready.
-          BudgetState top_state;
-          TileRunner *job = nullptr;
-          {
-            std::unique_lock<std::mutex> lk(mtx);
-            cv.wait(lk, [&] {
-              return (!ready.empty() && free_threads > 0) || !helpers.offers.empty() ||
-                     remaining == 0 || failed.load() != static_cast<int>(ErrorCode::Success);
-            });
-            if (failed.load() != static_cast<int>(ErrorCode::Success)) return;
-            if (!ready.empty() && free_threads > 0) {
-              s = ready.back();
-              ready.pop_back();
-              blas_threads = std::max(1, free_threads / static_cast<int>(ready.size() + 1));
-              free_threads -= blas_threads;
-              if (budget_regions) top_state = top_in_state(s);
-            } else if (!helpers.offers.empty()) {
-              job = helpers.offers.back().first;
-              if (--helpers.offers.back().second == 0) helpers.offers.pop_back();
-              job->add_helper();
-            } else {
-              return; // remaining == 0
-            }
-          }
-          if (job != nullptr) {
-            job->help();
-            continue;
-          }
-          ErrorCode e;
-          const int neg0 = P.st.inertia.negative;
-          const long long work0 = P.st.front_work;
-          BudgetState *bs = budget_regions ? &top_state : nullptr;
-          {
-            // Deterministic mode: BLAS on one thread whatever the front's
-            // share (its tile tasks still recruit blas_threads - 1 helpers).
-            BlasThreadGuard blas(det ? 1 : blas_threads);
-            const TileCtx tc{blas_threads, &helpers};
-            e = process_front(cx, P, 1 + tid, s, false, bs, &tc);
-          }
-          std::lock_guard<std::mutex> lk(mtx);
-          free_threads += blas_threads;
-          --remaining;
-          // Under the mutex, so a waiter cannot miss the stop.
-          if (e == ErrorCode::Success && armed) count_negatives(P.st.inertia.negative - neg0);
-          if (e == ErrorCode::Success && work_armed) count_work(P.st.front_work - work0);
-          if (e != ErrorCode::Success) {
-            failed.store(static_cast<int>(e));
-          } else {
-            done_order.push_back({tid, P.steps->size() - 1, s});
-            ++P.st.top_part_fronts;
-            P.diag_marks.emplace_back(s, P.diag->size());
-            const Int parent = keep.supernodes[static_cast<std::size_t>(s)].parent;
-            if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
-            if (parent >= 0 && top[static_cast<std::size_t>(parent)] &&
-                --pending[static_cast<std::size_t>(parent)] == 0)
-              ready.push_back(parent);
-          }
-          cv.notify_all();
-        }
-      });
-    }
+    done_order.reserve(sched.completed().size());
+    for (const auto &[local, tid] : sched.completed())
+      done_order.push_back({tid, top_step[static_cast<std::size_t>(local)],
+                            top_nodes[static_cast<std::size_t>(local)]});
+    st.top_part_queue_pops = sched.queue_pops();
     st.top_seconds = seconds_since(phase2_start);
     status = static_cast<ErrorCode>(failed.load());
     st.parallel_subtrees = static_cast<int>(subtrees.size());

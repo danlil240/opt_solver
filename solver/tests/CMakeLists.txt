@@ -310,6 +310,13 @@ if(WIN32)
 endif()
 add_test(NAME TreeParallel COMMAND test_tree_parallel)
 
+# Top-part scheduler of the subtree-parallel factorization (src/parallel).
+add_executable(test_top_scheduler test_top_scheduler.cpp)
+target_include_directories(test_top_scheduler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_top_scheduler PRIVATE smf GTest::gtest_main)
+add_test(NAME TopScheduler COMMAND test_top_scheduler)
+set_tests_properties(TopScheduler PROPERTIES TIMEOUT 120)
+
 # --- IPM mode: engine hooks (max_negative_pivots) ---
 
 add_executable(test_ipm_hooks

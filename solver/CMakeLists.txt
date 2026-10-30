@@ -482,6 +482,7 @@ add_library(smf STATIC
     src/parallel/tile_tasks.cpp
     src/parallel/determinism.cpp
     src/parallel/solve_pool.cpp
+    src/parallel/top_scheduler.cpp
     src/coo_to_csc.cpp
     src/solve_sparse_fwd.cpp
     src/matrix_market.cpp

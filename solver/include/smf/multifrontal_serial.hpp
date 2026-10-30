@@ -19,6 +19,9 @@ struct SerialFactorStats {
   int parallel_subtrees = 0;
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
   int top_part_fronts = 0;  // subtree engine: fronts of the top part factored (after the subtrees)
+  // Subtree engine: top fronts taken from the scheduler's shared ready list;
+  // the others were continued by the thread that factored their last child.
+  int top_part_queue_pops = 0;
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   int threads_used = 1;  // threads the factorization ran on (1 when serial)
   // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top

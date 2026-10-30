@@ -340,6 +340,7 @@ public:
         stats_.threads_used = info.threads_used;
         stats_.parallel_subtrees = info.parallel_subtrees;
         stats_.top_part_fronts = info.top_part_fronts;
+        stats_.top_part_queue_pops = info.top_part_queue_pops;
         stats_.subtree_ms = info.subtree_seconds * 1e3;
         stats_.top_ms = info.top_seconds * 1e3;
         stats_.gather_ms = info.gather_seconds * 1e3;

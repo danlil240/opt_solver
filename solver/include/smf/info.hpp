@@ -112,6 +112,10 @@ struct Info {
     /// Subtree-parallel engine (parallel_subtrees > 0): fronts of the top
     /// of the tree factored, after the subtrees (also after a stop).
     int          top_part_fronts        = 0;
+    /// Of those, the fronts taken from the top-part scheduler's shared
+    /// ready list; the others were continued by the thread that factored
+    /// their last child (a chain runs on one thread).
+    int          top_part_queue_pops    = 0;
     /// Threads the factorization ran on (1 = serial).
     int          threads_used           = 1;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
