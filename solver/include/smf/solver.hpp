@@ -129,6 +129,8 @@ public:
 private:
   /// Matching-ordering workspace, reused by successive analyse() calls.
   std::vector<Int> analyse_scratch_;
+  /// The same for the matching trial's worker thread (num_threads > 1).
+  std::vector<Int> analyse_scratch_worker_;
   /// The analyse arena: one block, reused by successive analyse() calls,
   /// for every analysis temporary (adjacency, AMD's arrays, etree and
   /// counts, amalgamation, assembly tree). Never zero-filled: each user

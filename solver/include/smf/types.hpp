@@ -93,8 +93,10 @@ enum class MatchingTrigger {
 //                     too dear (past a guard band above the 1.5 flops rule):
 //                     AMD/METIS kept, no exact matching.
 //   ResumedExact    - the searches exceeded the budget, the initial phase's
-//                     matching ordering was not clearly too dear, so the
-//                     searches resumed and the exact matching decided.
+//                     matching ordering was not clearly too dear (or the
+//                     base ordering's factor was dear enough not to ask),
+//                     so the searches resumed and the exact matching
+//                     decided.
 enum class MatchingTrial {
     None            = 0,
     Exact           = 1,

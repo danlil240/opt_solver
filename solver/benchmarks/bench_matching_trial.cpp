@@ -13,7 +13,7 @@
 //
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
-//                             [--sample S [--lines]]
+//                             [--sample S [--lines]] [--pieces]
 //   file: one "<id> <path.mtx>" per line. --budget replaces the default
 //   budget of the second analysis. --ordering is the OrderingMethod value
 //   and --refactors Control::expected_refactors (the IPOPT plugin's
@@ -31,10 +31,13 @@
 // (--lines: by source line; needs a /Zi + /DEBUG build).
 
 #include "smf/control.hpp"
+#include "smf/etree.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/ordering.hpp"
 #include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
+#include "smf/supernode.hpp"
 
 #include "common/sampler.hpp"
 
@@ -155,7 +158,7 @@ int main(int argc, char **argv) {
     std::string list, filter;
     int trials = 3, ordering = -1, refactors = -1;
     double sample_seconds = 0.0;
-    bool sample_lines = false;
+    bool sample_lines = false, pieces = false;
     double budget = smf::Control{}.matching_search_budget;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -167,6 +170,7 @@ int main(int argc, char **argv) {
         else if (a == "--case" && i + 1 < argc) filter = argv[++i];
         else if (a == "--sample" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--lines") sample_lines = true;
+        else if (a == "--pieces") pieces = true;
     }
     if (list.empty()) {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
@@ -176,6 +180,111 @@ int main(int argc, char **argv) {
     }
     std::ifstream in(list);
     std::string line;
+    if (pieces) {
+        // The trial's pieces timed standalone (median of `trials`, ms):
+        // ctor = SymmetricMatcher construction (cost graph, duals, greedy,
+        // length-2), budget = the searches up to the default budget, rest =
+        // the remaining searches, oi_amd / oi_auto = the initial matching's
+        // compressed ordering with AMD only / Auto (AMD, METIS when dear),
+        // ox_auto = the exact matching's (Auto); r_amd = predicted flops of
+        // the initial matching's compressed AMD ordering over the base AMD
+        // ordering's, and fl0/n = the base AMD ordering's predicted flops
+        // per row; then analyse()'s phases.
+        std::printf("%-28s %7s | %8s %8s %8s | %8s %8s %4s | %8s %4s | %6s %9s | %8s %8s %8s %8s | %-8s\n",
+                    "matrix", "n", "ctor", "budget", "rest", "oi_amd", "oi_auto", "usd", "ox_auto", "usd",
+                    "r_amd", "fl0/n", "an_ord", "an_cnt", "an_mat", "analyse", "trial");
+        const auto med = [](std::vector<double> v) {
+            std::sort(v.begin(), v.end());
+            return v[v.size() / 2];
+        };
+        const auto ms_since = [](std::chrono::steady_clock::time_point t0) {
+            return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        };
+        while (std::getline(in, line)) {
+            std::istringstream ls(line);
+            std::string id, path;
+            if (!(ls >> id >> path)) continue;
+            if (!filter.empty() && id.find(filter) == std::string::npos) continue;
+            auto mm = smf::read_matrix_market(path);
+            if (!mm.ok) continue;
+            const smf::CscLower &A = mm.matrix;
+            const smf::Int n = A.n;
+            std::vector<smf::Int> xadj(static_cast<std::size_t>(n) + 1),
+                adj(smf::lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+            smf::lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), xadj.data(), adj.data());
+            const double edges = (budget >= 0.0 ? budget : 2.0) * 2.0 * static_cast<double>(A.row_idx.size());
+            // The base AMD ordering and its predicted flops.
+            std::vector<smf::Int> base_perm(static_cast<std::size_t>(n)), amd_w(smf::amd_adjacency_work_size(n, adj.size()));
+            smf::amd_order_adjacency(n, xadj.data(), adj.data(), base_perm.data(), amd_w.data());
+            double fl0 = 0.0;
+            {
+                const auto sn = static_cast<std::size_t>(n);
+                std::vector<smf::Int> ip(sn), par(sn), post(sn), cc(sn), w(4 * sn + 1);
+                for (smf::Int i = 0; i < n; ++i) ip[static_cast<std::size_t>(base_perm[static_cast<std::size_t>(i)])] = i;
+                smf::etree_from_adjacency(n, xadj.data(), adj.data(), base_perm.data(), ip.data(), par.data(), w.data());
+                smf::etree_postorder(n, par.data(), post.data(), w.data());
+                smf::filled_column_counts_from_adjacency(n, xadj.data(), adj.data(), base_perm.data(), ip.data(),
+                                                         par.data(), post.data(), cc.data(), w.data());
+                for (smf::Int c : cc) fl0 += static_cast<double>(c) * static_cast<double>(c);
+            }
+            double r_amd = 0.0;
+            std::vector<double> t_ctor, t_budget, t_rest, t_oia, t_oiu, t_oxu, t_ord, t_cnt, t_mat, t_an;
+            int used_i = -1, used_x = -1;
+            bool paused = false;
+            smf::Info last;
+            for (int t = 0; t < trials; ++t) {
+                auto t0 = std::chrono::steady_clock::now();
+                smf::SymmetricMatcher m(A);
+                t_ctor.push_back(ms_since(t0));
+                t0 = std::chrono::steady_clock::now();
+                paused = !m.advance(static_cast<long long>(edges));
+                t_budget.push_back(ms_since(t0));
+                const smf::MatchingResult init = m.initial();
+                t0 = std::chrono::steady_clock::now();
+                m.advance(-1);
+                t_rest.push_back(ms_since(t0));
+                const smf::MatchingResult fin = m.current();
+                std::vector<smf::Int> perm, work;
+                smf::MatchingOrderStats st;
+                t0 = std::chrono::steady_clock::now();
+                smf::matching_order_from(A, init, 0.1, perm, work, &st, smf::CompressedOrder::Amd, 1, xadj.data(),
+                                         adj.data());
+                t_oia.push_back(ms_since(t0));
+                r_amd = st.flops / fl0;
+                t0 = std::chrono::steady_clock::now();
+                smf::matching_order_from(A, init, 0.1, perm, work, &st, smf::CompressedOrder::Auto, 1, xadj.data(),
+                                         adj.data());
+                t_oiu.push_back(ms_since(t0));
+                used_i = static_cast<int>(st.used);
+                t0 = std::chrono::steady_clock::now();
+                if (fin.status == smf::ErrorCode::Success)
+                    smf::matching_order_from(A, fin, 0.1, perm, work, &st, smf::CompressedOrder::Auto, 1,
+                                             xadj.data(), adj.data());
+                t_oxu.push_back(ms_since(t0));
+                used_x = static_cast<int>(st.used);
+                smf::Control c;
+                c.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
+                c.num_threads = 1;
+                if (ordering >= 0) c.ordering = static_cast<smf::OrderingMethod>(ordering);
+                if (refactors >= 1) c.expected_refactors = refactors;
+                c.matching_search_budget = budget;
+                smf::Solver s;
+                t0 = std::chrono::steady_clock::now();
+                (void)s.analyse(A, c, last);
+                t_an.push_back(ms_since(t0));
+                t_ord.push_back(1000.0 * last.analyse_phases.ordering);
+                t_cnt.push_back(1000.0 * last.analyse_phases.etree_counts);
+                t_mat.push_back(1000.0 * last.analyse_phases.matching);
+            }
+            std::printf("%-28s %7d | %8.2f %8.2f %8.2f | %8.2f %8.2f %4d | %8.2f %4d | %6.3f %9.3g | %8.2f "
+                        "%8.2f %8.2f %8.2f | %-8s%s\n",
+                        id.c_str(), static_cast<int>(n), med(t_ctor), med(t_budget), med(t_rest), med(t_oia),
+                        med(t_oiu), used_i, med(t_oxu), used_x, r_amd, fl0 / static_cast<double>(n), med(t_ord), med(t_cnt),
+                        med(t_mat), med(t_an), trial_name(last.matching_trial), paused ? "" : " (in budget)");
+            std::fflush(stdout);
+        }
+        return 0;
+    }
     if (sample_seconds > 0.0) {
         while (std::getline(in, line)) {
             std::istringstream ls(line);
