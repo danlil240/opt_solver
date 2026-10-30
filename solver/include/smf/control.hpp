@@ -257,7 +257,7 @@ struct Control {
     // offline on the Ryzen 9950X3D (2 CCDs of 8 cores) against measured
     // factor times at 1/2/4/8/16 threads with auto_threads off (truth data:
     // benchmarks/results/thread_sched_truth2, fit summary fit.md there,
-    // tools/bench/fit_thread_costs.py): loss 3.36 against 4.15 for the
+    // tools/bench/fit_thread_costs.py): loss 3.41 against 4.15 for the
     // previous defaults (per_thread 1e5, no split terms); picks slower than
     // 1 thread by more than 5%: 0; 16-thread-max picks slower than the
     // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
@@ -265,8 +265,11 @@ struct Control {
     // 7-8 all lie within about 3% of that loss.
     double         thread_cost_per_thread    = 7e5;
     double         thread_cost_per_top_front = 5e3;
-    // Per tile-split top front and thread (team set-up and barriers).
-    double         thread_cost_per_split_front_thread = 3e5;
+    // Per tile-split top front and thread (team set-up and barriers). 5e5,
+    // not the fit's least-loss 3e5 (loss 3.36): at 3e5 cops_elec_200
+    // (recommended) picks 2 threads, 0.07% outside the 2% tie band, and its
+    // delay-heavy split fronts make that 20% slower than 1 thread.
+    double         thread_cost_per_split_front_thread = 5e5;
     // Threads past which a tile-split front's work stops speeding up. 8 is
     // the core count of one CCD on the 9950X3D where it was fitted: tile
     // teams spanning both CCDs gained nothing, and aug3dcqp, bratu3d and

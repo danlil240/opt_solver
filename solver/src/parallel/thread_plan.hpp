@@ -140,7 +140,7 @@ PartitionCount partition_count(const TreeView &t, int threads, double min_work);
 struct ThreadCosts {
   double per_thread = 7e5;              // starting and joining one thread
   double per_top_front = 5e3;           // handing one top-part front between threads
-  double per_split_front_thread = 3e5;  // a tile-split front's team set-up, per thread
+  double per_split_front_thread = 5e5;  // a tile-split front's team set-up, per thread
   int split_cap = 8;                    // threads past which split work stops speeding up (< 1: 1)
 };
 struct ThreadPlan {

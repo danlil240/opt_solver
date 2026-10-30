@@ -261,7 +261,7 @@ class GridTest(unittest.TestCase):
         self.assertEqual(len(fit.FACTOR_GRID), 4 * 3 * 6 * 5)
         self.assertEqual(len(fit.SOLVE_GRID), 5 * 6 * 4)
         # The C++ defaults (Control::thread_cost_*, solve_cost_*).
-        self.assertEqual(fit.FACTOR_DEFAULT, fit.FactorConsts(7e5, 5e3, 3e5, 8))
+        self.assertEqual(fit.FACTOR_DEFAULT, fit.FactorConsts(7e5, 5e3, 5e5, 8))
         self.assertEqual(fit.SOLVE_DEFAULT, fit.SolveConsts(2e4, 100.0, 1.0))
         self.assertIn(fit.FACTOR_DEFAULT, fit.FACTOR_GRID)
         self.assertIn(fit.SOLVE_DEFAULT, fit.SOLVE_GRID)

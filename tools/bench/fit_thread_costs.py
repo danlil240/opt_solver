@@ -113,7 +113,7 @@ FACTOR_GRID = [FactorConsts(*p) for p in itertools.product(
     (2e5, 5e5, 7e5, 1e6), (2e3, 5e3, 1e4), (0.0, 1e5, 2e5, 3e5, 5e5, 1e6), (4, 6, 8, 12, 16))]
 SOLVE_GRID = [SolveConsts(*p) for p in itertools.product(
     (5e3, 1e4, 2e4, 5e4, 1e5), (0.0, 50.0, 100.0, 200.0, 500.0, 1000.0), (0.25, 0.5, 1.0, 2.0))]
-FACTOR_DEFAULT = FactorConsts(7e5, 5e3, 3e5, 8)   # ThreadCosts{}
+FACTOR_DEFAULT = FactorConsts(7e5, 5e3, 5e5, 8)   # ThreadCosts{}
 SOLVE_DEFAULT = SolveConsts(2e4, 100.0, 1.0)      # SolveCosts{}
 
 # --------------------------------------------------------------------------
