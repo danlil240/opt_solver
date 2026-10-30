@@ -14,7 +14,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import fit_thread_costs as fit  # noqa: E402
 
 # Case A: 10 split top fronts (tile tasks). The model with no per-split cost
-# picks 8 threads (4 at max 4); measured, 1 thread is fastest.
+# (uncapped, split_cap 16) picks 8 threads (4 at max 4); measured, 1 thread is
+# fastest.
 TRACE_A = """\
 analyse: something unrelated
 plan-factor T=1 ok=1 sub_total=0 max_subtree=0 top_total=0 cp_top=0 top_fronts=0 split_top_fronts=0 split_top_work=0 total=1e+08
@@ -98,7 +99,7 @@ class ModelTest(unittest.TestCase):
 
     def test_factor_hand_computed(self):
         tr = fit.parse_trace(TRACE_A)["factor"]
-        c = fit.FactorConsts(1e5, 5e3, 0.0)
+        c = fit.FactorConsts(1e5, 5e3, 0.0, 16)
         # cost(2) = max(5e6, 3e7) + max(3e7, 2e7) + 2e5 + 12 * 5e3
         self.assertAlmostEqual(fit.factor_cost(tr[2], c), 6.026e7)
         self.assertAlmostEqual(fit.factor_cost(tr[4], c), 3.146e7)
@@ -108,21 +109,58 @@ class ModelTest(unittest.TestCase):
         self.assertEqual(fit.pick_factor_threads(tr, 16, c), 8)
         self.assertEqual(fit.pick_factor_threads(tr, 8, c), 8)
         self.assertEqual(fit.pick_factor_threads(tr, 4, c), 4)
-        # 10 split fronts at 1e7 each: every parallel candidate costs > 1e8.
-        split = fit.FactorConsts(1e5, 5e3, 1e7)
-        self.assertAlmostEqual(fit.factor_cost(tr[8], split), 1.2036e8)
+        # 10 split fronts at 1e7 per thread: T * 1e8 on top, every parallel
+        # candidate costs > 1e8.
+        split = fit.FactorConsts(1e5, 5e3, 1e7, 16)
+        self.assertAlmostEqual(fit.factor_cost(tr[8], split), 2.036e7 + 8e8)
         self.assertEqual(fit.pick_factor_threads(tr, 16, split), 1)
         self.assertEqual(fit.pick_factor_threads(tr, 4, split), 1)
+
+    def test_factor_split_cap(self):
+        tr = fit.parse_trace(TRACE_A)["factor"]
+        # Cap 2: the split work (3.5e7) speeds up on 2 threads at most; the
+        # rest of the top work and cp_top are as traced.
+        # T = 4: top = max(1.6e7, 5e6 / 4 + 3.5e7 / 2) = 1.875e7, subtrees 1.5e7.
+        c = fit.FactorConsts(1e5, 5e3, 0.0, 2)
+        self.assertAlmostEqual(fit.factor_cost(tr[2], c), 6.026e7)  # T <= cap: unchanged
+        self.assertAlmostEqual(fit.factor_cost(tr[4], c), 1.5e7 + 1.875e7 + 4e5 + 6e4)
+        # T = 8: top = 5e6 / 8 + 3.5e7 / 2 = 1.8125e7 (above cp_top 1.2e7).
+        self.assertAlmostEqual(fit.factor_cost(tr[8], c), 7.5e6 + 1.8125e7 + 8e5 + 6e4)
+        # Below 1 counts as 1: all split work on one thread.
+        c0 = fit.FactorConsts(1e5, 5e3, 0.0, 0)
+        c1 = fit.FactorConsts(1e5, 5e3, 0.0, 1)
+        self.assertAlmostEqual(fit.factor_cost(tr[8], c0), fit.factor_cost(tr[8], c1))
+        self.assertAlmostEqual(fit.factor_cost(tr[8], c1), 7.5e6 + 5e6 / 8 + 3.5e7 + 8e5 + 6e4)
+
+    def test_split_work_cap_prices_16_no_cheaper_than_8(self):
+        # All the top work is split work: with split_cap 8, 16 threads add
+        # per-thread costs and no speed-up.
+        def line(T):
+            return ("plan-factor T=%d ok=1 sub_total=0 max_subtree=0 top_total=4e+09 cp_top=%g "
+                    "top_fronts=3 split_top_fronts=3 split_top_work=4e+09 total=5e+09"
+                    % (T, 4e9 / T))
+        tr = fit.parse_trace("plan-factor T=1 ok=1 sub_total=0 max_subtree=0 top_total=0 "
+                             "cp_top=0 top_fronts=0 split_top_fronts=0 split_top_work=0 "
+                             "total=5e+09\n" + "\n".join(line(T) for T in (2, 4, 8, 16)) + "\n")["factor"]
+        c = fit.FactorConsts(7e5, 5e3, 3e5, 8)
+        self.assertAlmostEqual(fit.factor_cost(tr[8], c), 5e8 + 8 * 7e5 + 3 * 5e3 + 3 * 8 * 3e5)
+        self.assertAlmostEqual(fit.factor_cost(tr[16], c), 5e8 + 16 * 7e5 + 3 * 5e3 + 3 * 16 * 3e5)
+        self.assertGreater(fit.factor_cost(tr[16], c), fit.factor_cost(tr[8], c))
+        self.assertEqual(fit.pick_factor_threads(tr, 16, c), 8)
+        # Uncapped, the work still halves from 8 to 16 threads.
+        unc = fit.FactorConsts(7e5, 5e3, 3e5, 16)
+        self.assertLess(fit.factor_cost(tr[16], unc), fit.factor_cost(tr[8], unc))
+        self.assertEqual(fit.pick_factor_threads(tr, 16, unc), 16)
 
     def test_factor_light_tree(self):
         tr = fit.parse_trace("plan-factor T=1 ok=1 sub_total=0 max_subtree=0 top_total=0 cp_top=0 "
                              "top_fronts=0 split_top_fronts=0 split_top_work=0 total=5e+06\n"
                              "plan-factor chosen=1\n")["factor"]
-        self.assertEqual(fit.pick_factor_threads(tr, 16, fit.FactorConsts(1e5, 5e3, 0.0)), 1)
+        self.assertEqual(fit.pick_factor_threads(tr, 16, fit.FactorConsts(1e5, 5e3, 0.0, 8)), 1)
 
     def test_solve_hand_computed(self):
         tr = fit.parse_trace(TRACE_A)["solve"]
-        c = fit.SolveConsts(2e4, 2e3, 2.0)
+        c = fit.SolveConsts(2e4, 2e3, 2.0)  # not the defaults: hand values below
         self.assertEqual(fit.solve_cost(tr[1], 1, c), 1.1e6)
         # max(1e5, 1e6 / T) + 5e4 + T 2e4 + 10 * 2e3 + T * 1000 * 2
         self.assertAlmostEqual(fit.solve_cost(tr[2], 2, c), 6.14e5)
@@ -145,13 +183,13 @@ class LossTest(unittest.TestCase):
     def test_evaluate_skips_fast_cases(self):
         cases = [case("a", TRACE_A, FACTOR_A), case("b", TRACE_B, FACTOR_B),
                  case("tiny", TRACE_B, {1: 0.5, 16: 0.4})]
-        good = fit.evaluate(cases, "factor", fit.FactorConsts(1e3, 5e3, 1e7))
+        good = fit.evaluate(cases, "factor", fit.FactorConsts(1e3, 5e3, 1e7, 16))
         self.assertEqual(good["loss"], 0.0)
         self.assertEqual(good["used"], 2)
         self.assertEqual(good["skipped"], 1)
         self.assertEqual(good["a1"], 0)
         self.assertEqual(good["a2"], 0)
-        bad = fit.evaluate(cases, "factor", fit.FactorConsts(1e3, 5e3, 0.0))
+        bad = fit.evaluate(cases, "factor", fit.FactorConsts(1e3, 5e3, 0.0, 16))
         # a picks 8 at max 16 and 8: 15 / 10 twice; 15 > 1.05 x 10 (A1).
         self.assertAlmostEqual(bad["loss"], 2 * math.log(1.5))
         self.assertEqual(bad["a1"], 1)
@@ -159,31 +197,74 @@ class LossTest(unittest.TestCase):
         # A case without a measurement at some candidate T counts at no grid
         # point (a point choosing an unmeasured T is not rewarded).
         gap = cases + [case("gap", TRACE_B, {1: 100.0, 4: 30.0, 8: 18.0, 16: 12.0})]
-        for c in (fit.FactorConsts(1e3, 5e3, 1e7), fit.FactorConsts(1e7, 5e3, 0.0)):
+        for c in (fit.FactorConsts(1e3, 5e3, 1e7, 16), fit.FactorConsts(1e7, 5e3, 0.0, 16)):
             ev = fit.evaluate(gap, "factor", c)
             self.assertEqual((ev["used"], ev["skipped_fast"], ev["skipped_incomplete"]), (2, 1, 1))
+        self.assertEqual(bad["skipped_trace"], 0)
         row_a = [r for r in bad["rows"] if r["case"] == "a"][0]
         self.assertEqual(row_a["chosen"], {16: 8, 8: 8})
         self.assertEqual(row_a["best"], 1)
         self.assertTrue(row_a.get("a1"))
         self.assertAlmostEqual(row_a["ratio"], 1.5)
 
+    def test_trace_missing_a_candidate_is_skipped_and_counted(self):
+        # A trace with T = 4 and 8 missing (T = 1, 2, 16 only): a case-track
+        # skipped at every grid point, not a ValueError.
+        keep = [ln for ln in TRACE_B.splitlines()
+                if not ln.startswith(("plan-factor T=4 ", "plan-factor T=8 "))]
+        holey = "\n".join(keep) + "\n"
+        cases = [case("b", TRACE_B, FACTOR_B), case("holey", holey, FACTOR_B)]
+        for c in (fit.FactorConsts(1e3, 5e3, 0.0, 16), fit.FactorConsts(1e7, 5e3, 0.0, 16)):
+            ev = fit.evaluate(cases, "factor", c)
+            self.assertEqual((ev["used"], ev["skipped_trace"], ev["skipped"]), (1, 1, 1))
+            self.assertEqual([r["case"] for r in ev["rows"]], ["b"])
+        # The solve model is judged on its own block: no plan-solve block is
+        # the serial answer, not a skip.
+        sv = fit.evaluate([case("b", TRACE_B, FACTOR_B, solve=FACTOR_B)], "solve",
+                          fit.SolveConsts(2e4, 100.0, 1.0))
+        self.assertEqual((sv["used"], sv["skipped_trace"]), (1, 0))
+
+    def test_real_a2(self):
+        # B picks 16 at max 16 and 8 at max 8 for per-thread 1e3. Measured:
+        # 16 slower than 8 by more than 5% is a real-A2 miss.
+        c = fit.FactorConsts(1e3, 5e3, 0.0, 16)
+        slow16 = {**FACTOR_B, 16: 20.0}
+        ev = fit.evaluate([case("b", TRACE_B, slow16)], "factor", c)
+        self.assertEqual((ev["a2_real"], ev["a2"]), (1, 1))
+        self.assertTrue(ev["rows"][0].get("a2_real"))
+        # Within 5%: not a miss.
+        ev = fit.evaluate([case("b", TRACE_B, {**FACTOR_B, 16: 18.5})], "factor", c)
+        self.assertEqual(ev["a2_real"], 0)
+        # The max-8 pick's time below min-ms: not counted.
+        tiny = {1: 3.0, 2: 1.6, 4: 0.9, 8: 0.5, 16: 0.8}
+        ev = fit.evaluate([case("b", TRACE_B, tiny)], "factor", c, min_ms=1.0)
+        self.assertEqual(ev["a2_real"], 0)
+        # Faster at 16: no flag, and the column is in the table.
+        ev = fit.evaluate([case("b", TRACE_B, FACTOR_B)], "factor", c)
+        self.assertEqual(ev["a2_real"], 0)
+        default_ev = fit.evaluate([case("b", TRACE_B, slow16)], "factor", fit.FACTOR_DEFAULT)
+        lines = fit._rank_table([(c, ev)], fit.FACTOR_DEFAULT, default_ev, 1, (16, 8))
+        self.assertIn("real-A2", lines[0])
+
 
 class GridTest(unittest.TestCase):
     def test_known_optimum(self):
         cases = [case("a", TRACE_A, FACTOR_A), case("b", TRACE_B, FACTOR_B)]
-        grid = [fit.FactorConsts(pt, ptf, ps)
+        grid = [fit.FactorConsts(pt, ptf, ps, 16)
                 for pt in (1e3, 1e7) for ptf in (5e3,) for ps in (0.0, 1e7)]
         ranked = fit.grid_search(cases, "factor", grid)
-        self.assertEqual(ranked[0][0], fit.FactorConsts(1e3, 5e3, 1e7))
+        self.assertEqual(ranked[0][0], fit.FactorConsts(1e3, 5e3, 1e7, 16))
         self.assertEqual(ranked[0][1]["loss"], 0.0)
         self.assertTrue(all(r[1]["loss"] > 0.0 for r in ranked[1:]))
 
     def test_default_grids(self):
-        self.assertEqual(len(fit.FACTOR_GRID), 5 * 5 * 6)
-        self.assertEqual(len(fit.SOLVE_GRID), 4 * 4 * 4)
-        self.assertIn(fit.FactorConsts(1e5, 5e3, 0.0), fit.FACTOR_GRID)
-        self.assertIn(fit.SolveConsts(2e4, 2e3, 2.0), fit.SOLVE_GRID)
+        self.assertEqual(len(fit.FACTOR_GRID), 4 * 3 * 6 * 5)
+        self.assertEqual(len(fit.SOLVE_GRID), 5 * 6 * 4)
+        # The C++ defaults (Control::thread_cost_*, solve_cost_*).
+        self.assertEqual(fit.FACTOR_DEFAULT, fit.FactorConsts(7e5, 5e3, 3e5, 8))
+        self.assertEqual(fit.SOLVE_DEFAULT, fit.SolveConsts(2e4, 100.0, 1.0))
+        self.assertIn(fit.FACTOR_DEFAULT, fit.FACTOR_GRID)
+        self.assertIn(fit.SOLVE_DEFAULT, fit.SOLVE_GRID)
 
 
 def rec(matrix, threads, factor_ms, solve_ms, track="recommended", solver="smf"):

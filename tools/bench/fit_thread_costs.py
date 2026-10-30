@@ -22,10 +22,13 @@ thread counts. The re-implementation mirrors the C++ exactly:
   * least_cost_threads: in ascending T, the first candidate whose cost is
     within 2% of the least (cost <= least * 1.02); cost < 0 is no candidate;
   * factor_plan_cost: cost(1) = total; T > 1 with ok = 0 is no candidate; else
-      max(max_subtree, sub_total / T) + max(cp_top, top_total / T)
+      max(max_subtree, sub_total / T) + top
       + T * per_thread + top_fronts * per_top_front
-    plus, here only (ruling R13, not in the C++ yet),
-      + split_top_fronts * per_split_front;
+      + split_top_fronts * T * per_split_front_thread,
+      top = max(cp_top, (top_total - split_top_work) / T
+                        + split_top_work / min(T, split_cap)),
+    split_cap below 1 counting as 1 (the split fronts' work stops speeding
+    up past split_cap threads; cp_top keeps dividing it by T, as traced);
   * solve_plan_cost: cost(1) = sub_total + top_total; T > 1:
       max(max_subtree, sub_total / T) + top_cp + T * per_thread
       + n_top * per_top_step + T * top_rows * per_top_row.
@@ -48,9 +51,12 @@ log(measured(T_chosen) / min over T <= max_threads of measured(T)), measured =
 median factor ms (refactor, else first factor) or solve + refine ms of the
 truth records (score.aggregate, as thread_scaling.py). Case-tracks whose
 1-thread time is below --min-ms, or with no measurement at some candidate T
-(1, 2, 4, 8, 16), are skipped at every grid point. A1 proxy: case-tracks whose
-chosen T (max 16) is > 1.05 x slower than 1 thread; A2 proxy: > 1.05 x slower
-than 8 threads (8-thread time >= --min-ms).
+(1, 2, 4, 8, 16), or whose trace lacks the terms of a candidate T, are skipped
+at every grid point (the last counted as skipped_trace). A1 proxy: case-tracks
+whose chosen T (max 16) is > 1.05 x slower than 1 thread; A2 proxy: > 1.05 x
+slower than 8 threads (8-thread time >= --min-ms); real-A2: the measured time
+at the max-16 pick > 1.05 x the measured time at the max-8 pick (that time >=
+--min-ms), the `16>8` flag of thread_scaling.py evaluated on truth.
 
 Usage:
   # traces: bench_replay --print-steps per case-track (SMF_BENCH_AUTO_THREADS=0,
@@ -93,7 +99,8 @@ MAX_THREADS_EVAL = (16, 8)
 class FactorConsts(NamedTuple):
     per_thread: float
     per_top_front: float
-    per_split_front: float
+    per_split_front_thread: float
+    split_cap: int
 
 
 class SolveConsts(NamedTuple):
@@ -103,11 +110,11 @@ class SolveConsts(NamedTuple):
 
 
 FACTOR_GRID = [FactorConsts(*p) for p in itertools.product(
-    (2e4, 5e4, 1e5, 2e5, 5e5), (1e3, 2e3, 5e3, 1e4, 2e4), (0.0, 1e5, 3e5, 1e6, 3e6, 1e7))]
+    (2e5, 5e5, 7e5, 1e6), (2e3, 5e3, 1e4), (0.0, 1e5, 2e5, 3e5, 5e5, 1e6), (4, 6, 8, 12, 16))]
 SOLVE_GRID = [SolveConsts(*p) for p in itertools.product(
-    (5e3, 2e4, 5e4, 1e5), (5e2, 1e3, 2e3, 5e3), (0.5, 1.0, 2.0, 4.0))]
-FACTOR_DEFAULT = FactorConsts(1e5, 5e3, 0.0)   # ThreadCosts{} (+ no split term)
-SOLVE_DEFAULT = SolveConsts(2e4, 2e3, 2.0)     # SolveCosts{}
+    (5e3, 1e4, 2e4, 5e4, 1e5), (0.0, 50.0, 100.0, 200.0, 500.0, 1000.0), (0.25, 0.5, 1.0, 2.0))]
+FACTOR_DEFAULT = FactorConsts(7e5, 5e3, 3e5, 8)   # ThreadCosts{}
+SOLVE_DEFAULT = SolveConsts(2e4, 100.0, 1.0)      # SolveCosts{}
 
 # --------------------------------------------------------------------------
 # trace parsing
@@ -178,15 +185,18 @@ def least_cost_threads(costs: list[tuple[int, float]]) -> int:
 
 
 def factor_cost(k: dict[str, Any], c: FactorConsts) -> float:
-    """thread_plan.cpp factor_plan_cost, plus split_top_fronts * per_split_front."""
+    """thread_plan.cpp factor_plan_cost."""
     T = k["T"]
     if T <= 1:
         return k["total"]
     if not k["ok"]:
         return -1.0
-    return (max(k["max_subtree"], k["sub_total"] / T) + max(k["cp_top"], k["top_total"] / T)
+    cap = max(1, int(c.split_cap))
+    top = max(k["cp_top"], (k["top_total"] - k["split_top_work"]) / T
+              + k["split_top_work"] / min(T, cap))
+    return (max(k["max_subtree"], k["sub_total"] / T) + top
             + T * c.per_thread + float(k["top_fronts"]) * c.per_top_front
-            + float(k["split_top_fronts"]) * c.per_split_front)
+            + float(k["split_top_fronts"]) * T * c.per_split_front_thread)
 
 
 def _candidates(terms: dict[int, dict[str, Any]], max_threads: int) -> list[int]:
@@ -195,6 +205,13 @@ def _candidates(terms: dict[int, dict[str, Any]], max_threads: int) -> list[int]
     if missing:
         raise ValueError(f"trace has no terms at T = {missing} (traced: {sorted(terms)})")
     return cands
+
+
+def trace_covers(terms: dict[int, dict[str, Any]], max_threads: int) -> bool:
+    """Whether the traced terms can be evaluated at max_threads: a block of
+    only T = 1 (or none) is the serial answer; else every candidate T needs
+    its terms. evaluate skips (and counts) the case-tracks where not."""
+    return set(terms) <= {1} or all(t in terms for t in candidate_threads(max_threads))
 
 
 def pick_factor_threads(terms: dict[int, dict[str, Any]], max_threads: int,
@@ -274,7 +291,7 @@ def evaluate(cases: list[dict[str, Any]], kind: str, c, min_ms: float = 1.0,
     same case-tracks count at every grid point) and a 1-thread time >= min_ms."""
     loss = 0.0
     by_max = {m: 0.0 for m in max_threads}
-    a1 = a2 = used = skipped_fast = skipped_incomplete = 0
+    a1 = a2 = a2_real = used = skipped_fast = skipped_incomplete = skipped_trace = 0
     need = {t for m in max_threads for t in candidate_threads(m)}
     rows = []
     for cs in cases:
@@ -285,6 +302,9 @@ def evaluate(cases: list[dict[str, Any]], kind: str, c, min_ms: float = 1.0,
             continue
         if not need <= set(series):
             skipped_incomplete += 1
+            continue
+        if not all(trace_covers(cs["trace"][kind], m) for m in max_threads):
+            skipped_trace += 1
             continue
         row = {"case": cs["key"][0], "track": cs["key"][1], "class": cs.get("class", ""),
                "traced": cs["trace"][f"{kind}_chosen"], "chosen": {}, "loss": {}}
@@ -309,10 +329,16 @@ def evaluate(cases: list[dict[str, Any]], kind: str, c, min_ms: float = 1.0,
         if s8 is not None and s8 >= min_ms and series[t] > RATIO_TOL * s8:
             a2 += 1
             row["a2"] = True
+        if len(max_threads) > 1:
+            t_low = row["chosen"][max_threads[1]]
+            if series[t_low] >= min_ms and series[t] > RATIO_TOL * series[t_low]:
+                a2_real += 1
+                row["a2_real"] = True
         rows.append(row)
-    return {"loss": loss, "loss_by_max": by_max, "a1": a1, "a2": a2, "used": used,
-            "skipped": skipped_fast + skipped_incomplete, "skipped_fast": skipped_fast,
-            "skipped_incomplete": skipped_incomplete, "rows": rows}
+    return {"loss": loss, "loss_by_max": by_max, "a1": a1, "a2": a2, "a2_real": a2_real,
+            "used": used, "skipped": skipped_fast + skipped_incomplete + skipped_trace,
+            "skipped_fast": skipped_fast, "skipped_incomplete": skipped_incomplete,
+            "skipped_trace": skipped_trace, "rows": rows}
 
 
 def grid_search(cases: list[dict[str, Any]], kind: str, grid, min_ms: float = 1.0,
@@ -373,13 +399,14 @@ def _rank_table(ranked: list[tuple[Any, dict]], default, default_eval: dict, n: 
                 max_threads: tuple[int, ...]) -> list[str]:
     names = list(type(default)._fields)
     head = ["rank"] + names + ["loss"] + [f"loss@{m}" for m in max_threads] + [
-        "A1 proxy", "A2 proxy", "cases"]
+        "A1 proxy", "A2 proxy", "real-A2", "cases"]
     lines = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
 
     def row(label, c, ev):
         return ("| " + " | ".join([label] + [_g(v) for v in c] + [f"{ev['loss']:.4f}"]
                                   + [f"{ev['loss_by_max'][m]:.4f}" for m in max_threads]
-                                  + [str(ev["a1"]), str(ev["a2"]), str(ev["used"])]) + " |")
+                                  + [str(ev["a1"]), str(ev["a2"]), str(ev["a2_real"]),
+                                     str(ev["used"])]) + " |")
 
     for i, (c, ev) in enumerate(ranked[:n], 1):
         lines.append(row(str(i), c, ev))
@@ -391,7 +418,8 @@ def _rank_table(ranked: list[tuple[Any, dict]], default, default_eval: dict, n: 
         lines += ["", f"{ties} of {len(ranked)} grid points within 1% of the best loss. "
                   f"Case-tracks: {default_eval['used']} counted, {default_eval['skipped_fast']} "
                   f"below min-ms at 1 thread, {default_eval['skipped_incomplete']} without a "
-                  f"measurement at every candidate T ({', '.join(map(str, need))})."]
+                  f"measurement at every candidate T ({', '.join(map(str, need))}), "
+                  f"{default_eval['skipped_trace']} whose trace lacks a candidate T."]
     return lines
 
 
@@ -401,7 +429,8 @@ def _case_table(ev: dict[str, Any], max_threads: tuple[int, ...]) -> list[str]:
              f"best ms | ratio | chosen T (max {lo}) | measured ms by T | flags |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(ev["rows"], key=lambda r: (-r["ratio"], r["case"], r["track"])):
-        flags = " ".join(f for f, k in (("A1", "a1"), ("A2", "a2")) if r.get(k))
+        flags = " ".join(f for f, k in (("A1", "a1"), ("A2", "a2"), ("real-A2", "a2_real"))
+                         if r.get(k))
         series = " ".join(f"{t}:{v:.1f}" for t, v in sorted(r["series"].items()))
         traced = "-" if r["traced"] is None else str(r["traced"])
         lines.append(f"| {r['case']} | {r['track']} | {r['class']} | {traced} | "
@@ -421,9 +450,10 @@ def render(cases: list[dict[str, Any]], no_trace: list[str], no_truth: list[str]
         f"below {min_ms:g} ms or without a measurement at every candidate T are skipped. Loss = sum over case-tracks and max_threads "
         f"{' and '.join(map(str, max_threads))} of log(measured(chosen T) / best "
         "measured T <= max_threads). A1 / A2 proxies at max "
-        f"{max_threads[0]}: chosen T > {RATIO_TOL} x the 1-thread / 8-thread time. "
-        "`default` is the current constants (no per-split-front term). "
-        "The factor model's per_split_front term is not in the C++ yet.",
+        f"{max_threads[0]}: chosen T > {RATIO_TOL} x the 1-thread / 8-thread time; "
+        f"real-A2: the measured time at the max-{max_threads[0]} pick > {RATIO_TOL} x that at "
+        f"the max-{max_threads[-1]} pick. "
+        "`default` is the C++ defaults (Control::thread_cost_*, solve_cost_*).",
         "",
         f"## Factor: {top_n} best",
         "",
