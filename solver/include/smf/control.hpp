@@ -220,6 +220,15 @@ struct Control {
     // with num_threads BLAS threads. tree_parallel opts into the older
     // task-parallel engine instead, which measured slower everywhere.
     int            num_threads   = 1;
+    // A tree whose front work (sum of f^2 p over the supernodes, as
+    // delay-free) is below parallel_min_work factors and solves on one
+    // thread whatever num_threads says: thread start-up and the top part's
+    // hand-offs are not repaid. Front-tier recommended track, factor time at
+    // 8 / 16 threads against 1: every tree up to 1.2e8 (boyd2, robot_arm_8k,
+    // cops_polygon_200, cops_elec_200) is slower, up to 7.7x (robot_arm_8k
+    // leaves 11.8k of its 22.7k fronts in the top part); every tree from
+    // 1.9e8 up (TSOPF_FS_b39_c7) is faster, by 0.33-0.75x.
+    double         parallel_min_work = 1.5e8;
     // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
     // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
     // TPP at every thread count): fronts of at least 512 rows at the top of

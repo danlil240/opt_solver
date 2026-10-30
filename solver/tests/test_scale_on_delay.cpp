@@ -331,6 +331,7 @@ TEST(ScaleOnDelay, OnlyUnderAutoScalingAndThresholdPivoting) {
         if (variant == 5) {
             ctrl.tree_parallel = true;
             ctrl.num_threads = 2;
+            ctrl.parallel_min_work = 2e7;  // small test trees
         }
         Solver s;
         Info ia;
@@ -360,6 +361,7 @@ TEST(ScaleOnDelay, MaxNegativePivotsDisarmsTheTrigger) {
             Control ctrl = base_control();
             ctrl.deterministic = true;
             ctrl.num_threads = threads;
+            ctrl.parallel_min_work = 2e7;  // small test trees
             ctrl.max_negative_pivots = neg_limit;
             Solver s;
             Info ia;
@@ -450,6 +452,7 @@ TEST(ScaleOnDelay, WorkLimitOnParallelSubtrees) {
         Control ctrl = base_control();
         ctrl.scale_on_delay_ratio = -1.0;
         ctrl.num_threads = 4;
+        ctrl.parallel_min_work = 2e7;  // small test trees
         ctrl.deterministic = det;
         Solver s;
         Info ia;
@@ -502,6 +505,7 @@ TEST(ScaleOnDelay, DeterministicAcrossThreadCounts) {
         Control ctrl = base_control();
         ctrl.deterministic = true;
         ctrl.num_threads = threads;
+        ctrl.parallel_min_work = 2e7;  // small test trees
         Solver s;
         Info ia;
         auto ak = s.analyse(A, ctrl, ia);

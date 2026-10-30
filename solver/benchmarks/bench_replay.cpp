@@ -557,6 +557,8 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
+    // SMF_BENCH_PARALLEL_MIN_WORK (double): Control::parallel_min_work.
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_MIN_WORK")) ctrl.parallel_min_work = std::atof(e);
     // SMF_BENCH_SCALE_REUSE_TOL (double; negative = recompute): Control::scale_on_delay_reuse_tol.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_REUSE_TOL")) ctrl.scale_on_delay_reuse_tol = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).

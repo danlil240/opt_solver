@@ -711,8 +711,10 @@ double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
   return p * f * f;
 }
 
-// Below this much front work (sum of f^2 p) thread start-up is not repaid.
+// Below this much front work (sum of f^2 p) a tree is not partitioned
+// (one delay-budget region).
 constexpr double kTreeParallelMinWork = 2e7;
+
 
 // Control::delay_budget counts delays per region of a tree partition made
 // with this nominal thread count, whatever Control::num_threads is, so every
@@ -726,7 +728,8 @@ constexpr int kBudgetNominalThreads = 16;
 // marks the top part. Leaves too heavy to split stay in the top part, where
 // BLAS is threaded. Returns nothing when the tree is too light to share.
 std::vector<std::pair<std::size_t, std::size_t>>
-partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8_t> &top) {
+partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8_t> &top,
+                   double min_work) {
   const std::size_t ns = keep.supernodes.size();
   std::vector<double> work(ns, 0.0);
   std::vector<std::size_t> first(ns), at(ns);
@@ -753,7 +756,7 @@ partition_subtrees(const AnalysisKeep &keep, int threads, std::vector<std::uint8
     }
   }
   top.assign(ns, 0);
-  if (total < kTreeParallelMinWork) return {};
+  if (total < min_work) return {};
   const double target = total / (4.0 * threads);
   while (!heap.empty() && heap.top().first > target) {
     const Int s = heap.top().second;
@@ -965,9 +968,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
   std::vector<std::uint8_t> top;
   if (delay_budget >= 0 && ns >= 2) {
-    subtrees = partition_subtrees(keep, kBudgetNominalThreads, top);
+    subtrees = partition_subtrees(keep, kBudgetNominalThreads, top, kTreeParallelMinWork);
   } else if (ctrl.num_threads > 1 && ns >= 2) {
-    subtrees = partition_subtrees(keep, ctrl.num_threads, top);
+    subtrees = partition_subtrees(keep, ctrl.num_threads, top,
+                                  std::max(kTreeParallelMinWork, ctrl.parallel_min_work));
   }
   if (ctrl.num_threads > 1 && subtrees.size() >= 2)
     threads = std::min<int>(ctrl.num_threads, static_cast<int>(subtrees.size()));

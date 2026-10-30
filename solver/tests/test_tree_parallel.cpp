@@ -85,6 +85,7 @@ struct Run {
 
 Run factor_and_solve(const CscLower &A, Control ctrl, int threads, int refactors = 1) {
     ctrl.num_threads = threads;
+    ctrl.parallel_min_work = 2e7;  // small test trees
     Solver solver;
     Run run;
     auto ak = solver.analyse(A, ctrl, run.info);
@@ -152,6 +153,7 @@ namespace {
 // re-created at a different size).
 void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = false) {
     ctrl.num_threads = 4;
+    ctrl.parallel_min_work = 2e7;  // small test trees
     Solver solver;
     Info info;
     auto ak = solver.analyse(A, ctrl, info);
@@ -175,6 +177,7 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
 
     Control serial = ctrl;
     serial.num_threads = 1;
+    serial.parallel_min_work = 2e7;  // small test trees
     SolveWorkspace sws1;
     std::vector<double> x1 = b;
     ASSERT_EQ(solver.solve(fk, serial, info, x1.data(), n, nrhs, sws1), 0);
@@ -184,6 +187,7 @@ void check_parallel_solve(const CscLower &A, Control ctrl, bool expect_delays = 
     SolveWorkspace sws;
     for (const int threads : {4, 4, 3}) {
         par.num_threads = threads;
+        par.parallel_min_work = 2e7;  // small test trees
         std::vector<double> x = b;
         ASSERT_EQ(solver.solve(fk, par, info, x.data(), n, nrhs, sws), 0);
         EXPECT_LT(max_rel_diff(x1, x), 1e-12) << threads << " threads";
@@ -279,6 +283,7 @@ struct RefinedRun {
 // double), then the normwise backward error.
 RefinedRun factor_refined(const CscLower &A, Control ctrl, int threads) {
     ctrl.num_threads = threads;
+    ctrl.parallel_min_work = 2e7;  // small test trees
     Solver solver;
     RefinedRun run;
     auto ak = solver.analyse(A, ctrl, run.info);
@@ -387,6 +392,7 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     for (const int threads : {8, 3}) {
         ctrl.num_threads = threads;
+        ctrl.parallel_min_work = 2e7;  // small test trees
         Solver solver;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -401,5 +407,39 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
         EXPECT_GT(info.top_tile_fronts, 0) << threads << " threads";
         EXPECT_GE(peak, 2) << threads << " threads";
         EXPECT_LE(peak, threads) << threads << " threads, peak " << peak;
+    }
+}
+
+// Control::parallel_min_work: a tree with less front work than that factors
+// on one thread at any num_threads (the same factor as num_threads = 1);
+// below the floor it is shared.
+TEST(TreeParallel, LightTreeStaysSerial) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    double work = 0.0;
+    for (std::size_t s = 0; s < ak->supernodes.size(); ++s) {
+        const double f = static_cast<double>(ak->front_size(static_cast<Int>(s)));
+        work += static_cast<double>(ak->supernodes[s].width()) * f * f;
+    }
+    ASSERT_GT(work, 2e7) << "premise: heavy enough for the old floor";
+    ASSERT_LT(work, Control{}.parallel_min_work) << "premise: below the default";
+
+    for (const double floor : {Control{}.parallel_min_work, 2e7}) {
+        Control c = ctrl;
+        c.num_threads = 4;
+        c.parallel_min_work = floor;
+        NumericWorkspace nws;
+        FactorKeep fk;
+        Info fi;
+        ASSERT_EQ(solver.factor(*ak, A, c, fi, fk, nws), FactorStatus::Success);
+        if (floor > work)
+            EXPECT_EQ(fi.parallel_subtrees, 0);
+        else
+            EXPECT_GE(fi.parallel_subtrees, 2);
     }
 }

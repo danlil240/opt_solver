@@ -136,6 +136,7 @@ TEST(ParallelFactor, BlockDiagonalSPD_CorrectResult) {
   Control ctrl_s;
   ctrl_s.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
   ctrl_s.num_threads = 1;
+  ctrl_s.parallel_min_work = 2e7;  // small test trees
 
   auto t0s = std::chrono::steady_clock::now();
   auto ak = solver.analyse(A, ctrl_s, info_s);
@@ -163,6 +164,7 @@ TEST(ParallelFactor, BlockDiagonalSPD_CorrectResult) {
   Control ctrl_p;
   ctrl_p.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
   ctrl_p.num_threads = 4;
+  ctrl_p.parallel_min_work = 2e7;  // small test trees
   ctrl_p.tree_parallel = true;
 
   auto t0p = std::chrono::steady_clock::now();
@@ -225,6 +227,7 @@ TEST(ParallelFactor, BlockDiagonalSPD_MultipleBlocks) {
   Control ctrl;
   ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
   ctrl.num_threads = 4;
+  ctrl.parallel_min_work = 2e7;  // small test trees
   ctrl.tree_parallel = true;
 
   auto ak = solver.analyse(A, ctrl, info);
