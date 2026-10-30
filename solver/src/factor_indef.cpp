@@ -357,6 +357,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.aptp_failed_columns = 0;
   info.top_tile_fronts = 0;
   info.top_part_fronts = 0;
+  info.threads_used = 1;
+  info.subtree_seconds = 0.0;
+  info.top_seconds = 0.0;
+  info.gather_seconds = 0.0;
   info.small_front_handovers = 0;
   info.aborted_flops_skipped = 0.0;
   info.front_work = 0.0;
@@ -549,6 +553,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.front_work = static_cast<double>(st.front_work);
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_part_fronts = st.top_part_fronts;
+      info.threads_used = st.threads_used;
+      info.subtree_seconds = st.subtree_seconds;
+      info.top_seconds = st.top_seconds;
+      info.gather_seconds = st.gather_seconds;
       info.factor_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       return FactorStatus::MaxPivotDelays;
@@ -568,6 +576,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
+    info.threads_used = st.threads_used;
+    info.subtree_seconds = st.subtree_seconds;
+    info.top_seconds = st.top_seconds;
+    info.gather_seconds = st.gather_seconds;
       info.small_front_handovers = st.small_front_handovers;
       info.num_positive = st.inertia.positive;
       info.num_negative = st.inertia.negative;
@@ -596,6 +608,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.parallel_subtrees = st.parallel_subtrees;
     info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
+    info.threads_used = st.threads_used;
+    info.subtree_seconds = st.subtree_seconds;
+    info.top_seconds = st.top_seconds;
+    info.gather_seconds = st.gather_seconds;
     info.small_front_handovers = st.small_front_handovers;
     info.num_positive = st.inertia.positive;
     info.num_negative = st.inertia.negative;

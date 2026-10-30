@@ -337,6 +337,12 @@ public:
         stats_.inertia_zero = info.num_zero;
         stats_.delayed_pivots = info.delayed_pivots;
         stats_.delay_rescales = info.delay_rescales;
+        stats_.threads_used = info.threads_used;
+        stats_.parallel_subtrees = info.parallel_subtrees;
+        stats_.top_part_fronts = info.top_part_fronts;
+        stats_.subtree_ms = info.subtree_seconds * 1e3;
+        stats_.top_ms = info.top_seconds * 1e3;
+        stats_.gather_ms = info.gather_seconds * 1e3;
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
         stats_.aptp_failed_columns = info.aptp_failed_columns;

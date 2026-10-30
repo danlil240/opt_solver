@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cassert>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -1108,6 +1109,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // Phase 1: subtrees, heaviest first, one thread each on serial BLAS.
     // Each thread's step ranges per subtree become the solve's parallel
     // layout.
+    st.threads_used = threads;
+    using PhaseClock = std::chrono::steady_clock;
+    const auto seconds_since = [](PhaseClock::time_point t) {
+      return std::chrono::duration<double>(PhaseClock::now() - t).count();
+    };
+    const auto phase1_start = PhaseClock::now();
     std::atomic<std::size_t> next{0};
     std::vector<std::vector<std::pair<std::size_t, std::size_t>>> subtree_steps(
         static_cast<std::size_t>(threads));
@@ -1148,6 +1155,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
       }
     });
+    st.subtree_seconds = seconds_since(phase1_start);
+    const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)
       phase1_steps[static_cast<std::size_t>(t)] = tpass[static_cast<std::size_t>(t)].steps->size();
@@ -1271,6 +1280,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         }
       });
     }
+    st.top_seconds = seconds_since(phase2_start);
     status = static_cast<ErrorCode>(failed.load());
     st.parallel_subtrees = static_cast<int>(subtrees.size());
 
@@ -1295,6 +1305,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       }
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
+      const auto phase3_start = PhaseClock::now();
       grow(fv, main.fo, main.growths);
       grow(sri, main.ro, main.growths);
       run_pool([&](int tid) {
@@ -1305,6 +1316,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         std::copy(P.sri->begin(), P.sri->begin() + static_cast<std::ptrdiff_t>(P.ro),
                   sri.begin() + static_cast<std::ptrdiff_t>(rbase[ti]));
       });
+      st.gather_seconds = seconds_since(phase3_start);
       const auto relocated = [&](int t, SolveStep step) {
         step.factor_offset += static_cast<LongInt>(fbase[static_cast<std::size_t>(t)]);
         step.row_offset += static_cast<LongInt>(rbase[static_cast<std::size_t>(t)]);

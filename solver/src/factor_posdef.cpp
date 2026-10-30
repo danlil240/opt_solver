@@ -320,6 +320,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
   info.static_pivots = 0;  // SPD: no pivoting, the inertia is always exact
+  info.threads_used = 1;
+  info.subtree_seconds = 0.0;
+  info.top_seconds = 0.0;
+  info.gather_seconds = 0.0;
   info.inertia_exact = true;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
@@ -440,6 +444,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
 
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.parallel_subtrees = st.parallel_subtrees;
+  info.threads_used = st.threads_used;
+  info.subtree_seconds = st.subtree_seconds;
+  info.top_seconds = st.top_seconds;
+  info.gather_seconds = st.gather_seconds;
   info.actual_flops = st.flops;
   info.max_front_size = std::max(info.max_front_size, st.max_front);
   info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);

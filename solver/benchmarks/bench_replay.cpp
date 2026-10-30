@@ -701,10 +701,12 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.inertia_pos,
-                                 fst.inertia_neg, fst.inertia_zero, fst.factor_ms);
+                                 fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
+                                 fst.parallel_subtrees, fst.top_part_fronts, fst.subtree_ms, fst.top_ms,
+                                 fst.gather_ms);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {

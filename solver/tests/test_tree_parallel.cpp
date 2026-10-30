@@ -443,3 +443,22 @@ TEST(TreeParallel, LightTreeStaysSerial) {
             EXPECT_GE(fi.parallel_subtrees, 2);
     }
 }
+
+TEST(TreeParallel, PhaseTimesReported) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    const Run serial = factor_and_solve(A, ctrl, 1);
+    const Run par = factor_and_solve(A, ctrl, 4);
+    EXPECT_EQ(serial.info.threads_used, 1);
+    EXPECT_EQ(serial.info.subtree_seconds, 0.0);
+    EXPECT_EQ(serial.info.top_seconds, 0.0);
+    ASSERT_GE(par.info.parallel_subtrees, 2);
+    EXPECT_GE(par.info.threads_used, 2);
+    EXPECT_GT(par.info.subtree_seconds, 0.0);
+    EXPECT_GT(par.info.top_seconds, 0.0);
+    EXPECT_GE(par.info.gather_seconds, 0.0);
+    EXPECT_LE(par.info.subtree_seconds + par.info.top_seconds + par.info.gather_seconds,
+              par.info.factor_seconds);
+}

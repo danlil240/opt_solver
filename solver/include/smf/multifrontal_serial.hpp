@@ -20,6 +20,12 @@ struct SerialFactorStats {
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
   int top_part_fronts = 0;  // subtree engine: fronts of the top part factored (after the subtrees)
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
+  int threads_used = 1;  // threads the factorization ran on (1 when serial)
+  // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top
+  // part (task DAG), 3 the gather of the per-thread factors.
+  double subtree_seconds = 0.0;
+  double top_seconds = 0.0;
+  double gather_seconds = 0.0;
   double flops = 0.0;
   // Sum over fronts of (fully summed columns) x (rows)^2, as realized: the
   // delay-inflated counterpart of Info::predicted_flops (Info::front_work).
