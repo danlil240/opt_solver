@@ -8,17 +8,18 @@
 
 ## TL;DR
 
-1. **The scoreboard is wrong. Fix it first.**
+1. **The scoreboard was wrong. Fixed and re-baselined 2026-10-30 (section 1).**
    - The "1-thread" SSIDS records actually ran on **16 cores**.
    - The "8/16-thread" SSIDS records were **oversubscribed**.
-   - So the 1-thread hard_indef and spd scores overstate smf's losses, and the 8/16-thread scores overstate smf's wins.
-   - The memory and roadmap claim that "SSIDS is the 1-thread rival" comes from this bug.
+   - So the 1-thread hard_indef and spd scores overstated smf's losses, and the 8/16-thread scores overstated smf's wins.
+   - The memory and roadmap claim that "SSIDS is the 1-thread rival" came from this bug.
+   - **Corrected:** hard_indef loses at 1 thread (1.13-1.22) and on held-out at 8/16 threads (1.07-1.18), where properly threaded SSIDS is the main rival. spd and large_kkt win at 8/16 threads and are at parity or better at 1 thread (worst: large_kkt ipopt held-out, 1.03).
 2. **The biggest real lever the literature did not name is amalgamation.**
    - On the hard KKT matrices, smf's factorization is memory-bound: narrow supernodes carry huge contribution blocks.
    - On c-big, about 70% of factor time is assembly, zeroing and memmove; dense BLAS is about 25%.
    - Merging more aggressively made the factorization 2.5-4.3x faster on c-big, ncvxqp3 and cvxqp3, and was neutral on SPD.
    - Neither existing rule works everywhere, so this needs a cost-model rule.
-3. **Parallel scaling on large fronts is the next gap.** At 16 threads smf speeds up only 1.2-1.7x on the biggest problems (nd24k, c-big, ncvxqp3). SSIDS speeds up about 4.4x on nd24k with 16 cores.
+3. **Parallel scaling on large fronts is the next gap.** At 16 threads smf speeds up only 1.2-1.7x on the biggest problems (nd24k, c-big, ncvxqp3). SSIDS's factorization speeds up 2.9-3.9x on them.
 4. **Analysis cost on hard indefinite matrices** is the third gap: ncvxqp3 3.1 s against SSIDS 1.8 s, TSOPF_b300_c2 1.6 s against 1.0 s. The verified literature backs two-tier matching.
 5. **The verified literature's #1 lever (APTP with a blocked in-front fallback) is already in smf.** Turning it on does not move c-big, TSOPF or ncvxqp3 (measured below). Pivoting is not where the remaining gap is.
 
@@ -57,24 +58,27 @@ Add a sanity gate to `score.py` so this cannot recur silently. It should flag an
 - hard_indef at 1 thread is still a loss, but about half the reported size.
 - At 16 threads, the old "1T" SSIDS records *are* a well-configured 16-core SSIDS. Against them, smf at 16 threads is 0.50 shifted geomean over 60 cases, but it loses 1.8-4.2x on c-big, nd24k, ncvxqp3/7, TSOPF_b300* and cvxqp3 (section 3).
 
-**Action:** re-run the SSIDS stage at 1/8/16 threads with the fixed env, re-score, and update `docs/roadmap.md` and the front-tier memories. MA97 and PARDISO look honest at 1 thread: their bmwcra_1 times match single-core throughput.
+**Action (done 2026-10-30, below):** re-run the SSIDS stage at 1/8/16 threads with the fixed env and re-score. `docs/roadmap.md` is still to update. MA97 and PARDISO look honest at 1 thread: their bmwcra_1 times match single-core throughput.
 
-### Re-scored after the 1-thread SSIDS re-run (2026-10-29, 21:48-22:29)
+### Re-scored after the 1-thread SSIDS re-run (2026-10-29/30)
 
 Records are in `benchmarks/results/fronttier_20261029-ssidsfix/`:
-- `t1_ssids/`: the new run;
-- `score_fm_ssidsfix/`: the 2026-10-29 fast-matching records with all old SSIDS rows replaced.
+- `t1_ssids/`, 2026-10-29 21:48-22:29: every 1T case with the fixed env. It overlapped an smf A/B sweep from another session.
+- `t1_ssids_retime/`, `t1_ssids_retime2/` and `t1_ssids_retime3/`, 2026-10-30, quiet machine: the 30 matrices where SSIDS is the best competitor or within 40% of it. SSIDS ran 4-29% faster than in the overlapped run (median about 12%). No near-miss case changed its best competitor.
+- `t8_16_ssids/`, 2026-10-30 07:49-08:18, quiet machine: 8 and 16 threads on the 60 matrices that have 8/16-thread records.
 
-The 8/16-thread tables have no SSIDS until those stages are re-run.
+`score_fm_ssidsfix_t816/` holds the 2026-10-29 fast-matching records with every old SSIDS row replaced by these runs; its `score_*.md` are the current scoreboard. Only SSIDS was re-run; the smf and other competitor rows are the 2026-10-29 day run.
 
-| 1 thread (tuning \| held-out) | before | corrected |
+| 1 thread (tuning \| held-out) | before (bug) | corrected |
 |---|---|---|
-| spd | 1.18 \| 1.33 | **0.93 \| 0.97** |
-| hard_indef recommended | 1.36 \| 1.25 | **1.11 \| 1.13** |
-| hard_indef ipopt | 1.30 \| 1.34 | **1.08 \| 1.18** |
-| large_kkt recommended | 0.83 \| 0.83 | 0.71 \| 0.72 |
+| spd | 1.18 \| 1.33 | **0.95 \| 0.99** |
+| hard_indef recommended | 1.36 \| 1.25 | **1.16 \| 1.18** |
+| hard_indef ipopt | 1.30 \| 1.34 | **1.13 \| 1.22** |
+| large_kkt recommended | 0.83 \| 0.83 | 0.73 \| 0.73 |
 | large_kkt ipopt | 0.93 \| 1.03 | 0.88 \| 1.03 |
-| small_kkt | unchanged | unchanged |
+| small_kkt | unchanged | unchanged (±0.01) |
+
+The overlapped run alone gave hard_indef 0.02-0.06 lower (better for smf). Do not quote it.
 
 **The remaining 1-thread losses are mostly analysis, against MA97 and MA57.** 46 of 137 case-tracks lose by more than 1.15x.
 - **Analysis-dominated (29 case-tracks, 60% of the summed log-loss).** Examples (smf against the best competitor):
@@ -85,13 +89,41 @@ The 8/16-thread tables have no SSIDS until those stages are re-run.
   - cops_pinene: 43 ms against 4 ms;
   - TSOPF_b300*: 0.9-2.4 s against 0.45-1.4 s.
 - **Factor-dominated (17 case-tracks, 40%):** c-big, stokes128, ncvxqp9, bratu3d, G3_circuit and nd24k.
-- **SSIDS is the best competitor in only 9 of the losses:** TSOPF_b300 ×6, ncvxqp7 ×2 and nd24k.
+- **SSIDS is the best competitor in 10 of the losses**, all hard: TSOPF_b300_c1/c2/c3 on both tracks (1.53-1.76x), ncvxqp7 on both tracks (1.50-1.60x), cvxqp3 recommended (1.44x) and nd24k (1.50x).
 
 **This re-ranks the levers for 1 thread.** Analysis cost (section 4) comes first and amalgamation (section 2) second. Amalgamation stays first for 8/16 threads.
 
-**Caveats:**
-- The re-run overlapped an smf A/B sweep from another session, so anchor timings drifted by about ±20%. Re-time the SSIDS-best cases above on a quiet machine before quoting them individually.
-- pglib_opf_case2869/9241 time out at 150 s on SSIDS at 1 thread (both tracks).
+**Caveat:** pglib_opf_case2869/9241 time out at 150 s on SSIDS at 1 thread (both tracks).
+
+### 8/16 threads after the SSIDS re-run
+
+Properly threaded SSIDS's factorization speeds up 2.5x at 8 threads and 2.2x at 16 (geomean over 108 case-tracks; 3.8x on nd24k, 2.9x on c-big, 8.1x on G3_circuit at 16). Its analysis stays serial. The highest throughput is 30 GF/s per thread, well inside the `score.py` gate.
+
+| 8 \| 16 threads (tuning / held-out) | before (bug) | corrected |
+|---|---|---|
+| hard_indef recommended | 0.78 \| 0.75 / 0.99 \| 0.95 | **0.88 \| 0.89 / 1.07 \| 1.09** |
+| hard_indef ipopt | 0.83 \| 0.80 / 1.13 \| 1.07 | **0.92 \| 0.91 / 1.18 \| 1.18** |
+| spd | 0.53 \| 0.45 / 0.54 \| 0.53 | 0.55 \| 0.51 / 0.61 \| 0.62 |
+| large_kkt recommended | 0.63 \| 0.62 / 0.42 \| 0.43 | 0.66 \| 0.67 / 0.45 \| 0.47 |
+| large_kkt ipopt | 0.76 \| 0.83 / 0.71 \| 0.76 | 0.80 \| 0.87 / 0.71 \| 0.76 |
+
+SSIDS is now the best competitor on 17-18 of the 21 tuning hard_indef case-tracks at 8/16 threads.
+
+**At 16 threads, smf loses by more than 1.15x on 30 of 103 case-tracks.** SSIDS is the best competitor in 19 of them, MA97 in 9 and PARDISO in 2.
+- **Factor-dominated (17 case-tracks, 63% of the summed log-loss).** 16-thread factor time on the recommended track, with the wall-time score ratio over both tracks:
+
+  | case | smf factor | SSIDS factor | wall ratio |
+  |---|---|---|---|
+  | c-big | 13.2 s | 2.22 s | 4.1-4.3x |
+  | nd24k | 28.3 s | 8.25 s | 2.6x |
+  | ncvxqp7 | 2.64 s | 0.77 s | 2.1-2.3x |
+  | ncvxqp3 | 2.08 s | 0.69 s | 1.9x (2.9x on ipopt, against MA97) |
+  | TSOPF_b300_c3 | 1.06 s | 0.25 s | 1.8-2.1x |
+
+  The same holds for cvxqp3 (1.8-1.9x).
+- **Analysis-dominated (13 case-tracks, 37%):** TSOPF_b300_c1/c2 (smf 0.9-1.5 s against SSIDS 0.4-0.9 s), ncvxqp5, boyd1, cops_pinene and case39.
+
+This confirms the ranking for 8/16 threads: amalgamation (section 2) first, cross-front parallelism (section 3) second, then analysis cost.
 
 ## 2. Lever 1: cost-model amalgamation (measured, largest)
 
@@ -129,11 +161,11 @@ The cause is the current rule (`supernode_detection.cpp:463`), which merges only
 
 smf's 16-thread speedup over its own 1-thread time:
 
-| case | smf 1T | smf 16T | speedup | SSIDS 16 cores |
+| case (recommended, wall) | smf 1T | smf 16T | speedup | SSIDS 16T (fixed run) |
 |---|---|---|---|---|
-| nd24k | 51.8 s | 31.2 s | 1.66x | 11.8 s |
-| c-big | 17.2 s | 14.5 s | 1.19x | 3.5 s |
-| ncvxqp3 | 5.77 s | 4.46 s | 1.29x | 2.29 s |
+| nd24k | 51.8 s | 31.2 s | 1.66x | 12.2 s |
+| c-big | 17.2 s | 14.5 s | 1.19x | 3.55 s |
+| ncvxqp3 | 5.77 s | 4.46 s | 1.29x | 2.34 s |
 | TSOPF_FS_b300_c3 | 3.80 s | 3.46 s | 1.10x | 1.66 s |
 
 Part of this is lever 1 (narrow fronts cannot use threads) and part is the serial analysis (lever 3). The rest is architecture. Today's engine is "serial tree + threaded BLAS". It has APTP 2D top tiles, but only at u ≥ 1e-6 and f ≥ 512, and no cross-front pipelining (the deferred "Task 13b").
@@ -182,7 +214,7 @@ Accuracy is therefore the differentiator a GPU path would have to win on. An FP3
 
 ## Suggested order
 
-0. **Fix the SSIDS harness env and re-baseline** at 1/8/16 threads (hours of machine time: schedule it).
+0. ~~**Fix the SSIDS harness env and re-baseline** at 1/8/16 threads.~~ Done 2026-10-30 (section 1).
 1. **Cost-model amalgamation**, plus in-place last-child assembly. Single-thread A/B on the tuning split, then the held-out split.
 2. **Two-tier matching**, and running the analysis candidates concurrently.
 3. **Cross-front tile DAG** for the top of the tree, gated at 8/16 threads against corrected MA97 and SSIDS.
