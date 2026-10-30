@@ -115,12 +115,13 @@ TEST(ThreadPlan, BalancedTreeUsesAllThreads) {
     EXPECT_GT(p.predicted_speedup, 8.0);
 }
 
-// A root with 60% of the work: unsplit it bounds the speedup at 1/0.6
-// (2 threads are as good as more, within 2%); split into tiles it scales.
+// A root with 98% of the work: unsplit, the top phase alone takes 0.98 of
+// the serial time, so no thread count gains more than 2% (the tie rule
+// keeps the smallest); split into tiles it scales.
 TEST(ThreadPlan, SerialRootCapsThreads) {
     for (const bool root_split : {false, true}) {
         Synth rooty;
-        const Int root = rooty.add(-1, 1.5e9, root_split);
+        const Int root = rooty.add(-1, 5e10, root_split);
         binary(rooty, root, 9, 1e6, 1e3);
         binary(rooty, root, 9, 1e6, 1e3);
         const TreeView t = rooty.view();
@@ -129,9 +130,24 @@ TEST(ThreadPlan, SerialRootCapsThreads) {
             EXPECT_EQ(p.threads, 16);
         } else {
             EXPECT_LE(p.threads, 2);
-            EXPECT_LT(p.predicted_speedup, 1.0 / 0.59);
+            EXPECT_LT(p.predicted_speedup, 1.03);
         }
     }
+}
+
+// The two phases: an unsplit root with 60% of the work caps the speedup at
+// 1/0.6, but the 1024 balanced leaves below it still scale (phase 1 is
+// sub_total / T, not the heaviest subtree), so all 16 threads pay off.
+TEST(ThreadPlan, SubtreePhaseScalesUnderSerialRoot) {
+    Synth rooty;
+    const Int root = rooty.add(-1, 1.5e9);
+    binary(rooty, root, 9, 1e6, 1e3);
+    binary(rooty, root, 9, 1e6, 1e3);
+    const TreeView t = rooty.view();
+    const ThreadPlan p = plan_threads(t, 16, {});
+    EXPECT_EQ(p.threads, 16);
+    EXPECT_GT(p.predicted_speedup, 1.5);
+    EXPECT_LT(p.predicted_speedup, 1.0 / 0.59);
 }
 
 // robot_arm-like: a 10000-node spine of light fronts, each with one leaf.

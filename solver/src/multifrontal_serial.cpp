@@ -907,7 +907,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // Control::auto_threads: at most the thread count plan_threads picks for
   // the tree (else num_threads); below 2, the serial engine. Deterministic
   // mode's results do not depend on it: every thread count tiles the same
-  // fronts there.
+  // fronts there. The plan depends on the tree, num_threads, the costs and
+  // the split fronts (tiles_on) alone: ws.thread_plan keeps it for the
+  // refactorizations of this analysis.
   int threads = 1;
   std::vector<std::pair<std::size_t, std::size_t>> subtrees;
   std::vector<std::uint8_t> top;
@@ -915,18 +917,34 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::vector<double> tv_work;
   std::vector<std::uint8_t> tv_split;
   TreeView tv;
-  if (ns >= 2 && (delay_budget >= 0 || ctrl.num_threads > 1))
-    tv = tree_view(keep, tiles_on, tv_parent, tv_work, tv_split);
+  bool have_tv = false;
+  const auto view = [&]() -> const TreeView & {
+    if (!have_tv) tv = tree_view(keep, tiles_on, tv_parent, tv_work, tv_split);
+    have_tv = true;
+    return tv;
+  };
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
-  if (ctrl.auto_threads && want_threads > 1)
-    want_threads = plan_threads(tv, ctrl.num_threads,
+  if (ctrl.auto_threads && want_threads > 1) {
+    auto &pc = ws.thread_plan;
+    if (pc.analysis != keep.serial || pc.num_threads != ctrl.num_threads ||
+        pc.per_thread != ctrl.thread_cost_per_thread ||
+        pc.per_top_front != ctrl.thread_cost_per_top_front || pc.tiles_on != tiles_on) {
+      pc.threads = plan_threads(view(), ctrl.num_threads,
                                 ThreadCosts{ctrl.thread_cost_per_thread,
                                             ctrl.thread_cost_per_top_front})
                        .threads;
+      pc.analysis = keep.serial;
+      pc.num_threads = ctrl.num_threads;
+      pc.per_thread = ctrl.thread_cost_per_thread;
+      pc.per_top_front = ctrl.thread_cost_per_top_front;
+      pc.tiles_on = tiles_on;
+    }
+    want_threads = pc.threads;
+  }
   if (delay_budget >= 0 && ns >= 2) {
-    subtrees = partition_subtrees(tv, kBudgetNominalThreads, kTreeParallelMinWork, top);
+    subtrees = partition_subtrees(view(), kBudgetNominalThreads, kTreeParallelMinWork, top);
   } else if (want_threads > 1) {
-    subtrees = partition_subtrees(tv, want_threads, kTreeParallelMinWork, top);
+    subtrees = partition_subtrees(view(), want_threads, kTreeParallelMinWork, top);
   }
   if (want_threads > 1 && subtrees.size() >= 2)
     threads = std::min<int>(want_threads, static_cast<int>(subtrees.size()));

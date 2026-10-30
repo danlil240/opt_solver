@@ -4,10 +4,11 @@
 //
 // The partition splits the assembly tree into independent subtrees (phase
 // 1, one thread each) and a top part (phase 2, TopScheduler). The thread
-// count comes from a cost model on the tree: a T-thread run takes at least
-// the heaviest root-to-leaf path (fronts run as tile tasks count 1/T) and
-// total / T, plus a cost per thread and per top-part front. Work is f^2 p
-// per front, the unit of Info::predicted_flops.
+// count comes from a cost model of those two phases: each takes at least
+// its work / T and its longest serial chain (a subtree in phase 1, the
+// heaviest top path in phase 2, where fronts run as tile tasks count 1/T),
+// plus a cost per thread and per top-part front. Work is f^2 p per front,
+// the unit of Info::predicted_flops.
 
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
@@ -84,11 +85,16 @@ struct ThreadPlan {
 };
 
 // The thread count of least cost among 1, 2, 4, 8, ... and max_threads (at
-// most max_threads); on a tie within 2%, the smaller. cost(1) = total; for T
-// > 1, cost(T) = max(cp(T), total / T) + T per_thread + top(T)
-// per_top_front, with cp(T) the heaviest root-to-leaf sum of work / (split ?
-// T : 1) and top(T) the top-part size of partition_subtrees at T threads (T
-// is no candidate when that gives fewer than 2 subtrees).
+// most max_threads); on a tie within 2%, the smaller. cost(1) = total. For
+// T > 1, the engine's two phases on partition_subtrees' split at T threads
+// (T is no candidate when that gives fewer than 2 subtrees): the subtrees in
+// parallel, a barrier, then the top part:
+//   cost(T) = max(max_subtree, sub_total / T) + max(cp_top(T), top_total / T)
+//             + T per_thread + top(T) per_top_front,
+// with sub_total / max_subtree the work inside the subtrees / of the
+// heaviest one, top_total the top part's work, cp_top(T) the heaviest path
+// through top nodes only (split fronts' work / T), and top(T) the number of
+// top nodes.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 
 } // namespace smf

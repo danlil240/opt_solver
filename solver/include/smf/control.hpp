@@ -222,11 +222,13 @@ struct Control {
     int            num_threads   = 1;
     // auto_threads (num_threads > 1): the factorization runs on as many of
     // the num_threads threads as its assembly tree repays, by a cost model
-    // (src/parallel/thread_plan.hpp): a T-thread run costs the larger of the
-    // heaviest root-to-leaf path of front work (fronts run as tile tasks
-    // count 1/T) and total / T, plus thread_cost_per_thread per thread and
-    // thread_cost_per_top_front per front left in the top part; candidates
-    // 1, 2, 4, 8, ... and num_threads. Fewer than 2 threads: the serial
+    // (src/parallel/thread_plan.hpp) of the engine's two phases at T threads:
+    // the subtrees (the larger of the heaviest subtree and their work / T),
+    // then the top part (the larger of its heaviest path, fronts run as tile
+    // tasks counting 1/T, and its work / T), plus thread_cost_per_thread per
+    // thread and thread_cost_per_top_front per top-part front; candidates
+    // 1, 2, 4, 8, ... and num_threads. The choice is cached per analysis in
+    // the NumericWorkspace. Fewer than 2 threads: the serial
     // engine (Info::threads_used = 1). The choice never changes deterministic
     // mode's results. Front-tier board, factor time at 16 threads against 1
     // with all threads used: robot_arm_8k 7.7x slower (11.8k of its 22.7k

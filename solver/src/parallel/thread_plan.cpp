@@ -83,36 +83,42 @@ void subtree_sums(const TreeView &t, SubtreeSums &u) {
     if (t.parent[s] < 0) u.total += u.work[s];
 }
 
-// The heaviest root-to-leaf sum of work / (split ? threads : 1).
-double critical_path(const TreeView &t, int threads, std::vector<double> &below) {
-  below.assign(t.parent.size(), 0.0);  // heaviest path below each node
-  double cp = 0.0;
-  for (const Int s : t.postorder) {
-    const std::size_t si = static_cast<std::size_t>(s);
-    const double w = t.split[si] != 0 ? t.work[si] / threads : t.work[si];
-    const double path = w + below[si];
-    const Int p = t.parent[si];
-    if (p >= 0) {
-      double &b = below[static_cast<std::size_t>(p)];
-      b = std::max(b, path);
-    } else {
-      cp = std::max(cp, path);
-    }
-  }
-  return cp;
-}
-
-// partition_subtrees' sizes at this target without the heap: subtree work
+// The two phases of a candidate thread count, from the partition at this
+// target (the one partition_subtrees makes, without its heap: subtree work
 // never decreases towards the root, so the top part is exactly the nodes
 // heavier than the target, and the subtrees are the other nodes whose
-// parent is in the top part (or that are roots).
-void count_partition(const TreeView &t, const std::vector<double> &sub, double target,
-                     PartitionCount &pc) {
-  pc = PartitionCount{};
-  for (std::size_t s = 0; s < sub.size(); ++s) {
-    const Int p = t.parent[s];
-    if (sub[s] > target) ++pc.top;
-    else if (p < 0 || sub[static_cast<std::size_t>(p)] > target) ++pc.subtrees;
+// parent is in the top part, or that are roots).
+struct PhaseTerms {
+  PartitionCount pc;
+  double sub_total = 0.0;    // phase 1: work inside the subtrees
+  double max_subtree = 0.0;  //   and its heaviest subtree
+  double top_total = 0.0;    // phase 2: work of the top part
+  double cp_top = 0.0;       //   and its heaviest path, split fronts / threads
+};
+
+void phase_terms(const TreeView &t, const std::vector<double> &sub, double target, int threads,
+                 std::vector<double> &below, PhaseTerms &pt) {
+  pt = PhaseTerms{};
+  below.assign(t.parent.size(), 0.0);  // heaviest top path below each top node
+  for (const Int s : t.postorder) {
+    const std::size_t si = static_cast<std::size_t>(s);
+    const Int p = t.parent[si];
+    if (sub[si] > target) {
+      ++pt.pc.top;
+      pt.top_total += t.work[si];
+      const double w = t.split[si] != 0 ? t.work[si] / threads : t.work[si];
+      const double path = w + below[si];
+      if (p >= 0) {
+        double &b = below[static_cast<std::size_t>(p)];
+        b = std::max(b, path);
+      } else {
+        pt.cp_top = std::max(pt.cp_top, path);
+      }
+    } else if (p < 0 || sub[static_cast<std::size_t>(p)] > target) {
+      ++pt.pc.subtrees;
+      pt.sub_total += sub[si];
+      pt.max_subtree = std::max(pt.max_subtree, sub[si]);
+    }
   }
 }
 
@@ -149,10 +155,11 @@ partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<
 PartitionCount partition_count(const TreeView &t, int threads, double min_work) {
   SubtreeSums u;
   subtree_sums(t, u);
-  PartitionCount pc;
-  if (u.total < min_work) return pc;
-  count_partition(t, u.work, u.total / (4.0 * threads), pc);
-  return pc;
+  if (u.total < min_work) return {};
+  PhaseTerms pt;
+  std::vector<double> below;
+  phase_terms(t, u.work, u.total / (4.0 * threads), threads, below, pt);
+  return pt.pc;
 }
 
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c) {
@@ -172,17 +179,14 @@ ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c
     double cost;
   };
   std::vector<Cost> costs{{1, total}};
-  // Without split fronts the critical path does not depend on T.
-  const bool any_split = std::find(t.split.begin(), t.split.end(), std::uint8_t{1}) != t.split.end();
   std::vector<double> below;
-  double cp = -1.0;
   for (const int T : candidates) {
-    PartitionCount pc;
-    count_partition(t, u.work, total / (4.0 * T), pc);
-    if (pc.subtrees < 2) continue;
-    if (cp < 0.0 || any_split) cp = critical_path(t, T, below);
-    const double cost = std::max(cp, total / T) + T * c.per_thread +
-                        static_cast<double>(pc.top) * c.per_top_front;
+    PhaseTerms pt;
+    phase_terms(t, u.work, total / (4.0 * T), T, below, pt);
+    if (pt.pc.subtrees < 2) continue;
+    const double cost = std::max(pt.max_subtree, pt.sub_total / T) +
+                        std::max(pt.cp_top, pt.top_total / T) + T * c.per_thread +
+                        static_cast<double>(pt.pc.top) * c.per_top_front;
     costs.push_back({T, cost});
   }
   double least = total;

@@ -414,13 +414,10 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
     }
 }
 
-// Control::auto_threads: a chain-like tree (a banded matrix) repays no
-// thread, so it factors on one at num_threads = 16; with auto_threads off
-// the same tree is partitioned for all 16. (Bandwidth 30, not 10: at 10 the
-// tree's front work, 6.5e6, is below the 2e7 partition floor.)
-TEST(TreeParallel, AutoThreadsPicksSerialForChain) {
-    constexpr int n = 20000;
-    constexpr int bw = 30;
+namespace {
+
+// Banded SPD matrix of order n and half-bandwidth bw, lower CSC.
+CscLower banded_spd(int n, int bw) {
     CscLower A;
     A.n = n;
     A.col_ptr.push_back(0);
@@ -433,6 +430,17 @@ TEST(TreeParallel, AutoThreadsPicksSerialForChain) {
         }
         A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
     }
+    return A;
+}
+
+} // namespace
+
+// Control::auto_threads: a chain-like tree (a banded matrix) repays no
+// thread, so it factors on one at num_threads = 16; with auto_threads off
+// the same tree is partitioned for all 16. (Bandwidth 30, not 10: at 10 the
+// tree's front work, 6.5e6, is below the 2e7 partition floor.)
+TEST(TreeParallel, AutoThreadsPicksSerialForChain) {
+    const CscLower A = banded_spd(20000, 30);
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
@@ -462,6 +470,53 @@ TEST(TreeParallel, AutoThreadsPicksSerialForChain) {
             EXPECT_GE(fi.parallel_subtrees, 2);
         }
     }
+}
+
+// Control::auto_threads: the plan is cached in the NumericWorkspace per
+// analysis, num_threads and cost values; changing any of them re-plans
+// (threads_used follows), and a refactorization with the same ones reuses it.
+TEST(TreeParallel, ThreadPlanCacheFollowsItsInputs) {
+    const CscLower grid = laplacian_2d(200);
+    const CscLower band = banded_spd(20000, 30);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.num_threads = 16;
+    Solver solver;
+    Info info;
+    auto ak_grid = solver.analyse(grid, ctrl, info);
+    ASSERT_NE(ak_grid.get(), nullptr);
+    Control band_ctrl = ctrl;
+    band_ctrl.ordering = OrderingMethod::AMD;
+    auto ak_band = solver.analyse(band, band_ctrl, info);
+    ASSERT_NE(ak_band.get(), nullptr);
+
+    NumericWorkspace nws;  // shared by every factorization below
+    FactorKeep fk;
+    const auto threads_used = [&](const AnalysisKeep &ak, const CscLower &A, const Control &c) {
+        Info fi;
+        EXPECT_EQ(solver.factor(ak, A, c, fi, fk, nws), FactorStatus::Success);
+        return fi.threads_used;
+    };
+    const int planned = threads_used(*ak_grid, grid, ctrl);
+    ASSERT_GT(planned, 2) << "premise: the grid's tree repays more than 2 threads";
+    EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);  // cached
+
+    Control dear = ctrl;  // threads cost more than the whole factorization
+    dear.thread_cost_per_thread = 1e30;
+    EXPECT_EQ(threads_used(*ak_grid, grid, dear), 1);
+    Control dear_top = ctrl;
+    dear_top.thread_cost_per_top_front = 1e30;
+    EXPECT_EQ(threads_used(*ak_grid, grid, dear_top), 1);
+    EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);
+
+    Control two = ctrl;
+    two.num_threads = 2;
+    EXPECT_EQ(threads_used(*ak_grid, grid, two), 2);
+    EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);
+
+    // Another analysis on the same workspace: its own plan (the chain: 1).
+    EXPECT_EQ(threads_used(*ak_band, band, band_ctrl), 1);
+    EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);
 }
 
 TEST(TreeParallel, PhaseTimesReported) {
