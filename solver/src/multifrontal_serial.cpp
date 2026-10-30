@@ -941,6 +941,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pc.tiles_on = tiles_on;
     }
     want_threads = pc.threads;
+  } else if (want_threads > 1 && plan_trace_enabled()) {
+    // auto_threads off: the plan is evaluated for SMF_BENCH_PLAN_TRACE only
+    // (its terms do not depend on auto_threads) and not used.
+    plan_threads(view(), ctrl.num_threads,
+                 ThreadCosts{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front});
   }
   if (delay_budget >= 0 && ns >= 2) {
     subtrees = partition_subtrees(view(), kBudgetNominalThreads, kTreeParallelMinWork, top);
@@ -1399,19 +1404,25 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       top_work.push_back(static_cast<double>(step.p) * step.f);
     }
     // The solve's own thread count: its subtrees and top part weigh
-    // differently from the factorization's (p f, not f^2 p).
-    std::vector<double> sub_work;
-    sub_work.reserve(fkeep.solve_subtrees.size());
-    for (const auto &[b, e] : fkeep.solve_subtrees) {
-      double w = 0.0;
-      for (auto k = static_cast<std::size_t>(b); k < static_cast<std::size_t>(e); ++k)
-        w += static_cast<double>(fkeep.solve_steps[k].p) * fkeep.solve_steps[k].f;
-      sub_work.push_back(w);
+    // differently from the factorization's (p f, not f^2 p). auto_threads
+    // off: the factorization's thread count (the plan is evaluated for
+    // SMF_BENCH_PLAN_TRACE only).
+    if (ctrl.auto_threads || plan_trace_enabled()) {
+      std::vector<double> sub_work;
+      sub_work.reserve(fkeep.solve_subtrees.size());
+      for (const auto &[b, e] : fkeep.solve_subtrees) {
+        double w = 0.0;
+        for (auto k = static_cast<std::size_t>(b); k < static_cast<std::size_t>(e); ++k)
+          w += static_cast<double>(fkeep.solve_steps[k].p) * fkeep.solve_steps[k].f;
+        sub_work.push_back(w);
+      }
+      fkeep.solve_threads = plan_solve_threads(
+          sub_work, top_work, fkeep.solve_top_parent, fkeep.solve_top_rows.size(),
+          ctrl.num_threads,
+          SolveCosts{ctrl.solve_cost_per_thread, ctrl.solve_cost_per_top_step,
+                     ctrl.solve_cost_per_top_row});
     }
-    fkeep.solve_threads = plan_solve_threads(
-        sub_work, top_work, fkeep.solve_top_parent, fkeep.solve_top_rows.size(), ctrl.num_threads,
-        SolveCosts{ctrl.solve_cost_per_thread, ctrl.solve_cost_per_top_step,
-                   ctrl.solve_cost_per_top_row});
+    if (!ctrl.auto_threads) fkeep.solve_threads = threads;
   }
   return ErrorCode::Success;
 }

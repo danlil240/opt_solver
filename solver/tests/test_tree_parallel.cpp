@@ -520,6 +520,40 @@ TEST(TreeParallel, ThreadPlanCacheFollowsItsInputs) {
     EXPECT_EQ(threads_used(*ak_grid, grid, ctrl), planned);
 }
 
+// Control::auto_threads covers the solve. Off, FactorKeep::solve_threads is
+// the factorization's thread count whatever the solve costs: exactly 4 here,
+// since auto off partitions the 200 x 200 grid for all 4 threads and it has
+// far more than 4 subtrees (threads = min(4, subtrees)). On, a solve cost of
+// 1e15 per thread keeps the solve serial on the same parallel layout.
+TEST(TreeParallel, AutoThreadsOffFixesSolveThreads) {
+    const CscLower A = laplacian_2d(200);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = OrderingMethod::METIS;
+    ctrl.num_threads = 4;
+    ctrl.solve_cost_per_thread = 1e15;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    for (const bool auto_threads : {false, true}) {
+        Control c = ctrl;
+        c.auto_threads = auto_threads;
+        NumericWorkspace nws;
+        FactorKeep fk;
+        Info fi;
+        ASSERT_EQ(solver.factor(*ak, A, c, fi, fk, nws), FactorStatus::Success);
+        ASSERT_GE(fi.threads_used, 2) << "premise: tree-parallel, auto " << auto_threads;
+        ASSERT_GE(fk.solve_subtrees.size(), 2u) << "premise: parallel solve layout";
+        if (auto_threads) {
+            EXPECT_EQ(fk.solve_threads, 1);
+        } else {
+            EXPECT_EQ(fi.threads_used, 4);
+            EXPECT_EQ(fk.solve_threads, 4);
+        }
+    }
+}
+
 // FactorKeep::solve_threads (the solve's own cost model) and the call's
 // num_threads both cap the parallel solve: it runs on at most the smaller.
 TEST(TreeParallel, SolveThreadsCappedByCall) {

@@ -196,6 +196,29 @@ def rec(matrix, threads, factor_ms, solve_ms, track="recommended", solver="smf")
     }
 
 
+class CollectTest(unittest.TestCase):
+    def test_trace_env_auto_threads_off(self):
+        base = {"PATH": "x", "SMF_BENCH_AUTO_THREADS": "1", "SMF_BENCH_THREAD_COSTS": "1,2",
+                "SMF_BENCH_SOLVE_COSTS": "1,2,3"}
+        env = fit.trace_env(base, 16)
+        self.assertEqual(env["SMF_BENCH_AUTO_THREADS"], "0")
+        self.assertEqual(env["SMF_BENCH_PLAN_TRACE"], "1")
+        self.assertNotIn("SMF_BENCH_THREAD_COSTS", env)
+        self.assertNotIn("SMF_BENCH_SOLVE_COSTS", env)
+        self.assertEqual(env["OMP_NUM_THREADS"], "16")
+        self.assertEqual(env["PATH"], "x")
+        self.assertEqual(base["SMF_BENCH_AUTO_THREADS"], "1")  # not modified
+
+    def test_replay_command(self):
+        cmd = fit.replay_command(pathlib.Path("b.exe"), pathlib.Path("m.json"),
+                                 {"matrix_id": "c", "mode": "warm_sequence", "track": "ipopt",
+                                  "mtx_path": "c.mtx", "seq_values_path": "c.vals"}, 16)
+        self.assertEqual(cmd[cmd.index("--threads") + 1], "16")
+        self.assertIn("--print-steps", cmd)
+        self.assertEqual(cmd[cmd.index("--track") + 1], "ipopt")
+        self.assertEqual(cmd[cmd.index("--seq-values") + 1], "c.vals")
+
+
 class EndToEndTest(unittest.TestCase):
     def test_main_writes_report(self):
         manifest = {"cases": [

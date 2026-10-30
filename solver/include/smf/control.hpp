@@ -236,15 +236,21 @@ struct Control {
     // bound total / heaviest path 1.00 / 1.04); trees from 1.9e8 front work
     // up (TSOPF_FS_b39_c7) faster; ncvxqp3 ipopt (bound 1.54, root
     // dominated) gains nothing past 2-4 threads.
+    // auto_threads also covers the solve: on, the solve's thread count comes
+    // from its own cost model (solve_cost_* below).
     // auto_threads = false: the tree is partitioned for num_threads threads
-    // whenever its front work reaches 2e7.
+    // whenever its front work reaches 2e7, and the solve runs on the
+    // factorization's thread count (FactorKeep::solve_threads; at most the
+    // solve call's num_threads and the solve subtrees) with neither cost
+    // model consulted, so thread counts are fixed for scaling measurements.
     bool           auto_threads  = true;
     // The cost model's terms in front-work units (f^2 p): calibration hooks.
     double         thread_cost_per_thread    = 1e5;
     double         thread_cost_per_top_front = 5e3;
     // The solve's thread count, chosen at factorization time from its own
     // cost model (thread_plan.hpp, plan_solve_threads; FactorKeep::
-    // solve_threads) when the factorization leaves a parallel solve layout:
+    // solve_threads) when the factorization leaves a parallel solve layout
+    // and auto_threads is on:
     // the subtrees (the larger of the heaviest and their work / T), then
     // the top part's heaviest path, plus these terms per thread, per top
     // step and per top row and thread (the zeroed and summed buffers), in

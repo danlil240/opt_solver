@@ -34,10 +34,14 @@ thread counts. The re-implementation mirrors the C++ exactly:
 The trace prints %.6g, so a cost within ~1e-6 of the 2% tie boundary can
 resolve differently from the library.
 
+Traces are collected with SMF_BENCH_AUTO_THREADS=0 at 16 threads (ruling
+R18): the factorization is partitioned for all 16 threads, so the solve's
+terms are those of the 16-thread solve layout whatever the factor constants;
+with auto_threads off the library evaluates both plans for the trace only.
 Evaluation at max_threads 8 uses the candidates <= 8 of the 16-thread trace:
 exact for the factor (each candidate's partition depends on T alone), an
-approximation for the solve (its layout is the factorization's at the thread
-count the default constants picked when the trace was taken).
+approximation for the solve (an 8-thread factorization leaves a different
+layout).
 
 Loss of a grid point: sum over case-tracks and over max_threads in (16, 8) of
 log(measured(T_chosen) / min over T <= max_threads of measured(T)), measured =
@@ -49,7 +53,8 @@ chosen T (max 16) is > 1.05 x slower than 1 thread; A2 proxy: > 1.05 x slower
 than 8 threads (8-thread time >= --min-ms).
 
 Usage:
-  # traces: bench_replay --print-steps per case-track, killed after step 0
+  # traces: bench_replay --print-steps per case-track (SMF_BENCH_AUTO_THREADS=0,
+  # 16 threads), killed after step 0
   python tools/bench/fit_thread_costs.py --collect-traces \\
       --binary build/benchmarks/Release/bench_replay.exe \\
       --manifest benchmarks/manifests/fronttier.json --traces DIR [--cases a,b]
@@ -469,15 +474,25 @@ def replay_command(binary: pathlib.Path, manifest_path: pathlib.Path, case: dict
     return cmd
 
 
-def collect_one(cmd: list[str], cwd: pathlib.Path, threads: int, timeout_s: float) -> tuple[str, str]:
-    """Runs one replay with the plan trace on; returns (stderr up to and with
-    the first step line, how it ended)."""
-    env = dict(os.environ)
+def trace_env(base: dict[str, str], threads: int) -> dict[str, str]:
+    """The replay's environment: the plan trace on, auto_threads off (R18:
+    the factorization and the solve layout at all `threads`; the library
+    still evaluates the plans for the trace), default cost constants, and
+    the thread caps run.py exports."""
+    env = dict(base)
     env["SMF_BENCH_PLAN_TRACE"] = "1"
-    for var in ("SMF_BENCH_AUTO_THREADS", "SMF_BENCH_THREAD_COSTS", "SMF_BENCH_SOLVE_COSTS"):
+    env["SMF_BENCH_AUTO_THREADS"] = "0"
+    for var in ("SMF_BENCH_THREAD_COSTS", "SMF_BENCH_SOLVE_COSTS"):
         env.pop(var, None)
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
         env[var] = str(threads)
+    return env
+
+
+def collect_one(cmd: list[str], cwd: pathlib.Path, threads: int, timeout_s: float) -> tuple[str, str]:
+    """Runs one replay with the plan trace on; returns (stderr up to and with
+    the first step line, how it ended)."""
+    env = trace_env(dict(os.environ), threads)
     flags = BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
     proc = subprocess.Popen(cmd, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
@@ -547,7 +562,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--min-ms", type=float, default=1.0)
     ap.add_argument("--top", type=int, default=5)
     ap.add_argument("--collect-traces", action="store_true",
-                    help="run bench_replay per case-track and write the traces")
+                    help="run bench_replay per case-track and write the traces; the replays "
+                         "run with SMF_BENCH_AUTO_THREADS=0 and SMF_BENCH_PLAN_TRACE=1 at "
+                         "--max-threads threads (R18), cost env overrides removed")
     ap.add_argument("--binary", default=None, help="bench_replay executable (--collect-traces)")
     ap.add_argument("--repo-root", default=DEFAULT_REPO_ROOT,
                     help="working directory of the replays (manifest paths are relative to it)")
