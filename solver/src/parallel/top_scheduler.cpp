@@ -153,4 +153,12 @@ void TopScheduler::withdraw(TileRunner &job) {
   publish();
 }
 
+PassLanes::PassLanes(int lanes) : busy_(static_cast<std::size_t>(std::max(1, lanes)), 0) {}
+
+void PassLanes::release(int lane) {
+  if (lane < 0) return;
+  std::lock_guard<std::mutex> lk(mtx_);
+  busy_[static_cast<std::size_t>(lane)] = 0;
+}
+
 } // namespace smf

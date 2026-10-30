@@ -1,6 +1,8 @@
 // TopScheduler: the top part of the assembly tree as a DAG on a worker pool.
 // A node runs once all its children completed; a thread that readies a
 // parent continues with it; ready nodes share the BLAS-thread budget.
+// PassLanes: the passes handed to chains of top fronts, whatever thread
+// runs them.
 
 #include "parallel/top_scheduler.hpp"
 #include "smf/solve_pool.hpp"
@@ -192,4 +194,121 @@ TEST(TopScheduler, RandomTreesStress) {
         ASSERT_FALSE(sched.stopped());
         expect_topological(sched, parent);
     }
+}
+
+TEST(TopScheduler, ChainEndFollowsEachChain) {
+    // chain_end(tid) once per chain (a node taken from the list, then its
+    // continuations), after the chain's last run() on that thread: as many
+    // as queue_pops(), with a stop too.
+    std::mt19937 rng(7);
+    SolvePool pool(T);
+    for (int trial = 0; trial < 100; ++trial) {
+        const Int n = std::uniform_int_distribution<Int>(1, 2000)(rng);
+        std::vector<Int> parent(static_cast<std::size_t>(n), -1);
+        for (Int i = 0; i + 1 < n; ++i)
+            parent[static_cast<std::size_t>(i)] = std::uniform_int_distribution<Int>(i + 1, n - 1)(rng);
+        const Int fail_at = (trial % 4 == 3) ? n / 2 : -1;
+        TopScheduler sched(parent, T);
+        std::vector<int> in_chain(T, 0);  // per thread, touched by that thread only
+        std::atomic<int> ends{0}, bad{0};
+        pool.run([&](int tid) {
+            sched.work(
+                tid,
+                [&](Int v, int, int t) {
+                    in_chain[static_cast<std::size_t>(t)] = 1;
+                    return v != fail_at;
+                },
+                [&](int t) {
+                    if (in_chain[static_cast<std::size_t>(t)] != 1) bad.fetch_add(1);
+                    in_chain[static_cast<std::size_t>(t)] = 0;
+                    ends.fetch_add(1);
+                });
+        });
+        ASSERT_EQ(bad.load(), 0) << "trial " << trial;
+        ASSERT_EQ(ends.load(), sched.queue_pops()) << "trial " << trial;
+        for (int t = 0; t < T; ++t) ASSERT_EQ(in_chain[static_cast<std::size_t>(t)], 0) << "trial " << trial;
+    }
+}
+
+namespace {
+
+// Rooms of 8 lanes, as PassLanes::pick reads them.
+struct Rooms {
+    std::vector<std::size_t> r = std::vector<std::size_t>(T, 10);
+    std::size_t operator()(int l) const { return r[static_cast<std::size_t>(l)]; }
+};
+
+} // namespace
+
+TEST(PassLanes, ChainStartTakesHomeWhenItHasTheRoom) {
+    PassLanes lanes(T);
+    Rooms rooms;
+    rooms.r[5] = 100;
+    EXPECT_EQ(lanes.pick(-1, 2, 10, rooms), 2);
+    // Home taken: the next start from home 2 gets the free lane with the
+    // most room.
+    EXPECT_EQ(lanes.pick(-1, 2, 10, rooms), 5);
+}
+
+TEST(PassLanes, GrownLaneServesTheChainWhicheverThreadStartsIt) {
+    // The regression: lane 5 grew for the root fronts in an earlier
+    // factorization; this time thread 2 starts that chain. It must run on
+    // lane 5, not grow lane 2 (a reallocation and fresh pages, tens of ms
+    // on TSOPF_FS_b300_c3).
+    for (int home = 0; home < T; ++home) {
+        PassLanes lanes(T);
+        Rooms rooms;
+        rooms.r[5] = 100;
+        EXPECT_EQ(lanes.pick(-1, home, 50, rooms), 5) << "home " << home;
+    }
+}
+
+TEST(PassLanes, ChainMovesOnlyToAFreeLaneWithTheRoom) {
+    PassLanes lanes(T);
+    Rooms rooms;
+    rooms.r[3] = 40;
+    rooms.r[6] = 100;
+    int a = lanes.pick(-1, 1, 5, rooms);
+    ASSERT_EQ(a, 1);
+    // Room enough: kept, whatever the others have.
+    EXPECT_EQ(lanes.pick(a, 1, 10, rooms), 1);
+    // Another chain holds lane 6.
+    const int b = lanes.pick(-1, 6, 5, rooms);
+    ASSERT_EQ(b, 6);
+    // Lane 1 lacks the room for 30; lane 3 is the free one with the most.
+    a = lanes.pick(a, 1, 30, rooms);
+    EXPECT_EQ(a, 3);
+    // Lane 1 is free again: a start from home 1 takes it.
+    EXPECT_EQ(lanes.pick(-1, 1, 5, rooms), 1);
+    // No free lane has room for 60: the chain stays on lane 3 (it grows).
+    EXPECT_EQ(lanes.pick(a, 1, 60, rooms), 3);
+    // Lane 6 released: now it has the room.
+    lanes.release(b);
+    EXPECT_EQ(lanes.pick(a, 1, 60, rooms), 6);
+}
+
+TEST(PassLanes, NeverTwoHoldersOfALane) {
+    // Threads run chains of fronts on lanes; a lane is used (the front's
+    // window below) by one thread at a time.
+    PassLanes lanes(T);
+    std::vector<std::atomic<int>> inside(T);
+    std::atomic<int> clash{0};
+    SolvePool pool(T);
+    pool.run([&](int tid) {
+        std::mt19937 rng(static_cast<unsigned>(tid) + 1);
+        // Rooms are fixed here (read for free lanes only).
+        const auto room = [](int l) { return static_cast<std::size_t>(l) * 10; };
+        for (int chain = 0; chain < 2000; ++chain) {
+            int lane = -1;
+            for (int front = 0; front < 4; ++front) {
+                const std::size_t need = std::uniform_int_distribution<std::size_t>(0, 80)(rng);
+                lane = lanes.pick(lane, tid, need, room);
+                if (inside[static_cast<std::size_t>(lane)].fetch_add(1) != 0) clash.fetch_add(1);
+                for (int k = 0; k < 50; ++k) solve_pool_relax();
+                inside[static_cast<std::size_t>(lane)].fetch_sub(1);
+            }
+            lanes.release(lane);
+        }
+    });
+    EXPECT_EQ(clash.load(), 0);
 }

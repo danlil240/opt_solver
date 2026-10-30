@@ -1240,16 +1240,36 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // that the BLAS-thread budget leaves idle; they run its tasks on serial
     // BLAS.
     TopScheduler sched(std::move(top_parent), threads);
-    // Each top front's step index in its thread's pass (by local index).
+    // The passes as lanes (PassLanes): a chain of top fronts runs on a pass
+    // that already has the room its next front assembles in (factor values
+    // past the pass's fill), whichever thread runs it, so the root fronts
+    // stay in the buffers they grew in an earlier factorization. A thread
+    // starts on its own pass (its phase-1 blocks are there) when that has
+    // the room. lane_of: per thread, the pass its current chain holds.
+    PassLanes lanes(threads);
+    std::vector<int> lane_of(static_cast<std::size_t>(threads), -1);
+    const auto lane_room = [&tpass](int l) -> std::size_t {
+      const FrontPass &Q = tpass[static_cast<std::size_t>(l)];
+      return Q.fv->size() > Q.fo ? Q.fv->size() - Q.fo : 0;
+    };
+    // Each top front's pass and step index in it (by local index).
+    std::vector<int> top_pass(top_nodes.size(), 0);
     std::vector<std::size_t> top_step(top_nodes.size(), 0);
     if (failed.load() == static_cast<int>(ErrorCode::Success) && !top_nodes.empty()) {
       run_pool([&](int tid) {
-        FrontPass &P = tpass[static_cast<std::size_t>(tid)];
         // false stops every thread: an error here, or a stop raised by
         // another thread (an error, or a limit crossed by the counts).
-        sched.work(tid, [&](Int local, int blas_threads, int) {
+        int &lane = lane_of[static_cast<std::size_t>(tid)];
+        const auto run = [&](Int local, int blas_threads, int) {
           if (failed.load() != static_cast<int>(ErrorCode::Success)) return false;
           const Int s = top_nodes[static_cast<std::size_t>(local)];
+          // The front's rows at most (its children's delays are final), and
+          // the factor values it is assembled in.
+          std::size_t f = static_cast<std::size_t>(keep.front_size(s));
+          for (const Int c : keep.children(s))
+            f += static_cast<std::size_t>(ws.cb_delayed[static_cast<std::size_t>(c)]);
+          lane = lanes.pick(lane, tid, f * f, lane_room);
+          FrontPass &P = tpass[static_cast<std::size_t>(lane)];
           // Delay budget of a top front: its children's end states, all
           // final once it is ready (written before the scheduler recorded
           // their completion, under its lock, or by this thread).
@@ -1263,7 +1283,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // share (its tile tasks still recruit blas_threads - 1 helpers).
             BlasThreadGuard blas(det ? 1 : blas_threads);
             const TileCtx tc{blas_threads, &sched};
-            e = process_front(cx, P, 1 + tid, s, false, budget_regions ? &top_state : nullptr, &tc);
+            e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }
           if (e != ErrorCode::Success) {
             failed.store(static_cast<int>(e));
@@ -1271,12 +1291,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
           if (armed) count_negatives(P.st.inertia.negative - neg0);
           if (work_armed) count_work(P.st.front_work - work0);
+          top_pass[static_cast<std::size_t>(local)] = lane;
           top_step[static_cast<std::size_t>(local)] = P.steps->size() - 1;
           ++P.st.top_part_fronts;
           P.diag_marks.emplace_back(s, P.diag->size());
           if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
           // The counts above may have raised the stop.
           return failed.load() == static_cast<int>(ErrorCode::Success);
+        };
+        sched.work(tid, run, [&](int) {
+          lanes.release(lane);
+          lane = -1;
         });
       });
     }
@@ -1289,9 +1314,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     };
     std::vector<Done> done_order;
     done_order.reserve(sched.completed().size());
-    for (const auto &[local, tid] : sched.completed())
-      done_order.push_back({tid, top_step[static_cast<std::size_t>(local)],
-                            top_nodes[static_cast<std::size_t>(local)]});
+    for (const auto &c : sched.completed()) {
+      const std::size_t local = static_cast<std::size_t>(c.first);
+      done_order.push_back({top_pass[local], top_step[local], top_nodes[local]});
+    }
     st.top_part_queue_pops = sched.queue_pops();
     st.top_seconds = seconds_since(phase2_start);
     status = static_cast<ErrorCode>(failed.load());
