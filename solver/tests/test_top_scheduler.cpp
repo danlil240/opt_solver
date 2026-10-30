@@ -1,9 +1,10 @@
 // TopScheduler: the top part of the assembly tree as a DAG on a worker pool.
 // A node runs once all its children completed; a thread that readies a
 // parent continues with it; ready nodes share the BLAS-thread budget.
-// PassLanes: the passes handed to chains of top fronts, whatever thread
-// runs them.
+// PassLanes and ChunkArena: the factorization buffers the phases hand out
+// independently of which thread runs what.
 
+#include "parallel/chunk_arena.hpp"
 #include "parallel/top_scheduler.hpp"
 #include "smf/solve_pool.hpp"
 
@@ -311,4 +312,63 @@ TEST(PassLanes, NeverTwoHoldersOfALane) {
         }
     });
     EXPECT_EQ(clash.load(), 0);
+}
+
+TEST(ChunkArena, NeedsTheTotalWhateverTheOrder) {
+    // The subtree roots' blocks of a factorization, taken in a different
+    // order every time: the arena needs about their total, whatever the
+    // order (a chunk ends unused by less than the largest block), unlike a
+    // pass's stack, which needs what its thread happened to take.
+    ChunkArena<double> arena(1000);
+    std::vector<std::size_t> sizes;
+    std::mt19937 rng(3);
+    std::size_t total = 0;
+    for (int b = 0; b < 300; ++b) {
+        sizes.push_back(std::uniform_int_distribution<std::size_t>(1, 120)(rng));
+        total += sizes.back();
+    }
+    const std::size_t bound = total / (1000 - 119) + 1;
+    std::size_t first_chunks = 0;
+    for (int f = 0; f < 20; ++f) {
+        arena.reset();
+        std::shuffle(sizes.begin(), sizes.end(), rng);
+        std::vector<std::pair<double *, std::size_t>> taken;
+        for (const std::size_t n : sizes) {
+            double *p = arena.take(n);
+            for (std::size_t k = 0; k < n; ++k) p[k] = static_cast<double>(taken.size());
+            taken.emplace_back(p, n);
+        }
+        // Blocks do not overlap: each still holds its own index.
+        for (std::size_t i = 0; i < taken.size(); ++i)
+            for (std::size_t k = 0; k < taken[i].second; ++k)
+                ASSERT_EQ(taken[i].first[k], static_cast<double>(i)) << "factorization " << f;
+        if (f == 0) first_chunks = arena.chunks();
+        EXPECT_LE(arena.chunks(), bound) << "factorization " << f;
+    }
+    EXPECT_GE(first_chunks, total / 1000);
+}
+
+TEST(ChunkArena, OversizedBlockGetsItsOwnChunkAndThreadsNeverShareABlock) {
+    ChunkArena<int> arena(64);
+    int *big = arena.take(1000);
+    for (int k = 0; k < 1000; ++k) big[k] = k;
+    EXPECT_EQ(arena.chunks(), 1u);
+    int *small = arena.take(10);
+    EXPECT_EQ(arena.chunks(), 2u);
+    small[0] = -1;
+    EXPECT_EQ(big[999], 999);
+    // Threads taking blocks at once get disjoint ones.
+    arena.reset();
+    SolvePool pool(T);
+    std::vector<std::vector<int *>> got(T);
+    pool.run([&](int tid) {
+        for (int b = 0; b < 500; ++b) {
+            int *p = arena.take(7);
+            for (int k = 0; k < 7; ++k) p[k] = tid;
+            got[static_cast<std::size_t>(tid)].push_back(p);
+        }
+    });
+    for (int t = 0; t < T; ++t)
+        for (int *p : got[static_cast<std::size_t>(t)])
+            for (int k = 0; k < 7; ++k) ASSERT_EQ(p[k], t);
 }
