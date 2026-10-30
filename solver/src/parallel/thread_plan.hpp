@@ -57,6 +57,31 @@ struct TreeView {                       // one entry per supernode
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &parent,
                    std::vector<double> &work, std::vector<std::uint8_t> &split);
 
+// Subtree work of every node of a tree view, with each subtree's [first,
+// at] postorder range and the children lists: what the partitions and the
+// plan walk. Children are summed in descending postorder (AnalysisKeep::
+// children' order), so the sums add up exactly as they always did: the
+// delay-budget regions depend on them. subtree_sums refills one in place,
+// so a caller that keeps it (multifrontal_serial.cpp, per workspace) and
+// passes it to the overloads below walks a new analysis without fresh O(ns)
+// buffers; the overloads without one build their own.
+struct SubtreeSums {
+  std::vector<std::size_t> cptr;  // children, CSR
+  std::vector<Int> cidx;
+  std::vector<double> work;
+  std::vector<std::size_t> first, at;
+  double total = 0.0;  // over the roots, in index order
+  // Scratch: subtree_sums' CSR fill pointers, factor_plan_terms' heaviest
+  // top path below each node.
+  std::vector<std::size_t> fill;
+  std::vector<double> below;
+
+  std::span<const Int> children(std::size_t s) const {
+    return std::span<const Int>(cidx.data() + cptr[s], cptr[s + 1] - cptr[s]);
+  }
+};
+void subtree_sums(const TreeView &t, SubtreeSums &u);
+
 // Splits the tree into independent subtrees of bounded work (largest-first:
 // the heaviest subtree root moves to the top part until every remaining
 // subtree is below total / (4 threads)). Returns the subtrees as [first,
@@ -66,6 +91,10 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
 // The delay budget's regions (multifrontal_serial.cpp) are these subtrees.
 std::vector<std::pair<std::size_t, std::size_t>>
 partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top);
+// The same with u = subtree_sums(t).
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_subtrees(const TreeView &t, const SubtreeSums &u, int threads, double min_work,
+                   std::vector<std::uint8_t> &top);
 
 // The phase-1 tasks of the tree-parallel factorization without a delay
 // budget: partition_subtrees' subtrees, with runs of light ones merged into
@@ -81,6 +110,10 @@ partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<
 // and a solve range per front.
 std::vector<std::pair<std::size_t, std::size_t>>
 partition_tasks(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top);
+// The same with u = subtree_sums(t).
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_tasks(const TreeView &t, const SubtreeSums &u, int threads, double min_work,
+                std::vector<std::uint8_t> &top);
 
 // partition_tasks' merge grain: sub_total / (kTaskGrainsPerThread threads).
 // Two adjacent merged tasks weigh more than a grain together, so there are
@@ -132,6 +165,8 @@ struct ThreadPlan {
 // T), top_fronts(T) the number of top nodes and split_fronts(T) of them
 // run as tile tasks.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
+// The same with u = subtree_sums(t) (its scratch is used).
+ThreadPlan plan_threads(const TreeView &t, SubtreeSums &u, int max_threads, const ThreadCosts &c);
 
 // True when plan_threads picks 1 for every tree of this total work (the sum
 // of f^2 p over its fronts) and every max_threads, so the plan need not be
@@ -170,6 +205,9 @@ struct FactorPlanTerms {
 // Candidate 1 alone when max_threads < 2 or the tree's work is below
 // kTreeParallelMinWork; else one entry per candidate_threads(max_threads).
 std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads);
+// The same with u = subtree_sums(t) (its scratch is used).
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, SubtreeSums &u,
+                                               int max_threads);
 
 // cost(T) of plan_threads from one candidate's terms; < 0 when !ok.
 double factor_plan_cost(const FactorPlanTerms &k, const ThreadCosts &c);

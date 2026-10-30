@@ -399,6 +399,61 @@ TEST(ThreadPlan, PartitionCountMatchesPartition) {
     }
 }
 
+// One SubtreeSums refilled for tree after tree (largest first, so later
+// fills reuse longer buffers), as the engine keeps it per workspace: the
+// partitions and the plan terms are those of a fresh one, bitwise.
+TEST(ThreadPlan, ReusedSubtreeSumsMatchFresh) {
+    Synth bal;
+    binary(bal, -1, 12, 1e7, 1e5);
+    Synth cat;
+    Int s = -1;
+    for (int i = 0; i < 10000; ++i) {
+        s = cat.add(s, 2e3);
+        cat.add(s, 1e3);
+    }
+    Synth rooty;
+    const Int root = rooty.add(-1, 1.5e9, true);
+    binary(rooty, root, 9, 1e6, 1e3);
+    binary(rooty, root, 7, 3e6, 0.0);
+    rooty.add(-1, 4e8);
+    Synth light;
+    binary(light, -1, 3, 1e5, 1e3);
+
+    const TreeView views[] = {cat.view(), bal.view(), rooty.view(), light.view(), bal.view()};
+    SubtreeSums kept;
+    for (std::size_t v = 0; v < std::size(views); ++v) {
+        subtree_sums(views[v], kept);
+        for (const int T : {2, 4, 8, 16}) {
+            std::vector<std::uint8_t> top, ktop;
+            EXPECT_EQ(partition_tasks(views[v], kept, T, kTreeParallelMinWork, ktop),
+                      partition_tasks(views[v], T, kTreeParallelMinWork, top))
+                << "tree " << v << ", T = " << T;
+            EXPECT_EQ(ktop, top) << "tree " << v << ", T = " << T;
+            EXPECT_EQ(partition_subtrees(views[v], kept, T, kTreeParallelMinWork, ktop),
+                      partition_subtrees(views[v], T, kTreeParallelMinWork, top))
+                << "tree " << v << ", T = " << T;
+            EXPECT_EQ(ktop, top) << "tree " << v << ", T = " << T;
+        }
+        const auto fresh = factor_plan_terms(views[v], 16);
+        const auto reused = factor_plan_terms(views[v], kept, 16);
+        ASSERT_EQ(reused.size(), fresh.size()) << "tree " << v;
+        for (std::size_t i = 0; i < fresh.size(); ++i) {
+            EXPECT_EQ(reused[i].ok, fresh[i].ok);
+            EXPECT_EQ(reused[i].sub_total, fresh[i].sub_total);
+            EXPECT_EQ(reused[i].max_subtree, fresh[i].max_subtree);
+            EXPECT_EQ(reused[i].top_total, fresh[i].top_total);
+            EXPECT_EQ(reused[i].cp_top, fresh[i].cp_top);
+            EXPECT_EQ(reused[i].top_fronts, fresh[i].top_fronts);
+            EXPECT_EQ(reused[i].split_top_fronts, fresh[i].split_top_fronts);
+            EXPECT_EQ(reused[i].split_top_work, fresh[i].split_top_work);
+            EXPECT_EQ(reused[i].total, fresh[i].total);
+        }
+        EXPECT_EQ(plan_threads(views[v], kept, 16, {}).threads,
+                  plan_threads(views[v], 16, {}).threads)
+            << "tree " << v;
+    }
+}
+
 // The solve's model: two light subtrees under a 5000-step chain of top
 // steps. Every parallel candidate pays the chain serially plus a hand-off
 // per top step (5000 x 2e3 against 2.7e5 of work), so the solve is serial.

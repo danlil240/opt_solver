@@ -89,6 +89,14 @@ struct TreeParallelBuffers {
     std::vector<std::uint8_t> top;
   };
   Partition partition;
+  // The tree walks of the thread plan and the partition (tree_view's
+  // arrays, subtree_sums), refilled in place for each new analysis: fresh
+  // O(ns) buffers page-faulted on every cold call (about 1 ms of plan and
+  // partition on boyd2, ns ~ 93k). Both share one view and one set of sums.
+  std::vector<Int> view_parent;
+  std::vector<double> view_work;
+  std::vector<std::uint8_t> view_split;
+  SubtreeSums sums;
 };
 
 namespace {
@@ -940,15 +948,25 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // would come out serial (about 1 ms per analysis on boyd1, ns ~ 90k).
   // The plan trace (SMF_BENCH_PLAN_TRACE) still evaluates the plan.
   int threads = 1;
-  std::vector<Int> tv_parent;
-  std::vector<double> tv_work;
-  std::vector<std::uint8_t> tv_split;
+  const auto buffers = [&ws]() -> TreeParallelBuffers & {
+    if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
+    return *ws.tree_par;
+  };
   TreeView tv;
   bool have_tv = false;
   const auto view = [&]() -> const TreeView & {
-    if (!have_tv) tv = tree_view(keep, tiles_on, tv_parent, tv_work, tv_split);
+    if (!have_tv) {
+      TreeParallelBuffers &b = buffers();
+      tv = tree_view(keep, tiles_on, b.view_parent, b.view_work, b.view_split);
+    }
     have_tv = true;
     return tv;
+  };
+  bool have_sums = false;
+  const auto sums = [&]() -> SubtreeSums & {
+    if (!have_sums) subtree_sums(view(), buffers().sums);
+    have_sums = true;
+    return buffers().sums;
   };
   const ThreadCosts thread_costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
                                  ctrl.thread_cost_per_split_front_thread,
@@ -965,7 +983,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.per_top_front != thread_costs.per_top_front ||
         pc.per_split_front_thread != thread_costs.per_split_front_thread ||
         pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on) {
-      pc.threads = plan_threads(view(), ctrl.num_threads, thread_costs).threads;
+      pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
       pc.per_thread = thread_costs.per_thread;
@@ -978,7 +996,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   } else if (want_threads > 1 && plan_trace_enabled()) {
     // auto_threads off: the plan is evaluated for SMF_BENCH_PLAN_TRACE only
     // (its terms do not depend on auto_threads) and not used.
-    plan_threads(view(), ctrl.num_threads, thread_costs);
+    plan_threads(view(), sums(), ctrl.num_threads, thread_costs);
   }
   const auto partition = [&](int nthreads, bool budget) {
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
@@ -986,8 +1004,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     if (pp.analysis != keep.serial || pp.ns != ns || pp.threads != nthreads ||
         pp.budget != budget) {
       pp.analysis = 0;  // until rebuilt
-      pp.ranges = budget ? partition_subtrees(view(), nthreads, kTreeParallelMinWork, pp.top)
-                         : partition_tasks(view(), nthreads, kTreeParallelMinWork, pp.top);
+      pp.ranges = budget
+                      ? partition_subtrees(view(), sums(), nthreads, kTreeParallelMinWork, pp.top)
+                      : partition_tasks(view(), sums(), nthreads, kTreeParallelMinWork, pp.top);
       pp.analysis = keep.serial;
       pp.ns = ns;
       pp.threads = nthreads;

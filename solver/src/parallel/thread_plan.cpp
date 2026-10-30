@@ -33,24 +33,6 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
   return TreeView{keep.postorder, parent, work, split};
 }
 
-namespace {
-
-// Subtree work of every node, with each subtree's [first, at] postorder
-// range. Children are summed in descending postorder (AnalysisKeep::
-// children' order), so the sums add up exactly as they always did: the
-// delay-budget regions depend on them.
-struct SubtreeSums {
-  std::vector<std::size_t> cptr;  // children, CSR
-  std::vector<Int> cidx;
-  std::vector<double> work;
-  std::vector<std::size_t> first, at;
-  double total = 0.0;  // over the roots, in index order
-
-  std::span<const Int> children(std::size_t s) const {
-    return std::span<const Int>(cidx.data() + cptr[s], cptr[s + 1] - cptr[s]);
-  }
-};
-
 void subtree_sums(const TreeView &t, SubtreeSums &u) {
   const std::size_t ns = t.parent.size();
   u.cptr.assign(ns + 1, 0);
@@ -59,7 +41,8 @@ void subtree_sums(const TreeView &t, SubtreeSums &u) {
   for (std::size_t s = 0; s < ns; ++s) u.cptr[s + 1] += u.cptr[s];
   u.cidx.resize(u.cptr[ns]);
   {
-    std::vector<std::size_t> fill(u.cptr.begin(), u.cptr.end() - 1);
+    std::vector<std::size_t> &fill = u.fill;
+    fill.assign(u.cptr.begin(), u.cptr.end() - 1);
     for (std::size_t k = t.postorder.size(); k-- > 0;) {
       const Int s = t.postorder[k];
       const Int p = t.parent[static_cast<std::size_t>(s)];
@@ -84,6 +67,8 @@ void subtree_sums(const TreeView &t, SubtreeSums &u) {
   for (std::size_t s = 0; s < ns; ++s)
     if (t.parent[s] < 0) u.total += u.work[s];
 }
+
+namespace {
 
 // A postorder index range [lo, hi] of whole subtrees and its work.
 struct Range {
@@ -184,9 +169,15 @@ void append_line(std::string &out, const char *line, int n) {
 
 std::vector<std::pair<std::size_t, std::size_t>>
 partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top) {
-  const std::size_t ns = t.parent.size();
   SubtreeSums u;
   subtree_sums(t, u);
+  return partition_subtrees(t, u, threads, min_work, top);
+}
+
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_subtrees(const TreeView &t, const SubtreeSums &u, int threads, double min_work,
+                   std::vector<std::uint8_t> &top) {
+  const std::size_t ns = t.parent.size();
   using Item = std::pair<double, Int>;
   std::priority_queue<Item> heap;
   for (std::size_t s = 0; s < ns; ++s)
@@ -212,11 +203,17 @@ partition_subtrees(const TreeView &t, int threads, double min_work, std::vector<
 
 std::vector<std::pair<std::size_t, std::size_t>>
 partition_tasks(const TreeView &t, int threads, double min_work, std::vector<std::uint8_t> &top) {
+  SubtreeSums u;
+  subtree_sums(t, u);
+  return partition_tasks(t, u, threads, min_work, top);
+}
+
+std::vector<std::pair<std::size_t, std::size_t>>
+partition_tasks(const TreeView &t, const SubtreeSums &u, int threads, double min_work,
+                std::vector<std::uint8_t> &top) {
   // partition_subtrees' split without its heap (see phase_terms: the top
   // part is the nodes heavier than the target).
   const std::size_t ns = t.parent.size();
-  SubtreeSums u;
-  subtree_sums(t, u);
   top.assign(ns, 0);
   if (u.total < min_work) return {};
   const double target = u.total / (4.0 * threads);
@@ -266,16 +263,20 @@ std::vector<int> candidate_threads(int max_threads) {
 std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads) {
   SubtreeSums u;
   subtree_sums(t, u);
+  return factor_plan_terms(t, u, max_threads);
+}
+
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, SubtreeSums &u,
+                                               int max_threads) {
   const double total = u.total;
   std::vector<FactorPlanTerms> out(1);
   out[0].total = total;
   if (max_threads < 2 || total < kTreeParallelMinWork || !(total > 0.0)) return out;
-  std::vector<double> below;
   std::vector<Range> ranges;
   for (const int T : candidate_threads(max_threads)) {
     if (T == 1) continue;
     PhaseTerms pt;
-    phase_terms(t, u, total / (4.0 * T), T, below, ranges, pt);
+    phase_terms(t, u, total / (4.0 * T), T, u.below, ranges, pt);
     FactorPlanTerms k;
     k.threads = T;
     k.ok = pt.pc.subtrees >= 2;
@@ -347,7 +348,13 @@ bool plan_is_serial(double total, const ThreadCosts &c) {
 }
 
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c) {
-  const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, max_threads);
+  SubtreeSums u;
+  subtree_sums(t, u);
+  return plan_threads(t, u, max_threads, c);
+}
+
+ThreadPlan plan_threads(const TreeView &t, SubtreeSums &u, int max_threads, const ThreadCosts &c) {
+  const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, u, max_threads);
   std::vector<std::pair<int, double>> costs;
   costs.reserve(terms.size());
   for (const auto &k : terms) costs.emplace_back(k.threads, factor_plan_cost(k, c));
