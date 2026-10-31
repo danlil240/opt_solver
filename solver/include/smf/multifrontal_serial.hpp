@@ -92,4 +92,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
 /// this process put in their root arenas so far (tests use the difference).
 long long root_arena_blocks_taken();
 
+/// Tests: pool thread `tid` (> 0) of every tree-parallel factorization
+/// starts its subtree phase only once another thread has taken the task
+/// dealt to it (or after 10 s), as a thread that wakes late would; -1 (the
+/// default) turns this off.
+void set_late_phase1_thread_for_test(int tid);
+
+/// Dealt subtree tasks (the heaviest, one per thread) that a thread other
+/// than their own took, by every factorization of this process so far.
+long long dealt_tasks_taken_over();
+
 } // namespace smf

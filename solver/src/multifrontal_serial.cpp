@@ -35,6 +35,13 @@ namespace smf {
 // (root_arena_blocks_taken).
 std::atomic<long long> g_root_arena_blocks{0};
 
+namespace {
+// Tests (set_late_phase1_thread_for_test): the pool thread whose subtree
+// phase starts late, -1 for none; and the dealt tasks other threads took.
+std::atomic<int> g_late_phase1_thread{-1};
+std::atomic<long long> g_dealt_tasks_taken_over{0};
+} // namespace
+
 // Per-thread output and scratch of the tree-parallel path, kept in the
 // NumericWorkspace so refactorizations reuse it.
 struct TreeParallelBuffers {
@@ -808,6 +815,14 @@ void gather_copy(const T *src, std::size_t count, T *dst, bool in_pieces) {
 
 long long root_arena_blocks_taken() { return g_root_arena_blocks.load(std::memory_order_relaxed); }
 
+void set_late_phase1_thread_for_test(int tid) {
+  g_late_phase1_thread.store(tid, std::memory_order_relaxed);
+}
+
+long long dealt_tasks_taken_over() {
+  return g_dealt_tasks_taken_over.load(std::memory_order_relaxed);
+}
+
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
                                      const Control &ctrl, double eff_small,
@@ -1247,18 +1262,35 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // Thread t takes task t first, then the next one left: the heaviest
     // tasks (the first, heaviest first) land on the same passes in every
     // factorization of an analysis, whose buffers then hold them without
-    // growing (which thread wakes first is a race on the pool).
-    std::atomic<std::size_t> next{static_cast<std::size_t>(threads)};
+    // growing (which thread wakes first is a race on the pool). A dealt task
+    // is claimed, not pinned: a thread that finds no task left takes any
+    // dealt task whose thread has not claimed it yet, so a thread that wakes
+    // late (by a scheduler quantum on a loaded machine) holds up no task.
+    // Only then may a pass take a dealt task not its own, and grow.
+    const std::size_t dealt = std::min(subtrees.size(), static_cast<std::size_t>(threads));
+    std::vector<std::atomic<bool>> claimed(dealt);
+    const auto claim = [&claimed](std::size_t i) {
+      return !claimed[i].load(std::memory_order_relaxed) &&
+             !claimed[i].exchange(true, std::memory_order_relaxed);
+    };
+    std::atomic<std::size_t> next{dealt};
     std::vector<std::vector<std::pair<std::size_t, std::size_t>>> subtree_steps(
         static_cast<std::size_t>(threads));
     run_pool([&](int tid) {
       BlasSerialGuard serial_blas;
       FrontPass &P = tpass[static_cast<std::size_t>(tid)];
-      for (std::size_t i = static_cast<std::size_t>(tid);;
-           i = next.fetch_add(1, std::memory_order_relaxed)) {
-        if (i >= subtrees.size() ||
-            failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
-          break;
+      const std::size_t own = static_cast<std::size_t>(tid);
+      const auto running = [&failed] {
+        return failed.load(std::memory_order_relaxed) == static_cast<int>(ErrorCode::Success);
+      };
+      if (own < dealt && tid == g_late_phase1_thread.load(std::memory_order_relaxed)) {
+        // Tests: start once another thread has taken this thread's task.
+        const auto t0 = std::chrono::steady_clock::now();
+        while (!claimed[own].load(std::memory_order_relaxed) &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
+          std::this_thread::yield();
+      }
+      const auto run_task = [&](std::size_t i) {
         const auto [lo, hi] = subtrees[i];
         const std::size_t first_step = P.steps->size();
         // Delay budget: each subtree from zero over its own postorder, so the
@@ -1286,7 +1318,18 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         if (budget_regions && complete)
           node_budget[static_cast<std::size_t>(keep.postorder[hi])] = budget;
         subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
+      };
+      if (own < dealt && running() && claim(own)) run_task(own);
+      while (running()) {
+        const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+        if (i >= subtrees.size()) break;
+        run_task(i);
       }
+      for (std::size_t i = 0; i < dealt && running(); ++i)
+        if (claim(i)) {
+          g_dealt_tasks_taken_over.fetch_add(1, std::memory_order_relaxed);
+          run_task(i);
+        }
     });
     st.subtree_seconds = seconds_since(phase1_start);
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
