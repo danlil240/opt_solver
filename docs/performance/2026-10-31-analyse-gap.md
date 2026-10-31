@@ -59,6 +59,22 @@ thread-scheduling write-up).
   dissection's leaves, keep the library default.
 - Factors are identical to `0884a69` on the affected cases.
 
+### A nearly complete initial matching keeps its scale (`06126ff`)
+
+An initial rejection previously kept AMD with no scaling. Now, when the initial matching left at most 2%
+of the columns free and the pivot threshold is strong (u >= 1e-6), its scale is applied as a partial
+scale, with the rescue still armed.
+
+- stokes128 recommended (1.0% free): 54k → 17k delays, wall 159 → 65 ms at 1T (0.40), 85 → 57 ms at 8T
+  (0.67), accurate.
+- Of the 108 matrices, stokes128 is the only initial rejecter that qualifies. PGLib OPF is 13.5-15% free,
+  darcy003 and mario002 20%, ncvxqp9 31%, turon_m 38%.
+- Without the free-share gate, PGLib paid 2-9% for a scale that leaves its delays in place. At
+  u = 1e-8 the scale only costs time. Without the rescue armed, pglib_opf_case4661_sdet rec turned
+  inaccurate.
+- The rule was found on a tuning case (stokes128). The gate keeps it to initial matchings whose duals are
+  nearly the full matching's.
+
 ## Where the analysis time went
 
 `bench_matching_trial --pieces` splits the trial's matching phase into the matcher's constructor (cost
@@ -91,7 +107,8 @@ graph, greedy and length-2), the budgeted searches, the rest of the searches, an
   sparse part is diagonal.
 - **Diagonal verdict without a scale.** boyd1 on the recommended track (u = 0.01) then cascades delays
   and factors in 14 s instead of 13 ms. Auto must keep the matching's scaling.
-- **A rejected matching's scale applied with AMD** (temporary `SMF_REJ_SCALE` experiment).
+- **A rejected matching's scale applied with AMD, ungated** (temporary `SMF_REJ_SCALE` experiment;
+  the gated form is `06126ff` above).
   - The initial matching's scale on an initial rejection gives stokes128 rec 159 → 65 ms and pglib rec
     -23 to -26%.
   - But pglib_opf_case4661_sdet rec turns inaccurate, the ipopt tracks get 5-8% slower, and the full
