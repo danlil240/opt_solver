@@ -31,6 +31,10 @@
 
 namespace smf {
 
+// Blocks taken from the root arenas by every factorization in the process
+// (root_arena_blocks_taken).
+std::atomic<long long> g_root_arena_blocks{0};
+
 // Per-thread output and scratch of the tree-parallel path, kept in the
 // NumericWorkspace so refactorizations reuse it.
 struct TreeParallelBuffers {
@@ -716,6 +720,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       if (root_block) {
         dst = cx.root_values->take(sq * (sq + 1) / 2);
         dst_rows = cx.root_rows->take(sq);
+        g_root_arena_blocks.fetch_add(1, std::memory_order_relaxed);
       } else {
         nb.values = cx.pool->acquire(sq * (sq + 1) / 2, nb.cap);
         nb.rows.resize(sq);
@@ -777,6 +782,8 @@ double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
 constexpr int kBudgetNominalThreads = 16;
 
 } // namespace
+
+long long root_arena_blocks_taken() { return g_root_arena_blocks.load(std::memory_order_relaxed); }
 
 ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      const Int *ari, const double *av,
@@ -1208,6 +1215,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     };
     ws.tree_par->root_values.reset();
     ws.tree_par->root_rows.reset();
+    // The arenas' new chunks count as capacity growths (Info::arena_growths),
+    // as the pass stacks' growths did when the root blocks lived there.
+    const std::size_t arena_chunks0 =
+        ws.tree_par->root_values.chunks() + ws.tree_par->root_rows.chunks();
     const auto phase1_start = PhaseClock::now();
     // Thread t takes task t first, then the next one left: the heaviest
     // tasks (the first, heaviest first) land on the same passes in every
@@ -1254,6 +1265,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       }
     });
     st.subtree_seconds = seconds_since(phase1_start);
+    main.growths += static_cast<int64_t>(ws.tree_par->root_values.chunks() +
+                                         ws.tree_par->root_rows.chunks() - arena_chunks0);
     const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)

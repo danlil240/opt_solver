@@ -11,6 +11,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/multifrontal_serial.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -357,6 +358,7 @@ struct DetRun {
     std::vector<double> d;  // D entries (indefinite), elimination order
     int pos = 0, neg = 0, zero = 0;
     int subtrees = 0, tiles = 0;
+    long long arena_blocks = 0;  // subtree roots' blocks put in the root arenas
     int ordering_used = 0;
 };
 
@@ -381,7 +383,9 @@ DetRun det_run(const DetCase &c, int threads) {
     NumericWorkspace nws;
     SolveWorkspace sws;
     FactorKeep fk;
+    const long long arena0 = root_arena_blocks_taken();
     EXPECT_EQ(solver.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
+    r.arena_blocks = root_arena_blocks_taken() - arena0;
     const int n = static_cast<int>(c.A.n);
     r.x.resize(static_cast<std::size_t>(n));
     for (std::size_t i = 0; i < r.x.size(); ++i)
@@ -468,8 +472,12 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
             for (int run = 0; run < kRuns; ++run) {
                 const DetRun r = det_run(c, threads);
                 if (threads == 8 && run == 0) {
-                    if (c.expect_parallel)
+                    if (c.expect_parallel) {
                         EXPECT_GE(r.subtrees, 2) << "8 threads: parallel path not taken";
+                        // The root-arena path (Task 6b3) is part of what
+                        // must reproduce bitwise.
+                        EXPECT_GT(r.arena_blocks, 0) << "8 threads: no root block in the arena";
+                    }
                     if (c.expect_tiles)
                         EXPECT_GT(r.tiles, 0) << "8 threads: no tile-task front";
                 }

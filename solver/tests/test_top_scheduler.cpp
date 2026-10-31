@@ -372,3 +372,33 @@ TEST(ChunkArena, OversizedBlockGetsItsOwnChunkAndThreadsNeverShareABlock) {
         for (int *p : got[static_cast<std::size_t>(t)])
             for (int k = 0; k < 7; ++k) ASSERT_EQ(p[k], t);
 }
+
+TEST(ChunkArena, OversizedBlocksAnywhereTakeNoNewChunkAfterTheFirstPass) {
+    // Regular blocks that fill chunks exactly (no order-dependent waste) and
+    // blocks larger than a chunk, at different positions after every reset:
+    // the arena's chunks after the first pass serve every later order. An
+    // oversized block in the bump chain would skip the chunks left and make
+    // the arena grow again whenever it came earlier.
+    ChunkArena<double> arena(1000);
+    std::vector<std::size_t> sizes(60, 100);
+    for (const std::size_t big : {2500, 4000, 1500}) sizes.push_back(big);
+    std::mt19937 rng(11);
+    std::size_t after_first = 0;
+    for (int f = 0; f < 30; ++f) {
+        arena.reset();
+        std::shuffle(sizes.begin(), sizes.end(), rng);
+        std::vector<std::pair<double *, std::size_t>> taken;
+        for (const std::size_t n : sizes) {
+            double *p = arena.take(n);
+            for (std::size_t k = 0; k < n; ++k) p[k] = static_cast<double>(taken.size());
+            taken.emplace_back(p, n);
+        }
+        for (std::size_t i = 0; i < taken.size(); ++i)
+            for (std::size_t k = 0; k < taken[i].second; ++k)
+                ASSERT_EQ(taken[i].first[k], static_cast<double>(i)) << "factorization " << f;
+        if (f == 0) after_first = arena.chunks();
+        EXPECT_EQ(arena.chunks(), after_first) << "factorization " << f;
+    }
+    // 6000 regular elements in chunks of 1000, and one chunk per large block.
+    EXPECT_EQ(after_first, 6u + 3u);
+}

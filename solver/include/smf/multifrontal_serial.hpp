@@ -88,4 +88,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      NumericWorkspace &ws, SerialFactorStats &st,
                                      double work_limit = -1.0);
 
+/// Subtree roots' contribution blocks the tree-parallel factorizations of
+/// this process put in their root arenas so far (tests use the difference).
+long long root_arena_blocks_taken();
+
 } // namespace smf
