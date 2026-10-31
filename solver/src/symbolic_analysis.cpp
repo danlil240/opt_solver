@@ -140,6 +140,10 @@ namespace smf
             return within_;
         }
         const MatchingResult &initial() const { return initial_; }
+        // After within_budget(): the matcher's initial phase was diagonal
+        // (SymmetricMatcher::diagonal()), no search ran, and
+        // diagonal_scale holds its scaling.
+        bool diagonal() const { return diagonal_; }
         void stop() { stop_.store(true, std::memory_order_relaxed); }
         // Waits for the worker and rethrows what it threw. Afterwards
         // ordered() says whether the exact matching was perfect and its
@@ -154,6 +158,7 @@ namespace smf
         bool ordered() const { return ordered_; }
         std::vector<Int> perm;
         MatchingOrderStats stats;
+        std::vector<double> diagonal_scale;
 
     private:
         void run()
@@ -161,6 +166,19 @@ namespace smf
             try
             {
                 SymmetricMatcher matcher(C_);
+                if (matcher.diagonal())
+                {
+                    MatchingResult mr = matcher.diagonal_result();
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        diagonal_ = mr.status == ErrorCode::Success;
+                        if (diagonal_)
+                            diagonal_scale = std::move(mr.scale);
+                        phase1_ready_ = true;
+                    }
+                    ready_cv_.notify_all();
+                    return;
+                }
                 const bool within = matcher.advance(budget_);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -206,6 +224,7 @@ namespace smf
         std::condition_variable ready_cv_;
         bool phase1_ready_ = false;
         bool within_ = false;
+        bool diagonal_ = false;
         MatchingResult initial_;
         std::atomic<bool> stop_{false};
         bool ordered_ = false;
@@ -472,6 +491,7 @@ namespace smf
         // With threads, the trial runs concurrently (ConcurrentTrial) and is
         // decided at the same point, with the same results.
         std::vector<Int> matching_perm;
+        std::vector<double> diagonal_scale;  // MatchingTrial::Diagonal's
         std::unique_ptr<SymmetricMatcher> paused_matcher;
         std::unique_ptr<ConcurrentTrial> concurrent;
         // In edges scanned: budget x 2 x C's lower entries (diagonal
@@ -489,7 +509,17 @@ namespace smf
         else if (auto_matching)
         {
             auto matcher = std::make_unique<SymmetricMatcher>(C);
-            if (matcher->advance(budget))
+            if (matcher->diagonal())
+            {
+                MatchingResult mr = matcher->diagonal_result();
+                auto_matching = false;
+                if (mr.status == ErrorCode::Success)
+                {
+                    diagonal_scale = std::move(mr.scale);
+                    info.matching_trial = MatchingTrial::Diagonal;
+                }
+            }
+            else if (matcher->advance(budget))
             {
                 const MatchingResult mr = matcher->current();
                 auto_matching = mr.status == ErrorCode::Success &&
@@ -691,7 +721,13 @@ namespace smf
         if (concurrent)
         {
             const bool within = concurrent->within_budget();
-            const bool resume = !within && initial_passes(concurrent->initial());
+            if (concurrent->diagonal())
+            {
+                auto_matching = false;
+                diagonal_scale = std::move(concurrent->diagonal_scale);
+                info.matching_trial = MatchingTrial::Diagonal;
+            }
+            const bool resume = !within && !concurrent->diagonal() && initial_passes(concurrent->initial());
             if (within || resume)
             {
                 concurrent->finish();
@@ -930,6 +966,10 @@ namespace smf
         // factor less accurate, so ScalingMethod::Auto then applies none.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+        // A diagonal trial keeps the base ordering with the matching's
+        // scaling (MatchingTrial::Diagonal).
+        if (info.matching_trial == MatchingTrial::Diagonal)
+            keep->matching_scale = std::move(diagonal_scale);
         // Evaluated after the final ordering decision (the METIS trial and
         // the auto matching comparison above), so it reflects the ordering
         // the analysis actually kept.

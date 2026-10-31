@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -49,7 +50,78 @@ CscLower scaled_opf_kkt(int n_x, int m, unsigned seed, double spread) {
     return A;
 }
 
+// A boyd1-like KKT: a tridiagonal block (diagonal 4, off-diagonals -1)
+// over n_x variables and k dense constraint rows (zero diagonal), row r
+// holding every variable j with j % k == r (n_x / k entries, past the
+// matcher's 10 sqrt(n) dense threshold).
+CscLower diagonal_kkt(Int n_x, Int k) {
+    CscLower A;
+    A.n = n_x + k;
+    A.col_ptr.push_back(0);
+    for (Int j = 0; j < n_x; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(4.0);
+        if (j + 1 < n_x) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(-1.0);
+        }
+        A.row_idx.push_back(n_x + j % k);
+        A.values.push_back(1.0);
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    for (Int r = 0; r < k; ++r) A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    return A;
+}
+
 } // namespace
+
+// A matrix whose matching matches every sparse column to its own diagonal
+// (the dense constraint columns aside) skips the trial: the searches could
+// only match the dense columns, so the matching ordering would be AMD's.
+// The analysis keeps AMD with the matching's scaling (dense columns scaled
+// by their duals); the factor has the KKT inertia and solves accurately,
+// serially and with threads.
+TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
+    const Int n_x = 10000, k = 3;
+    const CscLower A = diagonal_kkt(n_x, k);
+    const int n = static_cast<int>(A.n);
+    // b = A * ones (A symmetric, lower triangle stored).
+    std::vector<double> b(static_cast<std::size_t>(n), 0.0);
+    for (Int j = 0; j < A.n; ++j) {
+        for (Int q = A.col_ptr[j]; q < A.col_ptr[j + 1]; ++q) {
+            const Int i = A.row_idx[q];
+            b[static_cast<std::size_t>(i)] += A.values[q];
+            if (i != j) b[static_cast<std::size_t>(j)] += A.values[q];
+        }
+    }
+    for (int threads : {1, 4}) {
+        Control c;
+        c.matrix_type = MatrixType::RealSymmetricIndefinite;
+        c.ordering = OrderingMethod::AutoSerial;
+        c.num_threads = threads;
+        c.auto_threads = false;  // small test trees
+        Solver s;
+        Info i;
+        auto a = s.analyse(A, c, i);
+        ASSERT_NE(a, nullptr) << "threads " << threads;
+        EXPECT_EQ(i.matching_trial, MatchingTrial::Diagonal) << "threads " << threads;
+        EXPECT_EQ(i.ordering_used, static_cast<int>(OrderingMethod::AMD)) << "threads " << threads;
+        EXPECT_FALSE(a->matching_rejected) << "threads " << threads;
+        ASSERT_EQ(a->matching_scale.size(), static_cast<std::size_t>(n)) << "threads " << threads;
+        for (double v : a->matching_scale) EXPECT_TRUE(std::isfinite(v) && v > 0.0) << "threads " << threads;
+
+        FactorKeep f;
+        ASSERT_EQ(s.factor(*a, c, i, f), FactorStatus::Success) << "threads " << threads;
+        EXPECT_EQ(i.num_positive, n_x) << "threads " << threads;
+        EXPECT_EQ(i.num_negative, k) << "threads " << threads;
+        EXPECT_EQ(i.num_zero, 0) << "threads " << threads;
+        std::vector<double> x = b;
+        ASSERT_EQ(s.solve(f, c, i, x.data(), n), 0) << "threads " << threads;
+        double err = 0.0;
+        for (double v : x) err = std::max(err, std::abs(v - 1.0));
+        EXPECT_LT(err, 1e-10) << "threads " << threads;
+    }
+}
 
 // The auto matching trial's searches have a work budget (default: about two
 // passes over the matrix's symmetric graph). Past it, the trial first orders

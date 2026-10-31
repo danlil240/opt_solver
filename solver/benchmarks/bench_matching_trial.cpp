@@ -61,6 +61,7 @@ const char *trial_name(smf::MatchingTrial t) {
     case smf::MatchingTrial::Exact: return "exact";
     case smf::MatchingTrial::RejectedInitial: return "rej-init";
     case smf::MatchingTrial::ResumedExact: return "resumed";
+    case smf::MatchingTrial::Diagonal: return "diagonal";
     }
     return "?";
 }

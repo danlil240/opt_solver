@@ -106,11 +106,18 @@ enum class MatchingTrigger {
 //                     base ordering's factor was dear enough not to ask),
 //                     so the searches resumed and the exact matching
 //                     decided.
+//   Diagonal        - the matching's initial phase matched every sparse
+//                     column to its own diagonal: the searches could only
+//                     match the dense columns, so the matching ordering is
+//                     the base ordering's. The trial was skipped; the base
+//                     ordering is kept with the matching's scaling (the
+//                     dense columns scaled by their duals, unmatched).
 enum class MatchingTrial {
     None            = 0,
     Exact           = 1,
     RejectedInitial = 2,
-    ResumedExact    = 3
+    ResumedExact    = 3,
+    Diagonal        = 4
 };
 
 // Dense kernel for the fully summed columns of an indefinite front.
