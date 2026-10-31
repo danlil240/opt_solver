@@ -3,6 +3,7 @@
 #include <suitesparse/amd.h>
 #endif
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,30 @@
 namespace smf {
 
 namespace {
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
+// AMD's dense-row threshold: a row of degree above max(16, alpha sqrt(n)) is
+// set aside and ordered last. The library's alpha = 10 leaves quasi-dense
+// rows in the graph, where every elimination next to one recomputes its
+// approximate degree: cops_polygon_200's 400 rows of degree 600 (3 sqrt(n))
+// cost 15 ms of AMD for a factor of 180k entries, 0.5 ms set aside (exact
+// flops +2.8%). Across the 108 benchmark matrices alpha = 2 changes the
+// ordering of 8 only (polygon, case39, boyd2, TSOPF_FS_b39_*/b162_c4:
+// flops -3% to +8.5%, analyse up to 3x faster), the rest bitwise the same.
+constexpr double kAmdDenseAlpha = 2.0;
+
+// amd_2 takes a non-const Control it only reads.
+double *amd_control()
+{
+    static auto control = [] {
+        std::array<double, AMD_CONTROL> c{};
+        amd_defaults(c.data());
+        c[AMD_DENSE] = kAmdDenseAlpha;
+        return c;
+    }();
+    return control.data();
+}
+#endif
+
 #if !(defined(SMF_HAS_AMD) && SMF_HAS_AMD)
 std::vector<Int> fallback_minimum_degree_ordering(
     Int n,
@@ -195,7 +220,7 @@ bool amd_order_lower_csc(Int n,
         }
     amd_2(static_cast<int>(n), Pe, Iw, Len, static_cast<int>(iwlen),
           static_cast<int>(nz), Nv, Next, Last, Head, Elen, Degree, W,
-          nullptr, nullptr);
+          amd_control(), nullptr);
     std::copy(Last, Last + sn, perm.begin());
     return true;
 #else
@@ -284,7 +309,7 @@ bool amd_order_adjacency(Int n, const Int *xadj, const Int *adj, Int *perm, Int 
     std::copy(adj, adj + nz, Iw);
     amd_2(static_cast<int>(n), Pe, Iw, Len, static_cast<int>(iwlen),
           static_cast<int>(nz), Nv, Next, Last, Head, Elen, Degree, W,
-          nullptr, nullptr);
+          amd_control(), nullptr);
     std::copy(Last, Last + sn, perm);
     return true;
 #else
