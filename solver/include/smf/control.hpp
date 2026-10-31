@@ -242,7 +242,10 @@ struct Control {
     // fronts in the top part), cops_elec_200 / cops_polygon_200 slower (work
     // bound total / heaviest path 1.00 / 1.04); trees from 1.9e8 front work
     // up (TSOPF_FS_b39_c7) faster; ncvxqp3 ipopt (bound 1.54, root
-    // dominated) gains nothing past 2-4 threads.
+    // dominated) gains nothing past 2-4 threads. With the model (acceptance
+    // run, docs/performance/2026-10-30-thread-scheduling.md): robot_arm_8k
+    // 10.5 ms at 1, 8 and 16 threads; factor time at 8 / 16 threads over the
+    // trees of at least 1e9 front work 0.90 / 0.87x the engine without it.
     // auto_threads also covers the solve: on, the solve's thread count comes
     // from its own cost model (solve_cost_* below).
     // auto_threads = false: the tree is partitioned for num_threads threads
