@@ -4,6 +4,7 @@
 #include "smf/determinism.hpp"
 #include "smf/error.hpp"
 #include "smf/etree.hpp"
+#include "smf/ldlt_kernel.hpp"
 #include "smf/ordering.hpp"
 #include "smf/ordering_parallel_nd.hpp"
 #include "smf/scaling_matching.hpp"
@@ -57,6 +58,19 @@ namespace smf
     // between them. It is a margin, not a bound: on adopters near the rule
     // the initial ratio has exceeded the exact one by up to 1.8x.
     static constexpr double kMatchingInitialRejectRatio = 1.6 * kMatchingFlopsRatio;
+
+    // An initial rejection (MatchingTrial::RejectedInitial) still applies
+    // the initial matching's scale (partial: AnalysisKeep::
+    // matching_scale_partial, the scale-on-delay rescue stays armed) when
+    // that matching left at most this share of the columns free and the
+    // pivot threshold is strong (Control::pivot_u >= kWeakPivotRatio): its
+    // duals are then close to the full matching's, and with the kept AMD
+    // ordering they spare a strong threshold most delays. stokes128 (1.0%
+    // free, u = 0.01): 54k -> 17k delays, wall 159 -> 65 ms. PGLib OPF
+    // (13.5-15% free) keeps its delays under such a scale and only pays for
+    // it (+2-9%); at IPOPT's u = 1e-8 the delays are few and the scale only
+    // costs (stokes128 +4%).
+    static constexpr double kInitialScaleMaxFree = 0.02;
 
     // Past the budget, a dear factor resumes the searches without the
     // initial matching's verdict: a base ordering, or the initial matching's
@@ -690,6 +704,7 @@ namespace smf
         // (bitwise: same adjacency, same counts), and an adopted candidate
         // takes its etree and counts from matching_stats.etree.
         bool rejected_initial = false;
+        double initial_free_share = 1.0;  // a rejecting initial matching's free columns
         // The initial matching's verdict: returns whether the paused
         // searches resume (false with auto_matching false: no ordering).
         // A dear factor resumes them outright (kMatchingResumeFlopsPerRow):
@@ -716,6 +731,7 @@ namespace smf
                 return true;
             rejected_initial = true;
             info.matching_trial = MatchingTrial::RejectedInitial;
+            initial_free_share = static_cast<double>(n - initial.matched_rank) / static_cast<double>(n);
             return false;
         };
         if (concurrent)
@@ -973,6 +989,15 @@ namespace smf
         if (info.matching_trial == MatchingTrial::Diagonal)
         {
             keep->matching_scale = std::move(diagonal_scale);
+            keep->matching_scale_partial = true;
+        }
+        // A nearly complete rejecting initial matching keeps its scale
+        // (kInitialScaleMaxFree); matching_stats holds it (initial_passes).
+        if (info.matching_trial == MatchingTrial::RejectedInitial &&
+            initial_free_share <= kInitialScaleMaxFree && control.pivot_u >= kWeakPivotRatio &&
+            matching_stats.scale.size() == sn_sz)
+        {
+            keep->matching_scale = matching_stats.scale;
             keep->matching_scale_partial = true;
         }
         // Evaluated after the final ordering decision (the METIS trial and
