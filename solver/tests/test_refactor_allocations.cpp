@@ -12,9 +12,11 @@
 #include "smf/info.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
+#include "kkt_test_matrices.hpp"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <new>
@@ -70,12 +72,19 @@ CscLower banded_indefinite(Int n, Int band) {
 }
 
 // Big allocations of the second (warm) factorization, at least `min_bytes`.
-int big_allocations_of_refactor(const CscLower &A, Control ctrl, std::size_t min_bytes) {
+// `matching_scale`: the analysis must have kept a matching scale (the
+// premise of ScalingMethod::Auto's user-supplied path).
+int big_allocations_of_refactor(const CscLower &A, Control ctrl, std::size_t min_bytes,
+                                bool matching_scale = false) {
     Solver solver;
     Info info;
     const auto ak = solver.analyse(A, ctrl, info);
     EXPECT_NE(ak.get(), nullptr);
     if (!ak) return -1;
+    if (matching_scale) {
+        EXPECT_FALSE(ak->matching_scale.empty()) << "premise: the analysis kept a matching scale";
+        if (ak->matching_scale.empty()) return -1;
+    }
     FactorKeep fk;
     NumericWorkspace ws;
     std::vector<double> v = A.values;
@@ -102,10 +111,8 @@ TEST(RefactorAllocations, CounterSeesBigAllocations) {
     EXPECT_EQ(g_big.load(), 1);
 }
 
-// User-supplied scaling (and ScalingMethod::Auto, which applies the
-// analysis' matching scale through it): the scale is read, the cleaned
-// matrix is not copied. At 1 and 16 threads (the tree is light: serial
-// engine at both).
+// User-supplied scaling: the scale is read, the cleaned matrix is not
+// copied. At 1 and 16 threads (the tree is light: serial engine at both).
 TEST(RefactorAllocations, UserScaleCopiesNoMatrix) {
     const CscLower A = banded_indefinite(2000, 8);
     const std::size_t nnz = A.row_idx.size();
@@ -119,6 +126,24 @@ TEST(RefactorAllocations, UserScaleCopiesNoMatrix) {
         ctrl.user_scale = scale.data();
         ctrl.num_threads = threads;
         EXPECT_EQ(big_allocations_of_refactor(A, ctrl, nnz * sizeof(double)), 0)
+            << "threads " << threads;
+    }
+}
+
+// ScalingMethod::Auto applies the analysis' matching scale through the
+// user-supplied path, so it copies no matrix either: a saddle-point KKT whose
+// auto ordering kept the matching (and its scale), refactored with new
+// values.
+TEST(RefactorAllocations, AutoMatchingScaleCopiesNoMatrix) {
+    const CscLower A = opf_like_kkt(10000, 1000, 7);
+    const std::size_t nnz = A.row_idx.size();
+    for (const int threads : {1, 16}) {
+        Control ctrl;
+        ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+        ctrl.ordering = OrderingMethod::AutoSerial;
+        ctrl.scaling = ScalingMethod::Auto;
+        ctrl.num_threads = threads;
+        EXPECT_EQ(big_allocations_of_refactor(A, ctrl, nnz * sizeof(double), true), 0)
             << "threads " << threads;
     }
 }

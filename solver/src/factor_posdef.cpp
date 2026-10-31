@@ -323,6 +323,9 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
   info.static_pivots = 0;  // SPD: no pivoting, the inertia is always exact
+  info.parallel_subtrees = 0;
+  info.top_part_fronts = 0;
+  info.top_part_queue_pops = 0;
   info.threads_used = 1;
   info.subtree_seconds = 0.0;
   info.top_seconds = 0.0;
@@ -447,6 +450,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
 
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.parallel_subtrees = st.parallel_subtrees;
+  info.top_part_fronts = st.top_part_fronts;
+  info.top_part_queue_pops = st.top_part_queue_pops;
   info.threads_used = st.threads_used;
   info.subtree_seconds = st.subtree_seconds;
   info.top_seconds = st.top_seconds;

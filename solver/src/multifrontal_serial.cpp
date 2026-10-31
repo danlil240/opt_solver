@@ -31,11 +31,10 @@
 
 namespace smf {
 
+namespace {
 // Blocks taken from the root arenas by every factorization in the process
 // (root_arena_blocks_taken).
 std::atomic<long long> g_root_arena_blocks{0};
-
-namespace {
 // Tests (set_late_phase1_thread_for_test): the pool thread whose subtree
 // phase starts late, -1 for none; and the dealt tasks other threads took.
 std::atomic<int> g_late_phase1_thread{-1};
@@ -1479,6 +1478,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       run_pool([&](int tid) {
         const std::size_t ti = static_cast<std::size_t>(tid);
         const FrontPass &P = tpass[ti];
+        assert(P.fo <= P.fv->size() && fbase[ti] + P.fo <= fv.size());
+        assert(P.ro <= P.sri->size() && rbase[ti] + P.ro <= sri.size());
         gather_copy(P.fv->data(), P.fo, fv.data() + fbase[ti], in_pieces);
         gather_copy(P.sri->data(), P.ro, sri.data() + rbase[ti], in_pieces);
       });
@@ -1650,6 +1651,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                      ctrl.solve_cost_per_top_row});
     }
     if (!ctrl.auto_threads) fkeep.solve_threads = threads;
+    // A solve runs at most one thread per subtree (it takes min(want,
+    // subtrees)): store what a solve can use.
+    fkeep.solve_threads =
+        std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
   }
   return ErrorCode::Success;
 }

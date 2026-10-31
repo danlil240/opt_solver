@@ -138,7 +138,7 @@ PartitionCount partition_count(const TreeView &t, int threads, double min_work);
 // thread_split_scaling_cap (the fitted defaults and their evidence are
 // there).
 struct ThreadCosts {
-  double per_thread = 7e5;              // starting and joining one thread
+  double per_thread = 7e5;              // a pool thread's wake-up, spin, barrier, dispatch
   double per_top_front = 5e3;           // handing one top-part front between threads
   double per_split_front_thread = 5e5;  // a tile-split front's team set-up, per thread
   int split_cap = 8;                    // threads past which split work stops speeding up (< 1: 1)
@@ -224,7 +224,7 @@ bool plan_trace_enabled();
 // (p f per front). Control::solve_cost_per_thread, solve_cost_per_top_step,
 // solve_cost_per_top_row.
 struct SolveCosts {
-  double per_thread = 2e4;    // starting and joining one thread
+  double per_thread = 2e4;    // a pool thread's wake-up, spin, barrier, dispatch
   double per_top_step = 100;  // handing one top step between threads
   double per_top_row = 1.0;   // zeroing and summing one top row's buffer, per thread
 };

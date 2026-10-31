@@ -137,21 +137,18 @@ TEST(TopScheduler, StopEndsAllWorkers) {
     for (Int i = extra; i + 1 < n; ++i) parent[static_cast<std::size_t>(i)] = i + 1;
     TopScheduler sched(parent, T);
     std::vector<std::atomic<int>> runs(static_cast<std::size_t>(n));
-    std::atomic<bool> stop_seen{false};
-    // Nodes whose run() began after the failing one returned false. Such a
-    // node can only have been taken before the scheduler saw the stop, so
-    // each other thread has at most one (a node is never handed out once
-    // the stop is known; the scheduler records it as soon as run() returns).
+    // Nodes whose run() began after the scheduler recorded the stop. Such a
+    // node can only have been taken before, so each other thread has at
+    // most one (a node is never handed out once the stop is known). Counting
+    // from the failing run's return instead would also count the nodes the
+    // others take while the failing thread is preempted before recording it.
     std::atomic<int> late{0};
     SolvePool pool(T);
     pool.run([&](int tid) {
         sched.work(tid, [&](Int v, int, int) {
-            if (stop_seen.load()) late.fetch_add(1);
+            if (sched.stopped()) late.fetch_add(1);
             runs[static_cast<std::size_t>(v)].fetch_add(1);
-            if (v == fail_at) {
-                stop_seen.store(true);
-                return false;
-            }
+            if (v == fail_at) return false;
             if (v < extra) {
                 const auto t0 = std::chrono::steady_clock::now();
                 while (std::chrono::steady_clock::now() - t0 < std::chrono::microseconds(20)) {

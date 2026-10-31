@@ -217,8 +217,10 @@ struct Control {
     // Parallelism
     // num_threads > 1: independent subtrees of the assembly tree are
     // factored concurrently (serial BLAS each), then the top of the tree
-    // with num_threads BLAS threads. tree_parallel opts into the older
-    // task-parallel engine instead, which measured slower everywhere.
+    // under a budget of as many BLAS threads in total as the factorization
+    // runs on (at most num_threads; auto_threads below picks how many).
+    // tree_parallel opts into the older task-parallel engine instead, which
+    // measured slower everywhere.
     int            num_threads   = 1;
     // auto_threads (num_threads > 1): the factorization runs on as many of
     // the num_threads threads as its assembly tree repays, by a cost model

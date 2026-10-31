@@ -55,8 +55,12 @@ than the `b70190b` engine at every thread count. The cause was buffer regrowth, 
 The fix:
 - **Phase 2:** a chain of top fronts picks a pass with room (`PassLanes`), not its thread's pass.
 - **Phase 1:** subtree roots' contribution blocks (≥ 4096 entries) go to a shared `ChunkArena`
-  (16 MB chunks, own-size chunks reused best-fit), not the pass stacks.
-- **Phase 1:** the heaviest T tasks are dealt one per thread.
+  (16 MB chunks, own-size chunks reused best-fit), not the pass stacks. A block that no free
+  own-size chunk holds reallocates the largest free one, so drifting root sizes over an IPOPT run
+  add no chunks (`e846a9e`).
+- **Phase 1:** the heaviest T tasks are dealt one per thread. A dealt task is claimed, not pinned:
+  a thread that runs out of tasks takes one whose thread has not started it, so a late wake-up
+  holds up nothing (`3fae7bf`).
 
 ### Small residuals (`9a08705`, `599aeba`)
 
@@ -85,7 +89,8 @@ truth data with `auto_threads` off at 1/2/4/8/16 threads (`benchmarks/results/th
 | `solve_cost_per_top_row` | 1.0 |
 
 - **Factor:** loss 3.41 against 4.15 for the pre-fit defaults. A1 proxy 0, real-A2 1.
-- **Solve:** loss 2.46 against 8.08. A1 proxy 0.
+- **Solve:** loss 2.46 against 8.08. A1 proxy 0. Real-A2 at the fitted solve constants is 3
+  (`fit.md`); solve A2 is not an acceptance criterion.
 - **`per_split_front_thread`** is 5e5, not the least-loss 3e5 (loss 3.36). At 3e5, cops_elec_200 rec
   picks 2 threads, and its delay-heavy split fronts make that 20% slower than 1 thread.
 - **`split_cap` 8** is one CCD of this machine. Tile teams spanning both CCDs gained nothing.
@@ -110,6 +115,10 @@ All runs are auto on, default costs, 1/2/4/8/16T, the large_kkt, hard_indef and 
 | 2 (`thread_sched_final2`) | `dd96520` | 5 | 2 | 3 | 2 | 0.913 | 0.875 | pass |
 | 3 (`thread_sched_final3`) | `599aeba` | 5 | 4 | 2 | 3 | **0.901** | **0.868** | 72/72 |
 | 3, 11-trial recheck of the flagged cases | `599aeba` | 11 | 1 ³ | 1 ³ | 0 | — | — | — |
+
+A3 is computed over all outcomes, from the median `factor_ms` of each of the 58 case-tracks (one
+script, `a3_all.py` in the session scratchpad, for every run). The run-1 values 1.016 / 0.971 are
+that script's output; a Success-only variant gave 1.017 / 0.969.
 
 Run 1 failed A1, A2 and A3. Two causes:
 - a fixed overhead at T > 1 on trees the plan runs serially (fixed by `ce29e83`, `68f7ec9`);

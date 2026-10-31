@@ -62,11 +62,13 @@ struct FactorKeep {
   std::vector<Int> solve_top_rows;
   std::vector<Int> solve_top_slot;
   std::vector<Int> solve_top_parent;
-  // The solve's thread count (src/parallel/thread_plan.hpp,
-  // plan_solve_threads, at the factorization's Control::num_threads): the
-  // solves use at most this many threads (and at most their num_threads).
-  // Every factorization sets it; 1, a serial solve, without a parallel
-  // layout.
+  // The solve's thread count: with Control::auto_threads, the solve's cost
+  // model (src/parallel/thread_plan.hpp, plan_solve_threads, at the
+  // factorization's Control::num_threads); off, the factorization's thread
+  // count. Either at most solve_subtrees.size(), since a solve runs at most
+  // one thread per subtree. The solves use at most this many threads (and
+  // at most their num_threads). Every factorization sets it; 1, a serial
+  // solve, without a parallel layout.
   int solve_threads = 1;
   // Control::cache_inverse_diag: inv_diag_offset[k] is where solve step k's
   // L11^-1 starts in inv_diag (p x p column-major, zero above the diagonal),
