@@ -23,9 +23,9 @@
 #include "smf/types.hpp"
 
 #include <atomic>
-#include <cassert>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -181,7 +181,9 @@ template <class Room> int PassLanes::pick(int held, int home, std::size_t need, 
     if (best < 0 || best_room < need) return held;  // grows the held lane
     busy_[static_cast<std::size_t>(held)] = 0;
   }
-  assert(best >= 0 && "PassLanes: more chains than lanes");
+  // A chain start always finds a free lane (at most `lanes` chains run at
+  // once); should that ever break, stop rather than index busy_[-1].
+  if (best < 0) std::abort();
   busy_[static_cast<std::size_t>(best)] = 1;
   return best;
 }
