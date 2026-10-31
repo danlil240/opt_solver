@@ -34,6 +34,31 @@ It is scored against the competitor records of `thread_sched_board`: shifted geo
 The remaining small moves are machine noise. darcy003 and mario002 read 8% slower on the board, but an
 interleaved A/B of the three binaries gives the same 300-345 ms.
 
+### 8T and 16T boards
+
+`analyse_gap_board_diag_8t` / `_16t`, scored against `thread_sched_board` at the same thread count:
+
+| class | split | 8T before → after | 16T before → after |
+|---|---|---|---|
+| hard_indef | heldout | 0.753 → **0.685** | 0.727 → **0.663** |
+| hard_indef | tuning | 0.598 → 0.598 | 0.583 → 0.586 |
+| large_kkt | heldout | 0.434 → **0.397** | 0.435 → **0.390** |
+| large_kkt | tuning | 0.576 → 0.581 | 0.542 → 0.547 |
+
+The ±0.06 per-case drifts on untouched cases (helm3d01, Dubcova3, obstacle_surface_200) are the noise
+level. TSOPF_FS_b300_c3 rec fails at 8T and 16T because it sits on the omega tolerance (see the
+thread-scheduling write-up).
+
+### Review fixes (`5f47dfd`)
+
+- A diagonal trial's scale is a partial matching's: the dense columns are unmatched. Before the fix, Auto
+  treated it as the analysed values' own matching scaling and disarmed the scale-on-delay rescue.
+  `AnalysisKeep::matching_scale_partial` now keeps the rescue armed (it computes the full matching), and
+  ScalingMethod::Matching never reuses a partial scale.
+- AMD alpha 2 applies to graphs of 10000 vertices or more. Smaller graphs, such as the parallel nested
+  dissection's leaves, keep the library default.
+- Factors are identical to `0884a69` on the affected cases.
+
 ## Where the analysis time went
 
 `bench_matching_trial --pieces` splits the trial's matching phase into the matcher's constructor (cost
