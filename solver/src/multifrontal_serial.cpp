@@ -781,6 +781,29 @@ double predicted_front_flops(const AnalysisKeep &keep, std::size_t si) {
 // thread count makes the same static/threshold choice per front.
 constexpr int kBudgetNominalThreads = 16;
 
+// The gather (phase 3) copies a factor of up to kCachedGatherBytes in pieces
+// of kGatherPieceBytes: the CRT's memmove of a whole pass streams the copy
+// past the cache, so the solve that usually follows read every factor entry
+// back from DRAM. TSOPF_FS_b162_c1 (19 MB, cold, 2-16 threads): first solve
+// 1.0-1.1 -> 0.5-0.85 ms, mostly ~0.6 (one thread: 0.8-0.9); gather 0.64 ->
+// 0.67 ms. A larger factor cannot stay cached until the solve and is copied
+// whole: TSOPF_FS_b300_c3 (435 MB, 16 threads) gathers in 15 ms whole, 20 ms
+// in pieces, with the same solve time. 32 MB: the smaller last-level cache
+// of this machine's two (CCD1; CCD0 has 96 MB).
+constexpr std::size_t kCachedGatherBytes = std::size_t{32} << 20;
+constexpr std::size_t kGatherPieceBytes = std::size_t{64} << 10;
+
+template <class T>
+void gather_copy(const T *src, std::size_t count, T *dst, bool in_pieces) {
+  if (!in_pieces) {
+    std::copy(src, src + count, dst);
+    return;
+  }
+  constexpr std::size_t piece = kGatherPieceBytes / sizeof(T);
+  for (std::size_t k = 0; k < count; k += piece)
+    std::copy(src + k, src + std::min(count, k + piece), dst + k);
+}
+
 } // namespace
 
 long long root_arena_blocks_taken() { return g_root_arena_blocks.load(std::memory_order_relaxed); }
@@ -1407,13 +1430,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       const auto phase3_start = PhaseClock::now();
       grow(fv, main.fo, main.growths);
       grow(sri, main.ro, main.growths);
+      const bool in_pieces =
+          main.fo * sizeof(double) + main.ro * sizeof(Int) <= kCachedGatherBytes;
       run_pool([&](int tid) {
         const std::size_t ti = static_cast<std::size_t>(tid);
         const FrontPass &P = tpass[ti];
-        std::copy(P.fv->begin(), P.fv->begin() + static_cast<std::ptrdiff_t>(P.fo),
-                  fv.begin() + static_cast<std::ptrdiff_t>(fbase[ti]));
-        std::copy(P.sri->begin(), P.sri->begin() + static_cast<std::ptrdiff_t>(P.ro),
-                  sri.begin() + static_cast<std::ptrdiff_t>(rbase[ti]));
+        gather_copy(P.fv->data(), P.fo, fv.data() + fbase[ti], in_pieces);
+        gather_copy(P.sri->data(), P.ro, sri.data() + rbase[ti], in_pieces);
       });
       st.gather_seconds = seconds_since(phase3_start);
       const auto relocated = [&](int t, SolveStep step) {
