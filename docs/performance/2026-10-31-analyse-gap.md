@@ -31,6 +31,10 @@ It is scored against the competitor records of `thread_sched_board`: shifted geo
 | large_kkt | tuning | 0.735 | 0.739 |
 | small_kkt | heldout / tuning | 0.862 / 0.696 | 0.870 / 0.697 |
 
+At the branch tip (`06126ff`, `analyse_gap_board_tip_1t`) the scores are: hard_indef 0.851 heldout,
+0.854 tuning (stokes128 rec +0.875 → +0.080); large_kkt 0.712 / 0.743; small_kkt 0.872 / 0.700. Run to run,
+a class score moves by about ±0.01.
+
 The remaining small moves are machine noise. darcy003 and mario002 read 8% slower on the board, but an
 interleaved A/B of the three binaries gives the same 300-345 ms.
 
