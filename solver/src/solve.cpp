@@ -115,7 +115,8 @@ std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double
                                       int print_level) {
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
-      !ak.matching_scale.empty() ? ak.matching_scale : ak.rejected_matching_scale;
+      !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale
+                                                               : ak.rejected_matching_scale;
   if (!analysed.empty() && cv == ak.cleaned.values) return analysed;
   CscLower C;
   C.n = ak.n;

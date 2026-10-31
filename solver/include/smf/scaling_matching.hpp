@@ -45,12 +45,12 @@ public:
     /// Edges scanned by the searches so far.
     long long work() const;
     /// Whether the initial phase matched every column but the dense ones
-    /// (more than 10 sqrt(n) entries) to its own diagonal. The searches then
-    /// only match dense columns: the matching pairs nothing else.
+    /// (more than 10 sqrt(n) entries) to its own diagonal. The searches left
+    /// are then one per dense column (phase 3).
     bool diagonal() const;
-    /// With diagonal(): the diagonal matching, the dense columns left free,
-    /// and the scaling of its duals, the dense columns' made feasible (as
-    /// before the searches over them). No search runs.
+    /// Requires diagonal(): the diagonal matching, the dense columns left
+    /// free, and the scaling of its duals, the dense columns' made feasible
+    /// (as before the searches over them). No search runs.
     MatchingResult diagonal_result();
     /// The current matching (free columns and rows -1 while searches are
     /// left) and the scaling of the current duals, as

@@ -94,6 +94,7 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
             if (i != j) b[static_cast<std::size_t>(j)] += A.values[q];
         }
     }
+    std::vector<double> serial_scale;
     for (int threads : {1, 4}) {
         Control c;
         c.matrix_type = MatrixType::RealSymmetricIndefinite;
@@ -107,8 +108,12 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
         EXPECT_EQ(i.matching_trial, MatchingTrial::Diagonal) << "threads " << threads;
         EXPECT_EQ(i.ordering_used, static_cast<int>(OrderingMethod::AMD)) << "threads " << threads;
         EXPECT_FALSE(a->matching_rejected) << "threads " << threads;
+        EXPECT_TRUE(a->matching_scale_partial) << "threads " << threads;
         ASSERT_EQ(a->matching_scale.size(), static_cast<std::size_t>(n)) << "threads " << threads;
         for (double v : a->matching_scale) EXPECT_TRUE(std::isfinite(v) && v > 0.0) << "threads " << threads;
+        // The concurrent trial decides as the serial one does.
+        if (threads == 1) serial_scale = a->matching_scale;
+        else EXPECT_EQ(a->matching_scale, serial_scale);
 
         FactorKeep f;
         ASSERT_EQ(s.factor(*a, c, i, f), FactorStatus::Success) << "threads " << threads;
@@ -121,6 +126,28 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
         for (double v : x) err = std::max(err, std::abs(v - 1.0));
         EXPECT_LT(err, 1e-10) << "threads " << threads;
     }
+}
+
+// One sparse column whose diagonal the max-product matching does not take
+// makes the matching not diagonal: the trial runs.
+TEST(MatchingTrial, OffDiagonalSparseColumnRunsTheTrial) {
+    CscLower A = diagonal_kkt(10000, 3);
+    // Column 0: diagonal 4 -> 1e-3, far below its sub-diagonal |-1|, so
+    // the max-product matching takes (1, 0) and (0, 1) instead.
+    ASSERT_EQ(A.row_idx[0], 0);
+    A.values[0] = 1e-3;
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AutoSerial;
+    c.num_threads = 1;
+    c.auto_threads = false;  // small test trees
+    Solver s;
+    Info i;
+    auto a = s.analyse(A, c, i);
+    ASSERT_NE(a, nullptr);
+    EXPECT_NE(i.matching_trial, MatchingTrial::Diagonal);
+    EXPECT_NE(i.matching_trial, MatchingTrial::None);
+    EXPECT_FALSE(a->matching_scale_partial);
 }
 
 // The auto matching trial's searches have a work budget (default: about two

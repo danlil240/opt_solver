@@ -964,12 +964,17 @@ namespace smf
         // The matching's scaling only pays off with the matching ordering
         // (its 2x2 pairs kept adjacent); with AMD or METIS kept it makes the
         // factor less accurate, so ScalingMethod::Auto then applies none.
+        // A diagonal trial's ordering differs from the matching's in at most
+        // one pair per dense column: its partial scale is kept.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
         // A diagonal trial keeps the base ordering with the matching's
         // scaling (MatchingTrial::Diagonal).
         if (info.matching_trial == MatchingTrial::Diagonal)
+        {
             keep->matching_scale = std::move(diagonal_scale);
+            keep->matching_scale_partial = true;
+        }
         // Evaluated after the final ordering decision (the METIS trial and
         // the auto matching comparison above), so it reflects the ordering
         // the analysis actually kept.

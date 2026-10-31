@@ -107,11 +107,15 @@ enum class MatchingTrigger {
 //                     so the searches resumed and the exact matching
 //                     decided.
 //   Diagonal        - the matching's initial phase matched every sparse
-//                     column to its own diagonal: the searches could only
-//                     match the dense columns, so the matching ordering is
-//                     the base ordering's. The trial was skipped; the base
-//                     ordering is kept with the matching's scaling (the
-//                     dense columns scaled by their duals, unmatched).
+//                     column to its own diagonal, the dense ones aside: the
+//                     searches left are one per dense column, so the exact
+//                     matching pairs at most that many columns and its
+//                     ordering is the base ordering up to them. The trial
+//                     was skipped; the base ordering is kept with the
+//                     partial matching's scaling (dense columns unmatched,
+//                     scaled by their duals; AnalysisKeep::
+//                     matching_scale_partial), under which a delay cascade
+//                     still triggers the scale-on-delay rescue.
 enum class MatchingTrial {
     None            = 0,
     Exact           = 1,

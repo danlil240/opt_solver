@@ -397,6 +397,7 @@ bool SymmetricMatcher::diagonal() const {
 }
 
 MatchingResult SymmetricMatcher::diagonal_result() {
+    assert(diagonal());
     State &s = *s_;
     // Phase 1 has no free sparse column to search: give the dense columns
     // their duals (phase 2) and stop short of phase 3.

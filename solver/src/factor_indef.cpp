@@ -411,9 +411,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   }
   // Scale on delay: Auto applying the analysis' matching scale to the
   // analysed values applies their own matching scaling, the one a stop
-  // would try next, so it does not stop.
+  // would try next, so it does not stop. A partial matching's scale
+  // (AnalysisKeep::matching_scale_partial) is not that scaling: it stays
+  // armed.
   if (work_limit >= 0.0 && ctrl.scaling == ScalingMethod::Auto && !keep.matching_scale.empty() &&
-      ws.clean_values == keep.cleaned.values)
+      !keep.matching_scale_partial && ws.clean_values == keep.cleaned.values)
     work_limit = -1.0;
 
   fkeep.scale.clear();
@@ -422,7 +424,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     // are being factored unchanged, its scaling is the one to compute.
     const bool reuse_analysis_matching =
         scaling == ScalingMethod::Matching && !keep.matching_scale.empty() &&
-        ws.clean_values == keep.cleaned.values;
+        !keep.matching_scale_partial && ws.clean_values == keep.cleaned.values;
     ErrorCode sc_err = ErrorCode::Success;
     if (reuse_analysis_matching) {
       fkeep.scale = keep.matching_scale;
