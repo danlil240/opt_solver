@@ -426,6 +426,16 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     ErrorCode sc_err = ErrorCode::Success;
     if (reuse_analysis_matching) {
       fkeep.scale = keep.matching_scale;
+    } else if (scaling == ScalingMethod::UserSupplied) {
+      // Reads the order alone (Auto's path with the analysis' matching
+      // scale): no copy of the cleaned matrix. The copy (12 bytes per
+      // entry) was allocated, faulted in and freed on every factorization:
+      // 0.1-0.25 ms of cops_catmix_800's 0.9-1.1 ms refactorization, paid
+      // in every run at num_threads > 1 and in some at 1.
+      CscLower order_only;
+      order_only.n = keep.n;
+      sc_err = compute_scaling_for_method(order_only, scaling, fkeep.scale, ctrl.print_level,
+                                          user_scale);
     } else {
       CscLower clean_mat;
       clean_mat.n = keep.n;
