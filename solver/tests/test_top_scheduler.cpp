@@ -398,7 +398,59 @@ TEST(ChunkArena, OversizedBlocksAnywhereTakeNoNewChunkAfterTheFirstPass) {
                 ASSERT_EQ(taken[i].first[k], static_cast<double>(i)) << "factorization " << f;
         if (f == 0) after_first = arena.chunks();
         EXPECT_EQ(arena.chunks(), after_first) << "factorization " << f;
+        EXPECT_EQ(arena.growths(), after_first) << "factorization " << f;
     }
     // 6000 regular elements in chunks of 1000, and one chunk per large block.
     EXPECT_EQ(after_first, 6u + 3u);
+}
+
+// One oversized block per factorization (a tree's root block, whose size
+// follows the delays), larger every time: its own-size chunk is reallocated,
+// never joined by another, and each reallocation counts as a growth.
+TEST(ChunkArena, GrowingOversizedBlockKeepsOneOwnChunk) {
+    ChunkArena<double> arena(1000);
+    for (int f = 0; f < 50; ++f) {
+        arena.reset();
+        for (int b = 0; b < 5; ++b) arena.take(100);
+        const std::size_t n = 1500 + 37 * static_cast<std::size_t>(f);
+        double *p = arena.take(n);
+        for (std::size_t k = 0; k < n; ++k) p[k] = static_cast<double>(k);
+        ASSERT_EQ(p[n - 1], static_cast<double>(n - 1));
+        EXPECT_EQ(arena.chunks(), 2u) << "factorization " << f;  // one bump, one own-size
+        EXPECT_EQ(arena.growths(), 2u + static_cast<std::size_t>(f)) << "factorization " << f;
+    }
+}
+
+// Three oversized blocks per factorization whose sizes drift upward in a
+// random walk, at shuffled positions: the arena holds three own-size chunks
+// (the most live at once), however many new highs the sizes set.
+TEST(ChunkArena, DriftingOversizedSizesStayBounded) {
+    ChunkArena<double> arena(1000);
+    std::mt19937 rng(5);
+    std::vector<std::size_t> big{1200, 2000, 3000};
+    std::size_t highs = 0;
+    for (int f = 0; f < 50; ++f) {
+        arena.reset();
+        for (std::size_t &b : big) {
+            const std::size_t up = std::uniform_int_distribution<std::size_t>(0, 300)(rng);
+            const std::size_t down = std::uniform_int_distribution<std::size_t>(0, 200)(rng);
+            const std::size_t prev_max = *std::max_element(big.begin(), big.end());
+            b = std::max<std::size_t>(1001, b + up - std::min(down, b));
+            if (b > prev_max) ++highs;
+        }
+        std::vector<std::size_t> sizes(60, 100);
+        sizes.insert(sizes.end(), big.begin(), big.end());
+        std::shuffle(sizes.begin(), sizes.end(), rng);
+        std::vector<std::pair<double *, std::size_t>> taken;
+        for (const std::size_t n : sizes) {
+            double *p = arena.take(n);
+            for (std::size_t k = 0; k < n; ++k) p[k] = static_cast<double>(taken.size());
+            taken.emplace_back(p, n);
+        }
+        for (std::size_t i = 0; i < taken.size(); ++i)
+            for (std::size_t k = 0; k < taken[i].second; ++k)
+                ASSERT_EQ(taken[i].first[k], static_cast<double>(i)) << "factorization " << f;
+        EXPECT_EQ(arena.chunks(), 6u + 3u) << "factorization " << f;
+    }
+    EXPECT_GT(highs, 5u) << "premise: the sizes set new highs";
 }
