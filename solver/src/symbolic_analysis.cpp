@@ -179,7 +179,7 @@ namespace smf
         {
             try
             {
-                SymmetricMatcher matcher(C_);
+                SymmetricMatcher matcher(C_, MatchingSearchOrder::Degree);
                 if (matcher.diagonal())
                 {
                     MatchingResult mr = matcher.diagonal_result();
@@ -522,7 +522,7 @@ namespace smf
         }
         else if (auto_matching)
         {
-            auto matcher = std::make_unique<SymmetricMatcher>(C);
+            auto matcher = std::make_unique<SymmetricMatcher>(C, MatchingSearchOrder::Degree);
             if (matcher->diagonal())
             {
                 MatchingResult mr = matcher->diagonal_result();

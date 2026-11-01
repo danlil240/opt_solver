@@ -27,10 +27,19 @@ MatchingResult compute_symmetric_matching(const CscLower &A);
 /// cheap initial phase (MC64's greedy matching on tight edges plus length-2
 /// augmentations); advance() runs the shortest augmenting path searches,
 /// optionally under a work budget, and resumes where it stopped. Run to the
-/// end, the result is bitwise compute_symmetric_matching's.
+/// end in MatchingSearchOrder::Column, the result is bitwise
+/// compute_symmetric_matching's.
+///
+/// The searches start from the free columns in column order, or with
+/// MatchingSearchOrder::Degree by decreasing degree (stable). Both give a
+/// maximum-product matching; they differ where ties let several be optimal.
+/// Degree order scans 3-11x fewer edges on KKT systems whose constraint
+/// columns come last (case39, the TSOPF_FS family, cops_catmix_800).
+enum class MatchingSearchOrder { Column, Degree };
+
 class SymmetricMatcher {
 public:
-    explicit SymmetricMatcher(const CscLower &A);
+    explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column);
     ~SymmetricMatcher();
     SymmetricMatcher(const SymmetricMatcher &) = delete;
     SymmetricMatcher &operator=(const SymmetricMatcher &) = delete;

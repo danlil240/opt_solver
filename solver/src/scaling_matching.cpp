@@ -211,10 +211,14 @@ struct SymmetricMatcher::State {
     std::vector<Int> col_to_row;
     int matched = 0;
     bool any_dense = false;
-    // Searches left: phase 1 (sparse part) or 3 (full graph) from column
-    // next_col on; 4 once none is left.
+    // Searches left: phase 1 (sparse part) from search_order[next_col] on,
+    // 3 (full graph) from column next_col on; 4 once none is left.
     int phase = 1;
     int next_col = 0;
+    MatchingSearchOrder order = MatchingSearchOrder::Column;
+    // Phase 1's free sparse columns in the search order, listed when
+    // phase 1 starts.
+    std::vector<int> search_order;
     long long work = 0;  // edges scanned by the searches
     // The initial phase's matching and duals.
     std::vector<Int> init_col_to_row;
@@ -236,8 +240,10 @@ struct SymmetricMatcher::State {
                           const std::vector<double> *vcol) const;
 };
 
-SymmetricMatcher::SymmetricMatcher(const CscLower &A) : s_(std::make_unique<State>()) {
+SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order)
+    : s_(std::make_unique<State>()) {
     State &s = *s_;
+    s.order = order;
     if (A.n < 0 || A.validate_shape() != ErrorCode::Success) {
         s.shape_ok = false;
         s.status = ErrorCode::IllegalValue;
@@ -593,12 +599,20 @@ bool SymmetricMatcher::advance(long long work_budget) {
     // Phase 1: the sparse part (a failed search just leaves its column for
     // phase 3).
     if (s.phase == 1) {
-        for (; s.next_col < n && s.matched < n; ++s.next_col) {
-            const int j = s.next_col;
-            if (!s.dense(j) && s.col_to_row[static_cast<std::size_t>(j)] < 0) {
-                if (out_of_budget()) return false;
-                s.search(j);
+        if (s.next_col == 0 && s.search_order.empty()) {
+            for (int j = 0; j < n; ++j) {
+                if (!s.dense(j) && s.col_to_row[static_cast<std::size_t>(j)] < 0) s.search_order.push_back(j);
             }
+            const Int *const gptr = s.g.ptr.data();
+            if (s.order == MatchingSearchOrder::Degree)
+                std::stable_sort(s.search_order.begin(), s.search_order.end(),
+                                 [gptr](int a, int b) { return gptr[a + 1] - gptr[a] > gptr[b + 1] - gptr[b]; });
+        }
+        const int n_free = static_cast<int>(s.search_order.size());
+        for (; s.next_col < n_free && s.matched < n; ++s.next_col) {
+            const int j = s.search_order[static_cast<std::size_t>(s.next_col)];
+            if (out_of_budget()) return false;
+            s.search(j);
         }
         if (s.any_dense) s.dense_duals();
         s.phase = 3;
