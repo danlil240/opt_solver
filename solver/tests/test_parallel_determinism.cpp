@@ -11,9 +11,11 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/multifrontal_serial.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -146,6 +148,7 @@ TEST(ParallelDeterminism, SerialReproducible) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.num_threads = 1;
+    ctrl.auto_threads = false;  // small test trees
 
     Solver solver;
     Info info;
@@ -197,6 +200,7 @@ TEST(ParallelDeterminism, DeterministicMode) {
         Control ctrl;
         ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
         ctrl.num_threads = 1;
+        ctrl.auto_threads = false;  // small test trees
         ctrl.deterministic = true;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -215,6 +219,7 @@ TEST(ParallelDeterminism, DeterministicMode) {
         Control ctrl;
         ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
         ctrl.num_threads = 1;
+        ctrl.auto_threads = false;  // small test trees
         ctrl.deterministic = false;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);
@@ -247,6 +252,7 @@ TEST(ParallelDeterminism, MultiThread_Residual) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.num_threads = 4;
+    ctrl.auto_threads = false;  // small test trees
     ctrl.deterministic = true;
 
     Info info;
@@ -353,6 +359,7 @@ struct DetRun {
     std::vector<double> d;  // D entries (indefinite), elimination order
     int pos = 0, neg = 0, zero = 0;
     int subtrees = 0, tiles = 0;
+    long long arena_blocks = 0;  // subtree roots' blocks put in the root arenas
     int ordering_used = 0;
 };
 
@@ -360,6 +367,7 @@ DetRun det_run(const DetCase &c, int threads) {
     Control ctrl;
     ctrl.matrix_type = c.type;
     ctrl.num_threads = threads;
+    ctrl.auto_threads = false;  // small test trees
     ctrl.deterministic = true;
     ctrl.ordering = c.ordering;
     // Cached L11^-1 (built at factor time) is part of what must reproduce.
@@ -376,7 +384,9 @@ DetRun det_run(const DetCase &c, int threads) {
     NumericWorkspace nws;
     SolveWorkspace sws;
     FactorKeep fk;
+    const long long arena0 = root_arena_blocks_taken();
     EXPECT_EQ(solver.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
+    r.arena_blocks = root_arena_blocks_taken() - arena0;
     const int n = static_cast<int>(c.A.n);
     r.x.resize(static_cast<std::size_t>(n));
     for (std::size_t i = 0; i < r.x.size(); ++i)
@@ -463,8 +473,12 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
             for (int run = 0; run < kRuns; ++run) {
                 const DetRun r = det_run(c, threads);
                 if (threads == 8 && run == 0) {
-                    if (c.expect_parallel)
+                    if (c.expect_parallel) {
                         EXPECT_GE(r.subtrees, 2) << "8 threads: parallel path not taken";
+                        // The root-arena path (Task 6b3) is part of what
+                        // must reproduce bitwise.
+                        EXPECT_GT(r.arena_blocks, 0) << "8 threads: no root block in the arena";
+                    }
                     if (c.expect_tiles)
                         EXPECT_GT(r.tiles, 0) << "8 threads: no tile-task front";
                 }
@@ -498,4 +512,53 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
     std::printf("[BitwiseAcrossThreadCounts] MKL CNR branch %d (10 = AVX2, 2 = AUTO)\n",
                 blas_reproducibility_branch());
 #endif
+}
+
+// A pool thread that wakes late (by a scheduler quantum on a loaded
+// machine): the subtree task dealt to it (the heaviest tasks go one per
+// thread, final review I-2) is taken over by a thread that ran out of
+// tasks, so the factorization does not wait for it, and the result is the
+// 1-thread one bit for bit whichever thread factored the task.
+TEST(ParallelDeterminism, LateThreadsDealtTaskIsTakenOver) {
+    struct LateOff {
+        ~LateOff() { set_late_phase1_thread_for_test(-1); }
+    } late_off;
+    std::vector<DetCase> cases;
+    cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                     true, false});
+    cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9), MatrixType::RealSymmetricIndefinite,
+                     true, true});
+    for (const DetCase &c : cases) {
+        SCOPED_TRACE(c.name);
+        set_late_phase1_thread_for_test(-1);
+        const DetRun ref = det_run(c, 1);
+        ASSERT_FALSE(ref.x.empty());
+        // No thread held back: how often a dealt task changes thread
+        // (informational; the deal is meant to hold).
+        const long long idle0 = dealt_tasks_taken_over();
+        constexpr int kIdleRuns = 10;
+        for (int run = 0; run < kIdleRuns; ++run) (void)det_run(c, 8);
+        std::printf("[LateThreadsDealtTaskIsTakenOver] %s: %lld dealt tasks taken over in %d "
+                    "8-thread factorizations, no thread held back\n",
+                    c.name.c_str(), dealt_tasks_taken_over() - idle0, kIdleRuns);
+        for (const int late : {1, 7}) {
+            set_late_phase1_thread_for_test(late);
+            const long long over0 = dealt_tasks_taken_over();
+            const auto t0 = std::chrono::steady_clock::now();
+            const DetRun r = det_run(c, 8);
+            const double secs =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            set_late_phase1_thread_for_test(-1);
+            ASSERT_GE(r.subtrees, 8) << "premise: a task dealt to every thread";
+            // The late thread waits until its task is taken (10 s at most).
+            EXPECT_GE(dealt_tasks_taken_over() - over0, 1) << "late thread " << late;
+            EXPECT_LT(secs, 5.0) << "late thread " << late << ": its task waited for it";
+            EXPECT_EQ(r.pos, ref.pos);
+            EXPECT_EQ(r.neg, ref.neg);
+            EXPECT_EQ(r.zero, ref.zero);
+            EXPECT_EQ(bit_diff(r.x, ref.x).first, 0u) << "late thread " << late;
+            EXPECT_EQ(bit_diff(r.d, ref.d).first, 0u) << "late thread " << late;
+            EXPECT_EQ(bit_diff(r.xm, ref.xm).first, 0u) << "late thread " << late;
+        }
+    }
 }

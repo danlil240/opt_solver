@@ -87,6 +87,18 @@ struct Control {
     // count would give: identical at every num_threads in deterministic
     // mode.
     double         scale_on_delay_ratio = 16.0;
+    // A factorization that the work limit lets through as Auto resolves it,
+    // but whose front work still exceeds scale_on_delay_next_ratio times the
+    // delay-free one, leaves the next factor() of that analysis into that
+    // FactorKeep to run under scale_on_delay_next_ratio as its limit
+    // instead: delays that heavy often grow into a cascade over an IPOPT
+    // sequence, and a try under the full ratio costs up to that many times
+    // the delay-free work before it stops (pde_control_250 on the cost-model
+    // tree: 1.4 s, against a 0.1 s factorization). A one-off spike
+    // (cops_elec_200: 2.2, 8.5, 2.2) passes the tighter limit unscaled and
+    // pays no matching. Not after a factor with the analysed values' own
+    // matching scale (a new one would be the same). Negative: off.
+    double         scale_on_delay_next_ratio = 4.0;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:
@@ -205,9 +217,85 @@ struct Control {
     // Parallelism
     // num_threads > 1: independent subtrees of the assembly tree are
     // factored concurrently (serial BLAS each), then the top of the tree
-    // with num_threads BLAS threads. tree_parallel opts into the older
-    // task-parallel engine instead, which measured slower everywhere.
+    // under a budget of as many BLAS threads in total as the factorization
+    // runs on (at most num_threads; auto_threads below picks how many).
+    // tree_parallel opts into the older task-parallel engine instead, which
+    // measured slower everywhere.
     int            num_threads   = 1;
+    // auto_threads (num_threads > 1): the factorization runs on as many of
+    // the num_threads threads as its assembly tree repays, by a cost model
+    // (src/parallel/thread_plan.hpp) of the engine's two phases at T threads.
+    // The subtree phase runs on serial BLAS (BlasSerialGuard); the top
+    // fronts run one after another or side by side, each under a
+    // BlasThreadGuard with its share of the threads, or as tile tasks.
+    // Both models (this and the solve's, solve_cost_* below) price work in
+    // flops plus a per-thread and per-front term. The factor model: the
+    // subtrees (the larger of the heaviest subtree and their work / T), then
+    // the top part (the larger of its heaviest path, fronts run as tile
+    // tasks counting 1/T, and its work, whose tile-split share speeds up to
+    // thread_split_scaling_cap threads only), plus thread_cost_per_thread per
+    // thread, thread_cost_per_top_front per top-part front and
+    // thread_cost_per_split_front_thread per split front and thread;
+    // candidates 1, 2, 4, 8, ... and num_threads. The choice is cached per
+    // analysis in the NumericWorkspace. Fewer than 2 threads: the serial
+    // engine (Info::threads_used = 1). The choice never changes deterministic
+    // mode's results. Front-tier board, factor time at 16 threads against 1
+    // with all threads used: robot_arm_8k 7.7x slower (11.8k of its 22.7k
+    // fronts in the top part), cops_elec_200 / cops_polygon_200 slower (work
+    // bound total / heaviest path 1.00 / 1.04); trees from 1.9e8 front work
+    // up (TSOPF_FS_b39_c7) faster; ncvxqp3 ipopt (bound 1.54, root
+    // dominated) gains nothing past 2-4 threads. With the model (acceptance
+    // run, docs/performance/2026-10-30-thread-scheduling.md): robot_arm_8k
+    // 10.5 ms at 1, 8 and 16 threads; factor time at 8 / 16 threads over the
+    // trees of at least 1e9 front work 0.90 / 0.87x the engine without it.
+    // auto_threads also covers the solve: on, the solve's thread count comes
+    // from its own cost model (solve_cost_* below).
+    // auto_threads = false: the tree is partitioned for num_threads threads
+    // whenever its front work reaches 2e7, and the solve runs on the
+    // factorization's thread count (FactorKeep::solve_threads; at most the
+    // solve call's num_threads and the solve subtrees); neither cost
+    // model chooses a count (both are evaluated for the plan trace alone,
+    // SMF_BENCH_PLAN_TRACE), so thread counts are fixed for scaling
+    // measurements.
+    bool           auto_threads  = true;
+    // The factor cost model's terms in front-work units (f^2 p). Fitted
+    // offline on the Ryzen 9950X3D (2 CCDs of 8 cores) against measured
+    // factor times at 1/2/4/8/16 threads with auto_threads off (truth data:
+    // benchmarks/results/thread_sched_truth2, fit summary fit.md there,
+    // tools/bench/fit_thread_costs.py): loss 3.41 against 4.15 for the
+    // previous defaults (per_thread 1e5, no split terms); picks slower than
+    // 1 thread by more than 5%: 0; 16-thread-max picks slower than the
+    // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
+    // per_thread 5e5-7e5 with per_split_front_thread 2e5-5e5 at a cap of
+    // 7-8 all lie within about 3% of that loss.
+    double         thread_cost_per_thread    = 7e5;
+    double         thread_cost_per_top_front = 5e3;
+    // Per tile-split top front and thread (team set-up and barriers). 5e5,
+    // not the fit's least-loss 3e5 (loss 3.36): at 3e5 cops_elec_200
+    // (recommended) picks 2 threads, 0.07% outside the 2% tie band, and its
+    // delay-heavy split fronts make that 20% slower than 1 thread.
+    double         thread_cost_per_split_front_thread = 5e5;
+    // Threads past which a tile-split front's work stops speeding up. 8 is
+    // the core count of one CCD on the 9950X3D where it was fitted: tile
+    // teams spanning both CCDs gained nothing, and aug3dcqp, bratu3d and
+    // TSOPF_FS_b300_c3 (recommended track) and ncvxqp7 (ipopt) ran 5-26%
+    // slower at 16 threads than at 8. Open follow-up: detect the size of
+    // the L3-sharing cluster at run time. Values below 1 count as 1.
+    int            thread_split_scaling_cap  = 8;
+    // The solve's thread count, chosen at factorization time from its own
+    // cost model (thread_plan.hpp, plan_solve_threads; FactorKeep::
+    // solve_threads) when the factorization leaves a parallel solve layout
+    // and auto_threads is on:
+    // the subtrees (the larger of the heaviest and their work / T), then
+    // the top part's heaviest path, plus these terms per thread, per top
+    // step and per top row and thread (the zeroed and summed buffers), in
+    // step-work units (p f). Fitted like the factor terms above (same truth
+    // data, fit.md): loss 2.46 against 8.08 for the previous defaults
+    // (per_top_step 2e3, per_top_row 2.0); picks slower than 1 thread by
+    // more than 5%: 0.
+    double         solve_cost_per_thread   = 2e4;
+    double         solve_cost_per_top_step = 100;
+    double         solve_cost_per_top_row  = 1.0;
     // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
     // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
     // TPP at every thread count): fronts of at least 512 rows at the top of

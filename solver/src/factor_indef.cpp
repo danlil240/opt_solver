@@ -283,6 +283,7 @@ bool finalize_factor_from_front_results(
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
+  fkeep.solve_threads = 1;
   std::vector<Int> fallback_order;
   const std::vector<Int> *order_ptr = &keep.solve_postorder;
   if (order_ptr->empty()) {
@@ -357,6 +358,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.aptp_failed_columns = 0;
   info.top_tile_fronts = 0;
   info.top_part_fronts = 0;
+  info.top_part_queue_pops = 0;
+  info.threads_used = 1;
+  info.subtree_seconds = 0.0;
+  info.top_seconds = 0.0;
+  info.gather_seconds = 0.0;
   info.small_front_handovers = 0;
   info.aborted_flops_skipped = 0.0;
   info.front_work = 0.0;
@@ -420,6 +426,16 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     ErrorCode sc_err = ErrorCode::Success;
     if (reuse_analysis_matching) {
       fkeep.scale = keep.matching_scale;
+    } else if (scaling == ScalingMethod::UserSupplied) {
+      // Reads the order alone (Auto's path with the analysis' matching
+      // scale): no copy of the cleaned matrix. The copy (12 bytes per
+      // entry) was allocated, faulted in and freed on every factorization:
+      // 0.1-0.25 ms of cops_catmix_800's 0.9-1.1 ms refactorization, paid
+      // in every run at num_threads > 1 and in some at 1.
+      CscLower order_only;
+      order_only.n = keep.n;
+      sc_err = compute_scaling_for_method(order_only, scaling, fkeep.scale, ctrl.print_level,
+                                          user_scale);
     } else {
       CscLower clean_mat;
       clean_mat.n = keep.n;
@@ -549,6 +565,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.front_work = static_cast<double>(st.front_work);
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_part_fronts = st.top_part_fronts;
+      info.top_part_queue_pops = st.top_part_queue_pops;
+      info.threads_used = st.threads_used;
+      info.subtree_seconds = st.subtree_seconds;
+      info.top_seconds = st.top_seconds;
+      info.gather_seconds = st.gather_seconds;
       info.factor_seconds =
           std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
       return FactorStatus::MaxPivotDelays;
@@ -568,6 +589,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
+    info.top_part_queue_pops = st.top_part_queue_pops;
+    info.threads_used = st.threads_used;
+    info.subtree_seconds = st.subtree_seconds;
+    info.top_seconds = st.top_seconds;
+    info.gather_seconds = st.gather_seconds;
       info.small_front_handovers = st.small_front_handovers;
       info.num_positive = st.inertia.positive;
       info.num_negative = st.inertia.negative;
@@ -596,6 +622,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.parallel_subtrees = st.parallel_subtrees;
     info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
+    info.top_part_queue_pops = st.top_part_queue_pops;
+    info.threads_used = st.threads_used;
+    info.subtree_seconds = st.subtree_seconds;
+    info.top_seconds = st.top_seconds;
+    info.gather_seconds = st.gather_seconds;
     info.small_front_handovers = st.small_front_handovers;
     info.num_positive = st.inertia.positive;
     info.num_negative = st.inertia.negative;

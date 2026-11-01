@@ -67,6 +67,22 @@ struct NumericWorkspace {
     std::vector<Int> cb_delayed;       ///< per-supernode delayed columns (leading rows of its block)
     std::vector<int> cb_owner;         ///< per-supernode pass whose stack holds its block (0 = serial)
     std::shared_ptr<TreeParallelBuffers> tree_par; ///< per-thread buffers of the tree-parallel factorization
+    std::shared_ptr<SolvePool> pool;               ///< worker threads of the tree-parallel factorization
+    /// Control::auto_threads: the last thread count the cost model chose
+    /// (multifrontal_serial.cpp) with every input it depends on, so
+    /// refactorizations of the same analysis skip the model. analysis 0:
+    /// none yet (AnalysisKeep::serial is never 0).
+    struct ThreadPlanCache {
+        std::uint64_t analysis = 0;   ///< AnalysisKeep::serial
+        int num_threads = 0;
+        double per_thread = 0.0;      ///< Control::thread_cost_per_thread
+        double per_top_front = 0.0;   ///< Control::thread_cost_per_top_front
+        double per_split_front_thread = 0.0;  ///< Control::thread_cost_per_split_front_thread
+        int split_cap = 0;            ///< Control::thread_split_scaling_cap
+        bool tiles_on = false;        ///< top_tiles_on(): which fronts are split
+        int threads = 1;              ///< the plan
+    };
+    ThreadPlanCache thread_plan;
 
     int warmup_calls = 0;
     int64_t front_heap_allocations_last_call = 0;
@@ -74,6 +90,8 @@ struct NumericWorkspace {
     std::size_t peak_pool_bytes = 0;
 
     void prepare_for_analysis(const AnalysisKeep &ak);
+    /// The pool with `nthreads` threads (re-created when the count changes).
+    SolvePool &ensure_pool(int nthreads);
     std::vector<double> acquire_contrib(std::size_t elems, bool &allocated_new);
     void release_contrib(std::vector<double> &&buf);
 };

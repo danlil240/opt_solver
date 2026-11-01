@@ -939,6 +939,7 @@ TEST(Refinement, Acopf160) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     ctrl.num_threads = 1;
+    ctrl.auto_threads = false;  // small test trees
     ctrl.pivot_u = 1e-8;
     Info info;
     Solver solver;

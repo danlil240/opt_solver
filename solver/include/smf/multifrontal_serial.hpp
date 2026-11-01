@@ -19,7 +19,16 @@ struct SerialFactorStats {
   int parallel_subtrees = 0;
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
   int top_part_fronts = 0;  // subtree engine: fronts of the top part factored (after the subtrees)
+  // Subtree engine: top fronts taken from the scheduler's shared ready list;
+  // the others were continued by the thread that factored their last child.
+  int top_part_queue_pops = 0;
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
+  int threads_used = 1;  // threads the factorization ran on (1 when serial)
+  // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top
+  // part (task DAG), 3 the gather of the per-thread factors.
+  double subtree_seconds = 0.0;
+  double top_seconds = 0.0;
+  double gather_seconds = 0.0;
   double flops = 0.0;
   // Sum over fronts of (fully summed columns) x (rows)^2, as realized: the
   // delay-inflated counterpart of Info::predicted_flops (Info::front_work).
@@ -78,5 +87,19 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      double budget_static_pivot, bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st,
                                      double work_limit = -1.0);
+
+/// Subtree roots' contribution blocks the tree-parallel factorizations of
+/// this process put in their root arenas so far (tests use the difference).
+long long root_arena_blocks_taken();
+
+/// Tests: pool thread `tid` (> 0) of every tree-parallel factorization
+/// starts its subtree phase only once another thread has taken the task
+/// dealt to it (or after 10 s), as a thread that wakes late would; -1 (the
+/// default) turns this off.
+void set_late_phase1_thread_for_test(int tid);
+
+/// Dealt subtree tasks (the heaviest, one per thread) that a thread other
+/// than their own took, by every factorization of this process so far.
+long long dealt_tasks_taken_over();
 
 } // namespace smf

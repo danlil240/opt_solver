@@ -35,9 +35,16 @@ public:
 
     int size() const { return static_cast<int>(workers_.size()) + 1; }
 
+    /// Worker threads created by every SolvePool in the process so far
+    /// (tests use the difference to check that a pool is reused).
+    static long long threads_started();
+
     /// Runs fn(tid) for tid = 0 .. size() - 1, tid 0 on the calling thread,
-    /// and returns when every call has finished.
-    void run(const std::function<void(int)> &fn);
+    /// and returns when every call has finished. A worker counts one BLAS
+    /// thread while it runs fn (BlasSerialGuard accounting), unless
+    /// `workers_count_blas` is false: then it counts none beyond the guards
+    /// fn sets itself (the factorization's jobs, whose threads wait inside fn).
+    void run(const std::function<void(int)> &fn, bool workers_count_blas = true);
 
 private:
     void worker(int tid);
@@ -47,6 +54,7 @@ private:
     std::condition_variable wake_;
     std::condition_variable done_;
     const std::function<void(int)> *job_ = nullptr;
+    bool job_counts_blas_ = true;
     std::atomic<unsigned> generation_{0};
     std::atomic<int> pending_{0};
     bool stop_ = false;

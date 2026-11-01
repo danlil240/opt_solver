@@ -75,6 +75,7 @@ Control ipopt_control() {
     c.scaling = ScalingMethod::None;
     c.pivot_u = 1e-8;
     c.num_threads = 1;
+    c.auto_threads = false;  // small test trees
     c.continue_on_singular = true;
     c.expected_refactors = 10;
     c.solve_use_blas3_single_rhs = true;

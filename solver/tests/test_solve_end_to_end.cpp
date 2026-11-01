@@ -395,6 +395,7 @@ TEST(SolveEndToEnd, InverseDiagMatchesTrsv) {
       Control ctrl;
       ctrl.matrix_type = c.type;
       ctrl.num_threads = threads;
+      ctrl.auto_threads = false;  // small test trees
       Solver s;
       Info info;
       auto ak = s.analyse(c.A, ctrl, info);
@@ -503,6 +504,7 @@ TEST(SolveEndToEnd, MultiRhsMatchesLoop) {
       Control ctrl;
       ctrl.matrix_type = c.type;
       ctrl.num_threads = threads;
+      ctrl.auto_threads = false;  // small test trees
       ctrl.cache_inverse_diag = cache;
       Solver s;
       Info info;

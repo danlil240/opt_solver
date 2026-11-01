@@ -317,14 +317,16 @@ void solve_forward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   };
 
   // Parallel layout from a tree-parallel factorization: independent
-  // subtrees first, then the top of the tree.
+  // subtrees first, then the top of the tree. At most the factorization's
+  // choice for this layout (FactorKeep::solve_threads).
   const std::size_t nsub = fkeep.solve_subtrees.size();
+  const int want = std::min(num_threads, fkeep.solve_threads);
   const int threads =
-      (use_steps && num_threads > 1 && nsub >= 2 &&
+      (use_steps && want > 1 && nsub >= 2 &&
        fkeep.solve_top_slot.size() == static_cast<std::size_t>(n) &&
        static_cast<LongInt>(fkeep.solve_top_parent.size()) ==
            static_cast<LongInt>(fkeep.solve_steps.size()) - fkeep.solve_top_begin)
-          ? std::min<int>(num_threads, static_cast<int>(nsub))
+          ? std::min<int>(want, static_cast<int>(nsub))
           : 1;
 
   std::vector<double> &tmp = ws.tmp;

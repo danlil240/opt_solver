@@ -48,6 +48,16 @@ struct AdapterStats {
     int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
     int aptp_failed_columns = 0;  // Info::aptp_failed_columns of the last factor (smf adapters)
     int delay_rescales = 0;  // Info::delay_rescales of the last factor (smf adapters)
+    // smf adapters: the subtree engine's shape and phase times (Info) of the
+    // last factor; subtree/top/gather are 0 when it ran serially.
+    int threads_used = 1;
+    int parallel_subtrees = 0;
+    int top_part_fronts = 0;
+    int top_part_queue_pops = 0;  // of those, taken from the scheduler's shared list
+    double subtree_ms = 0.0;
+    double top_ms = 0.0;
+    double gather_ms = 0.0;
+    int solve_threads = 1;  // FactorKeep::solve_threads of the last factor
     // smf adapter: smf::refine() of the last solve, -1 when it did not run.
     int refine_iterations = -1;
     bool refine_fgmres = false;  // RefinementResult::method_used == Fgmres

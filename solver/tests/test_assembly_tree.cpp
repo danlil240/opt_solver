@@ -251,6 +251,7 @@ void factor_solve_within_gate(const CscLower &A, MatrixType type) {
     Control ctrl;
     ctrl.matrix_type = type;
     ctrl.num_threads = 1;
+    ctrl.auto_threads = false;  // small test trees
     Info info;
     Solver solver;
     auto ak = solver.analyse(A, ctrl, info);

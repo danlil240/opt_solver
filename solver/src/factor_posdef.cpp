@@ -61,6 +61,8 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
     return false;
 
   fkeep.use_banded_spd = true;
+  // The band solve: no step layout to run in parallel.
+  fkeep.solve_threads = 1;
   fkeep.band_n = n_i;
   fkeep.band_kd = kd_i;
   fkeep.band_factor = std::move(ab);
@@ -73,6 +75,7 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
+  fkeep.solve_threads = 1;
   fkeep.solve_steps.reserve(keep.solve_postorder.size());
 
   std::size_t row_count = 0;
@@ -320,6 +323,13 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   const auto t0 = std::chrono::steady_clock::now();
   info.factor_status = FactorStatus::Success;
   info.static_pivots = 0;  // SPD: no pivoting, the inertia is always exact
+  info.parallel_subtrees = 0;
+  info.top_part_fronts = 0;
+  info.top_part_queue_pops = 0;
+  info.threads_used = 1;
+  info.subtree_seconds = 0.0;
+  info.top_seconds = 0.0;
+  info.gather_seconds = 0.0;
   info.inertia_exact = true;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
@@ -440,6 +450,12 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
 
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.parallel_subtrees = st.parallel_subtrees;
+  info.top_part_fronts = st.top_part_fronts;
+  info.top_part_queue_pops = st.top_part_queue_pops;
+  info.threads_used = st.threads_used;
+  info.subtree_seconds = st.subtree_seconds;
+  info.top_seconds = st.top_seconds;
+  info.gather_seconds = st.gather_seconds;
   info.actual_flops = st.flops;
   info.max_front_size = std::max(info.max_front_size, st.max_front);
   info.arena_growths = static_cast<int>(ws.capacity_growths_last_call);

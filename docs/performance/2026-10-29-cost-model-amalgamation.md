@@ -294,6 +294,22 @@ One outlier: pde_control_120 (recommended track) at +45% peak RSS. That is the s
 1. **Re-tune scale-on-delay on the new tree.** That means the ratio, and possibly a trigger in flops instead of eligible × rows². The two recommended-track losses in section 5 come from there.
    - *2026-10-30:* the ratio alone does not do it. Ratios 8, 6 and 4 fix pde_control (2.77 s → 1.97, 1.53 and 0.99 s), but they start rescaling cops_elec_200 (1.6x → 2.7x behind MA97) and case300 (+33%).
    - The ratio stays at 16, and the cops_polygon_200 replay step is accepted. See section 4 of `2026-10-30-branches-and-scoreboard.md`.
+   - *Done (feat/sod-next-step):* `Control::scale_on_delay_next_ratio` (4). A factorization let through past 4x the delay-free work leaves the next one to run under 4x as its limit, not 16x.
+     - pde_control_250: step 2 takes 97,870 delays at 5.0x and is accepted. Step 3's stopped try then trips at 4x, not 16x: 1472 → 460 ms.
+     - A one-off spike passes the tighter limit unscaled. cops_elec_200 runs 2.2, 8.5, 2.2, so it pays no matching.
+     - The rule never fires on a case whose steps all stay under 4x. On the cost tree that holds for everything but 7 recommended-track cases (ratio survey).
+     - Interleaved A/B on those cases and 3 controls, 1 thread, 5 rounds, wall B/A:
+
+       | case | wall B/A |
+       |---|---|
+       | pde_control_250 | 0.56 (2343 → 1319 ms) |
+       | cops_rocket_800 | 0.86 |
+       | case300 | 0.91 |
+       | cops_elec_200, polygon, case500, stokes128, robot_arm, case118 | 0.99-1.01 |
+
+       No accuracy changes. Records: `benchmarks/results/sod_retune_20261030/ab_tight4`.
+     - Rescaling at once on the next step, with no try, gave pde_control_250 0.41 but cops_elec_200 1.52 (`ab_next4`). There the matching costs more than the factorization and barely cuts its delays.
+     - Not fixed: pde_control_120 (1.24x). It goes from 1.03x straight into a cascade, so there is no warning step.
 2. **TPP pivot search in wide, delay-heavy fronts.** Merged fronts process delay cascades at half the work units per second of the old tree's. Failed pivot attempts are not counted as work and look quadratic in the eligible columns. A profile of pde_control_250 step 3 (bench_profile `--sample factor`) would show it.
 3. **A delay-aware cost term.** Treating expected delays as extra pivots and rows of a front would generalize the zero-diagonal guard, which only knows certain delays.
 4. **In-place assembly of the last child** (task item 2, not done). Fronts are assembled at their factor offset, and CBs live on a separate packed stack. Overlaying them needs a full-square CB layout or a front stack. After this rule c-big runs at ~60 GF/s against 11, so the measured gain left is smaller than when it was proposed.

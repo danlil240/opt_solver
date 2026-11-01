@@ -218,6 +218,7 @@ TEST(MatchingTrial, NonFiniteBudgetIsNoBudget) {
     ref.matrix_type = MatrixType::RealSymmetricIndefinite;
     ref.ordering = OrderingMethod::AutoSerial;
     ref.num_threads = 1;
+    ref.auto_threads = false;  // small test trees
     ref.matching_search_budget = -1.0;
     Solver sr;
     Info ir;
@@ -270,8 +271,10 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreads) {
         c1.ordering = OrderingMethod::AutoSerial;
         c1.matching_search_budget = 0.0;
         c1.num_threads = 1;
+        c1.auto_threads = false;  // small test trees
         Control c4 = c1;
         c4.num_threads = 4;
+        c4.auto_threads = false;  // small test trees
         Solver s1, s4;
         Info i1, i4;
         auto a1 = s1.analyse(A, c1, i1);
@@ -300,6 +303,7 @@ TEST(MatchingTrial, DearBaseFactorResumesWithoutInitialVerdict) {
         exact.ordering = OrderingMethod::AutoSerial;
         exact.matching_search_budget = -1.0;
         exact.num_threads = threads;
+        exact.auto_threads = false;  // small test trees
         Control budgeted = exact;
         budgeted.matching_search_budget = 0.0;
         Control cheap = budgeted;
@@ -337,8 +341,10 @@ TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
             c1.ordering = OrderingMethod::AutoSerial;
             c1.matching_search_budget = budget;
             c1.num_threads = 1;
+            c1.auto_threads = false;  // small test trees
             Control c4 = c1;
             c4.num_threads = 4;
+            c4.auto_threads = false;  // small test trees
             Solver s1, s4;
             Info i1, i4;
             auto a1 = s1.analyse(A, c1, i1);
@@ -374,8 +380,10 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreadsAutoParallel) {
         c1.ordering = OrderingMethod::AutoParallel;
         c1.matching_search_budget = 0.0;
         c1.num_threads = 1;
+        c1.auto_threads = false;  // small test trees
         Control c4 = c1;
         c4.num_threads = 4;
+        c4.auto_threads = false;  // small test trees
         Solver s1, s4;
         Info i1, i4;
         auto a1 = s1.analyse(A, c1, i1);
