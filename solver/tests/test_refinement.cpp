@@ -736,8 +736,9 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
     {
         // With the trigger (the default) the same KKT is factored again with
         // the matching scaling of its values: here the analysed ones, so the
-        // analysis' rejected trial matching, which is ScalingMethod::
-        // Matching's own.
+        // analysis' rejected trial matching (searched in degree order, see
+        // MatchingSearchOrder), a maximum-product matching's as ScalingMethod::
+        // Matching's (column order) is.
         CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
         FactorKeep fk;
         std::unique_ptr<AnalysisKeep> ak;
@@ -747,10 +748,11 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         EXPECT_EQ(fk.scale, ak->rejected_matching_scale);
         EXPECT_EQ(fk.delay_analysis, ak->serial);
         EXPECT_EQ(fk.delay_scale, ak->rejected_matching_scale);
-        std::vector<double> fresh;
-        ASSERT_EQ(compute_scaling_for_method(ak->cleaned, ScalingMethod::Matching, fresh),
-                  ErrorCode::Success);
-        EXPECT_EQ(fresh, ak->rejected_matching_scale);
+        SymmetricMatcher trial(ak->cleaned, MatchingSearchOrder::Degree);
+        ASSERT_TRUE(trial.advance());
+        const MatchingResult mr = trial.current();
+        ASSERT_EQ(mr.status, ErrorCode::Success);
+        EXPECT_EQ(mr.scale, ak->rejected_matching_scale);
     }
     {
         // Indefinite tridiagonal with a dominant diagonal of alternating sign.

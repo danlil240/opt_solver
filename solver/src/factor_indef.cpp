@@ -421,7 +421,9 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.scale.clear();
   if (scaling != ScalingMethod::None && keep.n > 0) {
     // The Matching ordering already matched the analysed values; when they
-    // are being factored unchanged, its scaling is the one to compute.
+    // are being factored unchanged, its scaling (a maximum-product
+    // matching's, searched in MatchingSearchOrder::Degree) stands in for a
+    // new one.
     const bool reuse_analysis_matching =
         scaling == ScalingMethod::Matching && !keep.matching_scale.empty() &&
         !keep.matching_scale_partial && ws.clean_values == keep.cleaned.values;

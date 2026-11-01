@@ -5,6 +5,7 @@
 #include "smf/control.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 #include "kkt_test_matrices.hpp"
@@ -126,6 +127,47 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
         for (double v : x) err = std::max(err, std::abs(v - 1.0));
         EXPECT_LT(err, 1e-10) << "threads " << threads;
     }
+}
+
+// MatchingSearchOrder: column order is compute_symmetric_matching (the API
+// contract: same code path, so this is no check of the pre-change loop);
+// degree order reaches a matching of the same (maximum) product, and its
+// scaling still has unit matched entries and no entry above 1.
+TEST(MatchingTrial, DegreeSearchOrderIsAMaximumProductMatching) {
+    const auto entry = [](const CscLower &A, Int r, Int c) {
+        const Int lo = std::min(r, c), hi = std::max(r, c);
+        for (Int q = A.col_ptr[lo]; q < A.col_ptr[lo + 1]; ++q)
+            if (A.row_idx[q] == hi) return A.values[q];
+        return 0.0;
+    };
+    int differ = 0;  // seeds whose two orders reach different optimal matchings or duals
+    for (unsigned seed : {1u, 2u, 3u}) {
+        const CscLower A = scaled_opf_kkt(3000, 1200, seed, 4.0);
+        SymmetricMatcher col(A, MatchingSearchOrder::Column), deg(A, MatchingSearchOrder::Degree);
+        ASSERT_TRUE(col.advance());
+        ASSERT_TRUE(deg.advance());
+        const MatchingResult mc = col.current(), md = deg.current();
+        const MatchingResult ref = compute_symmetric_matching(A);
+        EXPECT_EQ(mc.col_to_row, ref.col_to_row) << "seed " << seed;
+        EXPECT_EQ(mc.scale, ref.scale) << "seed " << seed;
+        ASSERT_EQ(md.status, ErrorCode::Success) << "seed " << seed;
+        ASSERT_EQ(md.matched_rank, A.n) << "seed " << seed;
+        double log_c = 0.0, log_d = 0.0;
+        for (Int j = 0; j < A.n; ++j) {
+            log_c += std::log(std::abs(entry(A, mc.col_to_row[j], j)));
+            log_d += std::log(std::abs(entry(A, md.col_to_row[j], j)));
+        }
+        EXPECT_NEAR(log_d, log_c, 1e-9 * std::abs(log_c) + 1e-9) << "seed " << seed;
+        differ += (md.col_to_row != mc.col_to_row || md.scale != mc.scale) ? 1 : 0;
+        for (Int j = 0; j < A.n; ++j) {
+            const Int r = md.col_to_row[j];
+            EXPECT_NEAR(std::abs(md.scale[r] * entry(A, r, j) * md.scale[j]), 1.0, 1e-10) << "seed " << seed;
+            for (Int q = A.col_ptr[j]; q < A.col_ptr[j + 1]; ++q)
+                EXPECT_LE(std::abs(md.scale[A.row_idx[q]] * A.values[q] * md.scale[j]), 1.0 + 1e-10);
+        }
+    }
+    // The orders search differently here: the product check is not vacuous.
+    EXPECT_GT(differ, 0);
 }
 
 // Auto applying the partial scale of a diagonal trial to the analysed values
