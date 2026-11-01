@@ -130,6 +130,12 @@ Control base_control() {
 // The matching scaling (ScalingMethod::Matching's) of M's values, M being
 // a clean matrix of ak's pattern.
 std::vector<double> matching_scale_of(const AnalysisKeep &ak, const CscLower &M) {
+    // The analysed values reuse the analysis' own matching scale, adopted or
+    // rejected (a degree-order search's, see MatchingSearchOrder), as
+    // factor() does; other values get ScalingMethod::Matching's.
+    const std::vector<double> &analysed =
+        !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale : ak.rejected_matching_scale;
+    if (!analysed.empty() && M.values == ak.cleaned.values) return analysed;
     CscLower clean = ak.cleaned;
     clean.values = M.values;
     std::vector<double> ref;

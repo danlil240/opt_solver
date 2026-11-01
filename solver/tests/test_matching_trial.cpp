@@ -129,7 +129,8 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
     }
 }
 
-// MatchingSearchOrder: column order is compute_symmetric_matching bitwise;
+// MatchingSearchOrder: column order is compute_symmetric_matching (the API
+// contract: same code path, so this is no check of the pre-change loop);
 // degree order reaches a matching of the same (maximum) product, and its
 // scaling still has unit matched entries and no entry above 1.
 TEST(MatchingTrial, DegreeSearchOrderIsAMaximumProductMatching) {
@@ -139,6 +140,7 @@ TEST(MatchingTrial, DegreeSearchOrderIsAMaximumProductMatching) {
             if (A.row_idx[q] == hi) return A.values[q];
         return 0.0;
     };
+    int differ = 0;  // seeds whose two orders reach different optimal matchings or duals
     for (unsigned seed : {1u, 2u, 3u}) {
         const CscLower A = scaled_opf_kkt(3000, 1200, seed, 4.0);
         SymmetricMatcher col(A, MatchingSearchOrder::Column), deg(A, MatchingSearchOrder::Degree);
@@ -156,6 +158,7 @@ TEST(MatchingTrial, DegreeSearchOrderIsAMaximumProductMatching) {
             log_d += std::log(std::abs(entry(A, md.col_to_row[j], j)));
         }
         EXPECT_NEAR(log_d, log_c, 1e-9 * std::abs(log_c) + 1e-9) << "seed " << seed;
+        differ += (md.col_to_row != mc.col_to_row || md.scale != mc.scale) ? 1 : 0;
         for (Int j = 0; j < A.n; ++j) {
             const Int r = md.col_to_row[j];
             EXPECT_NEAR(std::abs(md.scale[r] * entry(A, r, j) * md.scale[j]), 1.0, 1e-10) << "seed " << seed;
@@ -163,6 +166,8 @@ TEST(MatchingTrial, DegreeSearchOrderIsAMaximumProductMatching) {
                 EXPECT_LE(std::abs(md.scale[A.row_idx[q]] * A.values[q] * md.scale[j]), 1.0 + 1e-10);
         }
     }
+    // The orders search differently here: the product check is not vacuous.
+    EXPECT_GT(differ, 0);
 }
 
 // Auto applying the partial scale of a diagonal trial to the analysed values
