@@ -734,15 +734,18 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         EXPECT_TRUE(fk.scale.empty());
     }
     {
-        // With the trigger (the default) the same KKT is factored again with
-        // the matching scaling of its values: here the analysed ones, so the
-        // analysis' rejected trial matching (searched in degree order, see
+        // With the trigger the same KKT is factored again with the matching
+        // scaling of its values: here the analysed ones, so the analysis'
+        // rejected trial matching (searched in degree order, see
         // MatchingSearchOrder), a maximum-product matching's as ScalingMethod::
-        // Matching's (column order) is.
+        // Matching's (column order) is. The trigger at a ratio of 8: the
+        // unscaled factor takes 13.9x its delay-free work, under the default.
         CscLower kkt = make_random_kkt(8000, 3000, 3, 7);
         FactorKeep fk;
         std::unique_ptr<AnalysisKeep> ak;
-        solve_accurately(kkt, ctrl, fk, ak);
+        Control trigger = ctrl;
+        trigger.scale_on_delay_ratio = 8.0;
+        solve_accurately(kkt, trigger, fk, ak);
         EXPECT_TRUE(ak->matching_scale.empty());
         ASSERT_FALSE(ak->rejected_matching_scale.empty());
         EXPECT_EQ(fk.scale, ak->rejected_matching_scale);

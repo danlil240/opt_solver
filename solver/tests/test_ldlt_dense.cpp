@@ -258,4 +258,89 @@ TEST(LdltDense, WeakOneByOneGivesWayToStableTwoByTwo) {
     }
 }
 
+// The blocked kernel's first pass on a KKT-like front whose leading eligible
+// columns have no pivot of their own, like the delayed columns a front
+// receives: m constraint columns c (zero diagonal) coupled only to variable
+// columns at least kFar past them (outside their panel), then nv variable
+// columns (an SPD block), then q non-eligible rows. A panel over constraint
+// columns stalls and pulls each one's largest partner next to it, and the
+// next panel takes those 2x2 pivots. Every eligible column is accepted, the
+// inertia is the block's, and the Schur complement of the rows below matches
+// a dense reference.
+TEST(LdltDense, StalledPanelsPullInPartners) {
+    constexpr int m = 40, nv = 120, q = 40, e = m + nv, f = e + q, kFar = 100;
+    std::mt19937 rng(20261102);
+    std::uniform_real_distribution<double> U(-1.0, 1.0);
+    std::vector<double> A(static_cast<std::size_t>(f) * f, 0.0);
+    const auto at = [&](int i, int j) -> double & { return A[static_cast<std::size_t>(j) * f + i]; };
+    for (int c = 0; c < m; ++c)
+        for (int t = 0; t < 3; ++t) at(kFar + (c * 3 + t) % (e - kFar) , c) += 1.0 + 0.5 * U(rng);
+    for (int j = m; j < e; ++j) {
+        at(j, j) = 4.0 + U(rng);
+        for (int i = j + 1; i < f; ++i)
+            if (rng() % 8 == 0) at(i, j) = 0.3 * U(rng);
+    }
+    for (int j = e; j < f; ++j)
+        for (int i = j; i < f; ++i) at(i, j) = (i == j ? 2.0 : 0.1 * U(rng));
+
+    LdltKernelParams prm;
+    prm.u = 0.01;
+    ASSERT_GE(f, prm.blocked_min_front);
+    std::vector<double> F = A;
+    std::vector<Int> rows(f);
+    std::iota(rows.begin(), rows.end(), Int{0});
+    std::vector<int8_t> tags(f, 0);
+    std::vector<double> work(ldlt_work_size(f, prm));
+    const LdltKernelResult r = ldlt_factor_front(F.data(), f, e, rows.data(), prm, tags.data(), work.data());
+    EXPECT_EQ(r.num_accepted, e);
+    EXPECT_EQ(r.inertia.positive, nv);
+    EXPECT_EQ(r.inertia.negative, m);
+    EXPECT_EQ(r.inertia.zero, 0);
+    // The first pivot pairs constraint column 0 with a variable past kFar.
+    EXPECT_EQ(tags[0], 2);
+    EXPECT_EQ(rows[0], 0);
+    EXPECT_GE(rows[1], kFar);
+    // Non-eligible rows keep their positions.
+    for (int i = e; i < f; ++i) EXPECT_EQ(rows[i], i);
+
+    // Reference Schur complement S = A22 - A21 A11^-1 A12 (Gaussian
+    // elimination with partial pivoting on the full symmetric A11).
+    std::vector<double> M(static_cast<std::size_t>(e) * (e + q), 0.0);  // [A11 | A12], row-major
+    const auto sym = [&](int i, int j) { return i >= j ? at(i, j) : at(j, i); };
+    for (int i = 0; i < e; ++i)
+        for (int j = 0; j < e + q; ++j) M[static_cast<std::size_t>(i) * (e + q) + j] = sym(i, j);
+    for (int k = 0; k < e; ++k) {
+        int p = k;
+        for (int i = k + 1; i < e; ++i)
+            if (std::abs(M[static_cast<std::size_t>(i) * (e + q) + k]) > std::abs(M[static_cast<std::size_t>(p) * (e + q) + k])) p = i;
+        if (p != k)
+            for (int j = 0; j < e + q; ++j)
+                std::swap(M[static_cast<std::size_t>(k) * (e + q) + j], M[static_cast<std::size_t>(p) * (e + q) + j]);
+        const double d = M[static_cast<std::size_t>(k) * (e + q) + k];
+        ASSERT_NE(d, 0.0);
+        for (int i = k + 1; i < e; ++i) {
+            const double l = M[static_cast<std::size_t>(i) * (e + q) + k] / d;
+            if (l == 0.0) continue;
+            for (int j = k; j < e + q; ++j)
+                M[static_cast<std::size_t>(i) * (e + q) + j] -= l * M[static_cast<std::size_t>(k) * (e + q) + j];
+        }
+    }
+    // X = A11^-1 A12 by back substitution, then S.
+    std::vector<double> X(static_cast<std::size_t>(e) * q, 0.0);
+    for (int c = 0; c < q; ++c)
+        for (int i = e - 1; i >= 0; --i) {
+            double s = M[static_cast<std::size_t>(i) * (e + q) + e + c];
+            for (int j = i + 1; j < e; ++j) s -= M[static_cast<std::size_t>(i) * (e + q) + j] * X[static_cast<std::size_t>(j) * q + c];
+            X[static_cast<std::size_t>(i) * q + c] = s / M[static_cast<std::size_t>(i) * (e + q) + i];
+        }
+    double worst = 0.0;
+    for (int j = e; j < f; ++j)
+        for (int i = j; i < f; ++i) {
+            double s = at(i, j);
+            for (int k = 0; k < e; ++k) s -= sym(i, k) * X[static_cast<std::size_t>(k) * q + (j - e)];
+            worst = std::max(worst, std::abs(F[static_cast<std::size_t>(j) * f + i] - s));
+        }
+    EXPECT_LT(worst, 1e-10);
+}
+
 int main(int argc,char**argv){testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}

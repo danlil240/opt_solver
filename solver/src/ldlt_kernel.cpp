@@ -579,6 +579,93 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
     // and are saved (unscaled) in W; the trailing triangle is then updated
     // with one lower-only GEMM per panel.
     double *W = work;
+    // Plain threshold pivoting first passes over the columns once, without
+    // searching outside the panel. The children's delayed columns come
+    // first in the front and mostly fail again; searching every remaining
+    // column for each pivot (the loop below) costs a scan of each failed
+    // column per pivot and a rank-1 update of the whole eligible block per
+    // pivot (ncvxqp9 at u = 0.01: half its factor time). A panel that stalls
+    // (every eligible column current then) instead
+    // - pulls in partners: each failed column whose largest entry lies
+    //   outside the panel gets that column next to it, and the next panel
+    //   starts on these pairs (the 2x2 the search would have found, or the
+    //   partner's 1x1). Without them a far partner pivots alone first and
+    //   the failed column later on what is left (cops_polygon_200 at
+    //   u = 0.01: backward error 1e-14 -> 1.4e-8, ncvxqp7 at 1e-8: 2e-16 ->
+    //   6e-11). Again only once a pivot was taken since the last pairs;
+    // - else moves its failed columns behind the untried ones, to
+    //   [live, num_elig), and the next panel starts on fresh columns.
+    // The loop below then tries the moved columns again, all current.
+    // In-order, static-pivot and SPD fronts keep their order (they pivot or
+    // stop at the first failure).
+    if (!prm.posdef && prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0) {
+        const std::size_t sf = static_cast<std::size_t>(f);
+        int live = num_elig;
+        int k_paired = -1;
+        while (k < live) {
+            const int ps = k;
+            const int pl = std::min(live, ps + prm.nb);
+            bool stalled = false;
+            while (k < pl) {
+                const PivotChoice pc = select_pivot(F, sf, f, k, num_elig, pl, prm);
+                if (pc.kind == 0) {
+                    stalled = true;
+                    break;
+                }
+                apply_pivot(pc, F, f, k, rows, tags, W, k - ps, pl, prm, res);
+            }
+            deferred_update(F, f, ps, k, pl, num_elig, W);
+            if (stalled && k != k_paired) {
+                // order: (failed column, partner) row ids, distinct partners.
+                Int order[128];
+                int np = 0;
+                const int max_pairs = std::min(prm.nb / 2, 64);
+                for (int pos = k; pos < pl && np / 2 < max_pairs; ++pos) {
+                    const double *col = F + static_cast<std::size_t>(pos) * sf;
+                    double in_max = 0.0;
+                    for (int i = k; i < pos; ++i) in_max = std::max(in_max, std::abs(F[static_cast<std::size_t>(i) * sf + pos]));
+                    for (int i = pos + 1; i < pl; ++i) in_max = std::max(in_max, std::abs(col[i]));
+                    double out_max = 0.0;
+                    int r = -1;
+                    for (int i = pl; i < num_elig; ++i) {
+                        const double v = std::abs(col[i]);
+                        if (v > out_max) {
+                            out_max = v;
+                            r = i;
+                        }
+                    }
+                    // The search tried the partners inside the panel.
+                    if (r < 0 || !(out_max > in_max)) continue;
+                    bool taken = false;
+                    for (int t = 1; t < np; t += 2) taken = taken || order[t] == rows[r];
+                    if (taken) continue;
+                    order[np++] = rows[pos];
+                    order[np++] = rows[r];
+                }
+                if (np > 0) {
+                    // Each swap fixes position k + t; the column it displaces
+                    // moves further back (row ids are distinct).
+                    for (int t = 0; t < np; ++t) {
+                        int q = k + t;
+                        while (rows[q] != order[t]) ++q;
+                        sym_swap(F, sf, f, k + t, q, rows, nullptr, 0);
+                    }
+                    live = std::max(live, k + np);
+                    k_paired = k;
+                    continue;
+                }
+            }
+            if (stalled) {
+                // The m failed columns [k, pl) trade places with the last
+                // mv untried ones (all of [pl, live) when fewer remain).
+                const int m = pl - k;
+                const int mv = std::min(m, live - pl);
+                for (int t = 0; t < mv; ++t)
+                    sym_swap(F, sf, f, k + t, live - mv + t, rows, nullptr, 0);
+                live -= m;
+            }
+        }
+    }
     while (k < num_elig) {
         const int ps = k;
         const int pl = std::min(num_elig, ps + prm.nb);
