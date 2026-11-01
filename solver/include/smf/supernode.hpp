@@ -98,19 +98,11 @@ void filled_column_counts_from_adjacency(Int n, const Int *xadj, const Int *adj,
 ///
 /// `work` (optional): amalgamate_relaxed_work_size(n) ints of caller-owned
 /// workspace (contents need not be initialised); null allocates its own.
-///
-/// `zero_diagonal` (optional, length n, same numbering; CostModel only): 1
-/// marks a column whose diagonal is zero in the analysed values. A width-1
-/// leaf supernode of such a column delays into its parent for certain, and
-/// CostModel takes no merge into or out of a group that receives such a
-/// delay (merging a chain of them piles the delays into one front, which
-/// the model does not count). Null: no guard.
 void amalgamate_relaxed(Int n, const Int *parent, const Int *colcount, Int nemin,
                         std::vector<Int> &order, std::vector<Supernode> &snodes,
                         const std::uint8_t *keep_with_parent = nullptr,
                         Int *work = nullptr,
-                        Amalgamation rule = Amalgamation::Smf,
-                        const std::uint8_t *zero_diagonal = nullptr);
+                        Amalgamation rule = Amalgamation::Smf);
 
 /// Ints of workspace amalgamate_relaxed needs for n columns.
 std::size_t amalgamate_relaxed_work_size(Int n);
