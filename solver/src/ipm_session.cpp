@@ -355,6 +355,7 @@ void IpmSession::prepare_analysis() {
   if (nak->matching_scale.empty() && !ak_->matching_scale.empty() &&
       nak->cleaned.values.size() == ak_->cleaned.values.size()) {
     nak->matching_scale = ak_->matching_scale;
+    nak->matching_scale_partial = ak_->matching_scale_partial;
     nak->cleaned.values = ak_->cleaned.values;
   }
 

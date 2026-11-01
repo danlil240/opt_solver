@@ -115,7 +115,8 @@ std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double
                                       int print_level) {
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
-      !ak.matching_scale.empty() ? ak.matching_scale : ak.rejected_matching_scale;
+      !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale
+                                                               : ak.rejected_matching_scale;
   if (!analysed.empty() && cv == ak.cleaned.values) return analysed;
   CscLower C;
   C.n = ak.n;
@@ -356,8 +357,11 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
         // Let through, but costly: the next one runs under the tighter limit.
         if (ran(st) && ctrl.scale_on_delay_next_ratio >= 0.0 &&
             info.front_work > ctrl.scale_on_delay_next_ratio * free_work) {
+          // A partial matching's scale (AnalysisKeep::matching_scale_partial)
+          // is not the values' own matching scaling: the next one stays armed.
           bool own_scale = false;
-          if (info.scaling_used == static_cast<int>(ScalingMethod::Matching)) {
+          if (info.scaling_used == static_cast<int>(ScalingMethod::Matching) &&
+              !ak.matching_scale_partial) {
             get_values();
             own_scale = cv == ak.cleaned.values;
           }

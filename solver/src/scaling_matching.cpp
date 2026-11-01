@@ -387,6 +387,28 @@ ErrorCode SymmetricMatcher::status() const { return s_->status; }
 
 long long SymmetricMatcher::work() const { return s_->work; }
 
+bool SymmetricMatcher::diagonal() const {
+    const State &s = *s_;
+    if (s.status != ErrorCode::Success || s.init_col_to_row.empty()) return false;
+    for (int j = 0; j < s.n; ++j) {
+        if (!s.dense(j) && s.init_col_to_row[static_cast<std::size_t>(j)] != j) return false;
+    }
+    return true;
+}
+
+MatchingResult SymmetricMatcher::diagonal_result() {
+    assert(diagonal());
+    State &s = *s_;
+    // Phase 1 has no free sparse column to search: give the dense columns
+    // their duals (phase 2) and stop short of phase 3.
+    if (s.status == ErrorCode::Success && s.phase == 1) {
+        if (s.any_dense) s.dense_duals();
+        s.phase = 3;
+        s.next_col = 0;
+    }
+    return current();
+}
+
 // Shortest augmenting path from a free column (Dijkstra on reduced costs); on
 // success the duals are updated and the matching augmented. In phase 1 the
 // dense rows are invisible (their distance is -inf, see the constructor).

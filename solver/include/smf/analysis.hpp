@@ -53,9 +53,17 @@ struct AnalysisKeep {
     std::vector<Int>         postorder;         ///< supernode postorder: postorder[i] = s means supernode s is i-th in children-before-parents order
     std::vector<Int>         solve_postorder;   ///< supernode postorder reused by triangular solves
     std::vector<double>      matching_scale;    ///< Matching ordering: its matching's scaling of the analysed values (else empty)
+    /// matching_scale is a partial matching's (Info::matching_trial
+    /// Diagonal: the dense columns unmatched; RejectedInitial: a nearly
+    /// complete initial matching), not the optimal matching's scaling of
+    /// the analysed values: ScalingMethod::Auto applies it, but the
+    /// scale-on-delay trigger stays armed and computes the full matching's,
+    /// and ScalingMethod::Matching never reuses it.
+    bool                     matching_scale_partial = false;
     /// The auto ordering computed the matching ordering (a KKT-like matrix)
     /// and kept AMD or METIS: the matching's scaling would not pay off
-    /// without its ordering (ScalingMethod::Auto applies none).
+    /// without its ordering (ScalingMethod::Auto applies none). False for a
+    /// diagonal trial (MatchingTrial::Diagonal), which keeps a scale.
     bool                     matching_rejected = false;
     /// matching_rejected with the exact matching computed (Info::
     /// matching_trial Exact or ResumedExact): its scaling of the analysed

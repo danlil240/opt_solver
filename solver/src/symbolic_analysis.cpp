@@ -4,6 +4,7 @@
 #include "smf/determinism.hpp"
 #include "smf/error.hpp"
 #include "smf/etree.hpp"
+#include "smf/ldlt_kernel.hpp"
 #include "smf/ordering.hpp"
 #include "smf/ordering_parallel_nd.hpp"
 #include "smf/scaling_matching.hpp"
@@ -57,6 +58,19 @@ namespace smf
     // between them. It is a margin, not a bound: on adopters near the rule
     // the initial ratio has exceeded the exact one by up to 1.8x.
     static constexpr double kMatchingInitialRejectRatio = 1.6 * kMatchingFlopsRatio;
+
+    // An initial rejection (MatchingTrial::RejectedInitial) still applies
+    // the initial matching's scale (partial: AnalysisKeep::
+    // matching_scale_partial, the scale-on-delay rescue stays armed) when
+    // that matching left at most this share of the columns free and the
+    // pivot threshold is strong (Control::pivot_u >= kWeakPivotRatio): its
+    // duals are then close to the full matching's, and with the kept AMD
+    // ordering they spare a strong threshold most delays. stokes128 (1.0%
+    // free, u = 0.01): 54k -> 17k delays, wall 159 -> 65 ms. PGLib OPF
+    // (13.5-15% free) keeps its delays under such a scale and only pays for
+    // it (+2-9%); at IPOPT's u = 1e-8 the delays are few and the scale only
+    // costs (stokes128 +4%).
+    static constexpr double kInitialScaleMaxFree = 0.02;
 
     // Past the budget, a dear factor resumes the searches without the
     // initial matching's verdict: a base ordering, or the initial matching's
@@ -140,6 +154,10 @@ namespace smf
             return within_;
         }
         const MatchingResult &initial() const { return initial_; }
+        // After within_budget(): the matcher's initial phase was diagonal
+        // (SymmetricMatcher::diagonal()), no search ran, and
+        // diagonal_scale holds its scaling.
+        bool diagonal() const { return diagonal_; }
         void stop() { stop_.store(true, std::memory_order_relaxed); }
         // Waits for the worker and rethrows what it threw. Afterwards
         // ordered() says whether the exact matching was perfect and its
@@ -154,6 +172,7 @@ namespace smf
         bool ordered() const { return ordered_; }
         std::vector<Int> perm;
         MatchingOrderStats stats;
+        std::vector<double> diagonal_scale;
 
     private:
         void run()
@@ -161,6 +180,19 @@ namespace smf
             try
             {
                 SymmetricMatcher matcher(C_);
+                if (matcher.diagonal())
+                {
+                    MatchingResult mr = matcher.diagonal_result();
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        diagonal_ = mr.status == ErrorCode::Success;
+                        if (diagonal_)
+                            diagonal_scale = std::move(mr.scale);
+                        phase1_ready_ = true;
+                    }
+                    ready_cv_.notify_all();
+                    return;
+                }
                 const bool within = matcher.advance(budget_);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -206,6 +238,7 @@ namespace smf
         std::condition_variable ready_cv_;
         bool phase1_ready_ = false;
         bool within_ = false;
+        bool diagonal_ = false;
         MatchingResult initial_;
         std::atomic<bool> stop_{false};
         bool ordered_ = false;
@@ -472,6 +505,7 @@ namespace smf
         // With threads, the trial runs concurrently (ConcurrentTrial) and is
         // decided at the same point, with the same results.
         std::vector<Int> matching_perm;
+        std::vector<double> diagonal_scale;  // MatchingTrial::Diagonal's
         std::unique_ptr<SymmetricMatcher> paused_matcher;
         std::unique_ptr<ConcurrentTrial> concurrent;
         // In edges scanned: budget x 2 x C's lower entries (diagonal
@@ -489,7 +523,17 @@ namespace smf
         else if (auto_matching)
         {
             auto matcher = std::make_unique<SymmetricMatcher>(C);
-            if (matcher->advance(budget))
+            if (matcher->diagonal())
+            {
+                MatchingResult mr = matcher->diagonal_result();
+                auto_matching = false;
+                if (mr.status == ErrorCode::Success)
+                {
+                    diagonal_scale = std::move(mr.scale);
+                    info.matching_trial = MatchingTrial::Diagonal;
+                }
+            }
+            else if (matcher->advance(budget))
             {
                 const MatchingResult mr = matcher->current();
                 auto_matching = mr.status == ErrorCode::Success &&
@@ -660,6 +704,7 @@ namespace smf
         // (bitwise: same adjacency, same counts), and an adopted candidate
         // takes its etree and counts from matching_stats.etree.
         bool rejected_initial = false;
+        double initial_free_share = 1.0;  // a rejecting initial matching's free columns
         // The initial matching's verdict: returns whether the paused
         // searches resume (false with auto_matching false: no ordering).
         // A dear factor resumes them outright (kMatchingResumeFlopsPerRow):
@@ -686,12 +731,19 @@ namespace smf
                 return true;
             rejected_initial = true;
             info.matching_trial = MatchingTrial::RejectedInitial;
+            initial_free_share = static_cast<double>(n - initial.matched_rank) / static_cast<double>(n);
             return false;
         };
         if (concurrent)
         {
             const bool within = concurrent->within_budget();
-            const bool resume = !within && initial_passes(concurrent->initial());
+            if (concurrent->diagonal())
+            {
+                auto_matching = false;
+                diagonal_scale = std::move(concurrent->diagonal_scale);
+                info.matching_trial = MatchingTrial::Diagonal;
+            }
+            const bool resume = !within && !concurrent->diagonal() && initial_passes(concurrent->initial());
             if (within || resume)
             {
                 concurrent->finish();
@@ -928,8 +980,26 @@ namespace smf
         // The matching's scaling only pays off with the matching ordering
         // (its 2x2 pairs kept adjacent); with AMD or METIS kept it makes the
         // factor less accurate, so ScalingMethod::Auto then applies none.
+        // A diagonal trial's ordering differs from the matching's in at most
+        // one pair per dense column: its partial scale is kept.
         if (info.ordering_used == static_cast<int>(OrderingMethod::Matching))
             keep->matching_scale = std::move(matching_stats.scale);
+        // A diagonal trial keeps the base ordering with the matching's
+        // scaling (MatchingTrial::Diagonal).
+        if (info.matching_trial == MatchingTrial::Diagonal)
+        {
+            keep->matching_scale = std::move(diagonal_scale);
+            keep->matching_scale_partial = true;
+        }
+        // A nearly complete rejecting initial matching keeps its scale
+        // (kInitialScaleMaxFree); matching_stats holds it (initial_passes).
+        if (info.matching_trial == MatchingTrial::RejectedInitial &&
+            initial_free_share <= kInitialScaleMaxFree && control.pivot_u >= kWeakPivotRatio &&
+            matching_stats.scale.size() == sn_sz)
+        {
+            keep->matching_scale = matching_stats.scale;
+            keep->matching_scale_partial = true;
+        }
         // Evaluated after the final ordering decision (the METIS trial and
         // the auto matching comparison above), so it reflects the ordering
         // the analysis actually kept.
