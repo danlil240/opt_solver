@@ -128,6 +128,30 @@ TEST(MatchingTrial, DiagonalMatchingSkipsTheTrial) {
     }
 }
 
+// Auto applying the partial scale of a diagonal trial to the analysed values
+// is not their own matching scaling: a costly factorization past
+// Control::scale_on_delay_next_ratio still leaves the next one the tighter
+// limit (FactorKeep::delay_next), as an unscaled one does.
+TEST(MatchingTrial, PartialScaleKeepsTheNextLimitArmed) {
+    const CscLower A = diagonal_kkt(10000, 3);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AutoSerial;
+    c.num_threads = 1;
+    c.auto_threads = false;  // small test trees
+    c.scale_on_delay_next_ratio = 0.0;  // any factorization is costly
+    Solver s;
+    Info i;
+    auto a = s.analyse(A, c, i);
+    ASSERT_NE(a, nullptr);
+    ASSERT_TRUE(a->matching_scale_partial);
+    FactorKeep f;
+    ASSERT_EQ(s.factor(*a, c, i, f), FactorStatus::Success);
+    ASSERT_EQ(i.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_TRUE(f.delay_next);
+    EXPECT_EQ(f.delay_analysis, a->serial);
+}
+
 // One sparse column whose diagonal the max-product matching does not take
 // makes the matching not diagonal: the trial runs.
 TEST(MatchingTrial, OffDiagonalSparseColumnRunsTheTrial) {
