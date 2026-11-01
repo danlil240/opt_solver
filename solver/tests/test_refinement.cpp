@@ -668,6 +668,46 @@ TEST(Matching, InitialMatchingIsPartialAndKept) {
     EXPECT_EQ(again.scale, init.scale);
 }
 
+// set_stop_free: the searches end once at most max_free columns are free.
+// The partial matching uses entries of A, its scaling is positive and keeps
+// every scaled entry at most 1 (the duals stay feasible), and a matcher with
+// max_free 0 ends where one without a stop does.
+TEST(Matching, StopFreeLeavesAPartialMatching) {
+    const CscLower A = make_random_kkt(1500, 600, 3, 1);
+    const std::vector<double> d = dense_abs(A);
+    const MatchingResult full = compute_symmetric_matching(A);
+    ASSERT_EQ(full.status, ErrorCode::Success);
+    const int init_free = static_cast<int>(A.n) - SymmetricMatcher(A).initial().matched_rank;
+    const int max_free = init_free / 4;
+    ASSERT_GT(max_free, 0) << "fixture must leave work for the searches";
+    SymmetricMatcher m(A);
+    m.set_stop_free(max_free);
+    EXPECT_TRUE(m.advance(-1));
+    const MatchingResult part = m.current();
+    EXPECT_EQ(part.status, ErrorCode::Success);
+    EXPECT_GE(static_cast<int>(A.n) - part.matched_rank, max_free - 1);
+    EXPECT_LE(static_cast<int>(A.n) - part.matched_rank, max_free);
+    const std::size_t n = static_cast<std::size_t>(A.n);
+    for (std::size_t j = 0; j < n; ++j) {
+        const Int i = part.col_to_row[j];
+        if (i >= 0) EXPECT_GT(d[static_cast<std::size_t>(i) * n + j], 0.0);
+        EXPECT_TRUE(std::isfinite(part.scale[j]));
+        EXPECT_GT(part.scale[j], 0.0);
+    }
+    double worst = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t j = 0; j < n; ++j)
+            worst = std::max(worst, d[i * n + j] * part.scale[i] * part.scale[j]);
+    EXPECT_LE(worst, 1.0 + 1e-10);
+
+    SymmetricMatcher z(A);
+    z.set_stop_free(0);
+    EXPECT_TRUE(z.advance(-1));
+    const MatchingResult zres = z.current();
+    EXPECT_EQ(zres.col_to_row, full.col_to_row);
+    EXPECT_EQ(zres.scale, full.scale);
+}
+
 TEST(Matching, StructurallySingularFailsAfterSearches) {
     // Row/column 1 is empty: the construction already fails.
     CscLower A;

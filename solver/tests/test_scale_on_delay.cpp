@@ -12,6 +12,7 @@
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/scaling.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
@@ -127,20 +128,24 @@ Control base_control() {
     return c;  // Auto scaling, pivot_u = 0.01, default trigger ratio
 }
 
-// The matching scaling (ScalingMethod::Matching's) of M's values, M being
-// a clean matrix of ak's pattern.
+// The rescue's matching scaling of M's values, M being a clean matrix of
+// ak's pattern.
 std::vector<double> matching_scale_of(const AnalysisKeep &ak, const CscLower &M) {
     // The analysed values reuse the analysis' own matching scale, adopted or
     // rejected (a degree-order search's, see MatchingSearchOrder), as
-    // factor() does; other values get ScalingMethod::Matching's.
+    // factor() does; other values get a matching whose searches end with at
+    // most 2% of the columns free (solve.cpp's kRescueMaxFree).
     const std::vector<double> &analysed =
         !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale : ak.rejected_matching_scale;
     if (!analysed.empty() && M.values == ak.cleaned.values) return analysed;
     CscLower clean = ak.cleaned;
     clean.values = M.values;
-    std::vector<double> ref;
-    EXPECT_EQ(compute_scaling_for_method(clean, ScalingMethod::Matching, ref), ErrorCode::Success);
-    return ref;
+    SymmetricMatcher m(clean);
+    m.set_stop_free(static_cast<int>(0.02 * static_cast<double>(clean.n)));
+    m.advance();
+    const MatchingResult mr = m.current();
+    EXPECT_EQ(mr.status, ErrorCode::Success);
+    return mr.scale;
 }
 
 } // namespace

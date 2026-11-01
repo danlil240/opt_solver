@@ -5,6 +5,7 @@
 #include "smf/factor_indef.hpp"
 #include "smf/ldlt_kernel.hpp"
 #include "smf/scaling.hpp"
+#include "smf/scaling_matching.hpp"
 #include "smf/solve_diag.hpp"
 #include "smf/solve_forward.hpp"
 #include "smf/solver.hpp"
@@ -106,13 +107,22 @@ bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
          !(ctrl.tree_parallel && ctrl.num_threads > 1 && !deterministic_mode(ctrl));
 }
 
-// The matching scaling (ScalingMethod::Matching's) of values `cv` of ak's
-// pattern (cleaned order): the analysis' own matching scale, adopted or
-// rejected, when they are the analysed values. Empty when there is none
-// (e.g. structurally singular). cv is borrowed (moved in and back), not
-// copied.
-std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv,
-                                      int print_level) {
+// The scale-on-delay rescue's matching (matching_scale_of) ends its searches
+// once at most this share of the columns is free, and scales by that
+// partial matching's duals. The searches that complete a matching are its
+// dearest and change the rescued factor little: ncvxqp9 at u = 0.01, 25 ->
+// 11.6 ms for the matching, 3588 -> 3989 delays; on PGLib OPF the full
+// matchings took 70-370 ms per rescue. The analysis keeps an initial
+// matching's scale up to the same share (stokes128, 1% free).
+constexpr double kRescueMaxFree = 0.02;
+
+// The matching scaling of values `cv` of ak's pattern (cleaned order) for
+// the scale-on-delay rescue: the analysis' own matching scale, adopted or
+// rejected, when they are the analysed values, else a matching's that may
+// leave kRescueMaxFree of the columns free. Empty when there is none
+// (structurally singular: an all-zero column, or more unmatched columns
+// than that share). cv is borrowed (moved in and back), not copied.
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv) {
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
       !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale
@@ -123,11 +133,18 @@ std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double
   C.col_ptr = ak.cleaned.col_ptr;
   C.row_idx = ak.cleaned.row_idx;
   C.values = std::move(cv);
-  std::vector<double> scale;
-  const ErrorCode ec = compute_scaling_for_method(C, ScalingMethod::Matching, scale, print_level);
+  MatchingResult mr;
+  {
+    SymmetricMatcher m(C);
+    m.set_stop_free(static_cast<int>(kRescueMaxFree * static_cast<double>(ak.n)));
+    m.advance();
+    mr = m.current();
+  }
   cv = std::move(C.values);
-  if (ec != ErrorCode::Success || scale.size() != static_cast<std::size_t>(ak.n)) return {};
-  return scale;
+  if (mr.status != ErrorCode::Success || mr.scale.size() != static_cast<std::size_t>(ak.n)) return {};
+  for (const double s : mr.scale)
+    if (!(s > 0.0) || !std::isfinite(s)) return {};
+  return std::move(mr.scale);
 }
 
 // How far a kept scale s is from a matching scaling of values cv (cleaned
@@ -379,7 +396,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   // A new matching scaling of these values.
   get_values();
   const auto t0 = now();
-  std::vector<double> scale = matching_scale_of(ak, cv, ctrl.print_level);
+  std::vector<double> scale = matching_scale_of(ak, cv);
   extra_seconds += secs(t0, now());
   FactorStatus st;
   if (scale.empty()) {
