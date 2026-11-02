@@ -30,10 +30,11 @@ struct AuctionState {        // resumable: everything advance needs to continue
 };
 
 // opt with every field valid for auction_advance: a non-finite or
-// out-of-domain field takes its default, and the valid ones are clamped
+// out-of-domain field takes def's value (AuctionOptions{} for Auction,
+// hybrid_auction_options() for Hybrid), and the valid ones are clamped
 // (scaling_matching.hpp states the rule). SymmetricMatcher applies it at the
 // public boundary.
-AuctionOptions validated(const AuctionOptions &opt);
+AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def = AuctionOptions{});
 
 // Runs bids until every sparse column is matched in the last phase (Done),
 // work >= work_budget at a bid boundary (Paused; work_budget < 0: none),

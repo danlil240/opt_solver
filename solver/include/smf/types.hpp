@@ -131,7 +131,12 @@ enum class MatchingTrial {
 //                  repair: the duals made feasible, the matched edges left
 //                  loose unmatched, and their columns searched as above. Same
 //                  optimum; the matching and scaling may differ on ties.
-enum class MatchingAlgorithm { ShortestPath = 0, Auction = 1 };
+//   Hybrid       - ShortestPath searches until their work passes
+//                  AuctionOptions::switch_passes, then the auction (warm from
+//                  the searches' exact duals) on the free columns left, the
+//                  exact repair and the remaining searches. Bitwise
+//                  ShortestPath when phase 1 ends before the switch.
+enum class MatchingAlgorithm { ShortestPath = 0, Auction = 1, Hybrid = 2 };
 
 // Dense kernel for the fully summed columns of an indefinite front.
 //   Tpp  - threshold partial pivoting (ldlt_factor_front), blocked BLAS-3,

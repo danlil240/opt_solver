@@ -655,4 +655,201 @@ TEST(AuctionMatching, PriceWarsDoNotReachTheScaling) {
     EXPECT_GE(deficient, 8);
 }
 
+// ---- MatchingAlgorithm::Hybrid: Degree searches, then (past
+// switch_passes of phase-1 search work) the auction on the free columns
+// left, the exact repair and the remaining searches. ----
+
+namespace {
+
+// The Hybrid defaults with the switch moved to `passes`.
+AuctionOptions hybrid_at(double passes) {
+    AuctionOptions o = hybrid_auction_options();
+    o.switch_passes = passes;
+    return o;
+}
+
+// The random deficient KKTs of AuctionMatching.PriceWarsDoNotReachTheScaling.
+CscLower deficient_kkt(unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    const int n_x = 2000, k = 1 + static_cast<int>(seed % 3);
+    std::vector<std::tuple<int, int, double>> e;
+    for (int j = 0; j < n_x; ++j) {
+        if (unif(rng) < 0.7) e.emplace_back(j, j, std::pow(10.0, 6.0 * unif(rng) - 3.0));
+        const int t = 1 + static_cast<int>(unif(rng) * 2.0);
+        for (int q = 0; q < t; ++q) {
+            const int i = static_cast<int>(unif(rng) * n_x);
+            if (i != j) e.emplace_back(std::max(i, j), std::min(i, j), std::pow(10.0, 6.0 * unif(rng) - 3.0));
+        }
+        e.emplace_back(n_x + j % k, j, std::pow(10.0, 2.0 * unif(rng) - 1.0));
+    }
+    return from_entries(n_x + k, e);
+}
+
+} // namespace
+
+TEST(AuctionMatching, HybridDefaults) {
+    const AuctionOptions h = hybrid_auction_options();
+    EXPECT_EQ(h.eps_factor, 10.0);
+    EXPECT_EQ(h.eps_final, 1e-2);
+    EXPECT_TRUE(h.warm);
+    EXPECT_EQ(h.eps_start, 0.1);
+    EXPECT_EQ(h.switch_passes, 40.0);
+    // Auction's own defaults are unchanged (eps_start 0: max cost / eps_factor).
+    const AuctionOptions a;
+    EXPECT_EQ(a.eps_factor, 5.0);
+    EXPECT_EQ(a.eps_final, 1e-3);
+    EXPECT_EQ(a.eps_start, 0.0);
+}
+
+// A switch forced early (a small fraction of a pass) on KKTs the searches
+// finish in under one pass: the same optimum as compute_symmetric_matching
+// and the scaling guarantees, phases 1 only and 1-3 (dense rows).
+TEST(AuctionMatching, HybridSameOptimumAsShortestPath) {
+    std::vector<CscLower> cases;
+    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(scaled_opf_kkt(3000, 1200, seed, 4.0));
+    cases.push_back(scaled_opf_kkt(3000, 1200, 4, 40.0));
+    cases.push_back(dense_row_kkt(6000, 3, 5));
+    for (std::size_t c = 0; c < cases.size(); ++c) {
+        const CscLower &A = cases[c];
+        for (double passes : {0.0, 0.01, 0.05}) {
+            const AuctionOptions opt = hybrid_at(passes);
+            SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+            ASSERT_TRUE(m.advance()) << "case " << c;
+            EXPECT_TRUE(m.switched()) << "case " << c << " passes " << passes;
+            const MatchingResult r = m.current();
+            same_optimum(A, r, compute_symmetric_matching(A));
+            scaling_bounds(A, r);
+        }
+    }
+}
+
+// Below the switch point Hybrid is the Degree ShortestPath matcher bitwise:
+// the default 40 passes is never reached on these KKTs (each finishes in
+// under a pass), nor is a switch point just above the run's own work.
+TEST(AuctionMatching, HybridBitwiseWhenTheSwitchDoesNotFire) {
+    std::vector<CscLower> cases;
+    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(opf_like_kkt(3000, 1200, seed));
+    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(scaled_opf_kkt(3000, 1200, seed, 4.0));
+    cases.push_back(dense_row_kkt(6000, 3, 5));
+    for (std::size_t c = 0; c < cases.size(); ++c) {
+        const CscLower &A = cases[c];
+        SymmetricMatcher sp(A, MatchingSearchOrder::Degree);
+        ASSERT_TRUE(sp.advance());
+        const double pass = 2.0 * static_cast<double>(A.nnz());
+        ASSERT_GT(sp.work(), 0) << "case " << c;
+        const AuctionOptions above = hybrid_at(static_cast<double>(sp.work()) / pass + 1e-9);
+        for (const AuctionOptions *opt : {static_cast<const AuctionOptions *>(nullptr), &above}) {
+            SymmetricMatcher h(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, opt);
+            ASSERT_TRUE(h.advance()) << "case " << c;
+            EXPECT_FALSE(h.switched()) << "case " << c;
+            EXPECT_EQ(h.status(), sp.status());
+            EXPECT_EQ(h.work(), sp.work()) << "case " << c;
+            EXPECT_EQ(h.repaired(), 0);
+            expect_bitwise(h.current(), sp.current());
+            expect_bitwise(h.initial(), sp.initial());
+            EXPECT_EQ(h.diagonal(), sp.diagonal());
+        }
+    }
+}
+
+// The switch point depends on the search work alone: pausing every 50
+// edges (inside the searches, the auction and the repair's searches), in
+// one-pass slices (as the ConcurrentTrial runs it) or one-shot give the
+// same matching, scaling and work.
+TEST(AuctionMatching, HybridResumedAdvanceIsOneShot) {
+    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5)}) {
+        const AuctionOptions opt = hybrid_at(0.02);
+        SymmetricMatcher one(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+        ASSERT_TRUE(one.advance());
+        ASSERT_TRUE(one.switched());
+        {
+            SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+            int pauses = 0;
+            for (long long budget = 0; !m.advance(budget); budget = m.work() + 50) ++pauses;
+            EXPECT_GT(pauses, 10);
+            EXPECT_TRUE(m.switched());
+            expect_bitwise(m.current(), one.current());
+            EXPECT_EQ(m.work(), one.work());
+            EXPECT_EQ(m.repaired(), one.repaired());
+        }
+        {
+            // Slices of a tenth of a pass (these runs are a few passes long).
+            const long long slice = std::max<long long>(1, A.nnz() / 5);
+            SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+            for (long long budget = slice; !m.advance(budget); budget += slice) {
+            }
+            expect_bitwise(m.current(), one.current());
+            EXPECT_EQ(m.work(), one.work());
+        }
+    }
+}
+
+// The engine is the bench probe it replaces (bench_matching_trial
+// --hybrid-probe, rule w<k>): the probe pausing at every search boundary
+// and switching at the first one past switch_passes gives the same
+// matching, scaling and work bitwise.
+TEST(AuctionMatching, HybridIsTheProbe) {
+    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 2, 4.0), dense_row_kkt(6000, 3, 5)}) {
+        const AuctionOptions opt = hybrid_at(0.03);
+        SymmetricMatcher h(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+        ASSERT_TRUE(h.advance());
+        ASSERT_TRUE(h.switched());
+
+        SymmetricMatcher p(A, MatchingSearchOrder::Degree);
+        const double target = opt.switch_passes * 2.0 * static_cast<double>(A.nnz());
+        bool done = false;
+        while (!(done = p.advance(p.work() + 1)) && static_cast<double>(p.work()) <= target) {
+        }
+        ASSERT_FALSE(done);
+        p.probe_switch_to_auction(opt);
+        ASSERT_TRUE(p.advance());
+        expect_bitwise(h.current(), p.current());
+        EXPECT_EQ(h.work(), p.work());
+        EXPECT_EQ(h.repaired(), p.repaired());
+    }
+}
+
+// Structurally singular matrices and deficient sparse parts under a switch
+// at the first search boundary: the ShortestPath status, and on success the
+// optimum with bounded scaling (the auction's price wars do not reach it).
+TEST(AuctionMatching, HybridSingularAndDense) {
+    CscLower A;  // Matching.StructurallySingular: row/column 1 is empty.
+    A.n = 3;
+    A.col_ptr = {0, 1, 1, 2};
+    A.row_idx = {0, 2};
+    A.values = {4.0, 5.0};
+    CscLower B;  // Columns 0 and 1 only reach row 2.
+    B.n = 3;
+    B.col_ptr = {0, 1, 2, 3};
+    B.row_idx = {2, 2, 2};
+    B.values = {1.0, 1.0, 1.0};
+    std::vector<CscLower> cases = {A, B, dense_row_kkt(6000, 3, 5)};
+    for (unsigned seed = 1; seed <= 12; ++seed) cases.push_back(deficient_kkt(seed));
+    const AuctionOptions opt = hybrid_at(0.0);
+    int switched = 0, success = 0, singular = 0;
+    for (std::size_t c = 0; c < cases.size(); ++c) {
+        const CscLower &M = cases[c];
+        SymmetricMatcher sp(M, MatchingSearchOrder::Degree);
+        ASSERT_TRUE(sp.advance());
+        SymmetricMatcher h(M, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+        ASSERT_TRUE(h.advance()) << "case " << c;
+        EXPECT_EQ(h.status(), sp.status()) << "case " << c;
+        switched += h.switched() ? 1 : 0;
+        const MatchingResult r = h.current();
+        EXPECT_EQ(r.status, sp.status()) << "case " << c;
+        if (sp.status() != ErrorCode::Success) {
+            ++singular;
+            EXPECT_LT(r.matched_rank, M.n);
+            continue;
+        }
+        ++success;
+        same_optimum(M, r, sp.current());
+        scaling_bounds(M, r);
+    }
+    EXPECT_GE(singular, 2);
+    EXPECT_GE(success, 9);
+    EXPECT_GE(switched, 10);
+}
+
 } // namespace smf

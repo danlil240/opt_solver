@@ -30,8 +30,7 @@ constexpr double kMaxBidCap = 1e6;
 
 } // namespace
 
-AuctionOptions validated(const AuctionOptions &opt) {
-    const AuctionOptions def;
+AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def) {
     AuctionOptions o = opt;
     // NaN fails every comparison, so it takes the default too.
     if (!(std::isfinite(o.eps_factor) && o.eps_factor > 1.0)) o.eps_factor = def.eps_factor;
@@ -40,8 +39,9 @@ AuctionOptions validated(const AuctionOptions &opt) {
     o.eps_factor = std::max(o.eps_factor, kMinEpsFactor);
     o.eps_final = std::max(o.eps_final, kMinEpsFinal);
     o.bid_cap = std::min(o.bid_cap, kMaxBidCap);
-    // Probe option: not finite or <= 0 keeps the old rule (0).
-    if (!(std::isfinite(o.eps_start) && o.eps_start > 0.0)) o.eps_start = 0.0;
+    // Not finite or <= 0: def's (Auction: 0, the max-cost rule).
+    if (!(std::isfinite(o.eps_start) && o.eps_start > 0.0)) o.eps_start = def.eps_start;
+    if (!(std::isfinite(o.switch_passes) && o.switch_passes >= 0.0)) o.switch_passes = def.switch_passes;
     return o;
 }
 
@@ -85,7 +85,7 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
         }
         st.cost_range = cmin == kInf ? 0.0 : cmax - cmin;
         st.bid_limit = static_cast<long long>(std::ceil(opt.bid_cap * static_cast<double>(sparse_cols)));
-        // eps_start > 0: a probe's explicit first epsilon (warm from exact duals).
+        // eps_start > 0: an explicit first epsilon (Hybrid: warm from exact duals).
         st.eps = std::max(opt.eps_start > 0.0 ? opt.eps_start : cmax / opt.eps_factor, opt.eps_final);
         st.queue.assign(first_queue.begin(), first_queue.end());
         st.head = 0;
@@ -192,3 +192,18 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
 }
 
 } // namespace smf::detail
+
+namespace smf {
+
+// hybrid-probe-report.md's auction settings (the w40 run), the Hybrid
+// defaults; switch_passes keeps the struct's 40 and bid_cap its 50.
+AuctionOptions hybrid_auction_options() {
+    AuctionOptions o;
+    o.eps_factor = 10.0;
+    o.eps_final = 1e-2;
+    o.warm = true;
+    o.eps_start = 0.1;
+    return o;
+}
+
+} // namespace smf

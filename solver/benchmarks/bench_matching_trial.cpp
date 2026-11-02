@@ -69,8 +69,11 @@
 // switch (- : phase 1 ended first, the run is plain Degree), and per eps:
 // w = total work in passes (searches + auction + repair + searches),
 // ok = prod_ok against plain Degree (as --matcher auction), ms (median of
-// --trials). Totals per variant: summed edges over edges_deg, the ncvxqp3
-// ratio, prod_fail, summed ms over summed deg_ms.
+// --trials), and for w<k> rules e = y when MatchingAlgorithm::Hybrid with
+// switch_passes k (and these auction settings) gives the probe's work and
+// result bitwise (N otherwise). Totals per variant: summed edges over
+// edges_deg, the ncvxqp3 ratio, prod_fail, engine mismatches, summed ms over
+// summed deg_ms. Exit code 1 on any prod_fail or engine mismatch.
 // --sample S (with --case) instead loops the default-budget analyse() of
 // the first matching case for S seconds under the in-process sampler
 // (--lines: by source line; needs a /Zi + /DEBUG build).
@@ -345,13 +348,13 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
         for (double e : eps) {
             char head[32];
             std::snprintf(head, sizeof head, "w@%g", e);
-            std::printf(" %7s %2s %7s", head, "ok", "ms");
+            std::printf(" %7s %2s %1s %7s", head, "ok", "e", "ms");
         }
     }
     std::printf("\n");
     double edges_deg = 0.0, ms_deg = 0.0, nc3_deg = 0.0;
     std::vector<double> edges(nv, 0.0), ms_sum(nv, 0.0), nc3(nv, 0.0);
-    std::vector<int> fail(nv, 0);
+    std::vector<int> fail(nv, 0), eng_fail(nv, 0);
     bool have_nc3 = false;
     std::string line;
     while (std::getline(in, line)) {
@@ -409,6 +412,24 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
                 }
                 const bool ok = first.done && product_ok(A, first.res, fd0);
                 const std::size_t v = ri * ne + ei;
+                // w<k>: the Hybrid engine must be this probe run bitwise.
+                char eng = '-';
+                if (rules[ri].kind == 'w') {
+                    smf::AuctionOptions hopt = opt;
+                    hopt.switch_passes = rules[ri].value;
+                    smf::SymmetricMatcher mh(A, smf::MatchingSearchOrder::Degree, smf::MatchingAlgorithm::Hybrid,
+                                             &hopt);
+                    const bool hdone = mh.advance(-1);
+                    const smf::MatchingResult hr = mh.current();
+                    const bool same = hdone == first.done && mh.work() == first.work &&
+                                      mh.switched() == (first.switch_share >= 0.0) && hr.status == first.res.status &&
+                                      hr.col_to_row == first.res.col_to_row && hr.row_to_col == first.res.row_to_col &&
+                                      std::memcmp(hr.scale.data(), first.res.scale.data(),
+                                                  hr.scale.size() * sizeof(double)) == 0 &&
+                                      hr.scale.size() == first.res.scale.size();
+                    eng = same ? 'y' : 'N';
+                    eng_fail[v] += same ? 0 : 1;
+                }
                 const double h_ms = med(t_h);
                 edges[v] += static_cast<double>(first.work);
                 ms_sum[v] += h_ms;
@@ -418,7 +439,7 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
                     if (first.switch_share >= 0.0) std::printf(" | %5s %5.3f", "", first.switch_share);
                     else std::printf(" | %5s %5s", "", "-");
                 }
-                std::printf(" %7.2f %2s %7.2f", static_cast<double>(first.work) / pass, ok ? "y" : "N", h_ms);
+                std::printf(" %7.2f %2s %c %7.2f", static_cast<double>(first.work) / pass, ok ? "y" : "N", eng, h_ms);
             }
         }
         std::printf("\n");
@@ -432,11 +453,13 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
                         edges[v], edges_deg > 0.0 ? edges[v] / edges_deg : 0.0);
             if (have_nc3 && nc3_deg > 0.0) std::printf("%.3fx", nc3[v] / nc3_deg);
             else std::printf("n/a");
-            std::printf("; prod_fail %d; ms %.1f = %.3fx deg_ms\n", fail[v], ms_sum[v],
-                        ms_deg > 0.0 ? ms_sum[v] / ms_deg : 0.0);
+            std::printf("; prod_fail %d", fail[v]);
+            if (rules[ri].kind == 'w') std::printf("; engine_mismatch %d", eng_fail[v]);
+            std::printf("; ms %.1f = %.3fx deg_ms\n", ms_sum[v], ms_deg > 0.0 ? ms_sum[v] / ms_deg : 0.0);
         }
     int total_fail = 0;
     for (int f : fail) total_fail += f;
+    for (int f : eng_fail) total_fail += f;
     return total_fail == 0 ? 0 : 1;
 }
 

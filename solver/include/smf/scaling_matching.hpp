@@ -60,23 +60,45 @@ struct AuctionOptions {
     /// singular sparse part costs 50 bids per column before the searches
     /// take over; provisional.
     double bid_cap = 50.0;
-    /// The first phase's epsilon, in log units; <= 0 (the default): the old
-    /// rule, max sparse cost / eps_factor. Probe option for
-    /// SymmetricMatcher::probe_switch_to_auction (bench_matching_trial
-    /// --hybrid-probe): from exact duals the old eps0 would wreck them.
+    /// The first phase's epsilon, in log units; <= 0 (the default, kept for
+    /// MatchingAlgorithm::Auction): max sparse cost / eps_factor. Hybrid
+    /// starts warm from the searches' exact duals, which that eps0 would
+    /// wreck: 0.1 (hybrid_auction_options()) is the probe's best of
+    /// {0.01, 0.1, 1} (hybrid-probe-report.md; 0.01, a single phase at
+    /// eps_final, scans 1.1x the plain searches' edges).
     double eps_start = 0.0;
+    /// MatchingAlgorithm::Hybrid only: the phase-1 search work, in passes
+    /// (1 pass = 2 x the lower triangle's entries), past which the auction
+    /// takes the free columns left. Checked between searches on the work
+    /// alone (work() > switch_passes x pass), so the switch point does not
+    /// depend on how advance() is budgeted. 40 (bench_matching_trial
+    /// --hybrid-probe, rule w40, eps_start 0.1, 50 matrices on the 12900K):
+    /// every matrix <= 1.5x the Degree ShortestPath edges, total 0.74x edges
+    /// and 0.68x ms, ncvxqp3 0.35x, ncvxqp7 0.51x, the same optimum
+    /// everywhere. An earlier switch pays the auction's fixed passes on
+    /// matrices the searches finish quickly (pglib_opf_case300_ieee: 13.4
+    /// passes plain, 17.8 at w5, none at w20+).
+    double switch_passes = 40.0;
 };
+/// The Hybrid defaults (SymmetricMatcher with MatchingAlgorithm::Hybrid and
+/// auction == nullptr): eps_factor 10, eps_final 1e-2, warm, eps_start 0.1,
+/// switch_passes 40, bid_cap 50 (hybrid-probe-report.md: the auction
+/// settings of the probe's w40 run).
+AuctionOptions hybrid_auction_options();
 // SymmetricMatcher validates its AuctionOptions: a field that is not finite
-// or outside its domain (eps_factor <= 1, eps_final <= 0, bid_cap <= 0)
-// takes its default, and the valid ones are clamped to eps_factor >= 1.5,
-// eps_final >= 1e-12 and bid_cap <= 1e6 (auction_matching.cpp), so the
-// auction's phases and bids stay bounded.
+// or outside its domain (eps_factor <= 1, eps_final <= 0, bid_cap <= 0,
+// switch_passes < 0; under Hybrid also eps_start <= 0) takes its default
+// (under Hybrid hybrid_auction_options()'s), and the valid ones are clamped to
+// eps_factor >= 1.5, eps_final >= 1e-12 and bid_cap <= 1e6
+// (auction_matching.cpp), so the auction's phases and bids stay bounded.
+// Hybrid always runs the auction warm (from the searches' matching).
 
 class SymmetricMatcher {
 public:
     /// alg: the sparse part's engine (MatchingAlgorithm, types.hpp); auction
-    /// tunes MatchingAlgorithm::Auction (nullptr: the defaults) and is
-    /// copied. The constructor's initial phase is the same for both.
+    /// tunes MatchingAlgorithm::Auction and Hybrid (nullptr: AuctionOptions{}
+    /// for Auction, hybrid_auction_options() for Hybrid) and is copied. The
+    /// constructor's initial phase is the same for all three.
     explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column,
                               MatchingAlgorithm alg = MatchingAlgorithm::ShortestPath,
                               const AuctionOptions *auction = nullptr);
@@ -97,15 +119,19 @@ public:
     /// negative, the default: all of them run). current() then reports that
     /// partial matching and the scaling of its duals with status Success: a
     /// column left free may have no matching at all. MatchingAlgorithm::
-    /// ShortestPath only: under Auction it asserts in debug builds and is
-    /// ignored in release.
+    /// ShortestPath only: under Auction and Hybrid (whose auction matches
+    /// the tail as a whole) it asserts in debug builds and is ignored in
+    /// release.
     void set_stop_free(int max_free);
-    /// Edges scanned so far: by the searches, and under Auction also by the
-    /// auction's bids and phase passes and by the repair's pass.
+    /// Edges scanned so far: by the searches, and under Auction and Hybrid
+    /// also by the auction's bids and phase passes and by the repair's pass.
     long long work() const;
-    /// Under Auction, the sparse columns the repair left free and handed to
-    /// the searches (0 before the repair ran); 0 under ShortestPath.
+    /// Under Auction and Hybrid, the sparse columns the repair left free and
+    /// handed to the searches (0 before the repair ran); 0 under ShortestPath.
     int repaired() const;
+    /// Under Hybrid, whether the auction took over phase 1 (its searches
+    /// passed switch_passes with free columns left); false otherwise.
+    bool switched() const;
     /// Whether the initial phase matched every column but the dense ones
     /// (more than 10 sqrt(n) entries) to its own diagonal. The searches left
     /// are then one per dense column (phase 3).
@@ -140,7 +166,10 @@ public:
     /// columns whose phase-1 search already failed from the relisted search
     /// order, and continues the normal phase-1 searches and phases 2-3. All of
     /// it counts in work(); repaired() reports the columns repair() left free.
-    /// Ignored outside phase 1 or under MatchingAlgorithm::Auction.
+    /// Ignored outside phase 1 or unless MatchingAlgorithm::ShortestPath.
+    /// MatchingAlgorithm::Hybrid is this switch made by the matcher itself
+    /// (rule w<k> with k = switch_passes, at the first search boundary past
+    /// it), bitwise (AuctionMatching.HybridIsTheProbe).
     void probe_switch_to_auction(const AuctionOptions &opt);
 
 private:
