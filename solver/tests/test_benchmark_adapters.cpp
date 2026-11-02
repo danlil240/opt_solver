@@ -1,4 +1,5 @@
 #include "../benchmarks/adapters/adapter.hpp"
+#include "../benchmarks/common/ipopt_dynamic_scaling.hpp"
 #include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/replay_steps.hpp"
 #include "../benchmarks/common/validation.hpp"
@@ -276,6 +277,64 @@ TEST(BenchmarkAdapters, Ma97ScalingCallMatchesPlugin) {
     r = ma97_scaling_call(c, false, unit.data(), 4);
     EXPECT_FALSE(r.reuse || r.computed || r.unit_scale);
     EXPECT_EQ(c.scaling, ScalingMethod::None);
+}
+
+TEST(BenchmarkAdapters, IpoptDynamicScalingStateMachine) {
+    // IPOPT 3.14 defaults (dynamic, od_hd_reuse): n = 100, threshold 5 delays
+    // over the last MC64 factor's count.
+    const int n = 100;
+    const std::vector<double> none, s1(100, 2.0), s2(100, 3.0);
+    IpoptDynamicScaling d;
+    Ma97ScalingCall plain;                      // unscaled / reuse call: no scale computed
+    Ma97ScalingCall computed;
+    computed.computed = true;                   // an MC64 call (or a stale-scale retry)
+    Ma97ScalingCall reuse;
+    reuse.reuse = true;
+
+    // Unscaled factors below the threshold: nothing requested, no scale held.
+    d.after_factor(IpmFactorStatus::Ok, plain, none, 5, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.scale(), nullptr);
+    // 6 > 0.05 n: MC64 on the next factor.
+    d.after_factor(IpmFactorStatus::Ok, plain, none, 6, n);
+    EXPECT_TRUE(d.mc64_requested());
+    // A singular factor returns before IPOPT's check: the request stays,
+    // the scale it computed is still handed back.
+    d.after_factor(IpmFactorStatus::Singular, computed, s1, 50, n);
+    EXPECT_TRUE(d.mc64_requested());
+    ASSERT_NE(d.scale(), nullptr);
+    EXPECT_EQ(d.scale()[0], 2.0);
+    // A failed call hands nothing back and changes nothing.
+    d.after_factor(IpmFactorStatus::Error, computed, s2, 50, n);
+    EXPECT_TRUE(d.mc64_requested());
+    EXPECT_EQ(d.scale()[0], 2.0);
+    // The MC64 factor: scale kept, its delays (40) become numdelay_.
+    d.after_factor(IpmFactorStatus::Ok, computed, s2, 40, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.numdelay(), 40);
+    EXPECT_EQ(d.scale()[0], 3.0);
+    // Reuse while delays stay within numdelay_ + 0.05 n.
+    d.after_factor(IpmFactorStatus::Ok, reuse, s2, 45, n);
+    EXPECT_FALSE(d.mc64_requested());
+    // Delays grow by more than 0.05 n: MC64 again.
+    d.after_factor(IpmFactorStatus::Ok, reuse, s2, 46, n);
+    EXPECT_TRUE(d.mc64_requested());
+    // That MC64 request answered with the unit scale (rejected matching).
+    Ma97ScalingCall unit;
+    unit.unit_scale = true;
+    d.after_factor(IpmFactorStatus::Ok, unit, none, 10, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.numdelay(), 10);
+    EXPECT_EQ(d.scale()[0], 1.0);
+    // A stale-scale retry (reuse turned computed) replaces the held scale but
+    // is not an MC64 request: numdelay_ stays.
+    d.after_factor(IpmFactorStatus::Ok, computed, s1, 12, n);
+    EXPECT_EQ(d.numdelay(), 10);
+    EXPECT_EQ(d.scale()[0], 2.0);
+    d.reset();
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.scale(), nullptr);
+    EXPECT_EQ(d.numdelay(), 0);
 }
 
 TEST(BenchmarkAdapters, ReplayStepPicks) {

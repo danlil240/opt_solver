@@ -200,10 +200,4 @@ inline Ma97ScalingCall ma97_scaling_call(Control &ctrl, bool matching_rejected, 
     return r;
 }
 
-/// IPOPT's default ma97_switch1 = od_hd_reuse ("high delay"): after a
-/// successful factorization whose delays exceed this fraction of n, IPOPT
-/// requests MC64 scaling (scaling = 1) on the next factorization and then
-/// passes the returned scale back (scaling = 0) on every later one.
-inline constexpr double kIpoptHighDelayFraction = 0.05;
-
 } // namespace smf

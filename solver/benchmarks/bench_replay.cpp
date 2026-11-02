@@ -406,7 +406,8 @@ int main(int argc, char **argv) {
     // the analysis is deferred to the first factorization, as IPOPT analyses
     // the pattern without values. --ipm-static, when given, overrides the
     // static mode. smf only: rivals inside IPOPT are not modelled yet.
-    // IPOPT's dynamic scaling (MC64 after a high-delay factor, then reuse)
+    // IPOPT's dynamic scaling (MC64 whenever delays grow by > 0.05 n over
+    // the last MC64 factor, reuse in between; common/ipopt_dynamic_scaling.hpp)
     // is emulated by the adapter over the replayed steps. With
     // SMF_IPM_REANALYSE=1 a re-analysis runs inside factor() and its time
     // lands in factor_ms, not analyse_ms.

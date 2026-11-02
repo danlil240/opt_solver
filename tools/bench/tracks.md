@@ -17,26 +17,35 @@ experiments. With `SMF_IPM_REANALYSE=1` a re-analysis runs inside a
 factorization and its time is counted in `factor_ms`, not `analyse_ms`.
 
 **IPOPT's dynamic scaling is emulated** over the replayed steps of a
-sequence. IPOPT's default `ma97_scaling = dynamic` with `ma97_switch1 =
-od_hd_reuse` factors unscaled until a successful factorization delays more
-than 0.05 n pivots; it then requests MC64 (`scaling = 1`) on the next
-factorization and passes the returned scale back on every later one
-(robot_arm trace, docs/performance/2026-10-26-solve-phase.md). The adapter
-does the same, answering each call through the plugin's own per-call
-decision, `smf::ma97_scaling_call()` (unit scale after a rejected matching
-ordering, reuse of a passed-back scale), and the plugin's stale-scale retry.
+sequence, by the rule of IPOPT 3.14's Ma97SolverInterface under its defaults
+(`ma97_scaling = dynamic`, `ma97_switch1 = od_hd_reuse`, `ma97_switch2/3 =
+never`; `solver/benchmarks/common/ipopt_dynamic_scaling.hpp`):
+- IPOPT factors unscaled until a factorization returns successfully with
+  `num_delay - numdelay_ > 0.05 n`. Here `numdelay_` is the delay count of
+  the last MC64 factorization, and 0 before the first one.
+- It then requests MC64 (`scaling = 1`) on the next factorization and keeps
+  the scale handed back. It records that factorization's delays as
+  `numdelay_`, then passes the scale back (`scaling = 0`, reuse) on later
+  factorizations, until the rule fires again. Each new firing requests MC64
+  again.
+- A singular factorization returns before the check, so a pending request
+  stays pending.
+- A failed call (plugin flag -5) hands no scale back.
+
+The plugin's answer to each call is its own per-call decision,
+`smf::ma97_scaling_call()` (unit scale after a rejected matching ordering,
+reuse of a passed-back scale), followed by its stale-scale retry.
+
 Limits:
 - The "next factorization" is the next *replayed* step. The default
-  `--seq-steps 5` replays 5 evenly spaced recorded steps, so the switch
-  lands later in IPOPT's iteration count than it really would. Use
+  `--seq-steps 5` replays 5 evenly spaced recorded steps, so requests land
+  later in IPOPT's iteration count than they really would. Use
   `--seq-steps all` (bench_replay) for the exact order.
 - Recorded values come from the run that recorded them, whose own scaling
   history may differ from the replay's.
-- Modelled: one switch, then reuse for the rest of the sequence, as in the
-  robot_arm trace. Not modelled: IPOPT's on-demand ("od") quality requests
-  and its later switch levels.
-- Cold cases run one factorization, so they never switch. Their result is
-  exact for IPOPT's first factorization.
+- IPOPT's on-demand ("od") quality requests are not modelled.
+- Cold cases run one factorization, so they never request MC64. Their
+  result is exact for IPOPT's first factorization.
 
 Per-case `"ordering"` pins in the manifest are dropped on override tracks:
 the track runs the plugin's own ordering.
