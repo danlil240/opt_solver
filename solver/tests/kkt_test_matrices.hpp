@@ -5,6 +5,7 @@
 #include "smf/types.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -43,6 +44,24 @@ inline CscLower opf_like_kkt(int n_x, int m, unsigned seed) {
         for (const auto &e : c) {
             A.row_idx.push_back(e.first);
             A.values.push_back(e.second);
+        }
+    }
+    return A;
+}
+
+// opf_like_kkt with every Jacobian entry (an off-diagonal) scaled by
+// 10^(spread * (u - 1/2)), u uniform in [0, 1) from a seeded LCG. The spread
+// of magnitudes makes the matching's greedy initial phase pair columns
+// worse than the full searches do.
+inline CscLower scaled_opf_kkt(int n_x, int m, unsigned seed, double spread) {
+    CscLower A = opf_like_kkt(n_x, m, seed);
+    std::uint64_t st = seed * 7919u + 13u;
+    for (Int j = 0; j < A.n; ++j) {
+        for (Int q = A.col_ptr[j]; q < A.col_ptr[j + 1]; ++q) {
+            if (A.row_idx[q] == j) continue;
+            st = st * 6364136223846793005ULL + 1442695040888963407ULL;
+            const double u = static_cast<double>(st >> 11) / 9007199254740992.0;
+            A.values[q] *= std::pow(10.0, spread * (u - 0.5));
         }
     }
     return A;

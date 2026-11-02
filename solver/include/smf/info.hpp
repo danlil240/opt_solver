@@ -80,6 +80,11 @@ struct Info {
     /// Seconds inside the rescue's matching scaling (part of
     /// factor_seconds); 0 when no matching ran.
     double       delay_matching_seconds = 0.0;
+    /// 1 when this factor()'s rescue matching resumed the analysis' kept
+    /// matcher (AnalysisKeep::rescue_matcher: the analysed values of a
+    /// MatchingTrial::RejectedInitial analysis) instead of matching from
+    /// scratch, else 0.
+    int          delay_matcher_reused = 0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues

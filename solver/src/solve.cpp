@@ -119,28 +119,44 @@ constexpr double kRescueMaxFree = 0.02;
 // The matching scaling of values `cv` of ak's pattern (cleaned order) for
 // the scale-on-delay rescue: the analysis' own matching scale, adopted or
 // rejected, when they are the analysed values, else a matching's that may
-// leave kRescueMaxFree of the columns free. Empty when there is none
-// (structurally singular: an all-zero column, or more unmatched columns
-// than that share). cv is borrowed (moved in and back), not copied.
-std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv) {
+// leave kRescueMaxFree of the columns free. For the analysed values of a
+// MatchingTrial::RejectedInitial analysis that matching resumes the
+// analysis' matcher (AnalysisKeep::rescue_matcher, `resumed` set) from its
+// budget point instead of searching from scratch; other values get a fresh
+// one (Column order): the kept matcher describes the analysed values only.
+// Empty when there is none (structurally singular: an all-zero column, or
+// more unmatched columns than that share). cv is borrowed (moved in and
+// back), not copied.
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv,
+                                      bool &resumed) {
+  resumed = false;
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
       !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale
                                                                : ak.rejected_matching_scale;
   if (!analysed.empty() && cv == ak.cleaned.values) return analysed;
-  CscLower C;
-  C.n = ak.n;
-  C.col_ptr = ak.cleaned.col_ptr;
-  C.row_idx = ak.cleaned.row_idx;
-  C.values = std::move(cv);
+  const int max_free = static_cast<int>(kRescueMaxFree * static_cast<double>(ak.n));
   MatchingResult mr;
-  {
-    SymmetricMatcher m(C);
-    m.set_stop_free(static_cast<int>(kRescueMaxFree * static_cast<double>(ak.n)));
-    m.advance();
-    mr = m.current();
+  if (ak.rescue_matcher && cv == ak.cleaned.values) {
+    const std::unique_ptr<SymmetricMatcher> m = ak.rescue_matcher->fork();
+    m->set_stop_free(max_free);
+    m->advance();
+    mr = m->current();
+    resumed = true;
+  } else {
+    CscLower C;
+    C.n = ak.n;
+    C.col_ptr = ak.cleaned.col_ptr;
+    C.row_idx = ak.cleaned.row_idx;
+    C.values = std::move(cv);
+    {
+      SymmetricMatcher m(C);
+      m.set_stop_free(max_free);
+      m.advance();
+      mr = m.current();
+    }
+    cv = std::move(C.values);
   }
-  cv = std::move(C.values);
   if (mr.status != ErrorCode::Success || mr.scale.size() != static_cast<std::size_t>(ak.n)) return {};
   for (const double s : mr.scale)
     if (!(s > 0.0) || !std::isfinite(s)) return {};
@@ -295,7 +311,13 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   // Work outside factor_indef (value copies, the fit test, probes,
   // matchings, stopped tries): added to factor_seconds on every return.
   double extra_seconds = 0.0;
+  // The analysis' kept matcher (AnalysisKeep::rescue_matcher) serves this
+  // first armed factor of the keep only: released on every return, and
+  // before the rescaled factorization, so its O(nnz) cost graph is not
+  // held through it.
+  const auto release_matcher = [&] { ak.rescue_matcher.reset(); };
   const auto finish = [&](FactorStatus st) {
+    release_matcher();
     info.factor_seconds += extra_seconds;
     return st;
   };
@@ -398,8 +420,11 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   // A new matching scaling of these values.
   get_values();
   const auto t0 = now();
-  std::vector<double> scale = matching_scale_of(ak, cv);
+  bool resumed = false;
+  std::vector<double> scale = matching_scale_of(ak, cv, resumed);
+  release_matcher();
   info.delay_matching_seconds = secs(t0, now());
+  info.delay_matcher_reused = resumed ? 1 : 0;
   extra_seconds += info.delay_matching_seconds;
   FactorStatus st;
   if (scale.empty()) {
@@ -493,6 +518,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.delay_matcher_reused = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
@@ -514,6 +540,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.delay_matcher_reused = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
@@ -541,6 +568,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.delay_matcher_reused = 0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);

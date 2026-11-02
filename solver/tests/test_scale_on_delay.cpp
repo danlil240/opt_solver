@@ -15,6 +15,7 @@
 #include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
+#include "kkt_test_matrices.hpp"
 
 #include <gtest/gtest.h>
 
@@ -22,6 +23,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <cmath>
 #include <cstdio>
 #include <random>
@@ -129,23 +131,64 @@ Control base_control() {
 }
 
 // The rescue's matching scaling of M's values, M being a clean matrix of
-// ak's pattern.
+// ak's pattern. Call it before ak's first armed factor (which releases
+// ak.rescue_matcher).
 std::vector<double> matching_scale_of(const AnalysisKeep &ak, const CscLower &M) {
     // The analysed values reuse the analysis' own matching scale, adopted or
     // rejected (a degree-order search's, see MatchingSearchOrder), as
-    // factor() does; other values get a matching whose searches end with at
-    // most 2% of the columns free (solve.cpp's kRescueMaxFree).
+    // factor() does; else, when the analysis kept its matcher
+    // (AnalysisKeep::rescue_matcher, MatchingTrial::RejectedInitial), the
+    // analysed values resume it; other values get a fresh matching. Its
+    // searches end with at most 2% of the columns free (solve.cpp's
+    // kRescueMaxFree).
     const std::vector<double> &analysed =
         !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale : ak.rejected_matching_scale;
     if (!analysed.empty() && M.values == ak.cleaned.values) return analysed;
-    CscLower clean = ak.cleaned;
-    clean.values = M.values;
-    SymmetricMatcher m(clean);
-    m.set_stop_free(static_cast<int>(0.02 * static_cast<double>(clean.n)));
-    m.advance();
-    const MatchingResult mr = m.current();
+    const int max_free = static_cast<int>(0.02 * static_cast<double>(ak.n));
+    MatchingResult mr;
+    if (ak.rescue_matcher && M.values == ak.cleaned.values) {
+        std::unique_ptr<SymmetricMatcher> m = ak.rescue_matcher->fork();
+        m->set_stop_free(max_free);
+        m->advance();
+        mr = m->current();
+    } else {
+        CscLower clean = ak.cleaned;
+        clean.values = M.values;
+        SymmetricMatcher m(clean);
+        m.set_stop_free(max_free);
+        m.advance();
+        mr = m.current();
+    }
     EXPECT_EQ(mr.status, ErrorCode::Success);
     return mr.scale;
+}
+
+// The kept-matcher fixture: an OPF-like KKT whose initial matching rejects
+// (MatchingTrial::RejectedInitial) under a 0.5-pass search budget, so the
+// analysis keeps its matcher at the budget point
+// (AnalysisKeep::rescue_matcher). spread: the Jacobian's magnitude spread
+// (decades).
+CscLower kept_matcher_kkt(double spread) { return scaled_opf_kkt(6000, 5000, 7, spread); }
+
+// The spread at which the rescue fires (unscaled work ratio 89 on the Smf
+// tree) and its scale stays accurate. At 3.0 neither the kept nor a fresh
+// partial matching's scale passes expect_accurate_solve (omega 8e-5 and
+// 4e-7: a 2%-free matching of these values leaves the delays at a work
+// ratio of 97).
+constexpr double kKeptSpread = 1.0;
+
+Control kept_matcher_control() {
+    Control c = base_control();
+    c.matching_search_budget = 0.5;
+    return c;
+}
+
+// The analysis' search budget in edges scanned
+// (Control::matching_search_budget passes over the 2 nnz edges of the cost
+// graph, as MatchingTrial.RejectedInitialKeepsTheBudgetMatcher).
+long long budget_edges(const AnalysisKeep &ak, const Control &c) {
+    return static_cast<long long>(c.matching_search_budget * 2.0 *
+                                  static_cast<double>(ak.cleaned.row_idx.size()));
 }
 
 } // namespace
@@ -884,4 +927,182 @@ TEST(ScaleOnDelay, RescuePiecesTimed) {
               FactorStatus::Success);
     EXPECT_EQ(i2.delay_try_seconds, 0.0);
     EXPECT_EQ(i2.delay_matching_seconds, 0.0);
+}
+
+// The analysed values of a RejectedInitial analysis: the rescue resumes the
+// analysis' matcher from its budget point (the same matching as a Degree-
+// order matcher advanced to the budget, then stopped at 2% free) instead of
+// matching from scratch, and releases it.
+TEST(ScaleOnDelay, RescueResumesTheAnalysisMatcher) {
+    const CscLower A = kept_matcher_kkt(kKeptSpread);
+    const Control ctrl = kept_matcher_control();
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    // Premise: the trial rejects on its initial matching, and unscaled the
+    // delays trip the work limit.
+    ASSERT_EQ(info.matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_GT(unscaled_ratio(A, ctrl), ctrl.scale_on_delay_ratio);
+
+    ASSERT_NE(ak->rescue_matcher, nullptr);
+    const int n = static_cast<int>(ak->n);
+    SymmetricMatcher ref(ak->cleaned, MatchingSearchOrder::Degree);
+    ASSERT_FALSE(ref.advance(budget_edges(*ak, ctrl)));
+    ref.set_stop_free(static_cast<int>(0.02 * static_cast<double>(n)));
+    ref.advance();
+    const std::vector<double> expect = ref.current().scale;
+    EXPECT_EQ(matching_scale_of(*ak, A), expect);
+
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, ctrl, i1, fk), FactorStatus::Success);
+    std::printf("[ScaleOnDelay] kept matcher: %d delays, work ratio %.2f\n", i1.delayed_pivots,
+                work_ratio(*ak, i1));
+    EXPECT_EQ(i1.delay_rescales, 1);
+    EXPECT_EQ(i1.delay_matcher_reused, 1);
+    EXPECT_EQ(fk.scale, expect);  // bitwise
+    EXPECT_EQ(ak->rescue_matcher, nullptr);  // released
+    expect_accurate_solve(s, fk, ctrl, A);
+}
+
+// Values other than the analysed ones (same pattern): the kept matcher
+// describes the analysed values only, so the rescue matches them afresh
+// (Column order), and still releases the kept matcher.
+TEST(ScaleOnDelay, OtherValuesGetAFreshMatching) {
+    const CscLower A = kept_matcher_kkt(kKeptSpread);
+    const Control ctrl = kept_matcher_control();
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_EQ(info.matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_NE(ak->rescue_matcher, nullptr);
+
+    CscLower B = A;  // H's diagonal x1.01
+    for (Int j = 0; j < 6000; ++j)
+        for (Int p = B.col_ptr[static_cast<std::size_t>(j)]; p < B.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (B.row_idx[static_cast<std::size_t>(p)] == j) B.values[static_cast<std::size_t>(p)] *= 1.01;
+    const std::vector<double> fresh = matching_scale_of(*ak, B);
+
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, B, ctrl, i, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i.delay_rescales, 1);
+    EXPECT_EQ(i.delay_matcher_reused, 0);
+    EXPECT_EQ(fk.delay_scale, fresh);
+    EXPECT_EQ(ak->rescue_matcher, nullptr);
+}
+
+// A RejectedInitial analysis whose factor stays under the work limit: no
+// rescue, and the kept matcher is released all the same.
+TEST(ScaleOnDelay, KeptMatcherReleasedWhenTheRescueDoesNotFire) {
+    const CscLower A = kept_matcher_kkt(0.0);
+    // The default (CostModel) tree: on the Smf rule's narrower fronts the
+    // same delays trip the limit (work ratio 52 against 3.3).
+    Control ctrl = kept_matcher_control();
+    ctrl.amalgamation = Control{}.amalgamation;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_EQ(info.matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_LE(unscaled_ratio(A, ctrl), ctrl.scale_on_delay_ratio);
+    ASSERT_NE(ak->rescue_matcher, nullptr);
+
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+    EXPECT_EQ(i.delay_stops, 0);
+    EXPECT_EQ(ak->rescue_matcher, nullptr);
+}
+
+// A kept matcher whose resumed searches turn out structurally singular:
+// the rescue falls back as an empty scale does, running unarmed and
+// recording the zero signature, so the next factor of the same values runs
+// no try. (An all-zero column cannot be kept: the matcher's cost graph
+// rejects it, so the analysis runs no trial. Instead the constraint rows
+// that touch the first 200 variables keep only those entries, pattern
+// kept: about 450 such columns over 200 rows, a structural deficiency
+// past the rescue's 2% stop, so the resumed matching fails in its last
+// phase.)
+TEST(ScaleOnDelay, KeptMatcherSingularFallsBack) {
+    CscLower A = kept_matcher_kkt(kKeptSpread);
+    const Int nv = 200;
+    std::vector<char> touched(static_cast<std::size_t>(A.n), 0);
+    for (Int j = 0; j < nv; ++j)
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (A.row_idx[static_cast<std::size_t>(p)] != j)
+                touched[static_cast<std::size_t>(A.row_idx[static_cast<std::size_t>(p)])] = 1;
+    for (Int j = nv; j < 6000; ++j)
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            if (A.row_idx[static_cast<std::size_t>(p)] != j &&
+                touched[static_cast<std::size_t>(A.row_idx[static_cast<std::size_t>(p)])])
+                A.values[static_cast<std::size_t>(p)] = 0.0;
+    Control ctrl = kept_matcher_control();
+    ctrl.continue_on_singular = true;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_EQ(info.matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_NE(ak->rescue_matcher, nullptr);
+
+    FactorKeep fk;
+    Info i1;
+    const FactorStatus st = s.factor(*ak, ctrl, i1, fk);
+    EXPECT_TRUE(st == FactorStatus::Singular || st == FactorStatus::Success) << static_cast<int>(st);
+    EXPECT_EQ(i1.delay_stops, 1);
+    EXPECT_EQ(i1.delay_matcher_reused, 1);
+    EXPECT_EQ(i1.delay_rescales, 0);
+    EXPECT_EQ(fk.delay_analysis, ak->serial);
+    EXPECT_TRUE(fk.delay_scale.empty());
+    EXPECT_NE(fk.delay_signature, 0u);
+    EXPECT_EQ(ak->rescue_matcher, nullptr);
+
+    Info i2;
+    const FactorStatus st2 = s.factor(*ak, ctrl, i2, fk);
+    EXPECT_EQ(st2, st);
+    EXPECT_EQ(i2.delay_stops, 0);
+    EXPECT_EQ(i2.delay_rescales, 0);
+}
+
+// Deterministic mode: the rescue that resumes the kept matcher gives the
+// same factor and solution at every thread count (the kept matcher is the
+// budget point's whatever the analysis' threads,
+// MatchingTrial.ConcurrentTrialIsTheSerialOne).
+TEST(ScaleOnDelay, ReusedMatcherDeterministicAcrossThreads) {
+    const CscLower A = kept_matcher_kkt(kKeptSpread);
+    std::vector<double> scale_ref, x_ref;
+    Info i_ref;
+    for (const int threads : {1, 4}) {
+        Control ctrl = kept_matcher_control();
+        ctrl.deterministic = true;
+        ctrl.num_threads = threads;
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, ctrl, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        ASSERT_EQ(ia.matching_trial, MatchingTrial::RejectedInitial) << "threads " << threads;
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, ctrl, i1, fk), FactorStatus::Success);
+        EXPECT_EQ(i1.delay_matcher_reused, 1) << "threads " << threads;
+        std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
+        Info si;
+        ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), static_cast<int>(A.n), 1), 0);
+        if (threads == 1) {
+            scale_ref = fk.scale;
+            x_ref = x;
+            i_ref = i1;
+            continue;
+        }
+        EXPECT_EQ(fk.scale, scale_ref);
+        EXPECT_EQ(i1.delayed_pivots, i_ref.delayed_pivots);
+        EXPECT_EQ(i1.num_positive, i_ref.num_positive);
+        EXPECT_EQ(i1.num_negative, i_ref.num_negative);
+        EXPECT_EQ(i1.num_zero, i_ref.num_zero);
+        EXPECT_EQ(x, x_ref);
+    }
 }
