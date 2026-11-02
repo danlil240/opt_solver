@@ -85,6 +85,10 @@ struct RunRecord {
     // computed a matching scaling (Info::delay_rescales, summed over a
     // warm sequence's steps); -1 = not reported.
     int delay_rescales = -1;
+    // smf only: time of the stopped or failed try and of the rescue matching
+    // (Info::delay_try_seconds, delay_matching_seconds), ms; -1 = not reported.
+    double delay_try_ms = -1.0;
+    double delay_matching_ms = -1.0;
     // smf only: smf::refine() inside the adapter's solve (static pivots, or
     // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
     int refine_iterations = -1;

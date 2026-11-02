@@ -755,12 +755,12 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
                                  fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
-                                 fst.gather_ms, fst.solve_threads);
+                                 fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {
@@ -889,6 +889,8 @@ int main(int argc, char **argv) {
             rec.aptp_failed_columns = st.aptp_failed_columns;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = st.delay_rescales;
+            rec.delay_try_ms = st.delay_try_ms;
+            rec.delay_matching_ms = st.delay_matching_ms;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }

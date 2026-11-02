@@ -337,6 +337,8 @@ public:
         stats_.inertia_zero = info.num_zero;
         stats_.delayed_pivots = info.delayed_pivots;
         stats_.delay_rescales = info.delay_rescales;
+        stats_.delay_try_ms = info.delay_try_seconds * 1e3;
+        stats_.delay_matching_ms = info.delay_matching_seconds * 1e3;
         stats_.threads_used = info.threads_used;
         stats_.parallel_subtrees = info.parallel_subtrees;
         stats_.top_part_fronts = info.top_part_fronts;
