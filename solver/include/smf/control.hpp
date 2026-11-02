@@ -99,17 +99,25 @@ struct Control {
     // pays no matching. Not after a factor with the analysed values' own
     // matching scale (a new one would be the same). Negative: off.
     double         scale_on_delay_next_ratio = 4.0;
-    // The first armed factorization of an analysis whose matching trial
-    // rejected on its initial matching (MatchingTrial::RejectedInitial)
-    // into a FactorKeep (none for this analysis yet): > 0 runs its first
-    // try under min(the scale_on_delay_ratio limit,
+    // An armed factorization of an analysis whose matching trial rejected
+    // on its initial matching (MatchingTrial::RejectedInitial), while the
+    // FactorKeep is not yet armed by the rescue for that analysis (no kept
+    // scale, tightened next limit or zero signature: the first one, and
+    // again after each try let through without arming it): > 0
+    // runs its try under min(the scale_on_delay_ratio limit,
     // scale_on_delay_first_ratio times the delay-free front work); 0 skips
     // the try and factors with the values' matching scaling at once (the
-    // same scale the stopped try would lead to, Info::delay_stops 0).
-    // Later factorizations of the keep, and analyses that are not initial
-    // rejections, are unchanged. Negative: off (the try runs under the full
-    // limit). Evidence: to be filled in from the rescue_first_ab board
-    // (tuning and heldout splits).
+    // scale a stopped try would lead to, Info::delay_stops 0). Analyses
+    // that are not initial rejections are unchanged. Negative: off (the
+    // try runs under the full limit). Off: no variant passed the gate
+    // (12900K, 1T, small_kkt + large_kkt + hard_indef, 3 rounds; no
+    // accuracy change in any). Tuning recommended-track wall vs off: 4 at
+    // 1.001 (worst ncvxqp1 rec 1.04x), 0 at 1.009: skipping pays a needless
+    // rescue where the try would pass (darcy003 and mario002 rec 1.38-1.39x,
+    // factor 2.9-3.0x; turon_m rec 1.24x; stokes128 rec 1.12x). Heldout:
+    // ncvxqp9 rec gains (0: factor 0.69x, wall 0.75x; 4: 0.82x / 0.84x)
+    // but pglib_opf_case300_ieee rec loses (4: 1.23x, 0: 1.18x); rec
+    // geomean 1.000 (4) and 0.987 (0).
     double         scale_on_delay_first_ratio = -1.0;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
