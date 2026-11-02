@@ -281,8 +281,9 @@ std::uint64_t zero_signature(const std::vector<double> &cv) {
 // factorization runs as Auto resolves it, to the end, and later ones run
 // unarmed while the values' zero pattern stays the same. A first try let
 // through past Control::scale_on_delay_next_ratio leaves the next one to
-// run under that ratio as its limit. Only a factorization that ran to the
-// end updates the FactorKeep.
+// run under that ratio as its limit. The first one of a RejectedInitial
+// analysis tries under Control::scale_on_delay_first_ratio, or skips the
+// try. Only a factorization that ran to the end updates the FactorKeep.
 template <class Values, class Run>
 FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, Info &info,
                                    FactorKeep &fkeep, Values &&values, Run &&run) {
@@ -385,13 +386,19 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       info.delay_stops = 1;
     }
   } else if (first_try || !reuse_on) {
-    if (first_try) {
+    // The first armed factor of an initial rejection's keep: its try runs
+    // under Control::scale_on_delay_first_ratio, or (0) not at all.
+    const bool first_of_rejected = !ours && ctrl.scale_on_delay_first_ratio >= 0.0 &&
+                                   ak.matching_trial == MatchingTrial::RejectedInitial;
+    if (first_try && !(first_of_rejected && ctrl.scale_on_delay_first_ratio == 0.0)) {
       // First try: as Auto resolves it, under the work limit (the tighter
-      // one after a costly factorization, Control::scale_on_delay_next_ratio).
-      const double try_limit =
-          next && ctrl.scale_on_delay_next_ratio >= 0.0
-              ? std::min(limit, std::floor(ctrl.scale_on_delay_next_ratio * free_work))
-              : limit;
+      // one after a costly factorization, Control::scale_on_delay_next_ratio,
+      // or after an initial rejection, Control::scale_on_delay_first_ratio).
+      double try_limit = limit;
+      if (next && ctrl.scale_on_delay_next_ratio >= 0.0)
+        try_limit = std::min(limit, std::floor(ctrl.scale_on_delay_next_ratio * free_work));
+      else if (first_of_rejected)
+        try_limit = std::min(limit, std::floor(ctrl.scale_on_delay_first_ratio * free_work));
       const FactorStatus st = run(ak, ctrl, try_limit);
       if (st != FactorStatus::MaxPivotDelays) {
         // Let through, but costly: the next one runs under the tighter limit.

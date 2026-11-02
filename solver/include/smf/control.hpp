@@ -99,6 +99,18 @@ struct Control {
     // pays no matching. Not after a factor with the analysed values' own
     // matching scale (a new one would be the same). Negative: off.
     double         scale_on_delay_next_ratio = 4.0;
+    // The first armed factorization of an analysis whose matching trial
+    // rejected on its initial matching (MatchingTrial::RejectedInitial)
+    // into a FactorKeep (none for this analysis yet): > 0 runs its first
+    // try under min(the scale_on_delay_ratio limit,
+    // scale_on_delay_first_ratio times the delay-free front work); 0 skips
+    // the try and factors with the values' matching scaling at once (the
+    // same scale the stopped try would lead to, Info::delay_stops 0).
+    // Later factorizations of the keep, and analyses that are not initial
+    // rejections, are unchanged. Negative: off (the try runs under the full
+    // limit). Evidence: to be filled in from the rescue_first_ab board
+    // (tuning and heldout splits).
+    double         scale_on_delay_first_ratio = -1.0;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:

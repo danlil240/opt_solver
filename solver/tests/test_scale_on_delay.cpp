@@ -1107,3 +1107,131 @@ TEST(ScaleOnDelay, ReusedMatcherDeterministicAcrossThreads) {
         EXPECT_EQ(x, x_ref);
     }
 }
+
+// Control::scale_on_delay_first_ratio: the first armed factor of a
+// RejectedInitial analysis into a FactorKeep tries under
+// min(limit, first_ratio * delay-free work), or (0) not at all.
+namespace {
+
+// The kept-matcher fixture's analysis with the keep flag at its default
+// (off: the rescue matches afresh, main's behaviour).
+Control first_ratio_control(double first_ratio) {
+    Control c = base_control();
+    c.matching_search_budget = 0.5;
+    c.scale_on_delay_first_ratio = first_ratio;
+    return c;
+}
+
+struct FirstFactor {
+    Info info;
+    FactorKeep fk;
+    bool matcher_released = false;
+};
+
+// A fresh analysis of A and its first factor into a fresh FactorKeep.
+FirstFactor first_factor(const CscLower &A, const Control &ctrl) {
+    FirstFactor r;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    EXPECT_NE(ak.get(), nullptr);
+    if (!ak) return r;
+    EXPECT_EQ(ia.matching_trial, MatchingTrial::RejectedInitial);
+    EXPECT_EQ(ak->matching_trial, MatchingTrial::RejectedInitial);
+    EXPECT_EQ(s.factor(*ak, ctrl, r.info, r.fk), FactorStatus::Success);
+    r.matcher_released = ak->rescue_matcher == nullptr;
+    expect_accurate_solve(s, r.fk, ctrl, A);
+    return r;
+}
+
+} // namespace
+
+TEST(ScaleOnDelay, SkippedFirstTryGivesTheSameRescue) {
+    const CscLower A = kept_matcher_kkt(kKeptSpread);
+    const Control c_def = first_ratio_control(-1.0);
+    ASSERT_FALSE(c_def.scale_on_delay_keep_matcher);
+    ASSERT_GT(unscaled_ratio(A, c_def), c_def.scale_on_delay_ratio);  // premise: the try stops
+
+    const FirstFactor def = first_factor(A, c_def);
+    const FirstFactor skip = first_factor(A, first_ratio_control(0.0));
+    const Info &i_def = def.info;
+    const Info &i_skip = skip.info;
+    EXPECT_EQ(i_def.delay_stops, 1);
+    EXPECT_EQ(i_def.delay_rescales, 1);
+    EXPECT_EQ(i_skip.delay_stops, 0);
+    EXPECT_EQ(i_skip.delay_rescales, 1);
+    EXPECT_EQ(i_skip.delay_try_seconds, 0.0);
+    EXPECT_GT(i_skip.delay_matching_seconds, 0.0);
+    EXPECT_EQ(i_skip.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_EQ(skip.fk.scale, def.fk.scale);  // the scale does not depend on the try
+    EXPECT_EQ(skip.fk.delay_scale, def.fk.delay_scale);
+    EXPECT_EQ(i_skip.delayed_pivots, i_def.delayed_pivots);
+    EXPECT_EQ(i_skip.num_positive, i_def.num_positive);
+    EXPECT_EQ(i_skip.num_negative, i_def.num_negative);
+
+    // With the matcher kept, the skipped try still releases it.
+    Control c_keep = first_ratio_control(0.0);
+    c_keep.scale_on_delay_keep_matcher = true;
+    const FirstFactor kept = first_factor(A, c_keep);
+    EXPECT_EQ(kept.info.delay_stops, 0);
+    EXPECT_EQ(kept.info.delay_rescales, 1);
+    EXPECT_EQ(kept.info.delay_matcher_reused, 1);
+    EXPECT_TRUE(kept.matcher_released);
+}
+
+TEST(ScaleOnDelay, FirstRatioCapsTheTry) {
+    const CscLower A = kept_matcher_kkt(kKeptSpread);
+    const Control c_def = first_ratio_control(-1.0);
+    ASSERT_GT(unscaled_ratio(A, c_def), c_def.scale_on_delay_ratio);  // premise: the try stops
+
+    const FirstFactor def = first_factor(A, c_def);
+    const FirstFactor cap = first_factor(A, first_ratio_control(4.0));
+    EXPECT_EQ(def.info.delay_stops, 1);
+    EXPECT_EQ(cap.info.delay_stops, 1);
+    EXPECT_EQ(cap.info.delay_rescales, 1);
+    EXPECT_GT(cap.info.delay_try_seconds, 0.0);
+    EXPECT_LE(cap.info.delay_try_seconds, def.info.delay_try_seconds);
+    EXPECT_EQ(cap.fk.scale, def.fk.scale);
+    EXPECT_EQ(cap.info.delayed_pivots, def.info.delayed_pivots);
+    EXPECT_EQ(cap.info.num_negative, def.info.num_negative);
+}
+
+// A keep that is not an initial rejection is untouched: it still tries
+// first, and later factors into the same FactorKeep run as without the
+// option.
+TEST(ScaleOnDelay, FirstRatioIgnoredWithoutInitialRejection) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);       // the same bad scaling
+    const CscLower A2 = kkt(kG, kM, 4.1, 3.0, -0.1, 11);  // another bad scaling
+    struct Run { int stops, rescales, delayed, negative; std::vector<double> scale; };
+    std::vector<Run> runs[2];
+    const double ratios[2] = {-1.0, 0.0};
+    for (int v = 0; v < 2; ++v) {
+        Control ctrl = base_control();
+        ctrl.scale_on_delay_first_ratio = ratios[v];
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, ctrl, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        ASSERT_EQ(ia.matching_trial, MatchingTrial::None) << "premise: no trial";
+        ASSERT_EQ(ak->matching_trial, MatchingTrial::None);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        for (const CscLower *M : {&A, &A1, &A2, &A}) {
+            Info i;
+            ASSERT_EQ(s.factor(*ak, *M, ctrl, i, fk, ws), FactorStatus::Success);
+            runs[v].push_back({i.delay_stops, i.delay_rescales, i.delayed_pivots,
+                               i.num_negative, fk.scale});
+            expect_accurate_solve(s, fk, ctrl, *M);
+        }
+    }
+    EXPECT_EQ(runs[1][0].stops, 1);  // still tried
+    EXPECT_EQ(runs[1][0].rescales, 1);
+    for (std::size_t k = 0; k < runs[0].size(); ++k) {
+        EXPECT_EQ(runs[1][k].stops, runs[0][k].stops) << "factor " << k;
+        EXPECT_EQ(runs[1][k].rescales, runs[0][k].rescales) << "factor " << k;
+        EXPECT_EQ(runs[1][k].delayed, runs[0][k].delayed) << "factor " << k;
+        EXPECT_EQ(runs[1][k].negative, runs[0][k].negative) << "factor " << k;
+        EXPECT_EQ(runs[1][k].scale, runs[0][k].scale) << "factor " << k;
+    }
+}
