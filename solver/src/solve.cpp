@@ -359,6 +359,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       }
       // The limit tripped or the probe failed: this try is spent.
       extra_seconds += info.factor_seconds;
+      info.delay_try_seconds += info.factor_seconds;
       info.delay_stops = 1;
     }
   } else if (first_try || !reuse_on) {
@@ -390,6 +391,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
         return finish(st);
       }
       extra_seconds += info.factor_seconds;
+      info.delay_try_seconds += info.factor_seconds;
       info.delay_stops = 1;
     }
   }
@@ -397,7 +399,8 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   get_values();
   const auto t0 = now();
   std::vector<double> scale = matching_scale_of(ak, cv);
-  extra_seconds += secs(t0, now());
+  info.delay_matching_seconds = secs(t0, now());
+  extra_seconds += info.delay_matching_seconds;
   FactorStatus st;
   if (scale.empty()) {
     st = run(ak, ctrl, -1.0);
@@ -488,6 +491,8 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   info.scaling_used = 0;
   info.delay_rescales = 0;
   info.delay_stops = 0;
+  info.delay_try_seconds = 0.0;
+  info.delay_matching_seconds = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
@@ -507,6 +512,8 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   info.scaling_used = 0;
   info.delay_rescales = 0;
   info.delay_stops = 0;
+  info.delay_try_seconds = 0.0;
+  info.delay_matching_seconds = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
@@ -532,6 +539,8 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   info.scaling_used = 0;
   info.delay_rescales = 0;
   info.delay_stops = 0;
+  info.delay_try_seconds = 0.0;
+  info.delay_matching_seconds = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);
