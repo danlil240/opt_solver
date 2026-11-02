@@ -2,9 +2,8 @@
 
 **Date:** 2026-11-02
 **Branch:** `feat/factor-delays` (on main `97b9f42`)
-**Machine:** Ryzen 9 9950X3D for everything below. The 12900K's Windows application control
-blocked the new `bench_replay` binary (WinError 4551; older binaries still run there), so the
-boards ran locally, interleaved, A and B in the same session.
+**Machines:** Ryzen 9 9950X3D (profiling, interleaved A/B), i9-12900K (full board, same pair of
+binaries, sequential runs).
 
 ## Result
 
@@ -40,6 +39,22 @@ interleaved rounds. Shifted geomean (10 ms) against main, lower is better:
 - One real loss: pglib_opf_case300_ieee rec 1.10x (one more rescue). Everything else is within
   the A/A noise floor of this setup (±5% per case, ±0.3% per class).
 - 8 threads, 11 cases (22 case-tracks): 0.904, no accuracy change.
+
+i9-12900K, full front-tier manifest (SPD included), 3 trials, wall:
+
+| class | split | 1T | 8T |
+|---|---|---:|---:|
+| hard_indef | heldout / tuning | 0.975 / 0.984 | 0.971 / 0.984 |
+| large_kkt | heldout / tuning | 0.945 / 0.933 | 0.938 / 0.947 |
+| small_kkt | heldout / tuning | 0.928 / 0.955 | 0.948 / 0.956 |
+| spd | heldout / tuning | 0.998 / 1.013 | 1.007 / 1.002 |
+| recommended / ipopt track | | 0.938 / 0.998 | 0.946 / 0.993 |
+| all 137 / 138 | | **0.965** | **0.968** |
+
+The same accuracy picture: nothing lost, pglib 9241 rec fixed at both thread counts. Largest
+gains: cops_elec_200 rec 0.44x (1T), pde_control_250 rec 0.59x, PGLib rec 0.62-0.73x. Single-case
+losses are at most 1.11x on these sequential runs, with unchanged delays (cops_catmix_800 and
+cops_polygon_200 ipopt at 8T; flat in the interleaved Ryzen A/B).
 
 The two cases this started from, 1 thread (best rival from `thread_sched_board`, same machine):
 
