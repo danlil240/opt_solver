@@ -338,23 +338,21 @@ TEST(Supernode, CostModelRefusesPaddedMerge) {
     EXPECT_EQ(cost.size(), 2u);
 }
 
-// The CostModel delay guard, on a cops_elec-like tree: a chain of 40 single
-// columns c_i (each block exactly its parent's front: no padding) under a
-// dense 200-column root, each c_i also the parent of a leaf L_i with a zero
-// diagonal (rows L_i, c_i, root). Smf groups the chain 8 columns at a time
-// and absorbs most leaves into those groups. Unguarded, CostModel merges the
-// whole chain into the root, the leaves stay apart and all of them would
-// delay into that one front; with the zero diagonals given, it leaves the
-// tree as Smf builds it.
-TEST(Supernode, CostModelDelayGuard) {
+// A cops_elec-like tree: a chain of 40 single columns c_i (each block
+// exactly its parent's front: no padding) under a dense 200-column root,
+// each c_i also the parent of a leaf L_i (rows L_i, c_i, root; with a zero
+// diagonal in cops_elec). Smf groups the chain 8 columns at a time and
+// absorbs most leaves into those groups; CostModel merges the whole chain
+// into the root and leaves the leaves apart. Their columns delay into that
+// one front, which the blocked kernel factors in one pass (cops_elec_200 at
+// u = 0.01 and 1e-8: faster than the chain).
+TEST(Supernode, CostModelMergesAChainOverZeroDiagonalLeaves) {
     const Int m = 40, W = 200, n = 2 * m + W;
     std::vector<Int> parent(static_cast<std::size_t>(n)), colcount(static_cast<std::size_t>(n)), order;
-    std::vector<std::uint8_t> zero(static_cast<std::size_t>(n), 0);
     for (Int i = 0; i < m; ++i) {
         const auto L = static_cast<std::size_t>(2 * i), c = L + 1;
         parent[L] = 2 * i + 1;
         colcount[L] = 3;
-        zero[L] = 1;
         parent[c] = (i + 1 < m) ? 2 * i + 3 : 2 * m;
         colcount[c] = 1 + (m - 1 - i) + W;
     }
@@ -362,17 +360,14 @@ TEST(Supernode, CostModelDelayGuard) {
         parent[static_cast<std::size_t>(2 * m + j)] = (j + 1 < W) ? 2 * m + j + 1 : -1;
         colcount[static_cast<std::size_t>(2 * m + j)] = W - j;
     }
-    std::vector<Supernode> base, cost, guarded;
+    std::vector<Supernode> base, cost;
     amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, base);
     amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, cost, nullptr, nullptr,
                        Amalgamation::CostModel);
-    amalgamate_relaxed(n, parent.data(), colcount.data(), 8, order, guarded, nullptr, nullptr,
-                       Amalgamation::CostModel, zero.data());
-    // The root (last in postorder) holds the chain when it merged.
+    // The root (last in postorder) holds the chain.
     EXPECT_GE(cost.back().width(), W + m);
+    EXPECT_LT(base.back().width(), W + m);
     EXPECT_GT(cost.size(), base.size());  // leaves left apart
-    EXPECT_EQ(guarded.size(), base.size());
-    EXPECT_EQ(guarded.back().width(), base.back().width());
 }
 
 // Blocks below the CostModel's minimum (128 rows) stay with the Smf rule:

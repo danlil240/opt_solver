@@ -219,6 +219,7 @@ struct SymmetricMatcher::State {
     // Phase 1's free sparse columns in the search order, listed when
     // phase 1 starts.
     std::vector<int> search_order;
+    int stop_free = -1;  // set_stop_free()
     long long work = 0;  // edges scanned by the searches
     // The initial phase's matching and duals.
     std::vector<Int> init_col_to_row;
@@ -390,6 +391,8 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order)
 SymmetricMatcher::~SymmetricMatcher() = default;
 
 ErrorCode SymmetricMatcher::status() const { return s_->status; }
+
+void SymmetricMatcher::set_stop_free(int max_free) { s_->stop_free = max_free; }
 
 long long SymmetricMatcher::work() const { return s_->work; }
 
@@ -612,6 +615,13 @@ bool SymmetricMatcher::advance(long long work_budget) {
         for (; s.next_col < n_free && s.matched < n; ++s.next_col) {
             const int j = s.search_order[static_cast<std::size_t>(s.next_col)];
             if (out_of_budget()) return false;
+            if (s.stop_free >= 0 && n - s.matched <= s.stop_free) {
+                // Partial (set_stop_free): the dense columns' duals made
+                // feasible, as before their searches; the rest stay free.
+                if (s.any_dense) s.dense_duals();
+                s.phase = 4;
+                return true;
+            }
             s.search(j);
         }
         if (s.any_dense) s.dense_duals();

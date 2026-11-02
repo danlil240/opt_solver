@@ -51,6 +51,12 @@ public:
     /// scanned by all searches so far reach work_budget (false). The budget
     /// is checked between searches, so stopping never changes the result.
     bool advance(long long work_budget = -1);
+    /// From then on advance() ends the searches once at most max_free
+    /// columns are free (checked before each search over the sparse part;
+    /// negative, the default: all of them run). current() then reports that
+    /// partial matching and the scaling of its duals with status Success: a
+    /// column left free may have no matching at all.
+    void set_stop_free(int max_free);
     /// Edges scanned by the searches so far.
     long long work() const;
     /// Whether the initial phase matched every column but the dense ones

@@ -434,17 +434,22 @@ TEST(IpmHooks, UserPermMatchesAmdFactor) {
 
 TEST(IpmHooks, UserPermIsUsedAsGiven) {
     // A shuffled order fills far more than AMD: proves the perm is read,
-    // not recomputed. The factor is still correct.
+    // not recomputed. The factor is still correct. Both on the Smf
+    // amalgamation rule: CostModel merges the shuffled order's tree into
+    // fronts that store about as much as AMD's (7338 vs 6175 entries).
     const CscLower A = grid_kkt(40, 7);
     Control amd = indef_ctrl();
     amd.ordering = OrderingMethod::AMD;
+    amd.amalgamation = Amalgamation::Smf;
     Harness ref(A, amd);
     ASSERT_NE(ref.ak.get(), nullptr);
 
     std::vector<Int> perm(static_cast<std::size_t>(A.n));
     std::iota(perm.begin(), perm.end(), 0);
     std::shuffle(perm.begin(), perm.end(), std::mt19937(11));
-    Harness h(A, user_ctrl(perm));
+    Control user = user_ctrl(perm);
+    user.amalgamation = Amalgamation::Smf;
+    Harness h(A, user);
     ASSERT_NE(h.ak.get(), nullptr);
     EXPECT_GT(h.info.predicted_factor_entries, 2 * ref.info.predicted_factor_entries);
     ASSERT_EQ(h.factor(-1), FactorStatus::Success);
