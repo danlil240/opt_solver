@@ -159,7 +159,7 @@ int main(int argc, char **argv) {
     std::string list, filter;
     int trials = 3, ordering = -1, refactors = -1;
     double sample_seconds = 0.0;
-    bool sample_lines = false, pieces = false;
+    bool sample_lines = false, pieces = false, rescue_probe = false;
     double budget = smf::Control{}.matching_search_budget;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -172,6 +172,7 @@ int main(int argc, char **argv) {
         else if (a == "--sample" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--lines") sample_lines = true;
         else if (a == "--pieces") pieces = true;
+        else if (a == "--rescue-probe") rescue_probe = true;
     }
     if (list.empty()) {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
@@ -320,6 +321,7 @@ int main(int argc, char **argv) {
     std::printf("%-28s %7s %8s | %-8s %-8s %-8s | %6s %6s | %3s %4s %4s | %9s %9s | %7s %6s | %16s | %8s %8s | %16s\n",
                 "matrix", "n", "nnz_low", "exact", "default", "zero", "r_init", "r_exact", "eq", "ordE", "ordD",
                 "ms_exact", "ms_default", "work_x", "free0", "perm_hash", "mm_def", "mt_ms", "all_hash");
+    if (rescue_probe) std::printf("PROBE columns: matrix n free0 free_budget init_ratio trial finished|paused\n");
     double tot_exact = 0.0, tot_default = 0.0, tot_mm = 0.0, tot_mt = 0.0;
     int rows = 0, mismatches = 0;
     while (std::getline(in, line)) {
@@ -391,6 +393,22 @@ int main(int argc, char **argv) {
                     e.info.ordering_used, d.info.ordering_used, e.ms, d.ms, work_x, init_free,
                     static_cast<unsigned long long>(fnv(d.perm) ^ (fnv(d.scale) * 31u) ^ (d.rejected ? 1u : 0u)),
                     d.match_ms, mt_ms, static_cast<unsigned long long>(h.h));
+        if (rescue_probe) {
+            // Mirrors symbolic_analysis.cpp (budget_passes / budget_edges, ~l.527-531):
+            // budget = passes x 2 x lower entries, here of the matrix as read (analyse() uses
+            // its cleaned copy C); negative/NaN/>=1e18 edges: none (-1). The trial's matcher is
+            // SymmetricMatcher(C, MatchingSearchOrder::Degree), advanced to that budget.
+            const double passes = smf::Control{}.matching_search_budget;
+            const double pedges = passes * 2.0 * static_cast<double>(mm.matrix.row_idx.size());
+            const long long pb = (passes >= 0.0 && pedges < 1e18) ? static_cast<long long>(pedges) : -1;
+            smf::SymmetricMatcher pm(mm.matrix, smf::MatchingSearchOrder::Degree);
+            const bool fin = pm.advance(pb);
+            const double fb = 1.0 - static_cast<double>(pm.current().matched_rank) / static_cast<double>(mm.matrix.n);
+            const double f0 = 1.0 - static_cast<double>(pm.initial().matched_rank) / static_cast<double>(mm.matrix.n);
+            std::printf("PROBE %-28s %7d free0=%.4f free_budget=%.4f init_ratio=%.4f trial=%s %s\n", id.c_str(),
+                        static_cast<int>(mm.matrix.n), f0, fb, initial_ratio(d.info),
+                        trial_name(d.info.matching_trial), fin ? "finished" : "paused");
+        }
         std::fflush(stdout);
     }
     std::printf("total %d matrices, %d differ from the exact trial; analyse ms exact %.1f default %.1f; "
