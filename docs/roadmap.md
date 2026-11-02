@@ -20,6 +20,7 @@ The research report ranks complete solvers like COPT, Gurobi and cuOpt on LP, MI
   - the threading results have not been re-measured after the engine changes;
   - IPOPT end to end has not been re-run with the new plugin;
   - there is no comparison yet against MA57, MA97, SPRAL SSIDS or cuDSS.
+- 2026-11-02: the analysis' matching trial runs the Hybrid matcher by default (auction on the shortest-path search tail): ncvxqp3 analysis 2.34x / 2.49x faster (1T / 8T), ncvxqp7 1.76x / 1.83-1.85x, no accuracy loss; the pure auction was killed at its gate (`docs/performance/2026-11-02-auction-matching.md`).
 
 ## Horizon 1 — Win the CPU KKT niche (~3 months)
 

@@ -791,7 +791,8 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         EXPECT_EQ(fk.scale, ak->rejected_matching_scale);
         EXPECT_EQ(fk.delay_analysis, ak->serial);
         EXPECT_EQ(fk.delay_scale, ak->rejected_matching_scale);
-        SymmetricMatcher trial(ak->cleaned, MatchingSearchOrder::Degree);
+        // The trial's own engine (Control::matching_algorithm, Hybrid by default).
+        SymmetricMatcher trial(ak->cleaned, MatchingSearchOrder::Degree, trigger.matching_algorithm);
         ASSERT_TRUE(trial.advance());
         const MatchingResult mr = trial.current();
         ASSERT_EQ(mr.status, ErrorCode::Success);

@@ -53,6 +53,28 @@ struct Control {
     // the same and the saving small (the sixth, aug3dcqp at 2.22, finishes
     // inside its last search).
     double         matching_search_budget = 2.0;
+    // The sparse-part engine of analyse()'s auto matching trial (its
+    // Degree-order SymmetricMatcher, serial and ConcurrentTrial) and of
+    // nothing else: compute_symmetric_matching, compute_matching_scale and
+    // the scale-on-delay rescue's own matcher stay ShortestPath (Column);
+    // when the rescue reuses the analysis' matching scale (unchanged values)
+    // it gets the trial's own scale (by default Hybrid's: ShortestPath's to
+    // about 1e-14 thanks to the canonical duals). Hybrid runs the
+    // shortest-path searches and, past 40 passes of search work, a warm
+    // auction on the remaining tail (scaling_matching.hpp); up to that point
+    // it is ShortestPath bitwise, so within the 2-pass budget above no
+    // verdict moves. Hybrid by default. Re-gate (12900K, interleaved A/B,
+    // indefinite front tier, 3 rounds; f7dc144, canonical duals): no
+    // accuracy loss (no case-track lost, ncvxqp1 rec omega 5.7e-12), 0 trial
+    // verdict changes on 50 matrices, no case-track above 1.10x after a
+    // 5-round rerun of the flagged sub-ms cases, ncvxqp3 analysis 2.34x (1T)
+    // / 2.49x (8T) faster (wall 0.643x / 0.511x), ncvxqp7 analysis 1.76x
+    // (1T) / 1.83-1.85x (8T), all-case wall geomean 0.990 (1T) / 0.983 (8T).
+    // Accepted miss: ncvxqp7's 1T bar of 1.8x was missed by about 2%,
+    // because about 0.6 s of its analysis lies outside the matcher; the
+    // owner accepted it (2026-11-02). ShortestPath reproduces the old trial
+    // (and is what ShortestPath-specific tests set).
+    MatchingAlgorithm matching_algorithm = MatchingAlgorithm::Hybrid;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;
