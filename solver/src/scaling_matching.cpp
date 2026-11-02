@@ -201,7 +201,7 @@ struct SymmetricMatcher::State {
     int n = 0;
     bool shape_ok = true;
     ErrorCode status = ErrorCode::Success;
-    CostGraph g;
+    std::shared_ptr<const CostGraph> g;  // immutable once built; forks share it
     std::vector<RowState> rs;
     std::vector<int> row_match;           // matched column of each row, or -1
     std::vector<int> row_parent;          // column the search reached the row from
@@ -257,9 +257,11 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order)
         s.phase = 4;
         return;
     }
-    s.status = build_cost_graph(A, s.g);
+    auto graph = std::make_shared<CostGraph>();
+    s.status = build_cost_graph(A, *graph);
     if (s.status != ErrorCode::Success) return;
-    const CostGraph &g = s.g;
+    s.g = graph;
+    const CostGraph &g = *graph;
     auto &col_to_row = s.col_to_row;
     const Int *const gptr = g.ptr.data();
     const int *const grow = g.row.data();
@@ -388,7 +390,51 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order)
     }
 }
 
+SymmetricMatcher::SymmetricMatcher(std::unique_ptr<State> s) : s_(std::move(s)) {}
+
 SymmetricMatcher::~SymmetricMatcher() = default;
+
+// Copies everything the searches read and write between searches (the
+// matching, the duals, the progress counters, the initial phase's snapshot)
+// and shares the immutable cost graph. The search scratch (touched,
+// finalized, level, heap, row_parent, row_done) is empty between searches,
+// so it is sized fresh as the constructor does. A matcher that failed before
+// the scratch existed (rs empty) gets none.
+std::unique_ptr<SymmetricMatcher> SymmetricMatcher::fork() const {
+    const State &o = *s_;
+    auto c = std::make_unique<State>();
+    State &s = *c;
+    s.n = o.n;
+    s.shape_ok = o.shape_ok;
+    s.status = o.status;
+    s.g = o.g;
+    s.rs = o.rs;
+    s.row_match = o.row_match;
+    s.row_dense = o.row_dense;
+    s.v = o.v;
+    s.col_to_row = o.col_to_row;
+    s.matched = o.matched;
+    s.any_dense = o.any_dense;
+    s.phase = o.phase;
+    s.next_col = o.next_col;
+    s.order = o.order;
+    s.search_order = o.search_order;
+    s.stop_free = o.stop_free;
+    s.work = o.work;
+    s.init_col_to_row = o.init_col_to_row;
+    s.init_u = o.init_u;
+    s.init_v = o.init_v;
+    if (!o.rs.empty()) {
+        const std::size_t n = static_cast<std::size_t>(o.n);
+        s.heap.reset(o.n);
+        s.touched.resize(n);
+        s.finalized.resize(n);
+        s.level.resize(n);
+        s.row_parent.assign(n, -1);
+        s.row_done.assign(n, 0);
+    }
+    return std::unique_ptr<SymmetricMatcher>(new SymmetricMatcher(std::move(c)));
+}
 
 ErrorCode SymmetricMatcher::status() const { return s_->status; }
 
@@ -426,9 +472,9 @@ bool SymmetricMatcher::State::search(int start_col) {
     int *const M = row_match.data();
     int *const P = row_parent.data();
     std::uint8_t *const DN = row_done.data();
-    const Int *const gptr = g.ptr.data();
-    const int *const grow = g.row.data();
-    const double *const gcost = g.cost.data();
+    const Int *const gptr = g->ptr.data();
+    const int *const grow = g->row.data();
+    const double *const gcost = g->cost.data();
     int *const T = touched.data();
     int *const F = finalized.data();
     int *const L = level.data();
@@ -564,9 +610,9 @@ bool SymmetricMatcher::State::search(int start_col) {
 // that keep every reduced cost >= 0.
 void SymmetricMatcher::State::dense_duals() {
     RowState *const R = rs.data();
-    const Int *const gptr = g.ptr.data();
-    const int *const grow = g.row.data();
-    const double *const gcost = g.cost.data();
+    const Int *const gptr = g->ptr.data();
+    const int *const grow = g->row.data();
+    const double *const gcost = g->cost.data();
     for (int j = 0; j < n; ++j) {
         if (dense(j)) {
             R[j].u = kInf;
@@ -606,7 +652,7 @@ bool SymmetricMatcher::advance(long long work_budget) {
             for (int j = 0; j < n; ++j) {
                 if (!s.dense(j) && s.col_to_row[static_cast<std::size_t>(j)] < 0) s.search_order.push_back(j);
             }
-            const Int *const gptr = s.g.ptr.data();
+            const Int *const gptr = s.g->ptr.data();
             if (s.order == MatchingSearchOrder::Degree)
                 std::stable_sort(s.search_order.begin(), s.search_order.end(),
                                  [gptr](int a, int b) { return gptr[a + 1] - gptr[a] > gptr[b + 1] - gptr[b]; });
@@ -672,16 +718,16 @@ MatchingResult SymmetricMatcher::State::result(const std::vector<Int> &c2r, cons
     std::vector<double> vt = *vcol;
     for (int j = 0; j < n; ++j) {
         const int r = static_cast<int>(c2r[static_cast<std::size_t>(j)]);
-        for (Int q = g.ptr[static_cast<std::size_t>(j)]; q < g.ptr[static_cast<std::size_t>(j) + 1]; ++q) {
-            if (g.row[static_cast<std::size_t>(q)] == r) {
-                vt[static_cast<std::size_t>(j)] = g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
+        for (Int q = g->ptr[static_cast<std::size_t>(j)]; q < g->ptr[static_cast<std::size_t>(j) + 1]; ++q) {
+            if (g->row[static_cast<std::size_t>(q)] == r) {
+                vt[static_cast<std::size_t>(j)] = g->cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
                 break;
             }
         }
     }
     for (int i = 0; i < n; ++i) {
         const double log_s = 0.5 * (u[static_cast<std::size_t>(i)] + vt[static_cast<std::size_t>(i)] -
-                                    std::log(g.col_max[static_cast<std::size_t>(i)]));
+                                    std::log(g->col_max[static_cast<std::size_t>(i)]));
         const double clamped_log = std::clamp(log_s, -340.0, 340.0);
         res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);
     }

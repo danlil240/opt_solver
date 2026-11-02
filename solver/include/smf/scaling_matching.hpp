@@ -73,9 +73,14 @@ public:
     MatchingResult current() const;
     /// The initial phase's partial matching and the scaling of its duals.
     MatchingResult initial() const;
+    /// An independent matcher in this one's exact state: advancing either
+    /// leaves the other untouched, and both resume bitwise alike. The
+    /// immutable cost graph is shared, so a fork costs O(n), not O(nnz).
+    std::unique_ptr<SymmetricMatcher> fork() const;
 
 private:
     struct State;
+    explicit SymmetricMatcher(std::unique_ptr<State> s);
     std::unique_ptr<State> s_;
 };
 

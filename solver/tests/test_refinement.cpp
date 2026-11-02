@@ -1,5 +1,6 @@
 #include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/validation.hpp"
+#include "kkt_test_matrices.hpp"
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
@@ -706,6 +707,60 @@ TEST(Matching, StopFreeLeavesAPartialMatching) {
     const MatchingResult zres = z.current();
     EXPECT_EQ(zres.col_to_row, full.col_to_row);
     EXPECT_EQ(zres.scale, full.scale);
+}
+
+// A fork taken mid-search resumes bitwise like the original: same matching,
+// same scaling, same work.
+TEST(Matching, ForkResumesLikeTheOriginal) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    SymmetricMatcher m(A, MatchingSearchOrder::Degree);
+    ASSERT_FALSE(m.advance(2 * static_cast<long long>(A.row_idx.size())));  // paused mid-way
+    auto f = m.fork();
+    EXPECT_EQ(f->work(), m.work());
+    m.advance();
+    f->advance();
+    const MatchingResult a = m.current(), b = f->current();
+    EXPECT_EQ(a.status, b.status);
+    EXPECT_EQ(a.col_to_row, b.col_to_row);
+    EXPECT_EQ(a.scale, b.scale);  // bitwise
+    EXPECT_EQ(f->work(), m.work());
+}
+
+// Advancing a fork (here to a partial stop) leaves the original as it was,
+// and the original then finishes as a never-forked matcher does.
+TEST(Matching, ForkLeavesTheOriginalUntouched) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    SymmetricMatcher m(A, MatchingSearchOrder::Degree);
+    ASSERT_FALSE(m.advance(2 * static_cast<long long>(A.row_idx.size())));
+    const MatchingResult r0 = m.current();
+    const long long w0 = m.work();
+    auto f = m.fork();
+    f->set_stop_free(0);
+    f->advance();
+    EXPECT_EQ(m.work(), w0);
+    EXPECT_EQ(m.current().col_to_row, r0.col_to_row);
+    EXPECT_EQ(m.current().scale, r0.scale);
+
+    SymmetricMatcher ref(A, MatchingSearchOrder::Degree);
+    ref.advance();
+    m.advance();
+    EXPECT_EQ(m.current().col_to_row, ref.current().col_to_row);
+    EXPECT_EQ(m.current().scale, ref.current().scale);
+    EXPECT_EQ(m.work(), ref.work());
+}
+
+// A fork of a matcher that failed at construction fails the same way.
+TEST(Matching, ForkOfAFailedMatcher) {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 1, 1, 2};
+    A.row_idx = {0, 2};
+    A.values = {4.0, 5.0};
+    SymmetricMatcher m(A);
+    auto f = m.fork();
+    EXPECT_EQ(f->status(), m.status());
+    EXPECT_TRUE(f->advance());
+    EXPECT_EQ(f->current().status, m.current().status);
 }
 
 TEST(Matching, StructurallySingularFailsAfterSearches) {
