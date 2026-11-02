@@ -53,6 +53,19 @@ struct Control {
     // the same and the saving small (the sixth, aug3dcqp at 2.22, finishes
     // inside its last search).
     double         matching_search_budget = 2.0;
+    // The sparse-part engine of analyse()'s auto matching trial (its
+    // Degree-order SymmetricMatcher, serial and ConcurrentTrial) and of
+    // nothing else: compute_symmetric_matching, compute_matching_scale and
+    // the scale-on-delay rescue stay ShortestPath. Hybrid runs the
+    // shortest-path searches and, past 40 passes of search work, a warm
+    // auction on the remaining tail (scaling_matching.hpp); up to that point
+    // it is ShortestPath bitwise, so within the 2-pass budget above no
+    // verdict moves. Evidence for Hybrid (probe, 50 corpus matrices, 12900K):
+    // every matrix at most 1.5x ShortestPath's edges scanned, total 0.74x
+    // edges and 0.68x matcher ms, ncvxqp3 0.35x, ncvxqp7 0.51x (the 0.6x
+    // total edges gate G2 was not met; the owner restated the gate). The
+    // default stays ShortestPath until the interleaved board gate.
+    MatchingAlgorithm matching_algorithm = MatchingAlgorithm::ShortestPath;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;

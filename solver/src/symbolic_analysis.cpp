@@ -117,9 +117,10 @@ namespace smf
     class ConcurrentTrial
     {
     public:
-        ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, const Int *xadj,
-                        const Int *adj, std::vector<Int> &amd_work)
-            : C_(C), budget_(budget), refactors_(expected_refactors), xadj_(xadj), adj_(adj), amd_work_(amd_work)
+        ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, MatchingAlgorithm alg,
+                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work)
+            : C_(C), budget_(budget), refactors_(expected_refactors), alg_(alg), xadj_(xadj), adj_(adj),
+              amd_work_(amd_work)
         {
             try
             {
@@ -179,7 +180,7 @@ namespace smf
         {
             try
             {
-                SymmetricMatcher matcher(C_, MatchingSearchOrder::Degree);
+                SymmetricMatcher matcher(C_, MatchingSearchOrder::Degree, alg_);
                 if (matcher.diagonal())
                 {
                     MatchingResult mr = matcher.diagonal_result();
@@ -230,6 +231,7 @@ namespace smf
         const CscLower &C_;
         const long long budget_;
         const int refactors_;
+        const MatchingAlgorithm alg_;
         const Int *const xadj_;
         const Int *const adj_;
         std::vector<Int> &amd_work_;
@@ -517,12 +519,14 @@ namespace smf
             (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
         if (auto_matching && control.num_threads > 1)
         {
-            concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors, xadj, adj,
+            concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors,
+                                                           control.matching_algorithm, xadj, adj,
                                                            analyse_scratch_worker_);
         }
         else if (auto_matching)
         {
-            auto matcher = std::make_unique<SymmetricMatcher>(C, MatchingSearchOrder::Degree);
+            auto matcher =
+                std::make_unique<SymmetricMatcher>(C, MatchingSearchOrder::Degree, control.matching_algorithm);
             if (matcher->diagonal())
             {
                 MatchingResult mr = matcher->diagonal_result();

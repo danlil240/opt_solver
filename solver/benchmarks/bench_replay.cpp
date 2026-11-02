@@ -557,6 +557,15 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
+    // SMF_BENCH_MATCHER = ssp | auction | hybrid: Control::matching_algorithm
+    // (ShortestPath, Auction, Hybrid; the auto matching trial's matcher).
+    if (const char *e = std::getenv("SMF_BENCH_MATCHER")) {
+        const std::string k = e;
+        if (k == "ssp") ctrl.matching_algorithm = smf::MatchingAlgorithm::ShortestPath;
+        else if (k == "auction") ctrl.matching_algorithm = smf::MatchingAlgorithm::Auction;
+        else if (k == "hybrid") ctrl.matching_algorithm = smf::MatchingAlgorithm::Hybrid;
+        else std::fprintf(stderr, "warning: SMF_BENCH_MATCHER=\"%s\" is not ssp, auction or hybrid; keeping the default\n", e);
+    }
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,

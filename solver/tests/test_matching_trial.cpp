@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -508,6 +510,183 @@ TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
                 EXPECT_EQ(a4->matching_scale, a1->matching_scale) << "budget " << budget;
                 EXPECT_EQ(a4->rejected_matching_scale, a1->rejected_matching_scale) << "budget " << budget;
                 EXPECT_EQ(a4->matching_rejected, a1->matching_rejected) << "budget " << budget;
+            }
+        }
+    }
+}
+
+namespace {
+
+Control hybrid_test_control(double budget, MatchingAlgorithm alg, int threads) {
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AutoSerial;
+    c.matching_search_budget = budget;
+    c.matching_algorithm = alg;
+    c.num_threads = threads;
+    c.auto_threads = false;  // small test trees
+    return c;
+}
+
+// The trial's matcher under Hybrid run to the end on the matrix analyse()
+// matched (AnalysisKeep::cleaned).
+bool hybrid_switches(const CscLower &C) {
+    SymmetricMatcher m(C, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid);
+    m.advance(-1);
+    return m.switched();
+}
+
+double matched_log_product(const CscLower &A, const std::vector<Int> &col_to_row) {
+    double p = 0.0;
+    for (Int j = 0; j < A.n; ++j) {
+        const Int r = col_to_row[static_cast<std::size_t>(j)];
+        const Int lo = std::min(r, j), hi = std::max(r, j);
+        for (Int q = A.col_ptr[lo]; q < A.col_ptr[lo + 1]; ++q)
+            if (A.row_idx[q] == hi) p += std::log(std::abs(A.values[q]));
+    }
+    return p;
+}
+
+// The verdict of two analyses of one matrix: equal, and the initial ratio
+// bitwise equal (both are 0 when unset).
+void expect_same_verdict(const AnalysisKeep &a, const Info &ia, const AnalysisKeep &b, const Info &ib) {
+    EXPECT_EQ(ib.matching_trial, ia.matching_trial);
+    EXPECT_EQ(ib.ordering_used, ia.ordering_used);
+    EXPECT_EQ(b.matching_rejected, a.matching_rejected);
+    EXPECT_EQ(std::memcmp(&ib.matching_initial_ratio, &ia.matching_initial_ratio, sizeof(double)), 0)
+        << ib.matching_initial_ratio << " vs " << ia.matching_initial_ratio;
+}
+
+} // namespace
+
+// Control::matching_algorithm = Hybrid runs the trial's searches under the
+// hybrid engine. It switches to the auction only past 40 passes of search
+// work (AuctionOptions::switch_passes) and is ShortestPath bitwise before
+// that; the default budget (2 passes) pauses far earlier, so no verdict can
+// move. On matrices whose searches stay below 40 passes the whole analysis
+// is bitwise ShortestPath's. On two that switch inside analyse()
+// (opf_like_kkt(20000, 18000, 1): 43.9 passes, full rank; opf_like_kkt(10000,
+// 9200, 3): 44.7 passes, structurally singular) the verdict is the same and
+// the matching is again a maximum-product one (same status, same log
+// product); when the standalone matchers also give the same matching and
+// scale, the analysis is bitwise ShortestPath's (otherwise the max-product
+// matching is not unique, and perm may differ).
+TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
+    const double budgets[] = {-1.0, 0.0, Control{}.matching_search_budget};
+    const CscLower quiet[] = {scaled_opf_kkt(3000, 1200, 1, 4.0), opf_like_kkt(10000, 1000, 7),
+                              opf_like_kkt(6000, 5000, 7), diagonal_kkt(10000, 3)};
+    int k = 0;
+    for (const CscLower &A : quiet) {
+        for (double budget : budgets) {
+            SCOPED_TRACE("matrix " + std::to_string(k) + " budget " + std::to_string(budget));
+            Solver ss, sh;
+            Info is, ih;
+            auto as = ss.analyse(A, hybrid_test_control(budget, MatchingAlgorithm::ShortestPath, 1), is);
+            auto ah = sh.analyse(A, hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 1), ih);
+            ASSERT_NE(as, nullptr);
+            ASSERT_NE(ah, nullptr);
+            ASSERT_FALSE(hybrid_switches(ah->cleaned)) << "fixture must stay below the switch";
+            expect_same_verdict(*as, is, *ah, ih);
+            EXPECT_EQ(ih.matching_exact_ratio, is.matching_exact_ratio);
+            EXPECT_EQ(ah->perm, as->perm);
+            EXPECT_EQ(ah->matching_scale, as->matching_scale);
+            EXPECT_EQ(ah->rejected_matching_scale, as->rejected_matching_scale);
+            EXPECT_EQ(ah->matching_scale_partial, as->matching_scale_partial);
+        }
+        ++k;
+    }
+
+    const CscLower switching[] = {opf_like_kkt(20000, 18000, 1), opf_like_kkt(10000, 9200, 3)};
+    int switched = 0, success = 0, same = 0;
+    k = 0;
+    for (const CscLower &A : switching) {
+        bool same_matching = false;
+        for (double budget : budgets) {
+            SCOPED_TRACE("switching matrix " + std::to_string(k) + " budget " + std::to_string(budget));
+            Solver ss, sh;
+            Info is, ih;
+            auto as = ss.analyse(A, hybrid_test_control(budget, MatchingAlgorithm::ShortestPath, 1), is);
+            auto ah = sh.analyse(A, hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 1), ih);
+            ASSERT_NE(as, nullptr);
+            ASSERT_NE(ah, nullptr);
+            if (budget == budgets[0]) {
+                // The hybrid path really runs inside this analyse(): the
+                // exact trial's matcher, on its own cleaned matrix, switches.
+                const CscLower &C = ah->cleaned;
+                SymmetricMatcher ms(C, MatchingSearchOrder::Degree);
+                SymmetricMatcher mh(C, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid);
+                ms.advance(-1);
+                mh.advance(-1);
+                ASSERT_TRUE(mh.switched());
+                ++switched;
+                ASSERT_EQ(mh.status(), ms.status());
+                if (ms.status() == ErrorCode::Success) {
+                    ++success;
+                    const MatchingResult rs = ms.current(), rh = mh.current();
+                    const double ps = matched_log_product(C, rs.col_to_row);
+                    EXPECT_NEAR(matched_log_product(C, rh.col_to_row), ps, 1e-9 * std::abs(ps) + 1e-9);
+                    same_matching = rs.col_to_row == rh.col_to_row && rs.scale == rh.scale;
+                    same += same_matching ? 1 : 0;
+                    // Each analysis kept its own matcher's exact scale
+                    // (adopted, or recorded as rejected).
+                    const auto kept = [](const AnalysisKeep &a) -> const std::vector<double> & {
+                        return a.matching_scale.empty() ? a.rejected_matching_scale : a.matching_scale;
+                    };
+                    EXPECT_EQ(kept(*as), rs.scale);
+                    EXPECT_EQ(kept(*ah), rh.scale);
+                }
+            }
+            expect_same_verdict(*as, is, *ah, ih);
+            if (same_matching) {
+                EXPECT_EQ(ah->perm, as->perm);
+                EXPECT_EQ(ah->matching_scale, as->matching_scale);
+            }
+        }
+        ++k;
+    }
+    EXPECT_EQ(switched, 2);
+    EXPECT_EQ(success, 1);
+    std::printf("[ hybrid ] switching matrices with the ShortestPath matching and scale: %d of %d\n", same, success);
+}
+
+// ConcurrentTrialIsTheSerialOne under Hybrid, plus a matrix whose searches
+// switch to the auction (43.9 passes): the concurrent trial's one-pass slices
+// pause the hybrid engine around its switch and auction, and 1 vs 4 threads
+// still give the same perm, scales, rejected flag and verdict.
+TEST(MatchingTrial, HybridConcurrentTrialIsTheSerialOne) {
+    const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(8000, 2000, 1),
+                             opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 6, 1.0),
+                             opf_like_kkt(20000, 18000, 1)};
+    for (const CscLower &A : mats) {
+        for (double budget : {-1.0, 0.0, 2.0}) {
+            SCOPED_TRACE("n " + std::to_string(A.n) + " budget " + std::to_string(budget));
+            const Control c1 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 1);
+            const Control c4 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 4);
+            Solver s1, s4;
+            Info i1, i4;
+            auto a1 = s1.analyse(A, c1, i1);
+            ASSERT_NE(a1, nullptr);
+            ASSERT_NE(i1.matching_trial, MatchingTrial::None);
+            for (int rep = 0; rep < 2; ++rep) {  // the second reuses s4's buffers
+                auto a4 = s4.analyse(A, c4, i4);
+                ASSERT_NE(a4, nullptr);
+                EXPECT_EQ(i4.matching_trial, i1.matching_trial);
+                EXPECT_EQ(i4.matching_initial_ratio, i1.matching_initial_ratio);
+                EXPECT_EQ(i4.matching_exact_ratio, i1.matching_exact_ratio);
+                EXPECT_EQ(i4.ordering_used, i1.ordering_used);
+                EXPECT_EQ(a4->perm, a1->perm);
+                EXPECT_EQ(a4->matching_scale, a1->matching_scale);
+                EXPECT_EQ(a4->rejected_matching_scale, a1->rejected_matching_scale);
+                EXPECT_EQ(a4->matching_rejected, a1->matching_rejected);
+            }
+            if (budget < 0.0) {
+                // The exact trial kept the Hybrid matcher's scale (adopted,
+                // or recorded as rejected), on both thread counts.
+                SymmetricMatcher mh(a1->cleaned, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid);
+                ASSERT_TRUE(mh.advance(-1));
+                const std::vector<double> &kept =
+                    a1->matching_scale.empty() ? a1->rejected_matching_scale : a1->matching_scale;
+                EXPECT_EQ(kept, mh.current().scale);
             }
         }
     }

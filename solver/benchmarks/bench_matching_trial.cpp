@@ -13,7 +13,7 @@
 //
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
-//                             [--sample S [--lines]] [--pieces] [--matcher ssp|auction]
+//                             [--sample S [--lines]] [--pieces] [--matcher ssp|auction|hybrid]
 //                             [--auction-factor f] [--auction-eps e]
 //                             [--auction-cold]
 //                             [--hybrid-probe [--hybrid-eps e1,e2,..]
@@ -36,11 +36,15 @@
 // against; mtd_ms = its median wall time; logprod = sum_j log|a(col_to_row[j],
 // j)|, the matching's product, printed in full and as an fnv hash of
 // col_to_row). The totals line adds edges_deg = the summed edges scanned.
-// --matcher selects the algorithm of the standalone matcher columns (ssp:
-// the shortest augmenting paths; auction: the epsilon-scaling auction with
-// the exact repair, which affects no analyse() call yet). Under auction the
-// Degree ShortestPath columns are still produced and a Degree-order auction
-// run follows them: work_auc = its edges scanned in passes (as work_deg),
+// --matcher selects Control::matching_algorithm on every analyse() call
+// (the trial's matcher: ssp = ShortestPath, the default, auction = Auction,
+// hybrid = Hybrid), so the verdict, ordD and perm_hash columns show the trial
+// under it, and the algorithm of the extra standalone matcher columns (ssp:
+// none). Under auction or hybrid the
+// Degree ShortestPath columns are still produced and a Degree-order run of
+// that matcher follows them (auction with the AuctionOptions below, hybrid
+// with its defaults; hybrid adds sw = SymmetricMatcher::switched(), y/n):
+// work_auc = its edges scanned in passes (as work_deg),
 // repair = SymmetricMatcher::repaired(), mta_ms = its median wall time,
 // prod_ok = yes when its status equals the ShortestPath one and, on success,
 // its log product equals the ShortestPath one within 1e-9 |p| + 1e-9 and its
@@ -500,14 +504,17 @@ int main(int argc, char **argv) {
         else if (a == "--lines") sample_lines = true;
         else if (a == "--pieces") pieces = true;
     }
-    if (list.empty() || (matcher != "ssp" && matcher != "auction")) {
+    if (list.empty() || (matcher != "ssp" && matcher != "auction" && matcher != "hybrid")) {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
                              "[--budget b] [--refactors r] [--case s] "
-                             "[--sample S [--lines]] [--pieces] [--matcher ssp|auction]\n"
+                             "[--sample S [--lines]] [--pieces] [--matcher ssp|auction|hybrid]\n"
                              "[--auction-factor f] [--auction-eps e] [--auction-cold]\n"
                              "[--hybrid-probe [--hybrid-eps e1,e2,..] [--hybrid-rules r1,r2,..]]\n");
         return 2;
     }
+    const smf::MatchingAlgorithm matcher_alg = matcher == "auction" ? smf::MatchingAlgorithm::Auction
+                                               : matcher == "hybrid"  ? smf::MatchingAlgorithm::Hybrid
+                                                                      : smf::MatchingAlgorithm::ShortestPath;
     std::ifstream in(list);
     std::string line;
     if (pieces) {
@@ -598,6 +605,7 @@ int main(int argc, char **argv) {
                 if (ordering >= 0) c.ordering = static_cast<smf::OrderingMethod>(ordering);
                 if (refactors >= 1) c.expected_refactors = refactors;
                 c.matching_search_budget = budget;
+                c.matching_algorithm = matcher_alg;
                 smf::Solver s;
                 t0 = std::chrono::steady_clock::now();
                 (void)s.analyse(A, c, last);
@@ -630,6 +638,7 @@ int main(int argc, char **argv) {
             if (ordering >= 0) c.ordering = static_cast<smf::OrderingMethod>(ordering);
             if (refactors >= 1) c.expected_refactors = refactors;
             c.matching_search_budget = budget;
+            c.matching_algorithm = matcher_alg;
             int loops = 0;
             smf::bench::Sampler sampler;
             const auto t0 = std::chrono::steady_clock::now();
@@ -647,12 +656,15 @@ int main(int argc, char **argv) {
         }
         return 2;
     }
-    const bool use_auction = matcher == "auction";
+    // The extra standalone matcher columns: Auction or Hybrid (ssp: none).
+    const bool use_auction = matcher != "ssp";
+    const bool use_hybrid = matcher == "hybrid";
     std::printf("%-28s %7s %8s | %-8s %-8s %-8s | %6s %6s | %3s %4s %4s | %9s %9s | %7s %6s | %16s | %8s %8s | %16s | %8s %8s | %16s %21s",
                 "matrix", "n", "nnz_low", "exact", "default", "zero", "r_init", "r_exact", "eq", "ordE", "ordD",
                 "ms_exact", "ms_default", "work_x", "free0", "perm_hash", "mm_def", "mt_ms", "all_hash",
                 "work_deg", "mtd_ms", "logprod_hash", "logprod");
     if (use_auction) std::printf(" | %8s %6s %8s %7s", "work_auc", "repair", "mta_ms", "prod_ok");
+    if (use_hybrid) std::printf(" %2s", "sw");
     std::printf("\n");
     double tot_exact = 0.0, tot_default = 0.0, tot_mm = 0.0, tot_mt = 0.0, edges_deg = 0.0, edges_auc = 0.0;
     double worst_ratio = 0.0, worst_ratio_gt1 = 0.0;
@@ -671,6 +683,7 @@ int main(int argc, char **argv) {
         smf::Control base;
         base.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
         base.num_threads = 1;
+        base.matching_algorithm = matcher_alg;
         if (ordering >= 0) base.ordering = static_cast<smf::OrderingMethod>(ordering);
         if (refactors >= 1) base.expected_refactors = refactors;
         smf::Control ce = base, cd = base, cz = base;
@@ -702,7 +715,7 @@ int main(int argc, char **argv) {
         double work_deg = 0.0, logprod = 0.0, work_auc = 0.0;
         std::vector<double> mta;
         int repair = 0;
-        bool prod_ok = true;
+        bool prod_ok = true, switched = false;
         smf::MatchingResult fd0;
         std::uint64_t logprod_hash = 0;
         for (int t = 0; t < trials; ++t) {
@@ -737,10 +750,10 @@ int main(int argc, char **argv) {
                 if (use_auction) fd0 = fd;
             }
             if (use_auction) {
-                // The same, with the auction in the sparse part.
+                // The same, with the auction (or the hybrid) in the sparse part.
                 const auto a0 = std::chrono::steady_clock::now();
-                smf::SymmetricMatcher ma(mm.matrix, smf::MatchingSearchOrder::Degree,
-                                         smf::MatchingAlgorithm::Auction, &auc);
+                smf::SymmetricMatcher ma(mm.matrix, smf::MatchingSearchOrder::Degree, matcher_alg,
+                                         use_hybrid ? nullptr : &auc);
                 const bool done = ma.advance(-1);
                 const smf::MatchingResult fa = done ? ma.current() : smf::MatchingResult{};
                 const auto a1 = std::chrono::steady_clock::now();
@@ -749,6 +762,7 @@ int main(int argc, char **argv) {
                     work_auc = static_cast<double>(ma.work()) / (2.0 * static_cast<double>(mm.matrix.row_idx.size()));
                     edges_auc += static_cast<double>(ma.work());
                     repair = ma.repaired();
+                    switched = ma.switched();
                     prod_ok = done && product_ok(mm.matrix, fa, fd0);
                 }
             }
@@ -784,6 +798,7 @@ int main(int argc, char **argv) {
                     d.match_ms, mt_ms, static_cast<unsigned long long>(h.h), work_deg, mtd_ms,
                     static_cast<unsigned long long>(logprod_hash), logprod);
         if (use_auction) std::printf(" | %8.2f %6d %8.2f %7s", work_auc, repair, mta_ms, prod_ok ? "yes" : "NO");
+        if (use_hybrid) std::printf(" %2s", switched ? "y" : "n");
         std::printf("\n");
         std::fflush(stdout);
     }
