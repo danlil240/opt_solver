@@ -625,6 +625,17 @@ TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
                     const MatchingResult rs = ms.current(), rh = mh.current();
                     const double ps = matched_log_product(C, rs.col_to_row);
                     EXPECT_NEAR(matched_log_product(C, rh.col_to_row), ps, 1e-9 * std::abs(ps) + 1e-9);
+                    // Premise of the plumbing check below: the two matchers'
+                    // results differ, so each analysis keeping its own
+                    // matcher's scale is observable. The matchings coincide
+                    // here; the scales differ in rounding only since the
+                    // canonical duals (31323 of 38000 indices, max |dlog|
+                    // 1.2e-14; 5.6 without them).
+                    EXPECT_NE(rh.scale, rs.scale);
+                    for (std::size_t i = 0; i < rs.scale.size(); ++i) {
+                        const double ls = std::log(rs.scale[i]);
+                        ASSERT_NEAR(std::log(rh.scale[i]), ls, 1e-12 * std::max(1.0, std::abs(ls))) << "i=" << i;
+                    }
                     same_matching = rs.col_to_row == rh.col_to_row && rs.scale == rh.scale;
                     same += same_matching ? 1 : 0;
                     // Each analysis kept its own matcher's exact scale
@@ -667,6 +678,9 @@ TEST(MatchingTrial, HybridConcurrentTrialIsTheSerialOne) {
             auto a1 = s1.analyse(A, c1, i1);
             ASSERT_NE(a1, nullptr);
             ASSERT_NE(i1.matching_trial, MatchingTrial::None);
+            // Premise: the last matrix really switches (and so runs the
+            // auction, the repair and the canonical duals inside the trial).
+            if (&A == &mats[std::size(mats) - 1]) ASSERT_TRUE(hybrid_switches(a1->cleaned));
             for (int rep = 0; rep < 2; ++rep) {  // the second reuses s4's buffers
                 auto a4 = s4.analyse(A, c4, i4);
                 ASSERT_NE(a4, nullptr);

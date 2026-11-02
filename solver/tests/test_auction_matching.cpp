@@ -17,10 +17,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <numeric>
 #include <random>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -724,6 +726,74 @@ TEST(AuctionMatching, HybridSameOptimumAsShortestPath) {
     }
 }
 
+// Canonical duals (ncvxqp1-probe-report.md, candidate d): after a switch the
+// auction leaves its own prices on the rows of its displacement chains, a
+// different point of the optimal dual face than the searches reach (on
+// ncvxqp1 rec the scale drifted by up to e^8.5 and omega failed, 4.6e-8).
+// At the end of phase 1 the engine moves the sparse duals to the pointwise
+// largest u below the duals at the switch that keeps them feasible and the
+// matching tight. That point does not depend on which maximum-product
+// matching was found, up to the switch Hybrid is the Degree ShortestPath
+// matcher bitwise, and the ShortestPath searches from there end at it. So
+// phases 2-3 start from ShortestPath's duals (to rounding) and the scales
+// agree, also where the matchings differ (ties).
+//
+// Except where phase 3 meets an exact tie: on the deficient KKTs with dense
+// rows (deficient_kkt seeds 9 and 11, cases 13 and 15) the duals at the
+// start of phase 3 agree to 1e-15 (checked by a dump of every u, v and
+// row_match), and a phase-3 search then picks another of its equal-length
+// paths. Its 4-8 indices, along one alternating path ending at a dense
+// row, differ by up to 1.4 in log scale; both scales are optimal and
+// bounded (same_optimum, scaling_bounds). Every other switched run (42 of
+// 48 today) agrees to 1e-12 relative on every index, and every run on all
+// but at most 1% of them.
+TEST(AuctionMatching, HybridCanonicalDualsMatchShortestPathScale) {
+    std::vector<CscLower> cases;
+    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(scaled_opf_kkt(3000, 1200, seed, 4.0));
+    cases.push_back(scaled_opf_kkt(3000, 1200, 4, 40.0));
+    cases.push_back(dense_row_kkt(6000, 3, 5));
+    const std::size_t n_full_rank = cases.size();
+    for (unsigned seed = 1; seed <= 12; ++seed) cases.push_back(deficient_kkt(seed));
+    int compared = 0, equal = 0, differ = 0;
+    double worst = 0.0;
+    for (std::size_t c = 0; c < cases.size(); ++c) {
+        const CscLower &A = cases[c];
+        SymmetricMatcher sp(A, MatchingSearchOrder::Degree);
+        ASSERT_TRUE(sp.advance());
+        if (sp.status() != ErrorCode::Success) continue;
+        const MatchingResult ref = sp.current();
+        for (double passes : {0.0, 0.01, 0.05}) {
+            SCOPED_TRACE("case " + std::to_string(c) + " passes " + std::to_string(passes));
+            const AuctionOptions opt = hybrid_at(passes);
+            SymmetricMatcher h(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+            ASSERT_TRUE(h.advance());
+            ASSERT_TRUE(h.switched());
+            const MatchingResult r = h.current();
+            same_optimum(A, r, ref);
+            scaling_bounds(A, r);
+            int off = 0;
+            for (Int i = 0; i < A.n; ++i) {
+                const double ls = std::log(ref.scale[static_cast<std::size_t>(i)]);
+                const double d = std::abs(std::log(r.scale[static_cast<std::size_t>(i)]) - ls);
+                if (d > 1e-12 * std::max(1.0, std::abs(ls))) {
+                    ++off;
+                    worst = std::max(worst, d);
+                }
+            }
+            if (c < n_full_rank) EXPECT_EQ(off, 0);
+            EXPECT_LE(off, A.n / 100);
+            ++compared;
+            equal += off == 0 ? 1 : 0;
+            differ += r.col_to_row != ref.col_to_row ? 1 : 0;
+        }
+    }
+    EXPECT_EQ(compared, 48);
+    EXPECT_GE(equal, 42);
+    std::printf("[ hybrid ] canonical duals: %d switched runs, %d with the ShortestPath scale (1e-12), %d with another "
+                "optimal matching, max |dlog s| elsewhere %.3g\n",
+                compared, equal, differ, worst);
+}
+
 // Below the switch point Hybrid is the Degree ShortestPath matcher bitwise:
 // the default 40 passes is never reached on these KKTs (each finishes in
 // under a pass), nor is a switch point just above the run's own work.
@@ -754,15 +824,41 @@ TEST(AuctionMatching, HybridBitwiseWhenTheSwitchDoesNotFire) {
 }
 
 // The switch point depends on the search work alone: pausing every 50
-// edges (inside the searches, the auction and the repair's searches), in
-// one-pass slices (as the ConcurrentTrial runs it) or one-shot give the
-// same matching, scaling and work.
+// edges (inside the searches, the auction and the repair's searches), at
+// every search boundary (so also right before the canonical duals at the
+// end of phase 1), in one-pass slices (as the ConcurrentTrial runs it) or
+// one-shot give the same matching, scaling and work. deficient_kkt(9)
+// adds failed phase-1 searches (free columns at the canonical duals) and
+// phase 3.
 TEST(AuctionMatching, HybridResumedAdvanceIsOneShot) {
-    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5)}) {
+    int k = 0;
+    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5), deficient_kkt(9)}) {
+        SCOPED_TRACE("matrix " + std::to_string(k++));
         const AuctionOptions opt = hybrid_at(0.02);
         SymmetricMatcher one(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
         ASSERT_TRUE(one.advance());
         ASSERT_TRUE(one.switched());
+        ASSERT_EQ(one.status(), ErrorCode::Success);
+        // Premise: the canonical duals ran (the scale is ShortestPath's;
+        // without them it is not, from index 2 of matrix 0 on).
+        if (k <= 2) {
+            SymmetricMatcher sp(A, MatchingSearchOrder::Degree);
+            ASSERT_TRUE(sp.advance());
+            const MatchingResult rs = sp.current(), r1 = one.current();
+            for (Int i = 0; i < A.n; ++i) {
+                const double ls = std::log(rs.scale[static_cast<std::size_t>(i)]);
+                ASSERT_NEAR(std::log(r1.scale[static_cast<std::size_t>(i)]), ls, 1e-12 * std::max(1.0, std::abs(ls)))
+                    << "i=" << i;
+            }
+        }
+        {
+            SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
+            for (long long budget = 0; !m.advance(budget); budget = m.work() + 1) {
+            }
+            expect_bitwise(m.current(), one.current());
+            EXPECT_EQ(m.work(), one.work());
+            EXPECT_EQ(m.repaired(), one.repaired());
+        }
         {
             SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
             int pauses = 0;
