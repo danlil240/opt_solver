@@ -60,6 +60,11 @@ struct AuctionOptions {
     /// singular sparse part costs 50 bids per column before the searches
     /// take over; provisional.
     double bid_cap = 50.0;
+    /// The first phase's epsilon, in log units; <= 0 (the default): the old
+    /// rule, max sparse cost / eps_factor. Probe option for
+    /// SymmetricMatcher::probe_switch_to_auction (bench_matching_trial
+    /// --hybrid-probe): from exact duals the old eps0 would wreck them.
+    double eps_start = 0.0;
 };
 // SymmetricMatcher validates its AuctionOptions: a field that is not finite
 // or outside its domain (eps_factor <= 1, eps_final <= 0, bid_cap <= 0)
@@ -115,6 +120,26 @@ public:
     MatchingResult current() const;
     /// The initial phase's partial matching and the scaling of its duals.
     MatchingResult initial() const;
+
+    // ---- Probe hooks: bench_matching_trial --hybrid-probe only. Nothing in
+    // analyse() calls them; a matcher on which they are never called behaves
+    // bitwise as before. ----
+    /// ShortestPath, phase 1: the sparse columns free now; -1 otherwise.
+    int probe_free_sparse() const;
+    /// From then on advance() also pauses (returns false) before a phase-1
+    /// search once at most max_free sparse columns are free (negative: off).
+    /// probe_switch_to_auction() clears it.
+    void probe_pause_at_free(int max_free);
+    /// On a ShortestPath matcher paused in phase 1 (advance() returned
+    /// false): the next advance() first runs the auction (forced warm) on the
+    /// free sparse columns not yet searched, from the current duals and
+    /// matching (0-CS), then repair() (rows reachable from the columns left
+    /// free get the duals of this call back, not the constructor's), drops the
+    /// columns whose phase-1 search already failed from the relisted search
+    /// order, and continues the normal phase-1 searches and phases 2-3. All of
+    /// it counts in work(); repaired() reports the columns repair() left free.
+    /// Ignored outside phase 1 or under MatchingAlgorithm::Auction.
+    void probe_switch_to_auction(const AuctionOptions &opt);
 
 private:
     struct State;

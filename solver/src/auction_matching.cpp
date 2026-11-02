@@ -40,6 +40,8 @@ AuctionOptions validated(const AuctionOptions &opt) {
     o.eps_factor = std::max(o.eps_factor, kMinEpsFactor);
     o.eps_final = std::max(o.eps_final, kMinEpsFinal);
     o.bid_cap = std::min(o.bid_cap, kMaxBidCap);
+    // Probe option: not finite or <= 0 keeps the old rule (0).
+    if (!(std::isfinite(o.eps_start) && o.eps_start > 0.0)) o.eps_start = 0.0;
     return o;
 }
 
@@ -83,7 +85,8 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
         }
         st.cost_range = cmin == kInf ? 0.0 : cmax - cmin;
         st.bid_limit = static_cast<long long>(std::ceil(opt.bid_cap * static_cast<double>(sparse_cols)));
-        st.eps = std::max(cmax / opt.eps_factor, opt.eps_final);
+        // eps_start > 0: a probe's explicit first epsilon (warm from exact duals).
+        st.eps = std::max(opt.eps_start > 0.0 ? opt.eps_start : cmax / opt.eps_factor, opt.eps_final);
         st.queue.assign(first_queue.begin(), first_queue.end());
         st.head = 0;
         st.bids_in_phase = 0;
