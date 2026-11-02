@@ -237,7 +237,7 @@ TEST(MatchingTrial, RejectedInitialKeepsTheBudgetMatcher) {
     c.matrix_type = MatrixType::RealSymmetricIndefinite;
     c.ordering = OrderingMethod::AutoSerial;
     c.matching_search_budget = 0.5;  // some searches run (0.0 runs none)
-    EXPECT_TRUE(c.scale_on_delay_keep_matcher);
+    c.scale_on_delay_keep_matcher = true;  // off by default (gate failed)
     Solver s;
     Info info;
     auto ak = s.analyse(A, c, info);
@@ -267,6 +267,7 @@ TEST(MatchingTrial, KeptMatcherOnlyWhenTheRescueIsArmed) {
     base.matrix_type = MatrixType::RealSymmetricIndefinite;
     base.ordering = OrderingMethod::AutoSerial;
     base.matching_search_budget = 0.5;
+    base.scale_on_delay_keep_matcher = true;  // off by default (gate failed)
     Solver s0;
     Info i0;
     auto a0 = s0.analyse(A, base, i0);
@@ -283,7 +284,12 @@ TEST(MatchingTrial, KeptMatcherOnlyWhenTheRescueIsArmed) {
         EXPECT_EQ(a->matching_trial, trial) << what;
         EXPECT_EQ(a->rescue_matcher, nullptr) << what;
     };
+    // The default Control keeps nothing (main's behaviour).
     Control c = base;
+    c.scale_on_delay_keep_matcher = Control{}.scale_on_delay_keep_matcher;
+    EXPECT_FALSE(c.scale_on_delay_keep_matcher);
+    unarmed(c, "default Control", MatchingTrial::RejectedInitial);
+    c = base;
     c.pivot_u = 1e-8;
     unarmed(c, "pivot_u 1e-8", MatchingTrial::RejectedInitial);
     c = base;
@@ -579,6 +585,7 @@ TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
             c1.matrix_type = MatrixType::RealSymmetricIndefinite;
             c1.ordering = OrderingMethod::AutoSerial;
             c1.matching_search_budget = budget;
+            c1.scale_on_delay_keep_matcher = true;  // off by default
             c1.num_threads = 1;
             c1.auto_threads = false;  // small test trees
             Control c4 = c1;

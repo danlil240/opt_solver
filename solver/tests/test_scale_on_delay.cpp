@@ -180,6 +180,7 @@ constexpr double kKeptSpread = 1.0;
 Control kept_matcher_control() {
     Control c = base_control();
     c.matching_search_budget = 0.5;
+    c.scale_on_delay_keep_matcher = true;  // off by default (gate failed)
     return c;
 }
 

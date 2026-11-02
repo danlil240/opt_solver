@@ -115,10 +115,16 @@ struct Control {
     // (MatchingTrial::RejectedInitial) keeps the trial's matcher at the
     // budget point (AnalysisKeep::rescue_matcher) when this Control could
     // arm the scale-on-delay rescue, so the rescue of the analysed values
-    // resumes those searches instead of matching from scratch. Evidence for
-    // the default: to be filled in by the rescue-cost board (Task 4). False:
-    // nothing is kept (main's behaviour; the A/B switch).
-    bool           scale_on_delay_keep_matcher = true;
+    // resumes those searches instead of matching from scratch. Off: the A/B
+    // gate failed (12900K, 1T, small_kkt + large_kkt + hard_indef, 3 rounds).
+    // The Degree-order resume stopped at 2% free scales less accurately:
+    // pglib_opf_case9241_pegase rec turned inaccurate, case4661_sdet's first
+    // update omega 1.1e-8 against 6.9e-11. It saved little: ncvxqp9 rec
+    // factor 1.005x (scans 687,598 edges against 728,879 fresh, -6%, not
+    // the budget's 126k), PGLib rec factor 0.93-0.96x, recommended-track
+    // wall 0.992 tuning / 0.994 heldout, rss <= 1.07x. False (default):
+    // nothing is kept (main's behaviour); true reproduces the resumed rescue.
+    bool           scale_on_delay_keep_matcher = false;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter
