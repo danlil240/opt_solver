@@ -270,6 +270,11 @@ TEST(ScaleOnDelay, DoesNotFireOnWellScaledKkt) {
 TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
     const CscLower A = kkt(kG, kM, 4.1, 0.0, 0.0);
     Control ctrl = base_control();
+    // The full ratio alone: at the 4x crossing this one projects to 13.8x
+    // (scale_on_delay_early_proj 8) and the early rule stops it, though it
+    // ends at 9.96x (top-heavy tree: the root front carries most of the
+    // delay-free work).
+    ctrl.scale_on_delay_early_ratio = -1.0;
     Control off = ctrl;
     off.scale_on_delay_ratio = -1.0;
     Solver s;
@@ -838,6 +843,7 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
     ASSERT_LT(unscaled_ratio(E, ctrl), 0.5 * r) << "premise: E factors cheaply";
     ctrl.scale_on_delay_ratio = 2.0 * r;  // lets A through
     ctrl.scale_on_delay_next_ratio = 0.5 * r;
+    ctrl.scale_on_delay_early_ratio = -1.0;  // a cascade: it would stop the first try
 
     struct Case { const CscLower *next_values; bool on; bool rescales; };
     for (const Case cs : {Case{&A1, true, true}, Case{&A1, false, false}, Case{&E, true, false}}) {
@@ -909,4 +915,205 @@ TEST(ScaleOnDelay, RescuePiecesTimed) {
               FactorStatus::Success);
     EXPECT_EQ(i2.delay_try_seconds, 0.0);
     EXPECT_EQ(i2.delay_matching_seconds, 0.0);
+}
+
+namespace {
+
+// The rescue's conditional early stop of a first try
+// (Control::scale_on_delay_early_ratio) as Solver::factor arms it.
+EarlyWorkStop early_of(const AnalysisKeep &ak, const Control &c) {
+    return {delay_free_front_work(ak), c.scale_on_delay_early_ratio, c.scale_on_delay_early_proj};
+}
+
+// Solver::factor outcomes that must not depend on where a try stopped.
+void expect_same_outcome(const Info &a, const FactorKeep &fa, const Info &b,
+                         const FactorKeep &fb) {
+    EXPECT_EQ(a.delay_stops, b.delay_stops);
+    EXPECT_EQ(a.delay_rescales, b.delay_rescales);
+    EXPECT_EQ(a.scaling_used, b.scaling_used);
+    EXPECT_EQ(a.front_work, b.front_work);
+    EXPECT_EQ(a.delayed_pivots, b.delayed_pivots);
+    EXPECT_EQ(a.num_positive, b.num_positive);
+    EXPECT_EQ(a.num_negative, b.num_negative);
+    EXPECT_EQ(a.num_zero, b.num_zero);
+    EXPECT_EQ(fa.scale, fb.scale);
+    EXPECT_EQ(fa.factor_values, fb.factor_values);
+    EXPECT_EQ(fa.delay_scale, fb.delay_scale);
+    EXPECT_EQ(fa.delay_next, fb.delay_next);
+}
+
+
+} // namespace
+
+// A first try headed past the full limit (a cascade) stops at the early
+// crossing when its inflation so far projects past the threshold: less
+// front work spent, and the same rescue after it (the rescued factor does
+// not depend on where the try stopped).
+TEST(ScaleOnDelay, EarlyStopEndsATryHeadedPastTheLimit) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const Control ctrl = base_control();
+    ASSERT_GE(ctrl.scale_on_delay_early_ratio, 0.0);
+    ASSERT_GT(ctrl.scale_on_delay_ratio, ctrl.scale_on_delay_early_ratio);
+    ASSERT_GT(unscaled_ratio(A, ctrl), ctrl.scale_on_delay_ratio) << "premise: past the limit";
+
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_TRUE(ak->matching_scale.empty());
+    const double F = delay_free_front_work(*ak);
+    const double cap = std::floor(ctrl.scale_on_delay_ratio * F);
+    const double at = std::floor(ctrl.scale_on_delay_early_ratio * F);
+
+    // The engine: the full limit alone stops past it; the rule stops at the
+    // early crossing, with less work.
+    NumericWorkspace ws;
+    FactorKeep f_cap, f_early;
+    Info i_cap, i_early;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_cap, f_cap, ws, cap), FactorStatus::MaxPivotDelays);
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_early, f_early, ws, cap, early_of(*ak, ctrl)),
+              FactorStatus::MaxPivotDelays);
+    std::printf("[ScaleOnDelay] early stop: try work %.2f F (limit alone %.2f F)\n",
+                i_early.front_work / F, i_cap.front_work / F);
+    EXPECT_GT(i_cap.front_work, cap);
+    EXPECT_GT(i_early.front_work, at);
+    EXPECT_LE(i_early.front_work, cap);
+    EXPECT_LT(i_early.front_work, i_cap.front_work);
+    EXPECT_TRUE(f_early.factor_values.empty());
+
+    // Solver::factor, rule on and off: one stopped try and one rescale each,
+    // the same rescued factor.
+    Control off = ctrl;
+    off.scale_on_delay_early_ratio = -1.0;
+    FactorKeep fk_on, fk_off;
+    Info on_i, off_i;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, on_i, fk_on, ws),
+              FactorStatus::Success);
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), off, off_i, fk_off, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(on_i.delay_stops, 1);
+    EXPECT_EQ(on_i.delay_rescales, 1);
+    expect_same_outcome(on_i, fk_on, off_i, fk_off);
+    expect_accurate_solve(s, fk_on, ctrl, A);
+}
+
+// A try whose delays inflate it past the early ratio but not past the full
+// limit, at a modest rate, is let through: the same factor as with the rule
+// off, no stop, no rescale.
+TEST(ScaleOnDelay, EarlyStopLetsAModestTryThrough) {
+    // Mildly scaled, a weak (2,2) block: unscaled work 4.84x the delay-free
+    // one, about 6x projected at the 4x crossing.
+    const CscLower A = kkt(kG, kM, 4.1, 0.5, -0.01);
+    const Control ctrl = base_control();
+    const double r = unscaled_ratio(A, ctrl);
+    ASSERT_GT(r, ctrl.scale_on_delay_early_ratio) << "premise: crosses the early ratio";
+    ASSERT_LT(r, ctrl.scale_on_delay_ratio) << "premise: within the limit";
+
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_TRUE(ak->matching_scale.empty());
+    Control off = ctrl;
+    off.scale_on_delay_early_ratio = -1.0;
+    NumericWorkspace ws;
+    FactorKeep fk_on, fk_off;
+    Info on_i, off_i;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, on_i, fk_on, ws),
+              FactorStatus::Success);
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), off, off_i, fk_off, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(on_i.delay_stops, 0);
+    EXPECT_EQ(on_i.delay_rescales, 0);
+    EXPECT_EQ(on_i.scaling_used, static_cast<int>(ScalingMethod::None));
+    EXPECT_GT(work_ratio(*ak, on_i), ctrl.scale_on_delay_early_ratio);
+    expect_same_outcome(on_i, fk_on, off_i, fk_off);
+}
+
+// A negative early ratio is the plain work limit, bit for bit (engine and
+// Solver::factor), as is a projection threshold nothing reaches.
+TEST(ScaleOnDelay, EarlyStopOffIsThePlainLimit) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const Control ctrl = base_control();
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    const double F = delay_free_front_work(*ak);
+    const double cap = std::floor(ctrl.scale_on_delay_ratio * F);
+    NumericWorkspace ws;
+    FactorKeep f_cap, f_neg, f_inf;
+    Info i_cap, i_neg, i_inf;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_cap, f_cap, ws, cap), FactorStatus::MaxPivotDelays);
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_neg, f_neg, ws, cap, EarlyWorkStop{F, -1.0, 0.0}),
+              FactorStatus::MaxPivotDelays);
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_inf, f_inf, ws, cap,
+                           EarlyWorkStop{F, ctrl.scale_on_delay_early_ratio,
+                                         std::numeric_limits<double>::infinity()}),
+              FactorStatus::MaxPivotDelays);
+    EXPECT_EQ(i_neg.front_work, i_cap.front_work);
+    EXPECT_EQ(i_neg.delayed_pivots, i_cap.delayed_pivots);
+    EXPECT_EQ(i_inf.front_work, i_cap.front_work);
+    EXPECT_EQ(i_inf.delayed_pivots, i_cap.delayed_pivots);
+
+    Control off = ctrl;
+    off.scale_on_delay_early_ratio = -1.0;
+    Control never = ctrl;
+    never.scale_on_delay_early_proj = std::numeric_limits<double>::infinity();
+    FactorKeep fk_off, fk_never;
+    Info off_i, never_i;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), off, off_i, fk_off, ws),
+              FactorStatus::Success);
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), never, never_i, fk_never, ws),
+              FactorStatus::Success);
+    expect_same_outcome(off_i, fk_off, never_i, fk_never);
+}
+
+// Deterministic mode: the rule's decision is the same at every thread count
+// (the subtree engine, at 2 and 4, evaluates it over the fronts in
+// postorder): a stop under a limit nothing reaches when the projection
+// passes the threshold, the run to the end when nothing can pass it; and
+// Solver::factor's solution is the same.
+TEST(ScaleOnDelay, EarlyStopDeterministicAcrossThreadCounts) {
+    const CscLower A = kkt(90, 300, 4.1, 3.0);  // fires (DeterministicAcrossThreadCounts)
+    std::vector<double> x_ref;
+    for (const int threads : {1, 2, 4}) {
+        Control ctrl = base_control();
+        ctrl.deterministic = true;
+        ctrl.num_threads = threads;
+        ctrl.auto_threads = false;  // small test trees
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, ctrl, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        const double F = delay_free_front_work(*ak);
+        const double big = 1e6 * F;  // a limit nothing reaches
+        NumericWorkspace ws;
+        FactorKeep f_ref, f_stop, f_go;
+        Info i_ref, i_stop, i_go;
+        ASSERT_EQ(factor_indef(*ak, A, ctrl, i_ref, f_ref, ws), FactorStatus::Success);
+        if (threads > 1) EXPECT_GT(i_ref.parallel_subtrees, 1) << "threads " << threads;
+        ASSERT_GT(i_ref.front_work, ctrl.scale_on_delay_ratio * F) << "premise: a cascade";
+        EXPECT_EQ(factor_indef(*ak, A, ctrl, i_stop, f_stop, ws, big, early_of(*ak, ctrl)),
+                  FactorStatus::MaxPivotDelays)
+            << "threads " << threads;
+        EXPECT_LT(i_stop.front_work, i_ref.front_work) << "threads " << threads;
+        EarlyWorkStop never = early_of(*ak, ctrl);
+        never.proj = std::numeric_limits<double>::infinity();
+        EXPECT_EQ(factor_indef(*ak, A, ctrl, i_go, f_go, ws, big, never), FactorStatus::Success)
+            << "threads " << threads;
+        EXPECT_EQ(i_go.front_work, i_ref.front_work) << "threads " << threads;
+        EXPECT_EQ(i_go.delayed_pivots, i_ref.delayed_pivots) << "threads " << threads;
+
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, ctrl, i1, fk), FactorStatus::Success);
+        EXPECT_EQ(i1.delay_stops, 1) << "threads " << threads;
+        EXPECT_EQ(i1.delay_rescales, 1) << "threads " << threads;
+        std::vector<double> x(static_cast<std::size_t>(A.n), 1.0);
+        Info si;
+        ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), static_cast<int>(A.n), 1), 0);
+        if (x_ref.empty()) x_ref = x;
+        else EXPECT_EQ(x, x_ref) << "threads " << threads;
+    }
 }

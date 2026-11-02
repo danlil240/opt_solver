@@ -557,6 +557,10 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
+    // SMF_BENCH_SCALE_ON_DELAY_EARLY (double; negative = off): Control::scale_on_delay_early_ratio.
+    if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_EARLY")) ctrl.scale_on_delay_early_ratio = std::atof(e);
+    // SMF_BENCH_SCALE_ON_DELAY_EARLY_PROJ (double): Control::scale_on_delay_early_proj.
+    if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_EARLY_PROJ")) ctrl.scale_on_delay_early_proj = std::atof(e);
     // SMF_BENCH_MATCHER = ssp | hybrid: Control::matching_algorithm
     // (ShortestPath, Hybrid; the auto matching trial's matcher). Anything
     // else is an error (exit code 2), not a silent fallback to the default.

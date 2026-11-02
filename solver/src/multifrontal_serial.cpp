@@ -168,6 +168,82 @@ struct NodeBlock {
   const Int *r = nullptr;     // and row ids
 };
 
+// The conditional early stop of a work-limited factorization
+// (EarlyWorkStop, Control::scale_on_delay_early_ratio), decided over the
+// fronts in postorder whatever order they run in. Each front reports its
+// work w before it runs (reach); a cursor walks the postorder over the
+// works reported so far, summing them (done) and the fronts' delay-free
+// work (free_done, the front included); at the front where done <= at <
+// done + w it decides once: stop iff (done + w) / free_done > proj. The
+// works are those of the finished factorization, so the decision is a
+// function of the factor alone: the same at every thread count in
+// deterministic mode. The serial engine reaches the fronts in postorder
+// (the cursor is the front itself); the subtree engine's threads store
+// their fronts' works and advance the shared cursor under a lock, and the
+// last one to report has every work before it, so the decision is always
+// made if the crossing is reached. The front whose report makes it stop is
+// not factored (any front, on the subtree engine: the decision is made
+// when the cursor reaches the crossing).
+class EarlyGate {
+ public:
+  EarlyGate(const AnalysisKeep &keep, const EarlyWorkStop &e, long long at, bool shared)
+      : keep_(keep), at_(at), proj_(e.proj), shared_(shared) {
+    if (!shared_) return;  // the serial engine needs no tables
+    const std::size_t ns = keep.supernodes.size();
+    pos_.resize(ns);
+    for (std::size_t k = 0; k < keep.postorder.size(); ++k)
+      pos_[static_cast<std::size_t>(keep.postorder[k])] = k;
+    works_ = std::make_unique<std::atomic<long long>[]>(ns);
+    for (std::size_t k = 0; k < ns; ++k) works_[k].store(-1, std::memory_order_relaxed);
+  }
+
+  // Supernode s, about to run with work w: true = stop the factorization.
+  bool reach(Int s, long long w) {
+    if (verdict_.load(std::memory_order_acquire) != kOpen) return stopped();
+    if (!shared_) {  // the serial engine: s is the cursor's front
+      assert(keep_.postorder[cursor_] == s);
+      step(w);
+      return stopped();
+    }
+    works_[pos_[static_cast<std::size_t>(s)]].store(w, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(mu_);
+    while (verdict_.load(std::memory_order_relaxed) == kOpen && cursor_ < pos_.size()) {
+      const long long wk = works_[cursor_].load(std::memory_order_relaxed);
+      if (wk < 0) break;
+      step(wk);
+    }
+    return stopped();
+  }
+
+ private:
+  static constexpr int kOpen = 0, kGo = 1, kStop = 2;
+  bool stopped() const { return verdict_.load(std::memory_order_acquire) == kStop; }
+  // The front at the cursor, with work w.
+  void step(long long w) {
+    const Int s = keep_.postorder[cursor_];
+    const double f = static_cast<double>(keep_.front_size(s));
+    free_done_ += static_cast<double>(keep_.supernodes[static_cast<std::size_t>(s)].width()) * f * f;
+    if (done_ <= at_ && done_ + w > at_) {
+      const bool stop = static_cast<double>(done_ + w) > proj_ * free_done_;
+      verdict_.store(stop ? kStop : kGo, std::memory_order_release);
+    }
+    done_ += w;
+    ++cursor_;
+  }
+
+  const AnalysisKeep &keep_;
+  long long at_;
+  double proj_;
+  bool shared_;
+  std::vector<std::size_t> pos_;  // shared: supernode -> postorder index
+  std::unique_ptr<std::atomic<long long>[]> works_;  // shared: reported works, -1 none yet
+  std::mutex mu_;
+  std::size_t cursor_ = 0;  // postorder index of the next front to account
+  long long done_ = 0;
+  double free_done_ = 0.0;
+  std::atomic<int> verdict_{kOpen};
+};
+
 struct FactorContext {
   const AnalysisKeep &keep;
   const Int *acp;
@@ -212,6 +288,8 @@ struct FactorContext {
   const std::uint8_t *top = nullptr;
   ChunkArena<double> *root_values = nullptr;
   ChunkArena<Int> *root_rows = nullptr;
+  // The conditional early stop under the work limit (null: off).
+  EarlyGate *early = nullptr;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -456,12 +534,13 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // stop before this front instead of after it (the same decision; a
   // delay cascade's last front can be most of the work). Its work is
   // counted, so a stopped run reports front work past the limit either way.
+  // The early gate (EarlyGate) stops it the same way.
   if (cx.work_cap >= 0) {
     const long long w = static_cast<long long>(num_elig) * f * f;
     const long long done = cx.work_shared != nullptr
                                ? cx.work_shared->load(std::memory_order_relaxed)
                                : P.st.front_work;
-    if (done + w > cx.work_cap) {
+    if (done + w > cx.work_cap || (cx.early != nullptr && cx.early->reach(s, w))) {
       P.st.front_work += w;
       for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
       release_child_blocks();
@@ -829,7 +908,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      double budget_static_pivot,
                                      bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st,
-                                     double work_limit) {
+                                     double work_limit, const EarlyWorkStop &early) {
   const std::size_t n = static_cast<std::size_t>(keep.n);
   const std::size_t ns = keep.supernodes.size();
 
@@ -1130,6 +1209,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     return in;
   };
 
+  // The conditional early stop (EarlyWorkStop) under an armed work limit:
+  // shared by the threads on the subtree engine.
+  std::unique_ptr<EarlyGate> early_gate;
+  if (work_armed && early.on()) {
+    const double at = std::floor(early.ratio * early.free_work);
+    early_gate = std::make_unique<EarlyGate>(
+        keep, early,
+        at >= 9.0e18 ? std::numeric_limits<long long>::max() : static_cast<long long>(at),
+        threads > 1);
+  }
+
   if (threads <= 1) {
     if (det_tc != nullptr) {
       if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
@@ -1139,7 +1229,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, nullptr,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
-                           ctrl.small_front_kernels, work_cap};
+                           ctrl.small_front_kernels, work_cap,
+                           nullptr, nullptr, nullptr, nullptr, early_gate.get()};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1209,7 +1300,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, tiles_on ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
-                           &ws.tree_par->root_rows};
+                           &ws.tree_par->root_rows, early_gate.get()};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

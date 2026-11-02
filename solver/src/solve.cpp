@@ -265,7 +265,10 @@ std::uint64_t zero_signature(const std::vector<double> &cv) {
 // factorization runs as Auto resolves it, to the end, and later ones run
 // unarmed while the values' zero pattern stays the same. A first try let
 // through past Control::scale_on_delay_next_ratio leaves the next one to
-// run under that ratio as its limit. Only a factorization that ran to the
+// run under that ratio as its limit. A first try under the full limit may
+// stop earlier, at the early ratio's crossing, when its inflation so far
+// projects past Control::scale_on_delay_early_proj (EarlyWorkStop); that
+// stop takes the limit trip's path. Only a factorization that ran to the
 // end updates the FactorKeep.
 template <class Values, class Run>
 FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, Info &info,
@@ -370,7 +373,14 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
           next && ctrl.scale_on_delay_next_ratio >= 0.0
               ? std::min(limit, std::floor(ctrl.scale_on_delay_next_ratio * free_work))
               : limit;
-      const FactorStatus st = run(ak, ctrl, try_limit);
+      // Control::scale_on_delay_early_ratio: a try whose limit is above
+      // the early ratio may stop at its crossing (EarlyWorkStop), as a
+      // limit trip; one under the tighter next limit is left as it is.
+      EarlyWorkStop early;
+      if (ctrl.scale_on_delay_early_ratio >= 0.0 &&
+          try_limit > std::floor(ctrl.scale_on_delay_early_ratio * free_work))
+        early = {free_work, ctrl.scale_on_delay_early_ratio, ctrl.scale_on_delay_early_proj};
+      const FactorStatus st = run(ak, ctrl, try_limit, early);
       if (st != FactorStatus::MaxPivotDelays) {
         // Let through, but costly: the next one runs under the tighter limit.
         if (ran(st) && ctrl.scale_on_delay_next_ratio >= 0.0 &&
@@ -498,8 +508,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
     st = factor_posdef(ak, ctrl, info, fkeep);
   } else {
     st = factor_with_matching_trigger(ak, ctrl, info, fkeep, [&] { return ak.cleaned.values; },
-                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
-      return factor_indef(k, c, info, fkeep, limit);
+                                      [&](const AnalysisKeep &k, const Control &c, double limit,
+                                          const EarlyWorkStop &early = {}) {
+      return factor_indef(k, c, info, fkeep, limit, early);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);
@@ -524,8 +535,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
                                                     : std::vector<double>{};
     };
     st = factor_with_matching_trigger(ak, ctrl, info, fkeep, values,
-                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
-      return factor_indef(k, updated, c, info, fkeep, ws, limit);
+                                      [&](const AnalysisKeep &k, const Control &c, double limit,
+                                          const EarlyWorkStop &early = {}) {
+      return factor_indef(k, updated, c, info, fkeep, ws, limit, early);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);
@@ -547,8 +559,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   } else {
     st = factor_with_matching_trigger(ak, ctrl, info, fkeep,
                                       [&] { return cleaned_values(ak, fv); },
-                                      [&](const AnalysisKeep &k, const Control &c, double limit) {
-      return factor_indef(k, fv, c, info, fkeep, ws, limit);
+                                      [&](const AnalysisKeep &k, const Control &c, double limit,
+                                          const EarlyWorkStop &early = {}) {
+      return factor_indef(k, fv, c, info, fkeep, ws, limit, early);
     });
   }
   build_inverse_diag(fkeep, ctrl, info);

@@ -121,6 +121,28 @@ struct Control {
     // pays no matching. Not after a factor with the analysed values' own
     // matching scale (a new one would be the same). Negative: off.
     double         scale_on_delay_next_ratio = 4.0;
+    // Conditional early stop of a first try whose limit is above
+    // scale_on_delay_early_ratio times the delay-free front work F (the
+    // full-ratio try; one under scale_on_delay_next_ratio is untouched): at
+    // the front whose work takes the count past early_ratio x F, the try
+    // stops, as a work-limit trip (the matching scaling follows), when its
+    // front work so far, that front included, exceeds
+    // scale_on_delay_early_proj times the delay-free work of the fronts
+    // reached so far (that front included): the try's inflation
+    // extrapolated. Otherwise it runs on to the full limit. The fronts are
+    // taken in postorder whatever the engine, so the decision is the same
+    // at every num_threads in deterministic mode. Probe (2026-11-02,
+    // fronttier recommended track, 1T, full limit 16): tries that ended
+    // past 16x measured 10.9-84.7 at the 4x crossing, tries let through
+    // between 4x and 16x 4.0-6.4 (case500's first step, 6.25 and ending at
+    // 16.6, is left to the full limit as before). Local 1T wall against the
+    // full limit alone: pde_control_120 rec 0.66, cops_glider_400 0.83,
+    // ncvxqp9 0.89; pglib300, pglib500 and cops_rocket_800 unchanged, with
+    // the full limit's rescale counts (a fixed limit of 4 cost them extra
+    // rescales, 1.06-1.20 wall). The 12900K gate numbers follow.
+    // Negative early_ratio: off.
+    double         scale_on_delay_early_ratio = 4.0;
+    double         scale_on_delay_early_proj = 8.0;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:
