@@ -113,13 +113,18 @@ namespace smf
     // and the remaining searches and the exact ordering, which the calling
     // thread stops once the initial matching rejects (both would be
     // discarded). Stopping is checked between search slices and before the
-    // ordering, never inside them, so it changes no result.
+    // ordering, never inside them, so it changes no result. With
+    // keep_budget_fork, a matcher past the budget is forked before the
+    // calling thread learns the verdict, so the fork is the budget point's
+    // (as the serial trial's paused matcher) whatever the worker's searches
+    // reach before they are stopped.
     class ConcurrentTrial
     {
     public:
         ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, const Int *xadj,
-                        const Int *adj, std::vector<Int> &amd_work)
-            : C_(C), budget_(budget), refactors_(expected_refactors), xadj_(xadj), adj_(adj), amd_work_(amd_work)
+                        const Int *adj, std::vector<Int> &amd_work, bool keep_budget_fork)
+            : C_(C), budget_(budget), refactors_(expected_refactors), xadj_(xadj), adj_(adj), amd_work_(amd_work),
+              keep_budget_fork_(keep_budget_fork)
         {
             try
             {
@@ -170,6 +175,9 @@ namespace smf
                 std::rethrow_exception(error_);
         }
         bool ordered() const { return ordered_; }
+        // After finish(), with keep_budget_fork and the budget stopping the
+        // searches: the matcher as advance(budget) left it. Else null.
+        std::shared_ptr<const SymmetricMatcher> take_budget_fork() { return std::move(budget_fork_); }
         std::vector<Int> perm;
         MatchingOrderStats stats;
         std::vector<double> diagonal_scale;
@@ -194,6 +202,10 @@ namespace smf
                     return;
                 }
                 const bool within = matcher.advance(budget_);
+                // Before phase1_ready_: the searches below continue for as
+                // long as the calling thread takes to stop them.
+                if (!within && keep_budget_fork_)
+                    budget_fork_ = matcher.fork();
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     within_ = within;
@@ -233,6 +245,8 @@ namespace smf
         const Int *const xadj_;
         const Int *const adj_;
         std::vector<Int> &amd_work_;
+        const bool keep_budget_fork_;
+        std::shared_ptr<const SymmetricMatcher> budget_fork_;
         std::thread thread_;
         std::mutex mutex_;
         std::condition_variable ready_cv_;
@@ -515,10 +529,18 @@ namespace smf
         const double budget_edges = budget_passes * 2.0 * static_cast<double>(C.row_idx.size());
         const long long budget =
             (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
+        // The scale-on-delay rescue could fire under this Control: a
+        // rejecting trial keeps its matcher at the budget point for it
+        // (AnalysisKeep::rescue_matcher).
+        const bool keep_rescue_matcher = control.scale_on_delay_keep_matcher &&
+                                         control.scale_on_delay_ratio >= 0.0 &&
+                                         control.scaling == ScalingMethod::Auto &&
+                                         control.pivot_u >= kWeakPivotRatio;
+        std::shared_ptr<const SymmetricMatcher> budget_matcher;  // a rejected trial's, at the budget
         if (auto_matching && control.num_threads > 1)
         {
             concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors, xadj, adj,
-                                                           analyse_scratch_worker_);
+                                                           analyse_scratch_worker_, keep_rescue_matcher);
         }
         else if (auto_matching)
         {
@@ -759,6 +781,7 @@ namespace smf
             {
                 concurrent->stop();
                 concurrent->finish();
+                budget_matcher = concurrent->take_budget_fork();
             }
             concurrent.reset();
         }
@@ -775,6 +798,11 @@ namespace smf
                                                     control.expected_refactors, xadj, adj);
                 if (auto_matching)
                     info.matching_trial = MatchingTrial::ResumedExact;
+            }
+            else if (keep_rescue_matcher)
+            {
+                // Nothing advanced it since advance(budget) returned false.
+                budget_matcher = std::move(paused_matcher);
             }
             paused_matcher.reset();
         }
@@ -989,6 +1017,13 @@ namespace smf
         if (keep->matching_rejected && (info.matching_trial == MatchingTrial::Exact ||
                                         info.matching_trial == MatchingTrial::ResumedExact))
             keep->rejected_matching_scale = std::move(matching_stats.scale);
+        keep->matching_trial = info.matching_trial;
+        // Built on C, i.e. keep->cleaned (moved above: the matcher holds no
+        // reference to it). Released otherwise, so a trial that cannot be
+        // rescued holds no cost graph past the analysis.
+        if (keep_rescue_matcher && info.matching_trial == MatchingTrial::RejectedInitial)
+            keep->rescue_matcher = std::move(budget_matcher);
+        budget_matcher.reset();
         keep->matching_trigger_eligible =
             auto_order && !use_identity_ordering &&
             control.matrix_type == MatrixType::RealSymmetricIndefinite &&

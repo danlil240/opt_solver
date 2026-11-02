@@ -557,6 +557,8 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY_NEXT")) ctrl.scale_on_delay_next_ratio = std::atof(e);
+    // SMF_BENCH_RESCUE_KEEP_MATCHER = 0 | 1 (Control::scale_on_delay_keep_matcher).
+    if (const char *e = std::getenv("SMF_BENCH_RESCUE_KEEP_MATCHER")) ctrl.scale_on_delay_keep_matcher = std::atoi(e) != 0;
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,

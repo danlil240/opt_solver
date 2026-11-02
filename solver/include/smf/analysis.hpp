@@ -13,6 +13,8 @@
 
 namespace smf {
 
+class SymmetricMatcher;
+
 /// A process-unique, nonzero number for each AnalysisKeep constructed.
 inline std::uint64_t next_analysis_serial() noexcept {
     static std::atomic<std::uint64_t> counter{0};
@@ -71,6 +73,19 @@ struct AnalysisKeep {
     /// trigger (Control::scale_on_delay_ratio) reuses it when it factors
     /// those same values. Else empty.
     std::vector<double>      rejected_matching_scale;
+    /// The analysis' Info::matching_trial.
+    MatchingTrial            matching_trial = MatchingTrial::None;
+    /// matching_trial RejectedInitial: the trial's matcher of the analysed
+    /// values (cleaned, MatchingSearchOrder::Degree) at the budget point
+    /// (advance(budget) returned false, nothing ran after that), for the
+    /// scale-on-delay rescue to resume instead of matching from scratch.
+    /// Kept only when the analysis' Control could arm the rescue
+    /// (scale_on_delay_keep_matcher, scale_on_delay_ratio >= 0,
+    /// ScalingMethod::Auto, pivot_u >= kWeakPivotRatio); else null. It holds
+    /// the O(nnz) cost graph, so factor() releases it; mutable for that,
+    /// because factor() takes the keep const: one keep must not be factored
+    /// from two threads at once.
+    mutable std::shared_ptr<const SymmetricMatcher> rescue_matcher;
     Int                      n = 0;             ///< matrix order (= cleaned.n)
     /// Auto ordering of an indefinite matrix with values that did not end
     /// up with the matching ordering: factor() may re-analyse with it

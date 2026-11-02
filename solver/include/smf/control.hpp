@@ -111,6 +111,14 @@ struct Control {
     // matching scaling is computed anew. Negative: a new matching scaling
     // for every factorization once the trigger has fired (no probes).
     double         scale_on_delay_reuse_tol = 0.1;
+    // An analysis whose matching trial rejected on its initial matching
+    // (MatchingTrial::RejectedInitial) keeps the trial's matcher at the
+    // budget point (AnalysisKeep::rescue_matcher) when this Control could
+    // arm the scale-on-delay rescue, so the rescue of the analysed values
+    // resumes those searches instead of matching from scratch. Evidence for
+    // the default: to be filled in by the rescue-cost board (Task 4). False:
+    // nothing is kept (main's behaviour; the A/B switch).
+    bool           scale_on_delay_keep_matcher = true;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter

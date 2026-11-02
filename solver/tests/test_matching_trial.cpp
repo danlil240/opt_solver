@@ -245,6 +245,98 @@ TEST(MatchingTrial, RejectsOnInitialMatchingPastBudget) {
     EXPECT_TRUE(a2->matching_scale.empty());
 }
 
+// A trial rejected on its initial matching keeps its matcher as the budget
+// left it (advance(budget) returned false, nothing after that), for the
+// scale-on-delay rescue to resume: the same work and duals as a matcher of
+// the cleaned matrix advanced to the same budget.
+TEST(MatchingTrial, RejectedInitialKeepsTheBudgetMatcher) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AutoSerial;
+    c.matching_search_budget = 0.5;  // some searches run (0.0 runs none)
+    EXPECT_TRUE(c.scale_on_delay_keep_matcher);
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    ASSERT_NE(ak, nullptr);
+    ASSERT_EQ(info.matching_trial, MatchingTrial::RejectedInitial);
+    EXPECT_EQ(ak->matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_NE(ak->rescue_matcher, nullptr);
+    SymmetricMatcher ref(ak->cleaned, MatchingSearchOrder::Degree);
+    const long long budget = static_cast<long long>(0.5 * 2.0 * static_cast<double>(ak->cleaned.row_idx.size()));
+    ASSERT_FALSE(ref.advance(budget));
+    EXPECT_GT(ref.work(), 0);
+    EXPECT_EQ(ak->rescue_matcher->work(), ref.work());
+    const MatchingResult kept = ak->rescue_matcher->current();
+    const MatchingResult want = ref.current();
+    EXPECT_EQ(kept.scale, want.scale);
+    EXPECT_EQ(kept.col_to_row, want.col_to_row);
+}
+
+// The matcher is kept only when the analysis' Control could arm the
+// rescue (scale_on_delay_keep_matcher, scale_on_delay_ratio >= 0,
+// ScalingMethod::Auto, pivot_u >= kWeakPivotRatio) and the trial rejected
+// on its initial matching; otherwise nothing is held past the analysis.
+// Switching it off changes nothing else.
+TEST(MatchingTrial, KeptMatcherOnlyWhenTheRescueIsArmed) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    Control base;
+    base.matrix_type = MatrixType::RealSymmetricIndefinite;
+    base.ordering = OrderingMethod::AutoSerial;
+    base.matching_search_budget = 0.5;
+    Solver s0;
+    Info i0;
+    auto a0 = s0.analyse(A, base, i0);
+    ASSERT_NE(a0, nullptr);
+    ASSERT_EQ(i0.matching_trial, MatchingTrial::RejectedInitial);
+    ASSERT_NE(a0->rescue_matcher, nullptr);
+
+    const auto unarmed = [&](const Control &c, const char *what, MatchingTrial trial) {
+        Solver s;
+        Info i;
+        auto a = s.analyse(A, c, i);
+        ASSERT_NE(a, nullptr) << what;
+        EXPECT_EQ(i.matching_trial, trial) << what;
+        EXPECT_EQ(a->matching_trial, trial) << what;
+        EXPECT_EQ(a->rescue_matcher, nullptr) << what;
+    };
+    Control c = base;
+    c.pivot_u = 1e-8;
+    unarmed(c, "pivot_u 1e-8", MatchingTrial::RejectedInitial);
+    c = base;
+    c.scale_on_delay_ratio = -1.0;
+    unarmed(c, "scale_on_delay_ratio -1", MatchingTrial::RejectedInitial);
+    c = base;
+    c.scaling = ScalingMethod::None;
+    unarmed(c, "scaling None", MatchingTrial::RejectedInitial);
+    c = base;
+    c.scale_on_delay_keep_matcher = false;
+    unarmed(c, "keep_matcher false", MatchingTrial::RejectedInitial);
+    {
+        Solver s;
+        Info i;
+        auto a = s.analyse(A, c, i);
+        ASSERT_NE(a, nullptr);
+        EXPECT_EQ(i.ordering_used, i0.ordering_used);
+        EXPECT_EQ(a->perm, a0->perm);
+        EXPECT_EQ(a->matching_scale, a0->matching_scale);
+        EXPECT_EQ(a->rejected_matching_scale, a0->rejected_matching_scale);
+    }
+    c = base;
+    c.matching_search_budget = -1.0;
+    unarmed(c, "budget -1", MatchingTrial::Exact);
+
+    Control d = base;
+    Solver sd;
+    Info id;
+    auto ad = sd.analyse(diagonal_kkt(10000, 3), d, id);
+    ASSERT_NE(ad, nullptr);
+    EXPECT_EQ(id.matching_trial, MatchingTrial::Diagonal);
+    EXPECT_EQ(ad->matching_trial, MatchingTrial::Diagonal);
+    EXPECT_EQ(ad->rescue_matcher, nullptr);
+}
+
 // The trial records the flop ratios it decided on, so the initial phase's
 // margin to the rule is observable: the exact trial its exact ratio only,
 // a trial rejected on the initial matching its initial ratio only.
@@ -500,7 +592,7 @@ TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
     const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(8000, 2000, 1),
                              opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 6, 1.0)};
     for (const CscLower &A : mats) {
-        for (double budget : {-1.0, 0.0, 2.0}) {
+        for (double budget : {-1.0, 0.0, 0.5, 2.0}) {
             Control c1;
             c1.matrix_type = MatrixType::RealSymmetricIndefinite;
             c1.ordering = OrderingMethod::AutoSerial;
@@ -526,6 +618,19 @@ TEST(MatchingTrial, ConcurrentTrialIsTheSerialOne) {
                 EXPECT_EQ(a4->matching_scale, a1->matching_scale) << "budget " << budget;
                 EXPECT_EQ(a4->rejected_matching_scale, a1->rejected_matching_scale) << "budget " << budget;
                 EXPECT_EQ(a4->matching_rejected, a1->matching_rejected) << "budget " << budget;
+                // The kept matcher is the budget point's at every thread
+                // count, not wherever the worker's searches got to.
+                EXPECT_EQ(a4->matching_trial, a1->matching_trial) << "budget " << budget;
+                if (a1->rescue_matcher) {
+                    ASSERT_NE(a4->rescue_matcher, nullptr) << "budget " << budget;
+                    EXPECT_EQ(a4->rescue_matcher->work(), a1->rescue_matcher->work()) << "budget " << budget;
+                    const MatchingResult m1 = a1->rescue_matcher->current();
+                    const MatchingResult m4 = a4->rescue_matcher->current();
+                    EXPECT_EQ(m4.scale, m1.scale) << "budget " << budget;
+                    EXPECT_EQ(m4.col_to_row, m1.col_to_row) << "budget " << budget;
+                } else {
+                    EXPECT_EQ(a4->rescue_matcher, nullptr) << "budget " << budget;
+                }
             }
         }
     }
