@@ -1,8 +1,9 @@
 #pragma once
 
 // Epsilon-scaling auction on the sparse part of the matching's cost graph:
-// a fast approximate (eps-optimal) start for MatchingAlgorithm::Auction,
-// whose exact shortest-path repair then finishes the matching.
+// MatchingAlgorithm::Hybrid runs it, warm from the shortest-path searches'
+// duals and matching, on the free columns left at its switch; the exact
+// repair and the searches then finish the matching.
 
 #include "matching_internal.hpp"
 
@@ -30,11 +31,11 @@ struct AuctionState {        // resumable: everything advance needs to continue
 };
 
 // opt with every field valid for auction_advance: a non-finite or
-// out-of-domain field takes def's value (AuctionOptions{} for Auction,
-// hybrid_auction_options() for Hybrid), and the valid ones are clamped
+// out-of-domain field takes def's value (SymmetricMatcher under Hybrid passes
+// hybrid_auction_options()), and the valid ones are clamped
 // (scaling_matching.hpp states the rule). SymmetricMatcher applies it at the
 // public boundary.
-AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def = AuctionOptions{});
+AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def);
 
 // Runs bids until every sparse column is matched in the last phase (Done),
 // work >= work_budget at a bid boundary (Paused; work_budget < 0: none),
@@ -48,9 +49,11 @@ AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def = 
 //
 // Preconditions (SymmetricMatcher's constructor and advance() uphold them):
 // the incoming matching pairs only sparse columns with sparse rows,
-// row_match and col_to_row agree, and first_queue lists exactly the free
-// sparse columns (in the search order); it is read when st.phase == -1. The
-// incoming duals are feasible on every sparse edge. opt.eps_factor > 1,
+// row_match and col_to_row agree, and first_queue lists free sparse
+// columns, the ones to bid for (in the search order; other free columns,
+// such as Hybrid's failed searches, stay free and unqueued); it is read when
+// st.phase == -1. The incoming matching is 0-CS (warm: matched edges tight)
+// and the incoming duals are feasible on every sparse edge. opt.eps_factor > 1,
 // opt.eps_final > 0 and opt.bid_cap > 0, all finite (validated()).
 //
 // On return the duals are feasible on every sparse edge (c - u - v >= 0)

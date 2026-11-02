@@ -127,16 +127,16 @@ enum class MatchingTrial {
 // The engine of SymmetricMatcher's sparse part (phase 1).
 //   ShortestPath - one shortest augmenting path search per free column
 //                  (MC64 job 5).
-//   Auction      - an epsilon-scaling auction (AuctionOptions), then an exact
-//                  repair: the duals made feasible, the matched edges left
-//                  loose unmatched, and their columns searched as above. Same
-//                  optimum; the matching and scaling may differ on ties.
 //   Hybrid       - ShortestPath searches until their work passes
-//                  AuctionOptions::switch_passes, then the auction (warm from
-//                  the searches' exact duals) on the free columns left, the
-//                  exact repair and the remaining searches. Bitwise
-//                  ShortestPath when phase 1 ends before the switch.
-enum class MatchingAlgorithm { ShortestPath = 0, Auction = 1, Hybrid = 2 };
+//                  AuctionOptions::switch_passes, then an epsilon-scaling
+//                  auction (warm from the searches' exact duals) on the free
+//                  columns left, an exact repair (the duals made feasible,
+//                  the matched edges left loose unmatched), the remaining
+//                  searches and canonical duals. Same optimum; the matching
+//                  may differ on ties. Bitwise ShortestPath when phase 1 ends
+//                  before the switch.
+// (Value 1 was a pure auction engine, removed; nothing persists the value.)
+enum class MatchingAlgorithm { ShortestPath = 0, Hybrid = 2 };
 
 // Dense kernel for the fully summed columns of an indefinite front.
 //   Tpp  - threshold partial pivoting (ldlt_factor_front), blocked BLAS-3,

@@ -1,14 +1,15 @@
 // detail::auction_advance (solver/src/auction_matching.hpp): the
-// epsilon-scaling auction on the sparse part, on its own invariants; then
-// SymmetricMatcher with MatchingAlgorithm::Auction (the auction plus its
-// exact shortest-path repair) against the ShortestPath matcher. Every
-// test starts from the matcher constructor's duals on the cost graph:
-// u_i = min_j c_ij, v_j = min_i (c_ij - u_i), and (warm) its greedy matching
-// on tight edges.
+// epsilon-scaling auction on the sparse part, on its own invariants (each
+// kernel test starts from the matcher constructor's duals on the cost graph,
+// u_i = min_j c_ij, v_j = min_i (c_ij - u_i), and its greedy matching on
+// tight edges); then SymmetricMatcher with MatchingAlgorithm::Hybrid (the
+// shortest-path searches, the auction on the tail past the switch, its exact
+// repair and the canonical duals) against the ShortestPath matcher.
 
 #include "../src/auction_matching.hpp"
 #include "../src/matching_internal.hpp"
 
+#include "smf/control.hpp"
 #include "smf/scaling_matching.hpp"
 #include "kkt_test_matrices.hpp"
 
@@ -247,10 +248,43 @@ CscLower from_entries(int n, std::vector<std::tuple<int, int, double>> e) {
     return A;
 }
 
-MatchingResult run_auction(const CscLower &A, const AuctionOptions *opt = nullptr) {
-    SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction, opt);
+// The Hybrid defaults with the switch moved to `passes`.
+AuctionOptions hybrid_at(double passes) {
+    AuctionOptions o = hybrid_auction_options();
+    o.switch_passes = passes;
+    return o;
+}
+
+// Hybrid run to the end, by default with the switch forced at the first
+// search (hybrid_at(0.0)); `switched` reports SymmetricMatcher::switched().
+MatchingResult run_hybrid(const CscLower &A, const AuctionOptions *opt = nullptr, bool *switched = nullptr) {
+    const AuctionOptions forced = hybrid_at(0.0);
+    SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, opt != nullptr ? opt : &forced);
     EXPECT_TRUE(m.advance());
+    if (switched != nullptr) *switched = m.switched();
     return m.current();
+}
+
+// Random KKTs whose sparse part has no perfect matching (30% of the
+// variables lack a diagonal, off-diagonals of 6 decades, 1-3 dense rows):
+// an auction on their sparse part starts a price war. Under the removed
+// pure Auction engine, before repair() reset the war's rows, 6 of these 12
+// seeds failed the scaling bounds (scales clamped at exp(+-340)).
+CscLower deficient_kkt(unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unif(0.0, 1.0);
+    const int n_x = 2000, k = 1 + static_cast<int>(seed % 3);
+    std::vector<std::tuple<int, int, double>> e;
+    for (int j = 0; j < n_x; ++j) {
+        if (unif(rng) < 0.7) e.emplace_back(j, j, std::pow(10.0, 6.0 * unif(rng) - 3.0));
+        const int t = 1 + static_cast<int>(unif(rng) * 2.0);
+        for (int q = 0; q < t; ++q) {
+            const int i = static_cast<int>(unif(rng) * n_x);
+            if (i != j) e.emplace_back(std::max(i, j), std::min(i, j), std::pow(10.0, 6.0 * unif(rng) - 3.0));
+        }
+        e.emplace_back(n_x + j % k, j, std::pow(10.0, 2.0 * unif(rng) - 1.0));
+    }
+    return from_entries(n_x + k, e);
 }
 
 void expect_bitwise(const MatchingResult &a, const MatchingResult &b) {
@@ -363,26 +397,6 @@ TEST(AuctionMatching, KernelPausesAtBidBoundaries) {
     }
 }
 
-TEST(AuctionMatching, KernelColdAndWarmStartsAgreeOnProduct) {
-    for (unsigned seed = 1; seed <= 3; ++seed) {
-        const CscLower A = opf_like_kkt(3000, 1200, seed);
-        AuctionOptions warm, cold;
-        cold.warm = false;
-        Kernel kw, kc;
-        ASSERT_TRUE(setup(A, kw));
-        ASSERT_TRUE(setup(A, kc));
-        ASSERT_EQ(kw.advance(warm), AuctionStatus::Done) << "seed=" << seed;
-        ASSERT_EQ(kc.advance(cold), AuctionStatus::Done) << "seed=" << seed;
-        ASSERT_TRUE(all_matched(kw.col_to_row));
-        ASSERT_TRUE(all_matched(kc.col_to_row));
-        expect_eps_cs(kw, warm.eps_final);
-        expect_eps_cs(kc, cold.eps_final);
-        EXPECT_NEAR(log_product(kw.g, kw.col_to_row), log_product(kc.g, kc.col_to_row),
-                    static_cast<double>(A.n) * warm.eps_final)
-            << "seed=" << seed;
-    }
-}
-
 // A sparse column whose every entry lies in a dense row has nothing to bid
 // on: the kernel drops it (it stays free for the searches) and finishes the
 // other columns, then reports Capped, again on every later call. Resuming
@@ -397,8 +411,8 @@ TEST(AuctionMatching, KernelDropsAColumnWithoutSparseRows) {
     A.values = {1.0, 1e-3, 1.0, 1e-3, 1.0, 1e-3, 1.0, 1e-3, 1.0};
     const auto fresh = [&A](Kernel &k) {
         ASSERT_TRUE(setup(A, k));
-        // Mark 5 dense and start every sparse column free (as a cold start
-        // does), column 0 first in the queue.
+        // Mark 5 dense and start every sparse column free (an empty
+        // matching), column 0 first in the queue.
         k.dense[5] = 1;
         std::fill(k.row_match.begin(), k.row_match.end(), -1);
         std::fill(k.col_to_row.begin(), k.col_to_row.end(), -1);
@@ -433,126 +447,44 @@ TEST(AuctionMatching, KernelDropsAColumnWithoutSparseRows) {
     EXPECT_TRUE(bitwise_equal(one.row_match, k.row_match));
 }
 
-// SymmetricMatcher under MatchingAlgorithm::Auction reaches a maximum-product
-// matching with the scaling guarantees: on the scaled OPF KKT (phase 1
-// only) and on a KKT with 3 dense rows (phases 1-3).
-TEST(AuctionMatching, SameOptimumAsShortestPathOnKkt) {
-    std::vector<CscLower> cases;
-    for (unsigned seed = 1; seed <= 3; ++seed) cases.push_back(scaled_opf_kkt(3000, 1200, seed, 4.0));
-    cases.push_back(dense_row_kkt(6000, 3, 5));
-    ASSERT_EQ(count_dense(cases.back()), 3);  // phases 2-3 run
-    for (std::size_t c = 0; c < cases.size(); ++c) {
-        const CscLower &A = cases[c];
-        SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        // The auction has free sparse columns to bid for.
-        ASSERT_LT(m.initial().matched_rank, A.n - count_dense(A)) << "case " << c;
-        ASSERT_TRUE(m.advance()) << "case " << c;
-        const MatchingResult r = m.current();
-        same_optimum(A, r, compute_symmetric_matching(A));
-        scaling_bounds(A, r);
-        EXPECT_GT(m.work(), 0) << "case " << c;
-    }
-}
+// ---- MatchingAlgorithm::Hybrid: Degree searches, then (past
+// switch_passes of phase-1 search work) the auction on the free columns
+// left, the exact repair and the remaining searches. ----
 
-TEST(AuctionMatching, InitialIsTheShortestPathInitial) {
-    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5)}) {
-        SymmetricMatcher a(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        SymmetricMatcher sp(A, MatchingSearchOrder::Degree);
-        const MatchingResult ia = a.initial(), isp = sp.initial();
-        EXPECT_TRUE(bitwise_equal(ia.col_to_row, isp.col_to_row));
-        EXPECT_TRUE(bitwise_equal(ia.scale, isp.scale));
-        EXPECT_EQ(a.diagonal(), sp.diagonal());
-        EXPECT_EQ(a.repaired(), 0);
-        EXPECT_EQ(sp.repaired(), 0);
-    }
-}
-
-// Pausing every 50 edges (inside the auction, the repair's searches and
-// phase 3) and resuming gives the one-shot matching, scaling and work.
-TEST(AuctionMatching, ResumedAdvanceIsOneShot) {
-    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5)}) {
-        SymmetricMatcher one(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        ASSERT_TRUE(one.advance());
-        SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        int pauses = 0;
-        for (long long budget = 0; !m.advance(budget); budget = m.work() + 50) ++pauses;
-        EXPECT_GT(pauses, 1);
-        expect_bitwise(m.current(), one.current());
-        EXPECT_EQ(m.work(), one.work());
-        EXPECT_EQ(m.repaired(), one.repaired());
-    }
-}
-
-TEST(AuctionMatching, StructurallySingularIsReported) {
-    // Matching.StructurallySingular: row/column 1 is empty.
-    CscLower A;
-    A.n = 3;
-    A.col_ptr = {0, 1, 1, 2};
-    A.row_idx = {0, 2};
-    A.values = {4.0, 5.0};
-    // Matching.StructurallySingularFailsAfterSearches: columns 0 and 1
-    // only reach row 2 (a price war in the auction).
-    CscLower B;
-    B.n = 3;
-    B.col_ptr = {0, 1, 2, 3};
-    B.row_idx = {2, 2, 2};
-    B.values = {1.0, 1.0, 1.0};
-    for (const CscLower *M : std::vector<const CscLower *>{&A, &B}) {
-        SymmetricMatcher sp(*M);
-        ASSERT_TRUE(sp.advance());
-        SymmetricMatcher m(*M, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        EXPECT_TRUE(m.advance());
-        EXPECT_EQ(m.status(), ErrorCode::SingularMatrix);
-        EXPECT_EQ(m.status(), sp.status());
-        EXPECT_EQ(m.current().status, ErrorCode::SingularMatrix);
-        EXPECT_LT(m.current().matched_rank, 3);
-    }
-}
-
-// Columns 0 and 1 (zero diagonal) share the single sparse row 2, and each
-// also lies in a dense row: the sparse part has no perfect matching, the
-// auction caps its price war, and phase 3 matches one of them to a dense
-// row. The scaling stays bounded (the war's prices do not reach it).
-TEST(AuctionMatching, InfeasibleSparsePartFinishesInPhase3) {
-    const int n_x = 2000, k = 3;
+// In each of 3 triples (3t, 3t+1, 3t+2), columns 3t and 3t+1 (zero
+// diagonal) share the single sparse row 3t+2, and each also lies in a dense
+// row (k = 4: the 3 left free hit distinct ones): the sparse part has no
+// perfect matching, so phase 1 leaves 3 columns free. (One triple, as the
+// pure Auction engine's test had it, leaves a single phase-1 search, before
+// which no switch can fire.) The first phase-1 search fails, the switch
+// fires, the auction caps its price war on the other 2, and phase 3 matches
+// all 3 to dense rows. The scaling stays bounded (the war's prices do not
+// reach it).
+TEST(AuctionMatching, HybridInfeasibleSparsePartFinishesInPhase3) {
+    const int n_x = 2000, k = 4;
     std::vector<std::tuple<int, int, double>> e;
     for (int j = 0; j < n_x; ++j) {
-        if (j >= 2) e.emplace_back(j, j, 1.0 + 0.25 * (j % 7));
+        if (j >= 9 || j % 3 == 2) e.emplace_back(j, j, 1.0 + 0.25 * (j % 7));
         e.emplace_back(n_x + j % k, j, 0.5 + 0.125 * (j % 5));
     }
-    e.emplace_back(2, 0, 3.0);
-    e.emplace_back(2, 1, 2.0);
+    for (int t = 0; t < 3; ++t) {
+        e.emplace_back(3 * t + 2, 3 * t, 3.0);
+        e.emplace_back(3 * t + 2, 3 * t + 1, 2.0);
+    }
     const CscLower A = from_entries(n_x + k, e);
     ASSERT_EQ(count_dense(A), k);
-    SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
+    const AuctionOptions opt = hybrid_at(0.0);
+    SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
     ASSERT_TRUE(m.advance());
+    ASSERT_TRUE(m.switched());
     EXPECT_GE(m.repaired(), 1);  // a column the auction could not match
     const MatchingResult r = m.current();
     same_optimum(A, r, compute_symmetric_matching(A));
     scaling_bounds(A, r);
 }
 
-// Entries spanning 40 decades: the same product and bounds, and no price war
-// (eps0 comes from the largest cost): the auction scans at most 1.5x the
-// edges it scans at a 4-decade spread of the same matrix. (Not "within 4x
-// the Degree-order searches": those scan 5079 edges here, under one pass
-// over the ~10k-edge sparse part, while the auction's start, phase passes
-// and repair are full passes.)
-TEST(AuctionMatching, WideMagnitudeRange) {
-    const CscLower A = scaled_opf_kkt(3000, 1200, 4, 40.0);
-    SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-    ASSERT_TRUE(m.advance());
-    const MatchingResult r = m.current();
-    same_optimum(A, r, compute_symmetric_matching(A));
-    scaling_bounds(A, r);
-    SymmetricMatcher narrow(scaled_opf_kkt(3000, 1200, 4, 4.0), MatchingSearchOrder::Degree,
-                            MatchingAlgorithm::Auction);
-    ASSERT_TRUE(narrow.advance());
-    EXPECT_LE(static_cast<double>(m.work()), 1.5 * static_cast<double>(narrow.work()))
-        << "wide " << m.work() << " narrow " << narrow.work();
-}
-
-TEST(AuctionMatching, SingleEntryColumnsAndUncleanedInput) {
+// Under a switch at the first search (where any search is left).
+TEST(AuctionMatching, HybridSingleEntryColumnsAndUncleanedInput) {
     // A chain of single off-diagonal columns: column 2t holds only (2t+1, 2t),
     // column 2t+1 its own diagonal and (2t+2, 2t+1).
     std::vector<std::tuple<int, int, double>> e;
@@ -574,14 +506,19 @@ TEST(AuctionMatching, SingleEntryColumnsAndUncleanedInput) {
     // and (1,1) 3 - 3 = 0 (dropped).
     const CscLower dups = from_entries(
         3, {{1, 0, 0.25}, {0, 0, 0.5}, {1, 0, 0.75}, {1, 1, 3.0}, {2, 1, 4.0}, {1, 1, -3.0}, {2, 2, 2.0}, {2, 2, -1.5}});
+    int switched = 0;
     for (const CscLower *A : std::vector<const CscLower *>{&chain, &zeros, &dups}) {
-        const MatchingResult r = run_auction(*A);
+        bool sw = false;
+        const MatchingResult r = run_hybrid(*A, nullptr, &sw);
+        switched += sw ? 1 : 0;
         same_optimum(*A, r, compute_symmetric_matching(*A));
         scaling_bounds(*A, r);
     }
+    EXPECT_GE(switched, 1);  // the chain (the 3 x 3 ones may need no search)
 }
 
-TEST(AuctionMatching, EmptyAndTiny) {
+// Nothing to search: no switch, the ShortestPath result bitwise.
+TEST(AuctionMatching, HybridEmptyAndTiny) {
     CscLower empty;
     empty.n = 0;
     empty.col_ptr = {0};
@@ -593,111 +530,77 @@ TEST(AuctionMatching, EmptyAndTiny) {
     for (const CscLower *A : std::vector<const CscLower *>{&empty, &diag5}) {
         SymmetricMatcher sp(*A, MatchingSearchOrder::Degree);
         ASSERT_TRUE(sp.advance());
-        const MatchingResult r = run_auction(*A);
+        bool switched = true;
+        const MatchingResult r = run_hybrid(*A, nullptr, &switched);
+        EXPECT_FALSE(switched);
         EXPECT_EQ(r.status, ErrorCode::Success);
         expect_bitwise(r, sp.current());
     }
 }
 
-// Invalid options fall back to the defaults (the public boundary validates
-// them), so the auction still ends with the optimum.
-TEST(AuctionMatching, InvalidOptionsFallBackToDefaults) {
+// Invalid options fall back to the Hybrid defaults (the public boundary
+// validates them): the auction fields under a forced switch give the forced
+// switch's run bitwise, and an invalid switch_passes the default run (40
+// passes). Out of range but valid ones are clamped and still reach the
+// optimum.
+TEST(AuctionMatching, HybridInvalidOptionsFallBackToDefaults) {
     const CscLower A = scaled_opf_kkt(3000, 1200, 2, 4.0);
-    const MatchingResult ref = run_auction(A);
+    bool switched = false;
+    const MatchingResult ref = run_hybrid(A, nullptr, &switched);
+    ASSERT_TRUE(switched);
     const double nan = std::numeric_limits<double>::quiet_NaN(), inf = std::numeric_limits<double>::infinity();
-    std::vector<AuctionOptions> bad(6);
+    std::vector<AuctionOptions> bad(9, hybrid_at(0.0));
     bad[0].eps_factor = 1.0;
     bad[1].eps_factor = nan;
     bad[2].eps_final = 0.0;
     bad[3].eps_final = inf;
     bad[4].bid_cap = -1.0;
     bad[5].bid_cap = nan;
-    for (const AuctionOptions &o : bad) expect_bitwise(run_auction(A, &o), ref);
-    // Out of range but valid: clamped, and still the optimum.
-    AuctionOptions extreme;
+    bad[6].eps_start = nan;
+    bad[7].eps_start = 0.0;
+    bad[8].eps_start = -1.0;
+    for (std::size_t b = 0; b < bad.size(); ++b) {
+        SCOPED_TRACE("bad " + std::to_string(b));
+        expect_bitwise(run_hybrid(A, &bad[b]), ref);
+    }
+    // switch_passes falls back to 40: the default run (no switch here).
+    SymmetricMatcher def(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid);
+    ASSERT_TRUE(def.advance());
+    ASSERT_FALSE(def.switched());
+    for (const double sp : {nan, -1.0, inf}) {
+        SCOPED_TRACE("switch_passes " + std::to_string(sp));
+        AuctionOptions o = hybrid_auction_options();
+        o.switch_passes = sp;
+        bool sw = true;
+        expect_bitwise(run_hybrid(A, &o, &sw), def.current());
+        EXPECT_FALSE(sw);
+    }
+    // Out of range but valid: clamped, and still the optimum. eps_start is
+    // clamped to 1e3: above it, the 1e3 run bitwise.
+    AuctionOptions extreme = hybrid_at(0.0);
     extreme.eps_factor = 1.0 + 1e-12;
     extreme.eps_final = 1e-300;
     extreme.bid_cap = 1e300;
-    const MatchingResult r = run_auction(A, &extreme);
+    extreme.eps_start = 1e300;
+    const MatchingResult r = run_hybrid(A, &extreme);
     same_optimum(A, r, compute_symmetric_matching(A));
+    scaling_bounds(A, r);
+    AuctionOptions big = hybrid_at(0.0), cap = hybrid_at(0.0);
+    big.eps_start = 1e300;
+    cap.eps_start = 1e3;
+    expect_bitwise(run_hybrid(A, &big), run_hybrid(A, &cap));
 }
-
-// Random KKTs whose sparse part has no perfect matching (30% of the
-// variables lack a diagonal, off-diagonals of 6 decades): the auction's
-// price wars must not reach the scaling. Before repair() reset the war's
-// rows, 6 of these 12 seeds failed the scaling bounds (scales clamped at
-// exp(+-340)); the products were already the optimum.
-TEST(AuctionMatching, PriceWarsDoNotReachTheScaling) {
-    int deficient = 0;
-    for (unsigned seed = 1; seed <= 12; ++seed) {
-        std::mt19937 rng(seed);
-        std::uniform_real_distribution<double> unif(0.0, 1.0);
-        const int n_x = 2000, k = 1 + static_cast<int>(seed % 3);
-        std::vector<std::tuple<int, int, double>> e;
-        for (int j = 0; j < n_x; ++j) {
-            if (unif(rng) < 0.7) e.emplace_back(j, j, std::pow(10.0, 6.0 * unif(rng) - 3.0));
-            const int t = 1 + static_cast<int>(unif(rng) * 2.0);
-            for (int q = 0; q < t; ++q) {
-                const int i = static_cast<int>(unif(rng) * n_x);
-                if (i != j) e.emplace_back(std::max(i, j), std::min(i, j), std::pow(10.0, 6.0 * unif(rng) - 3.0));
-            }
-            e.emplace_back(n_x + j % k, j, std::pow(10.0, 2.0 * unif(rng) - 1.0));
-        }
-        const CscLower A = from_entries(n_x + k, e);
-        ASSERT_EQ(count_dense(A), k) << "seed " << seed;
-        SymmetricMatcher m(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Auction);
-        ASSERT_TRUE(m.advance());
-        const MatchingResult r = m.current(), ref = compute_symmetric_matching(A);
-        EXPECT_EQ(r.status, ref.status) << "seed " << seed;
-        if (ref.status != ErrorCode::Success) continue;
-        ++deficient;
-        same_optimum(A, r, ref);
-        scaling_bounds(A, r);
-    }
-    EXPECT_GE(deficient, 8);
-}
-
-// ---- MatchingAlgorithm::Hybrid: Degree searches, then (past
-// switch_passes of phase-1 search work) the auction on the free columns
-// left, the exact repair and the remaining searches. ----
-
-namespace {
-
-// The Hybrid defaults with the switch moved to `passes`.
-AuctionOptions hybrid_at(double passes) {
-    AuctionOptions o = hybrid_auction_options();
-    o.switch_passes = passes;
-    return o;
-}
-
-// The random deficient KKTs of AuctionMatching.PriceWarsDoNotReachTheScaling.
-CscLower deficient_kkt(unsigned seed) {
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<double> unif(0.0, 1.0);
-    const int n_x = 2000, k = 1 + static_cast<int>(seed % 3);
-    std::vector<std::tuple<int, int, double>> e;
-    for (int j = 0; j < n_x; ++j) {
-        if (unif(rng) < 0.7) e.emplace_back(j, j, std::pow(10.0, 6.0 * unif(rng) - 3.0));
-        const int t = 1 + static_cast<int>(unif(rng) * 2.0);
-        for (int q = 0; q < t; ++q) {
-            const int i = static_cast<int>(unif(rng) * n_x);
-            if (i != j) e.emplace_back(std::max(i, j), std::min(i, j), std::pow(10.0, 6.0 * unif(rng) - 3.0));
-        }
-        e.emplace_back(n_x + j % k, j, std::pow(10.0, 2.0 * unif(rng) - 1.0));
-    }
-    return from_entries(n_x + k, e);
-}
-
-} // namespace
 
 TEST(AuctionMatching, HybridDefaults) {
     const AuctionOptions h = hybrid_auction_options();
     EXPECT_EQ(h.eps_factor, 10.0);
     EXPECT_EQ(h.eps_final, 1e-2);
-    EXPECT_TRUE(h.warm);
     EXPECT_EQ(h.eps_start, 0.1);
     EXPECT_EQ(h.switch_passes, 40.0);
-    // Auction's own defaults are unchanged (eps_start 0: max cost / eps_factor).
+    // Hybrid is the library default (analyse()'s matching trial).
+    EXPECT_EQ(Control{}.matching_algorithm, MatchingAlgorithm::Hybrid);
+    // The struct's own defaults are the kernel's (eps_start 0: max cost /
+    // eps_factor), which the kernel tests above use.
     const AuctionOptions a;
     EXPECT_EQ(a.eps_factor, 5.0);
     EXPECT_EQ(a.eps_final, 1e-3);
@@ -726,7 +629,8 @@ TEST(AuctionMatching, HybridSameOptimumAsShortestPath) {
     }
 }
 
-// Canonical duals (ncvxqp1-probe-report.md, candidate d): after a switch the
+// Canonical duals (docs/performance/2026-11-02-auction-matching.md, "Re-gate
+// with canonical duals"): after a switch the
 // auction leaves its own prices on the rows of its displacement chains, a
 // different point of the optimal dual face than the searches reach (on
 // ncvxqp1 rec the scale drifted by up to e^8.5 and omega failed, 4.6e-8).
@@ -825,11 +729,12 @@ TEST(AuctionMatching, HybridBitwiseWhenTheSwitchDoesNotFire) {
 
 // The switch point depends on the search work alone: pausing every 50
 // edges (inside the searches, the auction and the repair's searches), at
-// every search boundary (so also right before the canonical duals at the
-// end of phase 1), in one-pass slices (as the ConcurrentTrial runs it) or
-// one-shot give the same matching, scaling and work. deficient_kkt(9)
-// adds failed phase-1 searches (free columns at the canonical duals) and
-// phase 3.
+// every search boundary, in slices of a fraction of a pass (as the
+// ConcurrentTrial slices its runs) or one-shot give the same matching,
+// scaling and work. (The canonical duals run in the same advance() call as
+// the end of phase 1, with no budget check between them, so no pause lands
+// right before them.) deficient_kkt(9) adds failed phase-1 searches (free
+// columns at the canonical duals) and phase 3.
 TEST(AuctionMatching, HybridResumedAdvanceIsOneShot) {
     int k = 0;
     for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 1, 4.0), dense_row_kkt(6000, 3, 5), deficient_kkt(9)}) {
@@ -878,31 +783,6 @@ TEST(AuctionMatching, HybridResumedAdvanceIsOneShot) {
             expect_bitwise(m.current(), one.current());
             EXPECT_EQ(m.work(), one.work());
         }
-    }
-}
-
-// The engine is the bench probe it replaces (bench_matching_trial
-// --hybrid-probe, rule w<k>): the probe pausing at every search boundary
-// and switching at the first one past switch_passes gives the same
-// matching, scaling and work bitwise.
-TEST(AuctionMatching, HybridIsTheProbe) {
-    for (const CscLower &A : {scaled_opf_kkt(3000, 1200, 2, 4.0), dense_row_kkt(6000, 3, 5)}) {
-        const AuctionOptions opt = hybrid_at(0.03);
-        SymmetricMatcher h(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid, &opt);
-        ASSERT_TRUE(h.advance());
-        ASSERT_TRUE(h.switched());
-
-        SymmetricMatcher p(A, MatchingSearchOrder::Degree);
-        const double target = opt.switch_passes * 2.0 * static_cast<double>(A.nnz());
-        bool done = false;
-        while (!(done = p.advance(p.work() + 1)) && static_cast<double>(p.work()) <= target) {
-        }
-        ASSERT_FALSE(done);
-        p.probe_switch_to_auction(opt);
-        ASSERT_TRUE(p.advance());
-        expect_bitwise(h.current(), p.current());
-        EXPECT_EQ(h.work(), p.work());
-        EXPECT_EQ(h.repaired(), p.repaired());
     }
 }
 

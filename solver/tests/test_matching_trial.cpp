@@ -522,7 +522,9 @@ Control hybrid_test_control(double budget, MatchingAlgorithm alg, int threads) {
     c.matrix_type = MatrixType::RealSymmetricIndefinite;
     c.ordering = OrderingMethod::AutoSerial;
     c.matching_search_budget = budget;
-    c.matching_algorithm = alg;
+    // Hybrid is the default (AuctionMatching.HybridDefaults checks it): the
+    // Hybrid runs leave the field alone, so they test the default.
+    if (alg != MatchingAlgorithm::Hybrid) c.matching_algorithm = alg;
     c.num_threads = threads;
     c.auto_threads = false;  // small test trees
     return c;
@@ -625,13 +627,17 @@ TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
                     const MatchingResult rs = ms.current(), rh = mh.current();
                     const double ps = matched_log_product(C, rs.col_to_row);
                     EXPECT_NEAR(matched_log_product(C, rh.col_to_row), ps, 1e-9 * std::abs(ps) + 1e-9);
-                    // Premise of the plumbing check below: the two matchers'
-                    // results differ, so each analysis keeping its own
-                    // matcher's scale is observable. The matchings coincide
-                    // here; the scales differ in rounding only since the
-                    // canonical duals (31323 of 38000 indices, max |dlog|
-                    // 1.2e-14; 5.6 without them).
-                    EXPECT_NE(rh.scale, rs.scale);
+                    // The matchings coincide here; the scales differ in
+                    // rounding only since the canonical duals (31323 of
+                    // 38000 indices, max |dlog| 1.2e-14; 5.6 without them).
+                    // That rounding is what makes the plumbing check below
+                    // (each analysis keeps its own matcher's scale)
+                    // observable; it is not asserted, since a compiler or FP
+                    // flag change could make the scales bitwise equal on a
+                    // correct build.
+                    if (rh.scale == rs.scale)
+                        std::printf("[ hybrid ] note: Hybrid and ShortestPath scales are bitwise equal here; "
+                                    "the kept-scale plumbing check is not observable\n");
                     for (std::size_t i = 0; i < rs.scale.size(); ++i) {
                         const double ls = std::log(rs.scale[i]);
                         ASSERT_NEAR(std::log(rh.scale[i]), ls, 1e-12 * std::max(1.0, std::abs(ls))) << "i=" << i;

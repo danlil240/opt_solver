@@ -1,8 +1,13 @@
-# Auction matching for the analysis trial: killed at G2 (2026-11-02)
+# Hybrid matching for the analysis trial: auction on the search tail (2026-11-02)
 
-Plan: `docs/superpowers/plans/2026-11-02-auction-matching.md`. Tasks 1-4 ran; the Task 4 kill point tripped, so Tasks 5-6 were not run and the auction is not wired into `analyse()`.
+**Outcome.**
+- Hybrid (shortest-path searches, then a warm auction on the tail past 40 passes, with canonical duals) is the default `Control::matching_algorithm`.
+- ncvxqp3 analysis 2.34x (1T) / 2.49x (8T) faster, ncvxqp7 1.76x / 1.83-1.85x (the 1T miss of the 1.8x bar was accepted); no accuracy loss, 0 verdict changes.
+- The pure auction (Task 4) was killed at G2; its engine and the hybrid probe tooling were removed afterwards (see Code state).
 
-## Result
+Plan: `docs/superpowers/plans/2026-11-02-auction-matching.md`. Tasks 1-4 ran for the pure auction; the Task 4 kill point tripped, so the pure auction was never wired into `analyse()`. The hybrid below, probed and then built in its place, was.
+
+## Pure auction result (G2)
 
 | gate | criterion | result | pass |
 |---|---|---|---|
@@ -64,7 +69,7 @@ The auction wins only where the shortest-path searches have a long tail: ncvxqp3
 
 ### The probe
 
-`bench_matching_trial --hybrid-probe` (efbca8d, selectable switch rules in 6f2dc96) runs the ShortestPath searches and counts edges scanned, then switches to a warm auction on the still-free columns by a rule. Over the 50 corpus matrices:
+`bench_matching_trial --hybrid-probe` (efbca8d, selectable switch rules in 6f2dc96; removed with the pure Auction engine, see Code state) ran the ShortestPath searches and counts edges scanned, then switches to a warm auction on the still-free columns by a rule. Over the 50 corpus matrices:
 
 - **Switch after 40 passes of search work (w40), eps_start 0.1:** total edges 0.74x, matcher ms 0.68x, no matrix above 1.5x, ncvxqp3 0.35x, ncvxqp7 0.51x. Chosen.
 - **Switch after 5 passes (w5):** 0.70x total, but dawson5 3.0x, cops_pinene_400 1.9x, copter2 1.9x.
@@ -164,5 +169,6 @@ Branch `feat/auction-matching`:
 - `f7dc144`: canonical duals after the auction.
 - `466fe25`: re-gate write-up and the control.hpp comment (docs only, no code change).
 - "analyse: hybrid matcher by default": `Control::matching_algorithm` defaults to Hybrid; this Default section.
+- "matching: trim the auction engine and probe surface; review fixes": removes the pure `MatchingAlgorithm::Auction` engine (and `AuctionOptions::warm`, the kernel's cold start), the `SymmetricMatcher::probe_*` hooks and `bench_matching_trial --hybrid-probe` / `--matcher auction` with its `--auction-*` flags. The Hybrid engine is bitwise unchanged (`bench_matching_trial --matcher hybrid` gives the same work, hashes and verdicts on cops_pinene_400, ncvxqp1 and ncvxqp3). The removed tooling is reproducible from commits `9b732c4` (auction prototype columns), `efbca8d` and `6f2dc96` (hybrid probe).
 
-Nothing calls `MatchingAlgorithm::Auction` outside the tests and `bench_matching_trial`. The analysis trial runs Hybrid by default, which is ShortestPath bitwise until its 40-pass switch; compute_symmetric_matching, compute_matching_scale and the scale-on-delay rescue stay ShortestPath. The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.
+The analysis trial runs Hybrid by default, which is ShortestPath bitwise until its 40-pass switch. compute_symmetric_matching, compute_matching_scale and the scale-on-delay rescue's own matcher stay ShortestPath (Column); when the rescue reuses the analysis' matching scale (unchanged values) it gets the trial's, Hybrid's by default (ShortestPath's to about 1e-14 thanks to the canonical duals). The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.

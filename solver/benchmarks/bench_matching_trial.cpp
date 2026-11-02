@@ -13,11 +13,7 @@
 //
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
-//                             [--sample S [--lines]] [--pieces] [--matcher ssp|auction|hybrid]
-//                             [--auction-factor f] [--auction-eps e]
-//                             [--auction-cold]
-//                             [--hybrid-probe [--hybrid-eps e1,e2,..]
-//                              [--hybrid-rules r1,r2,..]]
+//                             [--sample S [--lines]] [--pieces] [--matcher ssp|hybrid]
 //   file: one "<id> <path.mtx>" per line. --budget replaces the default
 //   budget of the second analysis. --ordering is the OrderingMethod value
 //   and --refactors Control::expected_refactors (the IPOPT plugin's
@@ -37,47 +33,20 @@
 // j)|, the matching's product, printed in full and as an fnv hash of
 // col_to_row). The totals line adds edges_deg = the summed edges scanned.
 // --matcher selects Control::matching_algorithm on every analyse() call
-// (the trial's matcher: ssp = ShortestPath, the default, auction = Auction,
-// hybrid = Hybrid), so the verdict, ordD and perm_hash columns show the trial
-// under it, and the algorithm of the extra standalone matcher columns (ssp:
-// none). Under auction or hybrid the
-// Degree ShortestPath columns are still produced and a Degree-order run of
-// that matcher follows them (auction with the AuctionOptions below, hybrid
-// with its defaults; hybrid adds sw = SymmetricMatcher::switched(), y/n):
-// work_auc = its edges scanned in passes (as work_deg),
-// repair = SymmetricMatcher::repaired(), mta_ms = its median wall time,
-// prod_ok = yes when its status equals the ShortestPath one and, on success,
-// its log product equals the ShortestPath one within 1e-9 |p| + 1e-9 and its
-// scaling holds |s_i a_ij s_j| <= 1 + 1e-10 with matched entries within 1e-10
-// of 1 (NO otherwise: prod_fail counts them). The totals line adds
-// edges_auc, prod_fail and the worst work_auc / work_deg (over all
-// matrices, and over those with work_deg > 1). --auction-factor f,
-// --auction-eps e and --auction-cold fill AuctionOptions::eps_factor,
-// eps_final and warm = false.
-// --hybrid-probe instead runs only standalone matchers (no analyse()): the
-// Degree ShortestPath run to the end (work_deg, passes; deg_ms, median of
-// --trials) and, per switch rule, the hybrid probe
-// (SymmetricMatcher::probe_switch_to_auction): Degree searches until the
-// switch, the warm auction on the free sparse columns not yet searched
-// (eps_factor 10, eps_final 1e-2, eps_start each of --hybrid-eps, default
-// 1e-2,1e-1,1), the exact repair, then the remaining searches. Rules
-// (--hybrid-rules, default f10,f5,f2,w2,w5): f<x> switches once the free
-// sparse columns are at most x% of n (checked before each search); w<k> once
-// the work exceeds k passes; p<x> at the first slice boundary where the
-// searches of the last slice cost more than x times an average column's share
-// of a pass on average: dw / ds > x * pass / n, dw = edges scanned in the
-// slice, ds = searches started in it (probe_searches(); ds = 0, one search
-// spanning the whole slice, counts as exceeded). w and p use slices of one
-// pass and switch at the first slice boundary past the point; both are
-// deterministic (edge counts only). A switch after phase 1 is a no-op. Per rule: sw = free sparse share at the
-// switch (- : phase 1 ended first, the run is plain Degree), and per eps:
-// w = total work in passes (searches + auction + repair + searches),
-// ok = prod_ok against plain Degree (as --matcher auction), ms (median of
-// --trials), and for w<k> rules e = y when MatchingAlgorithm::Hybrid with
-// switch_passes k (and these auction settings) gives the probe's work and
-// result bitwise (N otherwise). Totals per variant: summed edges over
-// edges_deg, the ncvxqp3 ratio, prod_fail, engine mismatches, summed ms over
-// summed deg_ms. Exit code 1 on any prod_fail or engine mismatch.
+// (the trial's matcher: ssp = ShortestPath, hybrid = Hybrid; the bench
+// default is ssp, the library default hybrid), so the verdict, ordD and
+// perm_hash columns show the trial under it. Under hybrid the Degree
+// ShortestPath columns are still produced and a Degree-order Hybrid run
+// (default options) follows them: work_auc = its edges scanned in passes
+// (as work_deg), repair = SymmetricMatcher::repaired(), mta_ms = its median
+// wall time, prod_ok = yes when its status equals the ShortestPath one and,
+// on success, its log product equals the ShortestPath one within
+// 1e-9 |p| + 1e-9 and its scaling holds |s_i a_ij s_j| <= 1 + 1e-10 with
+// matched entries within 1e-10 of 1 (NO otherwise: prod_fail counts them),
+// sw = SymmetricMatcher::switched() (y/n). The totals line adds edges_auc,
+// prod_fail and the worst work_auc / work_deg (over all matrices, and over
+// those with work_deg > 1). Exit code 1 when an analysis differs from the
+// exact trial or (hybrid) on any prod_fail.
 // --sample S (with --case) instead loops the default-budget analyse() of
 // the first matching case for S seconds under the in-process sampler
 // (--lines: by source line; needs a /Zi + /DEBUG build).
@@ -101,10 +70,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <fstream>
 #include <iterator>
-#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -219,7 +186,7 @@ double matching_logprod(const smf::CscLower &A, const std::vector<smf::Int> &col
     return sum;
 }
 
-// The auction's checks, as test_auction_matching.cpp's same_optimum and
+// The hybrid's checks, as test_auction_matching.cpp's same_optimum and
 // scaling_bounds: sum of log|a_ij| over the matched merged entries
 // (|a_ij| = col_max_j exp(-cost)).
 double cost_graph_logprod(const smf::detail::CostGraph &g, const std::vector<smf::Int> &col_to_row) {
@@ -246,7 +213,7 @@ bool scaling_bounds_hold(const smf::detail::CostGraph &g, const smf::MatchingRes
     return true;
 }
 
-// prod_ok: the auction's matching `a` against the ShortestPath one `b`.
+// prod_ok: the hybrid's matching `a` against the ShortestPath one `b`.
 bool product_ok(const smf::CscLower &A, const smf::MatchingResult &a, const smf::MatchingResult &b) {
     if (a.status != b.status) return false;
     if (a.status != smf::ErrorCode::Success) return true;
@@ -265,208 +232,6 @@ void hash_matching(Hasher &h, const smf::MatchingResult &m) {
     h.pod(m.matched_rank);
 }
 
-// --hybrid-probe (see the header comment).
-struct HybridRule {
-    std::string name;
-    char kind = 0;       // 'f': free share, 'w': work passes, 'p': per-search cost
-    double value = 0.0;  // f: share of n (0.10 for f10); w: passes; p: x
-};
-
-// "f10" / "w5" / "p200"; false on a malformed entry.
-bool parse_rules(const std::string &list, std::vector<HybridRule> &out) {
-    std::stringstream ss(list);
-    std::string tok;
-    while (std::getline(ss, tok, ',')) {
-        if (tok.size() < 2 || (tok[0] != 'f' && tok[0] != 'w' && tok[0] != 'p')) return false;
-        char *end = nullptr;
-        const double x = std::strtod(tok.c_str() + 1, &end);
-        if (end == tok.c_str() + 1 || *end != '\0' || !(x > 0.0)) return false;
-        out.push_back({tok, tok[0], tok[0] == 'f' ? x / 100.0 : x});
-    }
-    return !out.empty();
-}
-
-struct HybridRun {
-    long long work = 0;
-    bool done = false;
-    double switch_share = -1.0;  // free sparse / n at the switch; < 0: none
-    smf::MatchingResult res;
-};
-
-HybridRun run_hybrid(const smf::CscLower &A, const HybridRule &rule, const smf::AuctionOptions &opt) {
-    HybridRun r;
-    const long long pass = 2 * static_cast<long long>(A.row_idx.size());
-    smf::SymmetricMatcher m(A, smf::MatchingSearchOrder::Degree);
-    bool done = false;
-    if (rule.kind == 'f') {
-        m.probe_pause_at_free(static_cast<int>(std::floor(rule.value * static_cast<double>(A.n))));
-        done = m.advance(-1);
-    } else if (rule.kind == 'w') {
-        const double target = rule.value * static_cast<double>(pass);
-        for (long long b = pass;; b += pass) {
-            done = m.advance(b);
-            if (done || static_cast<double>(m.work()) > target) break;
-        }
-    } else {
-        // p<x>: the last slice's edges per search above x * pass / n.
-        const double limit = rule.value * static_cast<double>(pass) / static_cast<double>(std::max<smf::Int>(A.n, 1));
-        long long w0 = m.work(), s0 = m.probe_searches();
-        for (long long b = pass;; b += pass) {
-            done = m.advance(b);
-            if (done) break;
-            const long long dw = m.work() - w0, ds = m.probe_searches() - s0;
-            if (ds == 0 ? dw > 0 : static_cast<double>(dw) / static_cast<double>(ds) > limit) break;
-            w0 = m.work();
-            s0 = m.probe_searches();
-        }
-    }
-    if (!done) {
-        const int free_sparse = m.probe_free_sparse();
-        if (free_sparse >= 0) r.switch_share = static_cast<double>(free_sparse) / static_cast<double>(A.n);
-        m.probe_switch_to_auction(opt);
-        done = m.advance(-1);
-    }
-    r.work = m.work();
-    r.done = done;
-    if (done) r.res = m.current();
-    return r;
-}
-
-int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials, const std::vector<double> &eps,
-                        const std::string &rule_list) {
-    std::vector<HybridRule> rules;
-    if (!parse_rules(rule_list, rules)) {
-        std::fprintf(stderr, "bad --hybrid-rules '%s' (comma list of f<x>, w<k>, p<x>)\n", rule_list.c_str());
-        return 2;
-    }
-    const std::size_t nr = rules.size(), ne = eps.size(), nv = nr * ne;
-    const auto med = [](std::vector<double> v) {
-        std::sort(v.begin(), v.end());
-        return v[v.size() / 2];
-    };
-    std::printf("hybrid probe: auction eps_factor 10, eps_final 1e-2, warm; eps_start");
-    for (double e : eps) std::printf(" %g", e);
-    std::printf("\n%-28s %7s %8s %8s %6s", "matrix", "n", "work_deg", "deg_ms", "free0");
-    for (const HybridRule &r : rules) {
-        std::printf(" | %5s %5s", r.name.c_str(), "sw");
-        for (double e : eps) {
-            char head[32];
-            std::snprintf(head, sizeof head, "w@%g", e);
-            std::printf(" %7s %2s %1s %7s", head, "ok", "e", "ms");
-        }
-    }
-    std::printf("\n");
-    double edges_deg = 0.0, ms_deg = 0.0, nc3_deg = 0.0;
-    std::vector<double> edges(nv, 0.0), ms_sum(nv, 0.0), nc3(nv, 0.0);
-    std::vector<int> fail(nv, 0), eng_fail(nv, 0);
-    bool have_nc3 = false;
-    std::string line;
-    while (std::getline(in, line)) {
-        std::istringstream ls(line);
-        std::string id, path;
-        if (!(ls >> id >> path)) continue;
-        if (!filter.empty() && id.find(filter) == std::string::npos) continue;
-        auto mm = smf::read_matrix_market(path);
-        if (!mm.ok) {
-            std::printf("%-28s load failed: %s\n", id.c_str(), mm.error_message.c_str());
-            continue;
-        }
-        const smf::CscLower &A = mm.matrix;
-        const double pass = 2.0 * static_cast<double>(A.row_idx.size());
-        std::vector<double> t_deg;
-        long long wdeg = 0;
-        double free0 = 0.0;
-        smf::MatchingResult fd0;
-        for (int t = 0; t < trials; ++t) {
-            const auto t0 = std::chrono::steady_clock::now();
-            smf::SymmetricMatcher md(A, smf::MatchingSearchOrder::Degree);
-            md.advance(-1);
-            smf::MatchingResult fd = md.current();
-            t_deg.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
-            if (t == 0) {
-                wdeg = md.work();
-                free0 = 1.0 - static_cast<double>(md.initial().matched_rank) / static_cast<double>(A.n);
-                fd0 = std::move(fd);
-            }
-        }
-        const double deg_ms = med(t_deg);
-        edges_deg += static_cast<double>(wdeg);
-        ms_deg += deg_ms;
-        const bool is_nc3 = id == "ncvxqp3";
-        if (is_nc3) {
-            have_nc3 = true;
-            nc3_deg = static_cast<double>(wdeg);
-        }
-        std::printf("%-28s %7d %8.2f %8.2f %6.3f", id.c_str(), static_cast<int>(A.n), static_cast<double>(wdeg) / pass,
-                    deg_ms, free0);
-        for (std::size_t ri = 0; ri < nr; ++ri) {
-            for (std::size_t ei = 0; ei < ne; ++ei) {
-                smf::AuctionOptions opt;
-                opt.eps_factor = 10.0;
-                opt.eps_final = 1e-2;
-                opt.warm = true;
-                opt.eps_start = eps[ei];
-                std::vector<double> t_h;
-                HybridRun first;
-                for (int t = 0; t < trials; ++t) {
-                    const auto t0 = std::chrono::steady_clock::now();
-                    HybridRun hr = run_hybrid(A, rules[ri], opt);
-                    t_h.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
-                    if (t == 0) first = std::move(hr);
-                }
-                const bool ok = first.done && product_ok(A, first.res, fd0);
-                const std::size_t v = ri * ne + ei;
-                // w<k>: the Hybrid engine must be this probe run bitwise.
-                char eng = '-';
-                if (rules[ri].kind == 'w') {
-                    smf::AuctionOptions hopt = opt;
-                    hopt.switch_passes = rules[ri].value;
-                    smf::SymmetricMatcher mh(A, smf::MatchingSearchOrder::Degree, smf::MatchingAlgorithm::Hybrid,
-                                             &hopt);
-                    const bool hdone = mh.advance(-1);
-                    const smf::MatchingResult hr = mh.current();
-                    const bool same = hdone == first.done && mh.work() == first.work &&
-                                      mh.switched() == (first.switch_share >= 0.0) && hr.status == first.res.status &&
-                                      hr.col_to_row == first.res.col_to_row && hr.row_to_col == first.res.row_to_col &&
-                                      std::memcmp(hr.scale.data(), first.res.scale.data(),
-                                                  hr.scale.size() * sizeof(double)) == 0 &&
-                                      hr.scale.size() == first.res.scale.size();
-                    eng = same ? 'y' : 'N';
-                    eng_fail[v] += same ? 0 : 1;
-                }
-                const double h_ms = med(t_h);
-                edges[v] += static_cast<double>(first.work);
-                ms_sum[v] += h_ms;
-                fail[v] += ok ? 0 : 1;
-                if (is_nc3) nc3[v] = static_cast<double>(first.work);
-                if (ei == 0) {
-                    if (first.switch_share >= 0.0) std::printf(" | %5s %5.3f", "", first.switch_share);
-                    else std::printf(" | %5s %5s", "", "-");
-                }
-                std::printf(" %7.2f %2s %c %7.2f", static_cast<double>(first.work) / pass, ok ? "y" : "N", eng, h_ms);
-            }
-        }
-        std::printf("\n");
-        std::fflush(stdout);
-    }
-    std::printf("total edges_deg %.0f, deg_ms %.1f\n", edges_deg, ms_deg);
-    for (std::size_t ri = 0; ri < nr; ++ri)
-        for (std::size_t ei = 0; ei < ne; ++ei) {
-            const std::size_t v = ri * ne + ei;
-            std::printf("variant %-5s eps_start %-6g: edges %.0f = %.3fx edges_deg; ncvxqp3 ", rules[ri].name.c_str(), eps[ei],
-                        edges[v], edges_deg > 0.0 ? edges[v] / edges_deg : 0.0);
-            if (have_nc3 && nc3_deg > 0.0) std::printf("%.3fx", nc3[v] / nc3_deg);
-            else std::printf("n/a");
-            std::printf("; prod_fail %d", fail[v]);
-            if (rules[ri].kind == 'w') std::printf("; engine_mismatch %d", eng_fail[v]);
-            std::printf("; ms %.1f = %.3fx deg_ms\n", ms_sum[v], ms_deg > 0.0 ? ms_sum[v] / ms_deg : 0.0);
-        }
-    int total_fail = 0;
-    for (int f : fail) total_fail += f;
-    for (int f : eng_fail) total_fail += f;
-    return total_fail == 0 ? 0 : 1;
-}
-
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -475,11 +240,7 @@ int main(int argc, char **argv) {
     double sample_seconds = 0.0;
     bool sample_lines = false, pieces = false;
     double budget = smf::Control{}.matching_search_budget;
-    std::string matcher = "ssp";
-    smf::AuctionOptions auc;
-    bool hybrid_probe = false;
-    std::vector<double> hybrid_eps = {1e-2, 1e-1, 1.0};
-    std::string hybrid_rules = "f10,f5,f2,w2,w5";
+    std::string matcher = "ssp";  // the bench default; the library default is hybrid
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--list" && i + 1 < argc) list = argv[++i];
@@ -490,31 +251,17 @@ int main(int argc, char **argv) {
         else if (a == "--case" && i + 1 < argc) filter = argv[++i];
         else if (a == "--sample" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
         else if (a == "--matcher" && i + 1 < argc) matcher = argv[++i];
-        else if (a == "--auction-factor" && i + 1 < argc) auc.eps_factor = std::atof(argv[++i]);
-        else if (a == "--auction-eps" && i + 1 < argc) auc.eps_final = std::atof(argv[++i]);
-        else if (a == "--auction-cold") auc.warm = false;
-        else if (a == "--hybrid-probe") hybrid_probe = true;
-        else if (a == "--hybrid-eps" && i + 1 < argc) {
-            hybrid_eps.clear();
-            std::stringstream ss(argv[++i]);
-            std::string tok;
-            while (std::getline(ss, tok, ',')) hybrid_eps.push_back(std::atof(tok.c_str()));
-        }
-        else if (a == "--hybrid-rules" && i + 1 < argc) hybrid_rules = argv[++i];
         else if (a == "--lines") sample_lines = true;
         else if (a == "--pieces") pieces = true;
     }
-    if (list.empty() || (matcher != "ssp" && matcher != "auction" && matcher != "hybrid")) {
+    if (list.empty() || (matcher != "ssp" && matcher != "hybrid")) {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
                              "[--budget b] [--refactors r] [--case s] "
-                             "[--sample S [--lines]] [--pieces] [--matcher ssp|auction|hybrid]\n"
-                             "[--auction-factor f] [--auction-eps e] [--auction-cold]\n"
-                             "[--hybrid-probe [--hybrid-eps e1,e2,..] [--hybrid-rules r1,r2,..]]\n");
+                             "[--sample S [--lines]] [--pieces] [--matcher ssp|hybrid]\n");
         return 2;
     }
-    const smf::MatchingAlgorithm matcher_alg = matcher == "auction" ? smf::MatchingAlgorithm::Auction
-                                               : matcher == "hybrid"  ? smf::MatchingAlgorithm::Hybrid
-                                                                      : smf::MatchingAlgorithm::ShortestPath;
+    const smf::MatchingAlgorithm matcher_alg =
+        matcher == "hybrid" ? smf::MatchingAlgorithm::Hybrid : smf::MatchingAlgorithm::ShortestPath;
     std::ifstream in(list);
     std::string line;
     if (pieces) {
@@ -623,7 +370,6 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (hybrid_probe) return hybrid_probe_survey(in, filter, trials, hybrid_eps, hybrid_rules);
     if (sample_seconds > 0.0) {
         while (std::getline(in, line)) {
             std::istringstream ls(line);
@@ -656,15 +402,13 @@ int main(int argc, char **argv) {
         }
         return 2;
     }
-    // The extra standalone matcher columns: Auction or Hybrid (ssp: none).
-    const bool use_auction = matcher != "ssp";
-    const bool use_hybrid = matcher == "hybrid";
+    // The extra standalone matcher columns: Hybrid (ssp: none).
+    const bool use_alt = matcher_alg != smf::MatchingAlgorithm::ShortestPath;
     std::printf("%-28s %7s %8s | %-8s %-8s %-8s | %6s %6s | %3s %4s %4s | %9s %9s | %7s %6s | %16s | %8s %8s | %16s | %8s %8s | %16s %21s",
                 "matrix", "n", "nnz_low", "exact", "default", "zero", "r_init", "r_exact", "eq", "ordE", "ordD",
                 "ms_exact", "ms_default", "work_x", "free0", "perm_hash", "mm_def", "mt_ms", "all_hash",
                 "work_deg", "mtd_ms", "logprod_hash", "logprod");
-    if (use_auction) std::printf(" | %8s %6s %8s %7s", "work_auc", "repair", "mta_ms", "prod_ok");
-    if (use_hybrid) std::printf(" %2s", "sw");
+    if (use_alt) std::printf(" | %8s %6s %8s %7s %2s", "work_auc", "repair", "mta_ms", "prod_ok", "sw");
     std::printf("\n");
     double tot_exact = 0.0, tot_default = 0.0, tot_mm = 0.0, tot_mt = 0.0, edges_deg = 0.0, edges_auc = 0.0;
     double worst_ratio = 0.0, worst_ratio_gt1 = 0.0;
@@ -747,13 +491,12 @@ int main(int argc, char **argv) {
                 edges_deg += static_cast<double>(md.work());
                 logprod = matching_logprod(mm.matrix, fd.col_to_row);
                 logprod_hash = fnv(fd.col_to_row);
-                if (use_auction) fd0 = fd;
+                if (use_alt) fd0 = fd;
             }
-            if (use_auction) {
-                // The same, with the auction (or the hybrid) in the sparse part.
+            if (use_alt) {
+                // The same, with the hybrid in the sparse part.
                 const auto a0 = std::chrono::steady_clock::now();
-                smf::SymmetricMatcher ma(mm.matrix, smf::MatchingSearchOrder::Degree, matcher_alg,
-                                         use_hybrid ? nullptr : &auc);
+                smf::SymmetricMatcher ma(mm.matrix, smf::MatchingSearchOrder::Degree, matcher_alg, nullptr);
                 const bool done = ma.advance(-1);
                 const smf::MatchingResult fa = done ? ma.current() : smf::MatchingResult{};
                 const auto a1 = std::chrono::steady_clock::now();
@@ -770,7 +513,7 @@ int main(int argc, char **argv) {
         std::sort(mtd.begin(), mtd.end());
         const double mtd_ms = mtd[mtd.size() / 2];
         double mta_ms = 0.0;
-        if (use_auction) {
+        if (use_alt) {
             std::sort(mta.begin(), mta.end());
             mta_ms = mta[mta.size() / 2];
             prod_fail += prod_ok ? 0 : 1;
@@ -797,17 +540,18 @@ int main(int argc, char **argv) {
                     static_cast<unsigned long long>(fnv(d.perm) ^ (fnv(d.scale) * 31u) ^ (d.rejected ? 1u : 0u)),
                     d.match_ms, mt_ms, static_cast<unsigned long long>(h.h), work_deg, mtd_ms,
                     static_cast<unsigned long long>(logprod_hash), logprod);
-        if (use_auction) std::printf(" | %8.2f %6d %8.2f %7s", work_auc, repair, mta_ms, prod_ok ? "yes" : "NO");
-        if (use_hybrid) std::printf(" %2s", switched ? "y" : "n");
+        if (use_alt)
+            std::printf(" | %8.2f %6d %8.2f %7s %2s", work_auc, repair, mta_ms, prod_ok ? "yes" : "NO",
+                        switched ? "y" : "n");
         std::printf("\n");
         std::fflush(stdout);
     }
     std::printf("total %d matrices, %d differ from the exact trial; analyse ms exact %.1f default %.1f; "
                 "matching phase (default) %.1f; standalone matcher %.1f; edges_deg %.0f",
                 rows, mismatches, tot_exact, tot_default, tot_mm, tot_mt, edges_deg);
-    if (use_auction)
+    if (use_alt)
         std::printf("; edges_auc %.0f; prod_fail %d; worst work_auc/work_deg %.3f (%s), over work_deg > 1: %.3f (%s)",
                     edges_auc, prod_fail, worst_ratio, worst_id.c_str(), worst_ratio_gt1, worst_id_gt1.c_str());
     std::printf("\n");
-    return mismatches == 0 ? 0 : 1;
+    return mismatches == 0 && prod_fail == 0 ? 0 : 1;
 }

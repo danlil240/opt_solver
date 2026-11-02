@@ -56,7 +56,10 @@ struct Control {
     // The sparse-part engine of analyse()'s auto matching trial (its
     // Degree-order SymmetricMatcher, serial and ConcurrentTrial) and of
     // nothing else: compute_symmetric_matching, compute_matching_scale and
-    // the scale-on-delay rescue stay ShortestPath. Hybrid runs the
+    // the scale-on-delay rescue's own matcher stay ShortestPath (Column);
+    // when the rescue reuses the analysis' matching scale (unchanged values)
+    // it gets the trial's own scale (by default Hybrid's: ShortestPath's to
+    // about 1e-14 thanks to the canonical duals). Hybrid runs the
     // shortest-path searches and, past 40 passes of search work, a warm
     // auction on the remaining tail (scaling_matching.hpp); up to that point
     // it is ShortestPath bitwise, so within the 2-pass budget above no

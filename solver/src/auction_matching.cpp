@@ -23,10 +23,14 @@ constexpr std::size_t kQueueCompactMin = 1024;
 // (Bertsekas recommends 4-10) and 1e-12 that is at most 87 phases. 1e-12
 // is about four ulps of a price near 1500: a smaller eps no longer moves
 // prices. The bid cap times the sparse columns (< 2^31) must fit a long
-// long; 1e6 is 2e4x the default 50.
+// long; 1e6 is 2e4x the default 50. An explicit eps_start above 1e3 log
+// units (e^1000, past double's whole range of ~1418) is no tighter a start
+// than the max-cost rule's and only adds phases: at 1e3 and the clamps
+// above, at most log(1e3 / 1e-12) / log(1.5) = 86 phases.
 constexpr double kMinEpsFactor = 1.5;
 constexpr double kMinEpsFinal = 1e-12;
 constexpr double kMaxBidCap = 1e6;
+constexpr double kMaxEpsStart = 1e3;
 
 } // namespace
 
@@ -39,8 +43,10 @@ AuctionOptions validated(const AuctionOptions &opt, const AuctionOptions &def) {
     o.eps_factor = std::max(o.eps_factor, kMinEpsFactor);
     o.eps_final = std::max(o.eps_final, kMinEpsFinal);
     o.bid_cap = std::min(o.bid_cap, kMaxBidCap);
-    // Not finite or <= 0: def's (Auction: 0, the max-cost rule).
+    // Not finite or <= 0: def's (Hybrid: 0.1; AuctionOptions{}: 0, the
+    // max-cost rule, kept for the kernel tests).
     if (!(std::isfinite(o.eps_start) && o.eps_start > 0.0)) o.eps_start = def.eps_start;
+    o.eps_start = std::min(o.eps_start, kMaxEpsStart);
     if (!(std::isfinite(o.switch_passes) && o.switch_passes >= 0.0)) o.switch_passes = def.switch_passes;
     return o;
 }
@@ -90,18 +96,6 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
         st.queue.assign(first_queue.begin(), first_queue.end());
         st.head = 0;
         st.bids_in_phase = 0;
-        if (!opt.warm) {
-            // Cold: the constructor's duals and an empty matching; the
-            // columns matched greedily queue after first_queue's, in column
-            // order.
-            for (int j = 0; j < n; ++j) {
-                const Int r = col_to_row[static_cast<std::size_t>(j)];
-                if (is_dense(j) || r < 0) continue;
-                row_match[static_cast<std::size_t>(r)] = -1;
-                col_to_row[static_cast<std::size_t>(j)] = -1;
-                st.queue.push_back(j);
-            }
-        }
         st.phase = 0;
     }
 
@@ -195,13 +189,13 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
 
 namespace smf {
 
-// hybrid-probe-report.md's auction settings (the w40 run), the Hybrid
-// defaults; switch_passes keeps the struct's 40 and bid_cap its 50.
+// The hybrid probe's auction settings (the w40 run; docs/performance/
+// 2026-11-02-auction-matching.md, "The probe"), the Hybrid defaults;
+// switch_passes keeps the struct's 40 and bid_cap its 50.
 AuctionOptions hybrid_auction_options() {
     AuctionOptions o;
     o.eps_factor = 10.0;
     o.eps_final = 1e-2;
-    o.warm = true;
     o.eps_start = 0.1;
     return o;
 }

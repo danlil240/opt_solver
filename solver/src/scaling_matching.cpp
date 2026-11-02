@@ -182,11 +182,10 @@ using detail::kInf;
 // As in MC64, a greedy matching on zero-reduced-cost edges (plus length-2
 // augmentations) settles most columns, and each remaining column runs a
 // heap-based Dijkstra that touches, and afterwards resets, only the rows it
-// reaches. Under MatchingAlgorithm::Auction an epsilon-scaling auction
-// (auction_matching.hpp) first matches the sparse part approximately, and
-// repair() hands what it left loose to the same searches. Under Hybrid the
-// searches run first; past AuctionOptions::switch_passes of their work the
-// auction takes the free columns left (hybrid_step()).
+// reaches. Under MatchingAlgorithm::Hybrid the searches run first; past
+// AuctionOptions::switch_passes of their work an epsilon-scaling auction
+// (auction_matching.hpp) takes the free columns left, and repair() hands
+// what it left loose back to the same searches (hybrid_step()).
 struct SymmetricMatcher::State {
     int n = 0;
     bool shape_ok = true;
@@ -207,38 +206,29 @@ struct SymmetricMatcher::State {
     int next_col = 0;
     MatchingSearchOrder order = MatchingSearchOrder::Column;
     MatchingAlgorithm alg = MatchingAlgorithm::ShortestPath;
-    AuctionOptions auction_opt;      // validated (Hybrid: warm)
+    AuctionOptions auction_opt;      // Hybrid: validated
     detail::AuctionState auction;    // the auction's resumable state
-    bool repair_done = false;        // Auction: the auction and repair() ran
-    int repaired = 0;                // Auction, Hybrid: columns repair() left free
+    int repaired = 0;                // Hybrid: columns repair() left free
     // Hybrid: phase 1 switches to the auction before the first search at
     // which work > switch_work (switch_passes x 2 x lower entries).
     double switch_work = 0.0;
     bool switched = false;           // Hybrid: the switch fired
     // Phase 1's free sparse columns in the search order, listed when
-    // phase 1 starts (under Auction: the auction's first queue, then
-    // relisted by repair()).
+    // phase 1 starts (under Hybrid relisted by repair() after a switch).
     std::vector<int> search_order;
     int stop_free = -1;  // set_stop_free()
-    long long work = 0;  // edges scanned (searches; under Auction also the auction and repair())
+    long long work = 0;  // edges scanned (searches; after a switch also the auction, repair() and canonical_duals())
     // The initial phase's matching and duals.
     std::vector<Int> init_col_to_row;
     std::vector<double> init_u, init_v;
-    // The switch to the auction in phase 1 (Hybrid, or the probe's
-    // probe_switch_to_auction): hybrid_step() runs it.
+    // Hybrid's switch to the auction in phase 1: hybrid_step() runs it.
     bool hybrid_armed = false;           // the next advance() runs the auction first
-    AuctionOptions hybrid_opt;           // validated, warm
     std::vector<int> hybrid_queue;       // the auction's first queue
     std::vector<int> hybrid_failed;      // phase-1 searches that failed before the switch
     std::vector<double> hybrid_reset_u;  // duals at the switch, for repair()'s reset
     // The auction ran (hybrid_step): at the end of phase 1,
     // canonical_duals() moves the sparse duals below hybrid_reset_u.
     bool canon_due = false;
-    // Probe state (bench_matching_trial --hybrid-probe only). Unused unless
-    // a probe_* hook is called.
-    int n_sparse = 0;                 // sparse columns (n minus the dense ones)
-    long long searches = 0;           // search() calls (probe_searches())
-    int probe_pause_free = -1;        // probe_pause_at_free()
     // Search scratch.
     // Each holds at most n rows per search (a row is touched, finalized and
     // queued at the current distance at most once), so they are sized n
@@ -269,11 +259,7 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
     if (alg == MatchingAlgorithm::Hybrid) {
         const AuctionOptions def = hybrid_auction_options();
         s.auction_opt = detail::validated(auction != nullptr ? *auction : def, def);
-        // The auction starts from the searches' matching (0-CS).
-        s.auction_opt.warm = true;
         s.switch_work = s.auction_opt.switch_passes * 2.0 * static_cast<double>(A.nnz());
-    } else {
-        s.auction_opt = detail::validated(auction != nullptr ? *auction : AuctionOptions{});
     }
     if (A.n < 0 || A.validate_shape() != ErrorCode::Success) {
         s.shape_ok = false;
@@ -326,7 +312,6 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
         }
     }
     const auto is_dense = [D](int i) { return D[i] != 0; };
-    for (int j = 0; j < n; ++j) s.n_sparse += D[j] ? 0 : 1;
 
     // Initial duals on the sparse part: u[i] = min_j cost(i, j);
     // v[j] = min_i cost(i, j) - u[i]. Rows or columns without sparse entries
@@ -424,8 +409,9 @@ SymmetricMatcher::~SymmetricMatcher() = default;
 ErrorCode SymmetricMatcher::status() const { return s_->status; }
 
 void SymmetricMatcher::set_stop_free(int max_free) {
-    // The auction matches the sparse part as a whole: no partial stop.
-    assert(s_->alg == MatchingAlgorithm::ShortestPath);
+    // Hybrid's auction matches the tail as a whole: no partial stop (a
+    // negative max_free, the default, is a no-op either way).
+    assert(max_free < 0 || s_->alg == MatchingAlgorithm::ShortestPath);
     if (s_->alg == MatchingAlgorithm::ShortestPath) s_->stop_free = max_free;
 }
 
@@ -461,7 +447,6 @@ MatchingResult SymmetricMatcher::diagonal_result() {
 // success the duals are updated and the matching augmented. In phase 1 the
 // dense rows are invisible (their distance is -inf, see the constructor).
 bool SymmetricMatcher::State::search(int start_col) {
-    ++searches;  // probe counter only; affects nothing else
     RowState *const R = rs.data();
     int *const M = row_match.data();
     int *const P = row_parent.data();
@@ -613,22 +598,25 @@ void SymmetricMatcher::State::list_free_sparse() {
                          [gptr](int a, int b) { return gptr[a + 1] - gptr[a] > gptr[b + 1] - gptr[b]; });
 }
 
-// After the auction: v_j = min over sparse rows of (c_ij - u_i) makes the
-// duals exactly feasible on the sparse part (the auction keeps them so up
-// to its v), every matched edge left loose (c - u - v > 0) is unmatched,
+// After Hybrid's auction: v_j = min over sparse rows of (c_ij - u_i) makes
+// the duals exactly feasible on the sparse part (the auction keeps them so
+// up to its v), every matched edge left loose (c - u - v > 0) is unmatched,
 // and the free sparse columns are listed for phase 1's searches. The
 // searches need nothing more: feasible duals and tight matched edges, for
 // any u.
 //
 // So first, if the auction left columns free (capped, or a column without
 // sparse rows), every sparse row reachable from them by alternating paths
-// (any edge to a row, its matched edge back to a column) gets its
-// constructor dual back. A sparse part without a perfect matching makes
-// the auction's prices fall without bound on exactly those rows (a price
-// war: ~1e5 log units at the bid cap), and the searches would carry them
-// into the scaling: 6 of the 12 deficient KKTs of
-// AuctionMatching.PriceWarsDoNotReachTheScaling ended with scales clamped
-// at exp(+-340) without the reset. Rows outside keep the auction's duals.
+// (any edge to a row, its matched edge back to a column) gets its dual at
+// the switch back (hybrid_reset_u, the searches' exact duals). A sparse
+// part without a perfect matching makes the auction's prices fall without
+// bound on exactly those rows (a price war: ~1e5 log units at the bid cap),
+// and the searches would carry them into the scaling: under the removed
+// pure Auction engine (the same repair, from the constructor's duals) 6 of
+// 12 deficient KKTs ended with scales clamped at exp(+-340) without the
+// reset;
+// AuctionMatching.HybridSingularAndDense covers such sparse parts under
+// Hybrid. Rows outside keep the auction's duals.
 void SymmetricMatcher::State::repair() {
     RowState *const R = rs.data();
     const Int *const gptr = g.ptr.data();
@@ -642,9 +630,9 @@ void SymmetricMatcher::State::repair() {
         int *const reached = touched.data();
         std::uint8_t *const seen = row_done.data();
         std::size_t n_stack = 0, n_reached = 0;
-        // The reset target: the constructor's duals, or after a switch to
-        // the auction (hybrid_step) the exact duals at the switch.
-        const std::vector<double> &reset_u = hybrid_reset_u.empty() ? init_u : hybrid_reset_u;
+        // The reset target: the exact duals at the switch (hybrid_step).
+        assert(hybrid_reset_u.size() == static_cast<std::size_t>(n));
+        const std::vector<double> &reset_u = hybrid_reset_u;
         for (int j = 0; j < n; ++j) {
             if (!dense(j) && col_to_row[static_cast<std::size_t>(j)] < 0) stack[n_stack++] = j;
         }
@@ -727,10 +715,9 @@ void SymmetricMatcher::State::dense_duals() {
     }
 }
 
-// The switch to the auction in phase 1 (Hybrid, or probe_switch_to_auction):
-// the auction and repair(); false: paused by the budget inside the auction
-// (the next call resumes it; the snapshot below is taken once, before the
-// auction starts). The searched part of search_order (before next_col)
+// Hybrid's switch to the auction in phase 1: the auction and repair();
+// false: paused by the budget inside the auction (the next call resumes it;
+// the snapshot below is taken once, before the auction starts). The searched part of search_order (before next_col)
 // holds matched columns and the failed searches' columns; the rest are the
 // free, unsearched ones the auction bids for. Phase 1's
 // duals are feasible and its matched edges tight (0-CS), as the warm
@@ -746,12 +733,12 @@ bool SymmetricMatcher::State::hybrid_step(long long work_budget) {
         hybrid_reset_u.resize(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) hybrid_reset_u[static_cast<std::size_t>(i)] = rs[static_cast<std::size_t>(i)].u;
     }
-    if (hybrid_queue.empty()) {  // nothing left to bid for: plain run
-        hybrid_armed = false;
-        return true;
-    }
+    // The switch fires at a search boundary with search_order[next_col], an
+    // unsearched column, still free (a search only matches its own start
+    // column), so the auction always has a column to bid for.
+    assert(!hybrid_queue.empty());
     const detail::AuctionStatus st = detail::auction_advance(g, row_dense.data(), rs, v, row_match, col_to_row,
-                                                             hybrid_queue, hybrid_opt, auction, work, work_budget);
+                                                             hybrid_queue, auction_opt, auction, work, work_budget);
     if (st == detail::AuctionStatus::Paused) return false;
     repair();  // relists search_order (every free sparse column), next_col = 0
     canon_due = true;
@@ -775,23 +762,7 @@ bool SymmetricMatcher::advance(long long work_budget) {
     // Phase 1: the sparse part (a failed search just leaves its column for
     // phase 3).
     if (s.phase == 1) {
-        if (s.alg == MatchingAlgorithm::Auction) {
-            if (!s.repair_done) {
-                // The auction's first queue: the free sparse columns in the
-                // search order (none free: nothing to bid for or repair).
-                if (s.auction.phase == -1) s.list_free_sparse();
-                if (!s.search_order.empty()) {
-                    const detail::AuctionStatus st =
-                        detail::auction_advance(s.g, s.row_dense.data(), s.rs, s.v, s.row_match, s.col_to_row,
-                                                s.search_order, s.auction_opt, s.auction, s.work, work_budget);
-                    if (st == detail::AuctionStatus::Paused) return false;
-                    s.repair();
-                }
-                s.repair_done = true;
-            }
-        } else if (s.next_col == 0 && s.search_order.empty()) {
-            s.list_free_sparse();
-        }
+        if (s.next_col == 0 && s.search_order.empty()) s.list_free_sparse();
         // Again after a switch: the auction and repair() relist
         // search_order, and the searches start over on it.
         for (bool relisted = true; relisted;) {
@@ -807,13 +778,10 @@ bool SymmetricMatcher::advance(long long work_budget) {
                 if (s.alg == MatchingAlgorithm::Hybrid && !s.switched &&
                     static_cast<double>(s.work) > s.switch_work) {
                     s.switched = true;
-                    s.hybrid_opt = s.auction_opt;
                     s.hybrid_armed = true;
                     relisted = true;
                     break;
                 }
-                // Probe (probe_pause_at_free): pause for the caller's switch.
-                if (s.probe_pause_free >= 0 && s.n_sparse - s.matched <= s.probe_pause_free) return false;
                 if (s.stop_free >= 0 && n - s.matched <= s.stop_free) {
                     // Partial (set_stop_free): the dense columns' duals made
                     // feasible, as before their searches; the rest stay free.
@@ -848,8 +816,9 @@ bool SymmetricMatcher::advance(long long work_budget) {
     return true;
 }
 
-// Canonical duals after a switch to the auction (ncvxqp1-probe-report.md,
-// candidate d), at the end of phase 1. Every optimal dual scales the matrix
+// Canonical duals after a switch to the auction (docs/performance/
+// 2026-11-02-auction-matching.md, "Re-gate with canonical duals"), at the
+// end of phase 1. Every optimal dual scales the matrix
 // validly, but the auction's bids lower u along their displacement chains,
 // and repair() keeps those prices on every row no free column reaches: a
 // different point of the optimal dual face than the searches end at. On
@@ -981,27 +950,6 @@ MatchingResult SymmetricMatcher::State::result(const std::vector<Int> &c2r, cons
         res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);
     }
     return res;
-}
-
-// ---- Probe hooks (bench_matching_trial --hybrid-probe only). ----
-
-long long SymmetricMatcher::probe_searches() const { return s_->searches; }
-
-int SymmetricMatcher::probe_free_sparse() const {
-    const State &s = *s_;
-    if (s.status != ErrorCode::Success || s.phase != 1 || s.alg != MatchingAlgorithm::ShortestPath) return -1;
-    return s.n_sparse - s.matched;
-}
-
-void SymmetricMatcher::probe_pause_at_free(int max_free) { s_->probe_pause_free = max_free; }
-
-void SymmetricMatcher::probe_switch_to_auction(const AuctionOptions &opt) {
-    State &s = *s_;
-    s.probe_pause_free = -1;
-    if (s.status != ErrorCode::Success || s.phase != 1 || s.alg != MatchingAlgorithm::ShortestPath) return;
-    s.hybrid_opt = detail::validated(opt);
-    s.hybrid_opt.warm = true;
-    s.hybrid_armed = true;
 }
 
 MatchingResult SymmetricMatcher::current() const {
