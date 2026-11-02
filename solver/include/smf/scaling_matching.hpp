@@ -61,10 +61,20 @@ struct AuctionOptions {
     /// take over; provisional.
     double bid_cap = 50.0;
 };
+// SymmetricMatcher validates its AuctionOptions: a field that is not finite
+// or outside its domain (eps_factor <= 1, eps_final <= 0, bid_cap <= 0)
+// takes its default, and the valid ones are clamped to eps_factor >= 1.5,
+// eps_final >= 1e-12 and bid_cap <= 1e6 (auction_matching.cpp), so the
+// auction's phases and bids stay bounded.
 
 class SymmetricMatcher {
 public:
-    explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column);
+    /// alg: the sparse part's engine (MatchingAlgorithm, types.hpp); auction
+    /// tunes MatchingAlgorithm::Auction (nullptr: the defaults) and is
+    /// copied. The constructor's initial phase is the same for both.
+    explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column,
+                              MatchingAlgorithm alg = MatchingAlgorithm::ShortestPath,
+                              const AuctionOptions *auction = nullptr);
     ~SymmetricMatcher();
     SymmetricMatcher(const SymmetricMatcher &) = delete;
     SymmetricMatcher &operator=(const SymmetricMatcher &) = delete;
@@ -73,17 +83,24 @@ public:
     ErrorCode status() const;
     /// Runs searches until none is left (true; status() says whether the
     /// matching is perfect) or, with work_budget >= 0, until the edges
-    /// scanned by all searches so far reach work_budget (false). The budget
-    /// is checked between searches, so stopping never changes the result.
+    /// scanned so far (work()) reach work_budget (false). The budget
+    /// is checked between searches (and under Auction between bids), so
+    /// stopping never changes the result.
     bool advance(long long work_budget = -1);
     /// From then on advance() ends the searches once at most max_free
     /// columns are free (checked before each search over the sparse part;
     /// negative, the default: all of them run). current() then reports that
     /// partial matching and the scaling of its duals with status Success: a
-    /// column left free may have no matching at all.
+    /// column left free may have no matching at all. MatchingAlgorithm::
+    /// ShortestPath only: under Auction it asserts in debug builds and is
+    /// ignored in release.
     void set_stop_free(int max_free);
-    /// Edges scanned by the searches so far.
+    /// Edges scanned so far: by the searches, and under Auction also by the
+    /// auction's bids and phase passes and by the repair's pass.
     long long work() const;
+    /// Under Auction, the sparse columns the repair left free and handed to
+    /// the searches (0 before the repair ran); 0 under ShortestPath.
+    int repaired() const;
     /// Whether the initial phase matched every column but the dense ones
     /// (more than 10 sqrt(n) entries) to its own diagonal. The searches left
     /// are then one per dense column (phase 3).

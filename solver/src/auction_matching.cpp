@@ -17,7 +17,31 @@ namespace {
 // within about twice that. The value only bounds how often it compacts.
 constexpr std::size_t kQueueCompactMin = 1024;
 
+// validated()'s clamps on valid options, which bound the auction's work:
+// the phases number log(eps0 / eps_final) / log(eps_factor), eps0 being the
+// largest sparse cost (up to ~1500 log units on the test corpus). At 1.5
+// (Bertsekas recommends 4-10) and 1e-12 that is at most 87 phases. 1e-12
+// is about four ulps of a price near 1500: a smaller eps no longer moves
+// prices. The bid cap times the sparse columns (< 2^31) must fit a long
+// long; 1e6 is 2e4x the default 50.
+constexpr double kMinEpsFactor = 1.5;
+constexpr double kMinEpsFinal = 1e-12;
+constexpr double kMaxBidCap = 1e6;
+
 } // namespace
+
+AuctionOptions validated(const AuctionOptions &opt) {
+    const AuctionOptions def;
+    AuctionOptions o = opt;
+    // NaN fails every comparison, so it takes the default too.
+    if (!(std::isfinite(o.eps_factor) && o.eps_factor > 1.0)) o.eps_factor = def.eps_factor;
+    if (!(std::isfinite(o.eps_final) && o.eps_final > 0.0)) o.eps_final = def.eps_final;
+    if (!(std::isfinite(o.bid_cap) && o.bid_cap > 0.0)) o.bid_cap = def.bid_cap;
+    o.eps_factor = std::max(o.eps_factor, kMinEpsFactor);
+    o.eps_final = std::max(o.eps_final, kMinEpsFinal);
+    o.bid_cap = std::min(o.bid_cap, kMaxBidCap);
+    return o;
+}
 
 // A forward (Gauss-Seidel) auction in min-cost form (Bertsekas): columns bid
 // for rows, and a row's price is -u_i. Column j's bid takes its cheapest row
@@ -80,7 +104,7 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
 
     for (;;) {
         if (st.head == st.queue.size()) {
-            if (st.eps <= opt.eps_final) return AuctionStatus::Done;
+            if (st.eps <= opt.eps_final) return st.dropped ? AuctionStatus::Capped : AuctionStatus::Done;
             // Next phase: the matched columns whose edge is more than the
             // new eps above their column's minimum become free again.
             st.eps = std::max(st.eps / opt.eps_factor, opt.eps_final);
@@ -116,7 +140,6 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
 
         const int j = st.queue[st.head++];
         assert(!is_dense(j) && col_to_row[static_cast<std::size_t>(j)] < 0);
-        ++st.bids_in_phase;
         work += gptr[j + 1] - gptr[j];
         // Ties in b1 go to the lowest position in the column.
         double b1 = kInf, b2 = kInf;
@@ -137,12 +160,13 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
         }
         if (i1 < 0) {
             // No sparse row: the column can only be matched to a dense row,
-            // so the sparse part has no perfect matching. It stays queued
-            // and free, and the phase counts as capped (again on resume).
-            --st.head;
-            st.bids_in_phase = st.bid_limit;
-            return AuctionStatus::Capped;
+            // so the sparse part has no perfect matching. It leaves the
+            // queue free (no bid, never displaced, so never queued again)
+            // for the searches, and the auction ends Capped.
+            st.dropped = true;
+            continue;
         }
+        ++st.bids_in_phase;
         // A single sparse row has no second best: the bid raises its price
         // by the sparse part's cost range (at least eps), a finite step, so
         // single-entry columns competing for one row (no perfect matching)

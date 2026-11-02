@@ -1,5 +1,6 @@
 #include "smf/scaling_matching.hpp"
 
+#include "auction_matching.hpp"
 #include "indexed_min_heap.hpp"
 #include "matching_internal.hpp"
 
@@ -181,7 +182,9 @@ using detail::kInf;
 // As in MC64, a greedy matching on zero-reduced-cost edges (plus length-2
 // augmentations) settles most columns, and each remaining column runs a
 // heap-based Dijkstra that touches, and afterwards resets, only the rows it
-// reaches.
+// reaches. Under MatchingAlgorithm::Auction an epsilon-scaling auction
+// (auction_matching.hpp) first matches the sparse part approximately, and
+// repair() hands what it left loose to the same searches.
 struct SymmetricMatcher::State {
     int n = 0;
     bool shape_ok = true;
@@ -201,11 +204,17 @@ struct SymmetricMatcher::State {
     int phase = 1;
     int next_col = 0;
     MatchingSearchOrder order = MatchingSearchOrder::Column;
+    MatchingAlgorithm alg = MatchingAlgorithm::ShortestPath;
+    AuctionOptions auction_opt;      // validated
+    detail::AuctionState auction;    // the auction's resumable state
+    bool repair_done = false;        // Auction: the auction and repair() ran
+    int repaired = 0;                // Auction: columns repair() left free
     // Phase 1's free sparse columns in the search order, listed when
-    // phase 1 starts.
+    // phase 1 starts (under Auction: the auction's first queue, then
+    // relisted by repair()).
     std::vector<int> search_order;
     int stop_free = -1;  // set_stop_free()
-    long long work = 0;  // edges scanned by the searches
+    long long work = 0;  // edges scanned (searches; under Auction also the auction and repair())
     // The initial phase's matching and duals.
     std::vector<Int> init_col_to_row;
     std::vector<double> init_u, init_v;
@@ -221,15 +230,20 @@ struct SymmetricMatcher::State {
 
     bool dense(int i) const { return row_dense[static_cast<std::size_t>(i)] != 0; }
     bool search(int start_col);
+    void list_free_sparse();
+    void repair();
     void dense_duals();
     MatchingResult result(const std::vector<Int> &c2r, const std::vector<double> *u,
                           const std::vector<double> *vcol) const;
 };
 
-SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order)
+SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order, MatchingAlgorithm alg,
+                                   const AuctionOptions *auction)
     : s_(std::make_unique<State>()) {
     State &s = *s_;
     s.order = order;
+    s.alg = alg;
+    s.auction_opt = detail::validated(auction != nullptr ? *auction : AuctionOptions{});
     if (A.n < 0 || A.validate_shape() != ErrorCode::Success) {
         s.shape_ok = false;
         s.status = ErrorCode::IllegalValue;
@@ -377,9 +391,15 @@ SymmetricMatcher::~SymmetricMatcher() = default;
 
 ErrorCode SymmetricMatcher::status() const { return s_->status; }
 
-void SymmetricMatcher::set_stop_free(int max_free) { s_->stop_free = max_free; }
+void SymmetricMatcher::set_stop_free(int max_free) {
+    // The auction matches the sparse part as a whole: no partial stop.
+    assert(s_->alg == MatchingAlgorithm::ShortestPath);
+    if (s_->alg == MatchingAlgorithm::ShortestPath) s_->stop_free = max_free;
+}
 
 long long SymmetricMatcher::work() const { return s_->work; }
+
+int SymmetricMatcher::repaired() const { return s_->repaired; }
 
 bool SymmetricMatcher::diagonal() const {
     const State &s = *s_;
@@ -545,6 +565,96 @@ bool SymmetricMatcher::State::search(int start_col) {
     return free_row >= 0;
 }
 
+// Lists phase 1's free sparse columns in search_order: column order, or by
+// decreasing degree (stable).
+void SymmetricMatcher::State::list_free_sparse() {
+    search_order.clear();
+    for (int j = 0; j < n; ++j) {
+        if (!dense(j) && col_to_row[static_cast<std::size_t>(j)] < 0) search_order.push_back(j);
+    }
+    const Int *const gptr = g.ptr.data();
+    if (order == MatchingSearchOrder::Degree)
+        std::stable_sort(search_order.begin(), search_order.end(),
+                         [gptr](int a, int b) { return gptr[a + 1] - gptr[a] > gptr[b + 1] - gptr[b]; });
+}
+
+// After the auction: v_j = min over sparse rows of (c_ij - u_i) makes the
+// duals exactly feasible on the sparse part (the auction keeps them so up
+// to its v), every matched edge left loose (c - u - v > 0) is unmatched,
+// and the free sparse columns are listed for phase 1's searches. The
+// searches need nothing more: feasible duals and tight matched edges, for
+// any u.
+//
+// So first, if the auction left columns free (capped, or a column without
+// sparse rows), every sparse row reachable from them by alternating paths
+// (any edge to a row, its matched edge back to a column) gets its
+// constructor dual back. A sparse part without a perfect matching makes
+// the auction's prices fall without bound on exactly those rows (a price
+// war: ~1e5 log units at the bid cap), and the searches would carry them
+// into the scaling: 6 of the 12 deficient KKTs of
+// AuctionMatching.PriceWarsDoNotReachTheScaling ended with scales clamped
+// at exp(+-340) without the reset. Rows outside keep the auction's duals.
+void SymmetricMatcher::State::repair() {
+    RowState *const R = rs.data();
+    const Int *const gptr = g.ptr.data();
+    const int *const grow = g.row.data();
+    const double *const gcost = g.cost.data();
+    {
+        // Columns to expand in `level`, reached rows marked in row_done and
+        // listed in `touched` (each holds at most n: a column is pushed
+        // free or through its matched row, once), the marks cleared after.
+        int *const stack = level.data();
+        int *const reached = touched.data();
+        std::uint8_t *const seen = row_done.data();
+        std::size_t n_stack = 0, n_reached = 0;
+        for (int j = 0; j < n; ++j) {
+            if (!dense(j) && col_to_row[static_cast<std::size_t>(j)] < 0) stack[n_stack++] = j;
+        }
+        while (n_stack > 0) {
+            const int j = stack[--n_stack];
+            work += gptr[j + 1] - gptr[j];
+            for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                const int i = grow[q];
+                if (dense(i) || seen[i]) continue;
+                seen[i] = 1;
+                reached[n_reached++] = i;
+                R[i].u = init_u[static_cast<std::size_t>(i)];
+                const int k = row_match[static_cast<std::size_t>(i)];
+                if (k >= 0) stack[n_stack++] = k;
+            }
+        }
+        for (std::size_t t = 0; t < n_reached; ++t) seen[reached[t]] = 0;
+    }
+    matched = 0;
+    for (int j = 0; j < n; ++j) {
+        if (dense(j)) continue;
+        work += gptr[j + 1] - gptr[j];
+        const int r = static_cast<int>(col_to_row[static_cast<std::size_t>(j)]);
+        double vj = kInf, dr = kInf;
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            const int i = grow[q];
+            if (dense(i)) continue;
+            const double d = gcost[q] - R[i].u;
+            vj = std::min(vj, d);
+            if (i == r) dr = d;
+        }
+        // No sparse row: 0, as the constructor gives it (phase 2 makes the
+        // column's dense edges feasible).
+        v[static_cast<std::size_t>(j)] = vj == kInf ? 0.0 : vj;
+        if (r < 0) continue;
+        // The searches' reduced cost, (c - u) - v, of the matched edge.
+        if (dr - v[static_cast<std::size_t>(j)] > 0.0) {
+            row_match[static_cast<std::size_t>(r)] = -1;
+            col_to_row[static_cast<std::size_t>(j)] = -1;
+        } else {
+            ++matched;
+        }
+    }
+    list_free_sparse();
+    next_col = 0;
+    repaired = static_cast<int>(search_order.size());
+}
+
 // Phase 2: dense rows take the largest u, then dense columns the largest v,
 // that keep every reduced cost >= 0.
 void SymmetricMatcher::State::dense_duals() {
@@ -587,14 +697,22 @@ bool SymmetricMatcher::advance(long long work_budget) {
     // Phase 1: the sparse part (a failed search just leaves its column for
     // phase 3).
     if (s.phase == 1) {
-        if (s.next_col == 0 && s.search_order.empty()) {
-            for (int j = 0; j < n; ++j) {
-                if (!s.dense(j) && s.col_to_row[static_cast<std::size_t>(j)] < 0) s.search_order.push_back(j);
+        if (s.alg == MatchingAlgorithm::Auction) {
+            if (!s.repair_done) {
+                // The auction's first queue: the free sparse columns in the
+                // search order (none free: nothing to bid for or repair).
+                if (s.auction.phase == -1) s.list_free_sparse();
+                if (!s.search_order.empty()) {
+                    const detail::AuctionStatus st =
+                        detail::auction_advance(s.g, s.row_dense.data(), s.rs, s.v, s.row_match, s.col_to_row,
+                                                s.search_order, s.auction_opt, s.auction, s.work, work_budget);
+                    if (st == detail::AuctionStatus::Paused) return false;
+                    s.repair();
+                }
+                s.repair_done = true;
             }
-            const Int *const gptr = s.g.ptr.data();
-            if (s.order == MatchingSearchOrder::Degree)
-                std::stable_sort(s.search_order.begin(), s.search_order.end(),
-                                 [gptr](int a, int b) { return gptr[a + 1] - gptr[a] > gptr[b + 1] - gptr[b]; });
+        } else if (s.next_col == 0 && s.search_order.empty()) {
+            s.list_free_sparse();
         }
         const int n_free = static_cast<int>(s.search_order.size());
         for (; s.next_col < n_free && s.matched < n; ++s.next_col) {
