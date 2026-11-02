@@ -13,7 +13,7 @@
 //
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
-//                             [--sample S [--lines]] [--pieces]
+//                             [--sample S [--lines]] [--pieces] [--matcher ssp]
 //   file: one "<id> <path.mtx>" per line. --budget replaces the default
 //   budget of the second analysis. --ordering is the OrderingMethod value
 //   and --refactors Control::expected_refactors (the IPOPT plugin's
@@ -26,6 +26,14 @@
 // matching scale, rejected flag, ordering used, trial verdict, both flop
 // ratios) and of the standalone matcher (initial and final matching and
 // scale, search work, status), for bit-identity checks across builds.
+// The trial's matcher runs in MatchingSearchOrder::Degree order, so the
+// survey also reports that run to the end (work_deg = its edges scanned in
+// passes of 2 x lower entries, the baseline an alternative matcher is gated
+// against; mtd_ms = its median wall time; logprod = sum_j log|a(col_to_row[j],
+// j)|, the matching's product, printed in full and as an fnv hash of
+// col_to_row). The totals line adds edges_deg = the summed edges scanned.
+// --matcher selects the algorithm (only ssp, the shortest augmenting paths,
+// exists so far).
 // --sample S (with --case) instead loops the default-budget analyse() of
 // the first matching case for S seconds under the in-process sampler
 // (--lines: by source line; needs a /Zi + /DEBUG build).
@@ -43,6 +51,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -145,6 +154,24 @@ void hash_run(Hasher &h, const Run &r) {
     h.pod(exact_ratio(r.info));
 }
 
+// sum_j log|a(col_to_row[j], j)| of a (symmetric) matching of the lower-triangle
+// A: entry (r, j) is stored in column min(r, j); a duplicate counts its largest
+// magnitude. Unmatched columns are skipped.
+double matching_logprod(const smf::CscLower &A, const std::vector<smf::Int> &col_to_row) {
+    double sum = 0.0;
+    for (smf::Int j = 0; j < A.n; ++j) {
+        const smf::Int r = col_to_row[static_cast<std::size_t>(j)];
+        if (r < 0) continue;
+        const auto c = static_cast<std::size_t>(std::min(r, j));
+        const smf::Int row = std::max(r, j);
+        double a = 0.0;
+        for (auto k = static_cast<std::size_t>(A.col_ptr[c]); k < static_cast<std::size_t>(A.col_ptr[c + 1]); ++k)
+            if (A.row_idx[k] == row) a = std::max(a, std::abs(A.values[k]));
+        sum += std::log(a);
+    }
+    return sum;
+}
+
 void hash_matching(Hasher &h, const smf::MatchingResult &m) {
     h.pod(m.status);
     h.vec(m.scale);
@@ -161,6 +188,7 @@ int main(int argc, char **argv) {
     double sample_seconds = 0.0;
     bool sample_lines = false, pieces = false;
     double budget = smf::Control{}.matching_search_budget;
+    std::string matcher = "ssp";
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--list" && i + 1 < argc) list = argv[++i];
@@ -170,13 +198,14 @@ int main(int argc, char **argv) {
         else if (a == "--refactors" && i + 1 < argc) refactors = std::atoi(argv[++i]);
         else if (a == "--case" && i + 1 < argc) filter = argv[++i];
         else if (a == "--sample" && i + 1 < argc) sample_seconds = std::atof(argv[++i]);
+        else if (a == "--matcher" && i + 1 < argc) matcher = argv[++i];
         else if (a == "--lines") sample_lines = true;
         else if (a == "--pieces") pieces = true;
     }
-    if (list.empty()) {
+    if (list.empty() || matcher != "ssp") {
         std::fprintf(stderr, "usage: bench_matching_trial --list file [--trials T] [--ordering m] "
                              "[--budget b] [--refactors r] [--case s] "
-                             "[--sample S [--lines]]\n");
+                             "[--sample S [--lines]] [--pieces] [--matcher ssp]\n");
         return 2;
     }
     std::ifstream in(list);
@@ -317,10 +346,11 @@ int main(int argc, char **argv) {
         }
         return 2;
     }
-    std::printf("%-28s %7s %8s | %-8s %-8s %-8s | %6s %6s | %3s %4s %4s | %9s %9s | %7s %6s | %16s | %8s %8s | %16s\n",
+    std::printf("%-28s %7s %8s | %-8s %-8s %-8s | %6s %6s | %3s %4s %4s | %9s %9s | %7s %6s | %16s | %8s %8s | %16s | %8s %8s | %16s %21s\n",
                 "matrix", "n", "nnz_low", "exact", "default", "zero", "r_init", "r_exact", "eq", "ordE", "ordD",
-                "ms_exact", "ms_default", "work_x", "free0", "perm_hash", "mm_def", "mt_ms", "all_hash");
-    double tot_exact = 0.0, tot_default = 0.0, tot_mm = 0.0, tot_mt = 0.0;
+                "ms_exact", "ms_default", "work_x", "free0", "perm_hash", "mm_def", "mt_ms", "all_hash",
+                "work_deg", "mtd_ms", "logprod_hash", "logprod");
+    double tot_exact = 0.0, tot_default = 0.0, tot_mm = 0.0, tot_mt = 0.0, edges_deg = 0.0;
     int rows = 0, mismatches = 0;
     while (std::getline(in, line)) {
         std::istringstream ls(line);
@@ -362,7 +392,9 @@ int main(int argc, char **argv) {
         hash_run(h, e);
         hash_run(h, d);
         hash_run(h, z);
-        std::vector<double> mt;
+        std::vector<double> mt, mtd;
+        double work_deg = 0.0, logprod = 0.0;
+        std::uint64_t logprod_hash = 0;
         for (int t = 0; t < trials; ++t) {
             const auto t0 = std::chrono::steady_clock::now();
             smf::SymmetricMatcher m(mm.matrix);
@@ -377,24 +409,43 @@ int main(int argc, char **argv) {
                 h.pod(m.work());
                 h.pod(m.status());
             }
+            // The trial's matcher: Degree search order, run to the end.
+            const auto d0 = std::chrono::steady_clock::now();
+            smf::SymmetricMatcher md(mm.matrix, smf::MatchingSearchOrder::Degree);
+            md.advance(-1);
+            const smf::MatchingResult fd = md.current();
+            const auto d1 = std::chrono::steady_clock::now();
+            mtd.push_back(std::chrono::duration<double, std::milli>(d1 - d0).count());
+            if (t == 0) {
+                hash_matching(h, fd);
+                h.pod(md.work());
+                h.pod(md.status());
+                work_deg = static_cast<double>(md.work()) / (2.0 * static_cast<double>(mm.matrix.row_idx.size()));
+                edges_deg += static_cast<double>(md.work());
+                logprod = matching_logprod(mm.matrix, fd.col_to_row);
+                logprod_hash = fnv(fd.col_to_row);
+            }
         }
+        std::sort(mtd.begin(), mtd.end());
+        const double mtd_ms = mtd[mtd.size() / 2];
         std::sort(mt.begin(), mt.end());
         const double mt_ms = mt[mt.size() / 2];
         tot_mm += d.match_ms;
         tot_mt += mt_ms;
         double ri = initial_ratio(z.info);
         if (ri == 0.0) ri = initial_ratio(d.info);
-        std::printf("%-28s %7d %8zu | %-8s %-8s %-8s | %6.3f %6.3f | %3s %4d %4d | %9.2f %9.2f | %7.2f %6.3f | %016llx | %8.2f %8.2f | %016llx\n",
+        std::printf("%-28s %7d %8zu | %-8s %-8s %-8s | %6.3f %6.3f | %3s %4d %4d | %9.2f %9.2f | %7.2f %6.3f | %016llx | %8.2f %8.2f | %016llx | %8.2f %8.2f | %016llx %21.12e\n",
                     id.c_str(), static_cast<int>(mm.matrix.n), mm.matrix.row_idx.size(),
                     trial_name(e.info.matching_trial), trial_name(d.info.matching_trial),
                     trial_name(z.info.matching_trial), ri, exact_ratio(e.info), eq ? "yes" : "NO",
                     e.info.ordering_used, d.info.ordering_used, e.ms, d.ms, work_x, init_free,
                     static_cast<unsigned long long>(fnv(d.perm) ^ (fnv(d.scale) * 31u) ^ (d.rejected ? 1u : 0u)),
-                    d.match_ms, mt_ms, static_cast<unsigned long long>(h.h));
+                    d.match_ms, mt_ms, static_cast<unsigned long long>(h.h), work_deg, mtd_ms,
+                    static_cast<unsigned long long>(logprod_hash), logprod);
         std::fflush(stdout);
     }
     std::printf("total %d matrices, %d differ from the exact trial; analyse ms exact %.1f default %.1f; "
-                "matching phase (default) %.1f; standalone matcher %.1f\n",
-                rows, mismatches, tot_exact, tot_default, tot_mm, tot_mt);
+                "matching phase (default) %.1f; standalone matcher %.1f; edges_deg %.0f\n",
+                rows, mismatches, tot_exact, tot_default, tot_mm, tot_mt, edges_deg);
     return mismatches == 0 ? 0 : 1;
 }
