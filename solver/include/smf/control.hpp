@@ -139,7 +139,16 @@ struct Control {
     // full limit alone: pde_control_120 rec 0.66, cops_glider_400 0.83,
     // ncvxqp9 0.89; pglib300, pglib500 and cops_rocket_800 unchanged, with
     // the full limit's rescale counts (a fixed limit of 4 cost them extra
-    // rescales, 1.06-1.20 wall). The 12900K gate numbers follow.
+    // rescales, 1.06-1.20 wall). i9-12900K gate (interleaved A/B against the
+    // rule off, small_kkt + large_kkt + hard_indef, 3 rounds, all splits; the
+    // threshold was picked on all splits, so heldout is no independent
+    // check): 1T recommended geomean 0.987 (tuning 0.995, heldout 0.965),
+    // ipopt 0.999 (never armed); proj 7, 8 and 10 decide the same on the same
+    // 12 case-tracks, no rescale count or accuracy changes. 1T wins (rec):
+    // pde_control_120 0.61, cops_glider_400 0.83, ncvxqp9 0.85,
+    // cops_chain_800 0.93, pglib case4661 0.94, case1354/2869 0.96. 8T:
+    // recommended 0.993, ipopt 1.002 (pde_control_120 0.84, glider 0.81,
+    // ncvxqp9 0.87; worst 1.09, cont-300 ipopt, a path never armed).
     // Negative early_ratio: off.
     double         scale_on_delay_early_ratio = 4.0;
     double         scale_on_delay_early_proj = 8.0;
