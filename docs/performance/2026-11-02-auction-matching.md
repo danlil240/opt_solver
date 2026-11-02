@@ -142,6 +142,12 @@ All-case wall geomean 0.990 (1T) / 0.983 (8T); analyse geomean 0.978 / 0.974.
 
 Misses only ncvxqp7's 1T bar, by about 2%. The default stays ShortestPath pending the owner's decision. ncvxqp7's analysis time outside the matcher (about 0.6 s at 1T) caps its speedup.
 
+## Default
+
+Hybrid is the default `Control::matching_algorithm` from the commit "analyse: hybrid matcher by default". The owner accepted the one miss on 2026-11-02: ncvxqp7's 1T analysis is 1.76x faster against a 1.8x bar (about 2% short; 8T 1.83-1.85x passes), because about 0.6 s of its analysis lies outside the matcher, which no matcher can speed up. Every other criterion passed.
+
+To get the old behaviour back, set `Control::matching_algorithm = MatchingAlgorithm::ShortestPath` (bitwise the old trial), or `SMF_BENCH_MATCHER=ssp` for `bench_replay`.
+
 ## Code state
 
 Branch `feat/auction-matching`:
@@ -149,13 +155,14 @@ Branch `feat/auction-matching`:
 - `debd0c7`: auction kernel.
 - `5e85cef`: `SymmetricMatcher` Auction engine and exact repair.
 - `9b732c4`: prototype columns.
+- `b4a92d7`: the auction G2 kill write-up (this document's first part, docs only).
 - `efbca8d`, `6f2dc96`: hybrid probes.
 - `7497102`: hybrid engine.
 - `ac21660`: `Control::matching_algorithm` wiring.
-- Hybrid gate write-up and the control.hpp comment (docs only, no code change).
-- This write-up.
+- `5ac9369`: Hybrid gate write-up and the control.hpp comment (docs only, no code change).
 - `bb5783e`: ncvxqp1 hybrid accuracy probe.
 - `f7dc144`: canonical duals after the auction.
-- Re-gate write-up and the control.hpp comment (docs only, no code change).
+- `466fe25`: re-gate write-up and the control.hpp comment (docs only, no code change).
+- "analyse: hybrid matcher by default": `Control::matching_algorithm` defaults to Hybrid; this Default section.
 
-Nothing calls `MatchingAlgorithm::Auction` outside the tests and `bench_matching_trial`. Every existing caller defaults to ShortestPath and is bitwise unchanged. The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.
+Nothing calls `MatchingAlgorithm::Auction` outside the tests and `bench_matching_trial`. The analysis trial runs Hybrid by default, which is ShortestPath bitwise until its 40-pass switch; compute_symmetric_matching, compute_matching_scale and the scale-on-delay rescue stay ShortestPath. The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.
