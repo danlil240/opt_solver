@@ -236,6 +236,10 @@ struct SymmetricMatcher::State {
     int n_sparse = 0;                 // sparse columns (n minus the dense ones)
     long long searches = 0;           // search() calls (probe_searches())
     int probe_pause_free = -1;        // probe_pause_at_free()
+    // HybridProbe (probe only; read only when hybrid_probe().active).
+    const CscLower *probe_A = nullptr;
+    std::vector<Int> probe_switch_c2r;  // col_to_row at the switch
+    bool probe_noswitch = false;        // (a) declined the switch
     // Search scratch.
     // Each holds at most n rows per search (a row is touched, finalized and
     // queued at the current distance at most once), so they are sized n
@@ -252,6 +256,7 @@ struct SymmetricMatcher::State {
     void repair();
     void dense_duals();
     bool hybrid_step(long long work_budget);
+    void probe_canon();
     MatchingResult result(const std::vector<Int> &c2r, const std::vector<double> *u,
                           const std::vector<double> *vcol) const;
 };
@@ -263,7 +268,15 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
     s.order = order;
     s.alg = alg;
     if (alg == MatchingAlgorithm::Hybrid) {
-        const AuctionOptions def = hybrid_auction_options();
+        AuctionOptions def = hybrid_auction_options();
+        const HybridProbe &hp = hybrid_probe();
+        if (hp.active && auction == nullptr) {  // probe only
+            if (hp.eps_final > 0.0) def.eps_final = hp.eps_final;
+            if (hp.eps_start > 0.0) def.eps_start = hp.eps_start;
+            if (hp.eps_factor > 0.0) def.eps_factor = hp.eps_factor;
+            if (hp.switch_passes >= 0.0) def.switch_passes = hp.switch_passes;
+            s.probe_A = &A;
+        }
         s.auction_opt = detail::validated(auction != nullptr ? *auction : def, def);
         // The auction starts from the searches' matching (0-CS).
         s.auction_opt.warm = true;
@@ -676,8 +689,26 @@ void SymmetricMatcher::State::repair() {
         // column's dense edges feasible).
         v[static_cast<std::size_t>(j)] = vj == kInf ? 0.0 : vj;
         if (r < 0) continue;
+        // Probe (HybridProbe::tiebreak): unmatch columns the auction matched,
+        // so the Degree-order searches choose among their ties.
+        bool untie = false;
+        if (!probe_switch_c2r.empty() && probe_switch_c2r[static_cast<std::size_t>(j)] != r) {
+            const HybridProbe &hp = hybrid_probe();
+            if (hp.tiebreak == 2) {
+                untie = true;
+            } else if (hp.tiebreak == 1) {
+                int tight = 0;
+                for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                    const int i = grow[q];
+                    if (dense(i)) continue;
+                    if (gcost[q] - R[i].u - v[static_cast<std::size_t>(j)] <= hp.tie_tol) ++tight;
+                }
+                untie = tight > 1;
+            }
+            if (untie && dr - v[static_cast<std::size_t>(j)] <= 0.0) ++hybrid_probe().untied;
+        }
         // The searches' reduced cost, (c - u) - v, of the matched edge.
-        if (dr - v[static_cast<std::size_t>(j)] > 0.0) {
+        if (untie || dr - v[static_cast<std::size_t>(j)] > 0.0) {
             row_match[static_cast<std::size_t>(r)] = -1;
             col_to_row[static_cast<std::size_t>(j)] = -1;
         } else {
@@ -741,6 +772,13 @@ bool SymmetricMatcher::State::hybrid_step(long long work_budget) {
         }
         hybrid_reset_u.resize(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) hybrid_reset_u[static_cast<std::size_t>(i)] = rs[static_cast<std::size_t>(i)].u;
+        if (probe_A != nullptr) {  // probe only
+            HybridProbe &hp = hybrid_probe();
+            hp.queue = static_cast<int>(hybrid_queue.size());
+            hp.failed = static_cast<int>(hybrid_failed.size());
+            hp.free_share = n_sparse > 0 ? static_cast<double>(hp.queue) / n_sparse : 0.0;
+            if (hp.tiebreak != 0) probe_switch_c2r = col_to_row;
+        }
     }
     if (hybrid_queue.empty()) {  // nothing left to bid for: plain run
         hybrid_armed = false;
@@ -758,6 +796,7 @@ bool SymmetricMatcher::State::hybrid_step(long long work_budget) {
         for (int j : hybrid_failed) row_done[static_cast<std::size_t>(j)] = 0;
         repaired = static_cast<int>(search_order.size());
     }
+    probe_switch_c2r.clear();
     hybrid_armed = false;
     return true;
 }
@@ -799,8 +838,20 @@ bool SymmetricMatcher::advance(long long work_budget) {
                 // Hybrid: the switch depends on the search work alone (not
                 // on the budget), so every budgeting reaches it at the same
                 // search boundary, with j and the columns after it free.
-                if (s.alg == MatchingAlgorithm::Hybrid && !s.switched &&
+                if (s.alg == MatchingAlgorithm::Hybrid && !s.switched && !s.probe_noswitch &&
                     static_cast<double>(s.work) > s.switch_work) {
+                    if (s.probe_A != nullptr) {  // probe only: (a)
+                        HybridProbe &hp = hybrid_probe();
+                        const double share =
+                            s.n_sparse > 0 ? static_cast<double>(n_free - s.next_col) / s.n_sparse : 0.0;
+                        hp.free_share = share;
+                        hp.queue = n_free - s.next_col;
+                        if (hp.min_free_share >= 0.0 && share < hp.min_free_share) {
+                            s.probe_noswitch = true;
+                            s.search(j);
+                            continue;
+                        }
+                    }
                     s.switched = true;
                     s.hybrid_opt = s.auction_opt;
                     s.hybrid_armed = true;
@@ -835,8 +886,57 @@ bool SymmetricMatcher::advance(long long work_budget) {
             }
         }
     }
+    if (s.probe_A != nullptr && s.switched && hybrid_probe().canon != 0) s.probe_canon();  // probe only
     s.phase = 4;
     return true;
+}
+
+// Probe only (HybridProbe::canon): moves the final (optimal) duals to the
+// pointwise largest u among the optimal duals with u <= cap (the duals at
+// the switch on sparse rows, today's on dense rows): delta_i = u_new - u
+// is the shortest distance in the rows' graph k -> i (i on the column
+// matched to row k) with the non-negative reduced costs as weights and
+// cap - u as each row's start label. One Dijkstra over the graph; the
+// matching stays optimal and every reduced cost >= 0.
+void SymmetricMatcher::State::probe_canon() {
+    if (hybrid_reset_u.empty()) return;
+    RowState *const R = rs.data();
+    const Int *const gptr = g.ptr.data();
+    const int *const grow = g.row.data();
+    const double *const gcost = g.cost.data();
+    std::vector<double> delta(static_cast<std::size_t>(n));
+    std::vector<std::uint8_t> done(static_cast<std::size_t>(n), 0);
+    heap.clear();
+    for (int i = 0; i < n; ++i) {
+        const double cap = dense(i) ? R[i].u : hybrid_reset_u[static_cast<std::size_t>(i)];
+        delta[static_cast<std::size_t>(i)] = std::max(0.0, cap - R[i].u);
+        heap.push_or_decrease(i, delta[static_cast<std::size_t>(i)]);
+    }
+    while (!heap.empty()) {
+        const int k = heap.top_id();
+        const double dk = heap.top_key();
+        heap.pop();
+        if (done[static_cast<std::size_t>(k)]) continue;
+        done[static_cast<std::size_t>(k)] = 1;
+        const int j = row_match[static_cast<std::size_t>(k)];
+        if (j < 0) continue;
+        work += gptr[j + 1] - gptr[j];
+        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+            const int i = grow[q];
+            if (done[static_cast<std::size_t>(i)]) continue;
+            const double nd = dk + std::max(0.0, gcost[q] - R[i].u - v[static_cast<std::size_t>(j)]);
+            if (nd < delta[static_cast<std::size_t>(i)]) {
+                delta[static_cast<std::size_t>(i)] = nd;
+                heap.push_or_decrease(i, nd);
+            }
+        }
+    }
+    for (int i = 0; i < n; ++i) {
+        const double d = delta[static_cast<std::size_t>(i)];
+        R[i].u += d;
+        const int j = row_match[static_cast<std::size_t>(i)];
+        if (j >= 0) v[static_cast<std::size_t>(j)] -= d;
+    }
 }
 
 // The matching given by c2r, scaled from the duals u (rows) and vcol
@@ -914,7 +1014,56 @@ MatchingResult SymmetricMatcher::current() const {
     }
     std::vector<double> u(static_cast<std::size_t>(s.n));
     for (int i = 0; i < s.n; ++i) u[static_cast<std::size_t>(i)] = s.rs[static_cast<std::size_t>(i)].u;
-    return s.result(s.col_to_row, &u, &s.v);
+    MatchingResult res = s.result(s.col_to_row, &u, &s.v);
+    if (s.probe_A != nullptr && s.phase == 4) {  // probe only: stats, mix
+        HybridProbe &hp = hybrid_probe();
+        hp.n_sparse = s.n_sparse;
+        hp.switched = s.switched ? 1 : 0;
+        hp.repaired = s.switched ? s.repaired : 0;
+        hp.work = s.work;
+        if (hp.mix != 0) {
+            SymmetricMatcher ref(*s.probe_A, MatchingSearchOrder::Degree);
+            ref.advance(-1);
+            const MatchingResult rr = ref.current();
+            hp.work_ssp = ref.work();
+            const auto pairs = [](const std::vector<Int> &c2r) {
+                int p = 0;
+                for (std::size_t j = 0; j < c2r.size(); ++j) {
+                    const Int i = c2r[j];
+                    if (i >= 0 && static_cast<std::size_t>(i) != j && static_cast<std::size_t>(c2r[static_cast<std::size_t>(i)]) == j)
+                        ++p;
+                }
+                return p / 2;
+            };
+            hp.pairs_hyb = pairs(res.col_to_row);
+            hp.pairs_ssp = pairs(rr.col_to_row);
+            int differ = 0;
+            double mx = 0.0, sum = 0.0;
+            for (int j = 0; j < s.n; ++j) {
+                differ += res.col_to_row[static_cast<std::size_t>(j)] != rr.col_to_row[static_cast<std::size_t>(j)] ? 1 : 0;
+                const double d = std::abs(std::log(res.scale[static_cast<std::size_t>(j)]) -
+                                          std::log(rr.scale[static_cast<std::size_t>(j)]));
+                mx = std::max(mx, d);
+                sum += d;
+            }
+            hp.cols_differ = differ;
+            hp.max_dlog_scale = mx;
+            hp.mean_dlog_scale = s.n > 0 ? sum / s.n : 0.0;
+            if (hp.mix == 1 && rr.status == ErrorCode::Success) {
+                res.scale = rr.scale;
+            } else if (hp.mix == 2 && rr.status == ErrorCode::Success) {
+                res.col_to_row = rr.col_to_row;
+                res.row_to_col = rr.row_to_col;
+                res.matched_rank = rr.matched_rank;
+            }
+        }
+    }
+    return res;
+}
+
+HybridProbe &hybrid_probe() {
+    static HybridProbe probe;
+    return probe;
 }
 
 MatchingResult SymmetricMatcher::initial() const {

@@ -6,6 +6,7 @@
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/scaling_matching.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -566,6 +567,29 @@ int main(int argc, char **argv) {
         else if (k == "hybrid") ctrl.matching_algorithm = smf::MatchingAlgorithm::Hybrid;
         else std::fprintf(stderr, "warning: SMF_BENCH_MATCHER=\"%s\" is not ssp, auction or hybrid; keeping the default\n", e);
     }
+    // PROBE ONLY (ncvxqp1-probe-report.md): SMF_PROBE_HYB_* set
+    // smf::hybrid_probe() (Hybrid matcher overrides and stats); unset: off.
+    {
+        smf::HybridProbe &hp = smf::hybrid_probe();
+        const auto envd = [&](const char *k, double &dst) {
+            if (const char *e = std::getenv(k)) { dst = std::atof(e); hp.active = true; }
+        };
+        envd("SMF_PROBE_HYB_MIN_FREE", hp.min_free_share);
+        envd("SMF_PROBE_HYB_EPS_FINAL", hp.eps_final);
+        envd("SMF_PROBE_HYB_EPS_START", hp.eps_start);
+        envd("SMF_PROBE_HYB_EPS_FACTOR", hp.eps_factor);
+        envd("SMF_PROBE_HYB_SWITCH", hp.switch_passes);
+        envd("SMF_PROBE_HYB_TIE_TOL", hp.tie_tol);
+        double tb = 0.0, mix = 0.0, on = 0.0;
+        envd("SMF_PROBE_HYB_TIEBREAK", tb);
+        envd("SMF_PROBE_HYB_MIX", mix);
+        double canon = 0.0;
+        envd("SMF_PROBE_HYB_CANON", canon);
+        hp.canon = static_cast<int>(canon);
+        envd("SMF_PROBE_HYB", on);  // stats only
+        hp.tiebreak = static_cast<int>(tb);
+        hp.mix = static_cast<int>(mix);
+    }
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,
@@ -919,6 +943,21 @@ int main(int argc, char **argv) {
 
     if (!jsonl_out.empty()) {
         smf::bench::append_run_record_jsonl(jsonl_out, rec);
+    }
+    if (smf::hybrid_probe().active) {  // probe only
+        const smf::HybridProbe &hp = smf::hybrid_probe();
+        std::fprintf(stderr,
+                     "PROBE outcome=%d analyse_ms=%.2f match_ms=%.2f omega=%.3g eta=%.3g delayed=%lld entries=%lld "
+                     "flops=%.4g sw=%d share=%.4f queue=%d failed=%d repaired=%d untied=%d n_sparse=%d work_passes=%.2f "
+                     "differ=%d pairs_hyb=%d pairs_ssp=%d dlog_max=%.3g dlog_mean=%.3g work_ssp_passes=%.2f\n",
+                     static_cast<int>(rec.outcome), rec.analyse_ms,
+                     rec.has_analyse_phases ? 1000.0 * rec.analyse_phases.matching : -1.0,
+                     rec.validation.omega, rec.validation.eta_inf, static_cast<long long>(rec.delayed_pivots),
+                     static_cast<long long>(rec.factor_entries), static_cast<double>(rec.flops), hp.switched,
+                     hp.free_share, hp.queue, hp.failed, hp.repaired, hp.untied, hp.n_sparse,
+                     static_cast<double>(hp.work) / (2.0 * static_cast<double>(A.row_idx.size())), hp.cols_differ,
+                     hp.pairs_hyb, hp.pairs_ssp, hp.max_dlog_scale, hp.mean_dlog_scale,
+                     static_cast<double>(hp.work_ssp) / (2.0 * static_cast<double>(A.row_idx.size())));
     }
 
     return rec.outcome == smf::bench::Outcome::Success ? 0 : 1;

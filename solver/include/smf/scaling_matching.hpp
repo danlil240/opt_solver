@@ -177,6 +177,42 @@ private:
     std::unique_ptr<State> s_;
 };
 
+/// PROBE ONLY (ncvxqp1-probe-report.md): process-wide overrides of the
+/// MatchingAlgorithm::Hybrid matcher, which bench_replay sets from the
+/// SMF_PROBE_HYB_* environment variables. Not thread-safe; with active false
+/// (the default) nothing reads it and every matcher is bitwise unchanged.
+struct HybridProbe {
+    bool active = false;
+    /// (a) No switch while the free, unsearched sparse columns are below
+    /// this share of the sparse columns (negative: off). The searches go on.
+    double min_free_share = -1.0;
+    /// (c) Overrides of hybrid_auction_options() (negative: keep).
+    double eps_final = -1.0, eps_start = -1.0, eps_factor = -1.0, switch_passes = -1.0;
+    /// (b) Tie-break after the auction: 0 off; 1 the repair also unmatches
+    /// every column the auction matched (not matched so at the switch) whose
+    /// matched edge is not its column's only edge within tie_tol of tight;
+    /// 2 the repair unmatches every column the auction matched (only the
+    /// auction's duals are kept).
+    int tiebreak = 0;
+    double tie_tol = 0.0;
+    /// Diagnosis: 0 off; 1 the hybrid matching with the ShortestPath
+    /// (Degree) matcher's scale; 2 the ShortestPath matching with the
+    /// hybrid's scale; 3 compare only (stats below, result unchanged).
+    int mix = 0;
+    /// (d) After a switch, move the final duals to the largest u <= the
+    /// switch's duals among the optimal ones (probe_canon()); 0 off.
+    int canon = 0;
+    // Stats of the last Hybrid matcher run to the end.
+    int n_sparse = 0, switched = 0, queue = 0, failed = 0, repaired = 0, untied = 0;
+    double free_share = -1.0;  // queue / n_sparse at the switch
+    long long work = 0;
+    // mix != 0: against the ShortestPath (Degree) matcher.
+    int cols_differ = -1, pairs_hyb = -1, pairs_ssp = -1;
+    double max_dlog_scale = -1.0, mean_dlog_scale = -1.0;
+    long long work_ssp = 0;
+};
+HybridProbe &hybrid_probe();
+
 ErrorCode compute_matching_scale(const CscLower &A,
                                  std::vector<double> &scale,
                                  int print_level = 0);
