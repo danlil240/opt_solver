@@ -873,3 +873,40 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
         expect_accurate_solve(s, fk, c, B);
     }
 }
+
+TEST(ScaleOnDelay, RescuePiecesTimed) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);  // fires (see FiresOnBadlyScaledKkt)
+    const Control ctrl = base_control();
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(i1.delay_stops, 1);
+    EXPECT_GT(i1.delay_try_seconds, 0.0);
+    EXPECT_GT(i1.delay_matching_seconds, 0.0);
+    EXPECT_LE(i1.delay_try_seconds + i1.delay_matching_seconds, i1.factor_seconds);
+
+    // Second factor, same values, same FactorKeep: the kept scale is reused.
+    Info i1b;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1b, fk, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(i1b.delay_try_seconds, 0.0);
+    EXPECT_EQ(i1b.delay_matching_seconds, 0.0);
+
+    // Well scaled values: no try, no matching.
+    const CscLower B = kkt(kG, kM, 4.1, 0.0);
+    FactorKeep fk2;
+    Info i2;
+    auto ak2 = s.analyse(B, ctrl, info);
+    ASSERT_NE(ak2.get(), nullptr);
+    ASSERT_EQ(s.factor(*ak2, std::span<const double>(B.values), ctrl, i2, fk2, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(i2.delay_try_seconds, 0.0);
+    EXPECT_EQ(i2.delay_matching_seconds, 0.0);
+}
