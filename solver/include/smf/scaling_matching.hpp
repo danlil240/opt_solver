@@ -37,6 +37,31 @@ MatchingResult compute_symmetric_matching(const CscLower &A);
 /// columns come last (case39, the TSOPF_FS family, cops_catmix_800).
 enum class MatchingSearchOrder { Column, Degree };
 
+/// Tuning of the epsilon-scaling auction on the sparse part (the
+/// MatchingAlgorithm::Auction matcher, ahead of its exact shortest-path
+/// repair). All costs and epsilons are in log units (log col_max - log|a|).
+/// The defaults are provisional: Task 4 of the auction-matching plan tunes
+/// them on edges scanned over the 50-matrix corpus.
+struct AuctionOptions {
+    /// Epsilon divides by this per scaling phase. 5 is in the 4-10 range
+    /// Bertsekas recommends for epsilon-scaling; provisional.
+    double eps_factor = 5.0;
+    /// The last phase's epsilon, in log units: the matching's product is
+    /// within n * eps_final of the optimum (1e-3: a factor 1.001 per column)
+    /// before the repair makes it exact; provisional.
+    double eps_final = 1e-3;
+    /// Start from the constructor's duals and greedy matching (0-CS); false:
+    /// from its duals and an empty matching; provisional.
+    bool warm = true;
+    /// Max bids per phase, in units of the sparse part's columns. Bounds the
+    /// price war a structurally singular sparse part starts (prices fall
+    /// without bound). 50 is 7x the busiest phase of test_auction_matching's
+    /// KKT matrices (6.7 bids per column, opf_like_kkt 3000/1200); a
+    /// singular sparse part costs 50 bids per column before the searches
+    /// take over; provisional.
+    double bid_cap = 50.0;
+};
+
 class SymmetricMatcher {
 public:
     explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column);

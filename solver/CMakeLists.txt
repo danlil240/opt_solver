@@ -473,6 +473,7 @@ add_library(smf STATIC
     src/solve.cpp
     src/scaling.cpp
     src/scaling_matching.cpp
+    src/auction_matching.cpp
     src/refinement.cpp
     src/dispatch_policy.cpp
     src/solver.cpp

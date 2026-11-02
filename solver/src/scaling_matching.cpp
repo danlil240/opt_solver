@@ -1,6 +1,7 @@
 #include "smf/scaling_matching.hpp"
 
 #include "indexed_min_heap.hpp"
+#include "matching_internal.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -14,17 +15,7 @@
 
 namespace smf {
 
-namespace {
-
-// Full symmetric pattern (both triangles) in CSC form, duplicates merged and
-// explicit zeros dropped, with the matching cost of every entry:
-//   cost(i, j) = log(col_max[j]) - log|a_ij| >= 0.
-struct CostGraph {
-    std::vector<Int> ptr;
-    std::vector<int> row;
-    std::vector<double> cost;
-    std::vector<double> col_max;
-};
+namespace detail {
 
 ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     const int n = static_cast<int>(A.n);
@@ -176,23 +167,17 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
     return ErrorCode::Success;
 }
 
-// The per-row state every scanned edge reads: the row dual and the search
-// distance, 16 bytes, so four rows share a cache line (the searches are
-// bound by these random row accesses). The row's match, parent and flags,
-// needed only once a row's distance improves or it is finalized, live in
-// separate arrays of the matcher.
-struct RowState {
-    double u;      // row dual
-    double dist;   // tentative search distance (inf when untouched)
-};
+} // namespace detail
 
-constexpr double kInf = std::numeric_limits<double>::infinity();
-
-} // namespace
+using detail::CostGraph;
+using detail::RowState;
+using detail::build_cost_graph;
+using detail::kInf;
 
 // Maximum-product perfect matching (MC64 job 5): minimum-cost assignment on
-// the costs above, solved by shortest augmenting paths with dual potentials
-// u[row], v[col] (reduced cost c - u - v >= 0, zero on matched edges).
+// the costs of CostGraph (matching_internal.hpp), solved by shortest
+// augmenting paths with dual potentials u[row], v[col] (reduced cost
+// c - u - v >= 0, zero on matched edges).
 // As in MC64, a greedy matching on zero-reduced-cost edges (plus length-2
 // augmentations) settles most columns, and each remaining column runs a
 // heap-based Dijkstra that touches, and afterwards resets, only the rows it
