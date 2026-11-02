@@ -126,6 +126,8 @@ public:
     // bitwise as before. ----
     /// ShortestPath, phase 1: the sparse columns free now; -1 otherwise.
     int probe_free_sparse() const;
+    /// Shortest-path searches run so far (phases 1 and 3, failed ones too).
+    long long probe_searches() const;
     /// From then on advance() also pauses (returns false) before a phase-1
     /// search once at most max_free sparse columns are free (negative: off).
     /// probe_switch_to_auction() clears it.

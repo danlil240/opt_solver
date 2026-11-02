@@ -221,6 +221,7 @@ struct SymmetricMatcher::State {
     // Probe state (bench_matching_trial --hybrid-probe only; see
     // probe_switch_to_auction). Unused unless a probe_* hook is called.
     int n_sparse = 0;                 // sparse columns (n minus the dense ones)
+    long long searches = 0;           // search() calls (probe_searches())
     int probe_pause_free = -1;        // probe_pause_at_free()
     bool probe_armed = false;         // the next advance() runs the auction first
     AuctionOptions probe_opt;         // validated, warm
@@ -438,6 +439,7 @@ MatchingResult SymmetricMatcher::diagonal_result() {
 // success the duals are updated and the matching augmented. In phase 1 the
 // dense rows are invisible (their distance is -inf, see the constructor).
 bool SymmetricMatcher::State::search(int start_col) {
+    ++searches;  // probe counter only; affects nothing else
     RowState *const R = rs.data();
     int *const M = row_match.data();
     int *const P = row_parent.data();
@@ -809,6 +811,8 @@ MatchingResult SymmetricMatcher::State::result(const std::vector<Int> &c2r, cons
 }
 
 // ---- Probe hooks (bench_matching_trial --hybrid-probe only). ----
+
+long long SymmetricMatcher::probe_searches() const { return s_->searches; }
 
 int SymmetricMatcher::probe_free_sparse() const {
     const State &s = *s_;

@@ -16,7 +16,8 @@
 //                             [--sample S [--lines]] [--pieces] [--matcher ssp|auction]
 //                             [--auction-factor f] [--auction-eps e]
 //                             [--auction-cold]
-//                             [--hybrid-probe [--hybrid-eps e1,e2,..]]
+//                             [--hybrid-probe [--hybrid-eps e1,e2,..]
+//                              [--hybrid-rules r1,r2,..]]
 //   file: one "<id> <path.mtx>" per line. --budget replaces the default
 //   budget of the second analysis. --ordering is the OrderingMethod value
 //   and --refactors Control::expected_refactors (the IPOPT plugin's
@@ -55,11 +56,16 @@
 // (SymmetricMatcher::probe_switch_to_auction): Degree searches until the
 // switch, the warm auction on the free sparse columns not yet searched
 // (eps_factor 10, eps_final 1e-2, eps_start each of --hybrid-eps, default
-// 1e-2,1e-1,1), the exact repair, then the remaining searches. Rules: f10 /
-// f5 / f2 switch once the free sparse columns are at most 10 / 5 / 2% of n
-// (checked before each search); w2 / w5 once the search work exceeds 2 / 5
-// passes (slices of one pass, the first slice boundary past the point; a
-// switch after phase 1 is a no-op). Per rule: sw = free sparse share at the
+// 1e-2,1e-1,1), the exact repair, then the remaining searches. Rules
+// (--hybrid-rules, default f10,f5,f2,w2,w5): f<x> switches once the free
+// sparse columns are at most x% of n (checked before each search); w<k> once
+// the work exceeds k passes; p<x> at the first slice boundary where the
+// searches of the last slice cost more than x times an average column's share
+// of a pass on average: dw / ds > x * pass / n, dw = edges scanned in the
+// slice, ds = searches started in it (probe_searches(); ds = 0, one search
+// spanning the whole slice, counts as exceeded). w and p use slices of one
+// pass and switch at the first slice boundary past the point; both are
+// deterministic (edge counts only). A switch after phase 1 is a no-op. Per rule: sw = free sparse share at the
 // switch (- : phase 1 ended first, the run is plain Degree), and per eps:
 // w = total work in passes (searches + auction + repair + searches),
 // ok = prod_ok against plain Degree (as --matcher auction), ms (median of
@@ -254,10 +260,24 @@ void hash_matching(Hasher &h, const smf::MatchingResult &m) {
 
 // --hybrid-probe (see the header comment).
 struct HybridRule {
-    const char *name;
-    double free_share;  // > 0: switch at free sparse <= share x n
-    int passes;         // > 0: switch once the work exceeds this many passes
+    std::string name;
+    char kind = 0;       // 'f': free share, 'w': work passes, 'p': per-search cost
+    double value = 0.0;  // f: share of n (0.10 for f10); w: passes; p: x
 };
+
+// "f10" / "w5" / "p200"; false on a malformed entry.
+bool parse_rules(const std::string &list, std::vector<HybridRule> &out) {
+    std::stringstream ss(list);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        if (tok.size() < 2 || (tok[0] != 'f' && tok[0] != 'w' && tok[0] != 'p')) return false;
+        char *end = nullptr;
+        const double x = std::strtod(tok.c_str() + 1, &end);
+        if (end == tok.c_str() + 1 || *end != '\0' || !(x > 0.0)) return false;
+        out.push_back({tok, tok[0], tok[0] == 'f' ? x / 100.0 : x});
+    }
+    return !out.empty();
+}
 
 struct HybridRun {
     long long work = 0;
@@ -271,14 +291,26 @@ HybridRun run_hybrid(const smf::CscLower &A, const HybridRule &rule, const smf::
     const long long pass = 2 * static_cast<long long>(A.row_idx.size());
     smf::SymmetricMatcher m(A, smf::MatchingSearchOrder::Degree);
     bool done = false;
-    if (rule.free_share > 0.0) {
-        m.probe_pause_at_free(static_cast<int>(std::floor(rule.free_share * static_cast<double>(A.n))));
+    if (rule.kind == 'f') {
+        m.probe_pause_at_free(static_cast<int>(std::floor(rule.value * static_cast<double>(A.n))));
         done = m.advance(-1);
-    } else {
-        const long long target = static_cast<long long>(rule.passes) * pass;
+    } else if (rule.kind == 'w') {
+        const double target = rule.value * static_cast<double>(pass);
         for (long long b = pass;; b += pass) {
             done = m.advance(b);
-            if (done || m.work() > target) break;
+            if (done || static_cast<double>(m.work()) > target) break;
+        }
+    } else {
+        // p<x>: the last slice's edges per search above x * pass / n.
+        const double limit = rule.value * static_cast<double>(pass) / static_cast<double>(std::max<smf::Int>(A.n, 1));
+        long long w0 = m.work(), s0 = m.probe_searches();
+        for (long long b = pass;; b += pass) {
+            done = m.advance(b);
+            if (done) break;
+            const long long dw = m.work() - w0, ds = m.probe_searches() - s0;
+            if (ds == 0 ? dw > 0 : static_cast<double>(dw) / static_cast<double>(ds) > limit) break;
+            w0 = m.work();
+            s0 = m.probe_searches();
         }
     }
     if (!done) {
@@ -293,9 +325,14 @@ HybridRun run_hybrid(const smf::CscLower &A, const HybridRule &rule, const smf::
     return r;
 }
 
-int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials, const std::vector<double> &eps) {
-    const HybridRule rules[] = {{"f10", 0.10, 0}, {"f5", 0.05, 0}, {"f2", 0.02, 0}, {"w2", 0.0, 2}, {"w5", 0.0, 5}};
-    const std::size_t nr = std::size(rules), ne = eps.size(), nv = nr * ne;
+int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials, const std::vector<double> &eps,
+                        const std::string &rule_list) {
+    std::vector<HybridRule> rules;
+    if (!parse_rules(rule_list, rules)) {
+        std::fprintf(stderr, "bad --hybrid-rules '%s' (comma list of f<x>, w<k>, p<x>)\n", rule_list.c_str());
+        return 2;
+    }
+    const std::size_t nr = rules.size(), ne = eps.size(), nv = nr * ne;
     const auto med = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
         return v[v.size() / 2];
@@ -304,7 +341,7 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
     for (double e : eps) std::printf(" %g", e);
     std::printf("\n%-28s %7s %8s %8s %6s", "matrix", "n", "work_deg", "deg_ms", "free0");
     for (const HybridRule &r : rules) {
-        std::printf(" | %3s %5s", r.name, "sw");
+        std::printf(" | %5s %5s", r.name.c_str(), "sw");
         for (double e : eps) {
             char head[32];
             std::snprintf(head, sizeof head, "w@%g", e);
@@ -378,8 +415,8 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
                 fail[v] += ok ? 0 : 1;
                 if (is_nc3) nc3[v] = static_cast<double>(first.work);
                 if (ei == 0) {
-                    if (first.switch_share >= 0.0) std::printf(" | %3s %5.3f", "", first.switch_share);
-                    else std::printf(" | %3s %5s", "", "-");
+                    if (first.switch_share >= 0.0) std::printf(" | %5s %5.3f", "", first.switch_share);
+                    else std::printf(" | %5s %5s", "", "-");
                 }
                 std::printf(" %7.2f %2s %7.2f", static_cast<double>(first.work) / pass, ok ? "y" : "N", h_ms);
             }
@@ -391,7 +428,7 @@ int hybrid_probe_survey(std::ifstream &in, const std::string &filter, int trials
     for (std::size_t ri = 0; ri < nr; ++ri)
         for (std::size_t ei = 0; ei < ne; ++ei) {
             const std::size_t v = ri * ne + ei;
-            std::printf("variant %-3s eps_start %-6g: edges %.0f = %.3fx edges_deg; ncvxqp3 ", rules[ri].name, eps[ei],
+            std::printf("variant %-5s eps_start %-6g: edges %.0f = %.3fx edges_deg; ncvxqp3 ", rules[ri].name.c_str(), eps[ei],
                         edges[v], edges_deg > 0.0 ? edges[v] / edges_deg : 0.0);
             if (have_nc3 && nc3_deg > 0.0) std::printf("%.3fx", nc3[v] / nc3_deg);
             else std::printf("n/a");
@@ -415,6 +452,7 @@ int main(int argc, char **argv) {
     smf::AuctionOptions auc;
     bool hybrid_probe = false;
     std::vector<double> hybrid_eps = {1e-2, 1e-1, 1.0};
+    std::string hybrid_rules = "f10,f5,f2,w2,w5";
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--list" && i + 1 < argc) list = argv[++i];
@@ -435,6 +473,7 @@ int main(int argc, char **argv) {
             std::string tok;
             while (std::getline(ss, tok, ',')) hybrid_eps.push_back(std::atof(tok.c_str()));
         }
+        else if (a == "--hybrid-rules" && i + 1 < argc) hybrid_rules = argv[++i];
         else if (a == "--lines") sample_lines = true;
         else if (a == "--pieces") pieces = true;
     }
@@ -443,7 +482,7 @@ int main(int argc, char **argv) {
                              "[--budget b] [--refactors r] [--case s] "
                              "[--sample S [--lines]] [--pieces] [--matcher ssp|auction]\n"
                              "[--auction-factor f] [--auction-eps e] [--auction-cold]\n"
-                             "[--hybrid-probe [--hybrid-eps e1,e2,..]]\n");
+                             "[--hybrid-probe [--hybrid-eps e1,e2,..] [--hybrid-rules r1,r2,..]]\n");
         return 2;
     }
     std::ifstream in(list);
@@ -553,7 +592,7 @@ int main(int argc, char **argv) {
         }
         return 0;
     }
-    if (hybrid_probe) return hybrid_probe_survey(in, filter, trials, hybrid_eps);
+    if (hybrid_probe) return hybrid_probe_survey(in, filter, trials, hybrid_eps, hybrid_rules);
     if (sample_seconds > 0.0) {
         while (std::getline(in, line)) {
             std::istringstream ls(line);
