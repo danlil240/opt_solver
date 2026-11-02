@@ -1,5 +1,6 @@
 #include "adapter.hpp"
 #include "smf/ipm_session.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -447,7 +448,10 @@ public:
         ipm_.static_mode = mode;
         ipm_.static_as_zero = static_zero;
     }
-    SmfIpmSessionAdapter(const IpmControl &ipm, std::string label) : ipm_(ipm), label_(std::move(label)) {}
+    // The ipopt-plugin track: also emulates IPOPT's default dynamic scaling
+    // around the plugin's per-call scaling decision (see factor()).
+    SmfIpmSessionAdapter(const IpmControl &ipm, std::string label)
+        : ipm_(ipm), label_(std::move(label)), ipopt_scaling_(true) {}
 
     AdapterIdentity identity() const override {
         AdapterIdentity id;
@@ -479,6 +483,9 @@ public:
         const ErrorCode ec = session_.analyse(A, {}, ctrl_, ipm_);
         stats_.analyse_ms = ms_since(t0, Clock::now());
         analysed_ = false;
+        mc64_requested_ = false;
+        mc64_switched_ = false;
+        ipopt_scale_.clear();
         if (ec != ErrorCode::Success) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "smf::IpmSession::analyse failed";
@@ -499,11 +506,59 @@ public:
             stats_.reason = "values size mismatch";
             return stats_.outcome;
         }
-        session_.set_control(ctrl_);
+        // ipopt-plugin track: IPOPT's default ma97_scaling = dynamic with
+        // ma97_switch1 = od_hd_reuse factors unscaled until a successful
+        // factor delays more than kIpoptHighDelayFraction * n pivots; then it
+        // requests MC64 (scaling = 1) once and passes the returned scale back
+        // on every later factor. (The plugin trace of robot_arm shows one
+        // switch, then reuse for the rest of the run; "od", IPOPT's on-demand
+        // quality requests, is not modelled.) The plugin answers each call
+        // through smf::ma97_scaling_call(), as here.
+        Control c = ctrl_;
+        Ma97ScalingCall call;
+        if (ipopt_scaling_) {
+            if (mc64_requested_) c.scaling = ScalingMethod::Matching;  // MA97 scaling = 1
+            const AnalysisKeep *ak = session_.analysis_keep();
+            call = ma97_scaling_call(c, ak != nullptr && ak->matching_rejected,
+                                     ipopt_scale_.empty() ? nullptr : ipopt_scale_.data(),
+                                     static_cast<int>(pattern_->n));
+        }
+        session_.set_control(c);
+        if (call.reuse) session_.set_user_scale(ipopt_scale_.data());
         const auto t0 = Clock::now();
-        const IpmFactorStatus st = session_.factor(values);
+        IpmFactorStatus st = session_.factor(values);
+        // The plugin's stale-scale retry (smf_ma97_plugin.cpp, ma97_factor_d).
+        if (plugin_stale_scale_retry() && call.reuse && st == IpmFactorStatus::Singular) {
+            Control fresh = c;
+            fresh.scaling = ScalingMethod::Matching;
+            session_.set_control(fresh);
+            const IpmFactorStatus retried = session_.factor(values);
+            if (retried == IpmFactorStatus::Ok || retried == IpmFactorStatus::Singular) {
+                st = retried;
+                call.computed = true;
+            } else {
+                session_.set_control(c);
+                session_.set_user_scale(ipopt_scale_.data());
+                st = session_.factor(values);
+            }
+        }
         const double ms = ms_since(t0, Clock::now());
         const Info &info = session_.info();
+        if (ipopt_scaling_) {
+            // The scale handed back to IPOPT, which keeps it for its reuses.
+            if (call.computed && !session_.factor_keep().scale.empty())
+                ipopt_scale_ = session_.factor_keep().scale;
+            if (call.unit_scale) ipopt_scale_.assign(static_cast<std::size_t>(pattern_->n), 1.0);
+            if (mc64_requested_) {
+                mc64_requested_ = false;
+                mc64_switched_ = true;
+            }
+            // IPOPT's high-delay check runs after a successful factor only.
+            if (!mc64_switched_ && st == IpmFactorStatus::Ok &&
+                static_cast<double>(info.delayed_pivots) >
+                    kIpoptHighDelayFraction * static_cast<double>(pattern_->n))
+                mc64_requested_ = true;
+        }
         // The first factor() runs the deferred analysis: count it as analysis.
         const double analyse_ms = analysed_ ? 0.0 : 1e3 * info.analyse_seconds;
         analysed_ = analysed_ || session_.analysis_keep() != nullptr;
@@ -569,6 +624,10 @@ private:
     Control ctrl_{};
     IpmControl ipm_{};
     std::string label_ = "IpmSession";
+    bool ipopt_scaling_ = false;   // emulate IPOPT's dynamic scaling (ipopt-plugin)
+    bool mc64_requested_ = false;  // IPOPT asks for MC64 on the next factor
+    bool mc64_switched_ = false;   // IPOPT has switched (reuses the scale from now on)
+    std::vector<double> ipopt_scale_;  // the scale IPOPT holds and passes back
     IpmSession session_;
     const CscLower *pattern_ = nullptr;
     bool analysed_ = false;

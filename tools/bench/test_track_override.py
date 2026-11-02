@@ -48,6 +48,7 @@ class TrackOverrideCasesTests(unittest.TestCase):
         self.assertEqual(a["mode"], "warm_sequence")
         self.assertEqual(a["seq_values_path"], "a.vals")
         self.assertEqual(a["manifest_track"], "ipopt")
+        self.assertNotIn("ordering", a)
         self.assertEqual(out[1]["manifest_track"], "recommended")
         # the manifest entries themselves are untouched
         self.assertEqual(CASES[1]["track"], "ipopt")
@@ -98,7 +99,7 @@ class RunTrackOverrideTests(unittest.TestCase):
         by_case = {self._arg(c, "--case"): c for c in calls}
         self.assertEqual(self._arg(by_case["a"], "--mode"), "warm_sequence")
         self.assertEqual(self._arg(by_case["a"], "--seq-values"), "a.vals")
-        self.assertEqual(self._arg(by_case["a"], "--ordering"), "matching")
+        self.assertNotIn("--ordering", by_case["a"])  # per-case pins dropped on override tracks
         self.assertEqual(self._arg(by_case["b"], "--mode"), "cold")
 
     def test_case_filter_applies(self):
@@ -110,9 +111,28 @@ class RunTrackOverrideTests(unittest.TestCase):
         self.assertEqual(sorted(self._arg(c, "--track") for c in calls),
                          ["ipopt", "recommended", "recommended"])
 
-    def test_unknown_track_rejected(self):
-        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
-            self._run(["--track-override", "bogus"])
+    def test_only_override_tracks_accepted(self):
+        for bad in ("bogus", "recommended", "ipopt"):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self._run(["--track-override", bad])
+
+    def test_no_smf_selected_is_an_error(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, calls = self._run(["--track-override", "ipopt-plugin", "--solvers", "ma57"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("smf only", err.getvalue())
+
+    def test_threads_warning(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._run(["--track-override", "ipopt-plugin", "--threads", "1,8"])
+        self.assertIn("num_threads = 1", err.getvalue())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self._run(["--track-override", "ipopt-plugin", "--threads", "1"])
+        self.assertNotIn("num_threads = 1", err.getvalue())
 
 
 class AbRunPassThroughTests(unittest.TestCase):
@@ -142,6 +162,11 @@ class AbRunPassThroughTests(unittest.TestCase):
                              "--cases", "a"])
             self.assertTrue(all("--track-override" not in cmd for cmd in calls))
 
+    def test_ab_run_rejects_other_tracks(self):
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            ab_run.main(["--manifest", "m.json", "--output", "o", "--variant", "A=X=1",
+                         "--variant", "B=X=2", "--track-override", "ipopt"])
+
 
 class ScoreAndCompareTests(unittest.TestCase):
     def test_score_reports_ipopt_plugin_track(self):
@@ -153,6 +178,8 @@ class ScoreAndCompareTests(unittest.TestCase):
         self.assertEqual(g["solvers"]["smf"]["solved"], 1)
         text = score.render(res, "all")
         self.assertIn("hard_indef / ipopt-plugin / 1 thread(s)", text)
+        self.assertIn("Track ipopt-plugin runs smf only", text)
+        self.assertNotIn("missing in this table: ma57", text)
 
     def test_ab_compare_self_vs_self(self):
         with tempfile.TemporaryDirectory() as td:

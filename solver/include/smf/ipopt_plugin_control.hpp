@@ -11,6 +11,7 @@
 #include "smf/control.hpp"
 #include "smf/ipm_session.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -144,5 +145,65 @@ inline IpmControl ipopt_plugin_ipm_control()
     ipm.static_as_zero = static_zero;
     return ipm;
 }
+
+/// SMF_PLUGIN_MC64=always: the plugin answers every MC64 request (scaling =
+/// 1) with the matching scaling, also after the analysis rejected the
+/// matching ordering (read once per process).
+inline bool plugin_mc64_always()
+{
+    static const bool always = [] {
+        const char *v = std::getenv("SMF_PLUGIN_MC64");
+        return v != nullptr && std::strcmp(v, "always") == 0;
+    }();
+    return always;
+}
+
+/// SMF_STALE_SCALE_RETRY (default 1): a factor made singular by a reused
+/// scale is refactored once with a fresh matching scaling (read once per
+/// process).
+inline bool plugin_stale_scale_retry()
+{
+    static const bool retry = [] {
+        const char *v = std::getenv("SMF_STALE_SCALE_RETRY");
+        return (v == nullptr || *v == '\0') ? true : std::atoi(v) != 0;
+    }();
+    return retry;
+}
+
+/// The plugin's per-factorization scaling decision (ma97_factor_d), applied
+/// to `ctrl` (the Control after apply_ma97_options for this call):
+///  - unit_scale: an MC64 request (Matching) after the analysis rejected the
+///    matching ordering is answered with no scaling, and the unit scale is
+///    handed back (unless plugin_mc64_always());
+///  - computed: the factorization computes a scaling, handed back in `scale`;
+///  - reuse: no scaling requested and the caller passed a non-unit `scale`
+///    (IPOPT's "reuse" strategies): ctrl.scaling = UserSupplied, and the
+///    caller sets the session's user scale to `scale`.
+/// `matching_rejected`: an analysis exists and its matching_rejected is set.
+struct Ma97ScalingCall {
+    bool unit_scale = false;
+    bool computed = false;
+    bool reuse = false;
+};
+
+inline Ma97ScalingCall ma97_scaling_call(Control &ctrl, bool matching_rejected, const double *scale, int n)
+{
+    Ma97ScalingCall r;
+    r.unit_scale = !plugin_mc64_always() && ctrl.scaling == ScalingMethod::Matching && matching_rejected;
+    if (r.unit_scale)
+        ctrl.scaling = ScalingMethod::None;
+    r.computed = ctrl.scaling != ScalingMethod::None;
+    r.reuse = !r.computed && !r.unit_scale && scale != nullptr &&
+              !std::all_of(scale, scale + n, [](double s) { return s == 1.0; });
+    if (r.reuse)
+        ctrl.scaling = ScalingMethod::UserSupplied;
+    return r;
+}
+
+/// IPOPT's default ma97_switch1 = od_hd_reuse ("high delay"): after a
+/// successful factorization whose delays exceed this fraction of n, IPOPT
+/// requests MC64 scaling (scaling = 1) on the next factorization and then
+/// passes the returned scale back (scaling = 0) on every later one.
+inline constexpr double kIpoptHighDelayFraction = 0.05;
 
 } // namespace smf

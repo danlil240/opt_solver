@@ -406,7 +406,16 @@ int main(int argc, char **argv) {
     // the analysis is deferred to the first factorization, as IPOPT analyses
     // the pattern without values. --ipm-static, when given, overrides the
     // static mode. smf only: rivals inside IPOPT are not modelled yet.
+    // IPOPT's dynamic scaling (MC64 after a high-delay factor, then reuse)
+    // is emulated by the adapter over the replayed steps. With
+    // SMF_IPM_REANALYSE=1 a re-analysis runs inside factor() and its time
+    // lands in factor_ms, not analyse_ms.
     const bool plugin_track = track == "ipopt-plugin";
+    if (plugin_track && threads > 1) {
+        // Until the plugin sets Control::num_threads (it keeps the default 1).
+        std::fprintf(stderr, "warning: the IPOPT plugin runs smf with Control::num_threads = 1 (serial tree, "
+                             "only BLAS threads): this %d-thread run is a 1-thread-tree run\n", threads);
+    }
     // The IpmSession path (--ipm-static or the ipopt-plugin track): a singular
     // factor is one IPOPT rejects and refactors with delta_c, so a replay
     // skips it, and the analysis runs inside the first factor().

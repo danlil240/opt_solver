@@ -34,6 +34,8 @@ import sys
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import score  # noqa: E402
 
 
 def parse_variant(spec: str) -> tuple[str, dict[str, str]]:
@@ -61,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--binary", default=None)
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--timeout", type=float, default=180.0)
-    ap.add_argument("--track-override", default=None,
-                    help="passed to run.py: run each case once on this track (e.g. ipopt-plugin)")
+    ap.add_argument("--track-override", default=None, choices=score.OVERRIDE_TRACKS,
+                    help="passed to run.py: run each case once on this track (smf only)")
     args = ap.parse_args(argv)
 
     variants = [parse_variant(v) for v in args.variant]

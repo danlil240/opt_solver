@@ -77,7 +77,8 @@ def track_override_cases(cases: Iterable[dict[str, Any]], track: str) -> list[di
     matrix_id, in manifest order. A matrix listed on several tracks keeps its
     `ipopt` entry (mode, sequence and per-case settings), else its first.
     Each returned entry is a copy with "track" = `track` and "manifest_track"
-    = the track of the entry it came from."""
+    = the track of the entry it came from; a per-case "ordering" pin is
+    dropped (the override track runs its own Control, e.g. the plugin's)."""
     chosen: dict[str, dict[str, Any]] = {}
     for c in cases:
         mid = c["matrix_id"]
@@ -90,6 +91,7 @@ def track_override_cases(cases: Iterable[dict[str, Any]], track: str) -> list[di
         e = dict(c)
         e["manifest_track"] = c.get("track", "recommended")
         e["track"] = track
+        e.pop("ordering", None)
         out.append(e)
     return out
 
@@ -496,10 +498,13 @@ def render(result: dict[str, Any], split: str) -> str:
                     f"best competitor counts: {ratio['best_solver_counts'] or '-'}")
                 out.append("")
                 missing = ratio.get("missing_competitors") or []
-                out.append(
-                    f"Competitor set ({cls}): {', '.join(ratio.get('competitor_set', [])) or '-'}; "
-                    f"missing in this table: {', '.join(missing) if missing else 'none'}"
-                    + (" (ratio is against the competitors present only)" if missing else ""))
+                if track in OVERRIDE_TRACKS:
+                    out.append(f"Track {track} runs {ratio['subject']} only: no competitors.")
+                else:
+                    out.append(
+                        f"Competitor set ({cls}): {', '.join(ratio.get('competitor_set', [])) or '-'}; "
+                        f"missing in this table: {', '.join(missing) if missing else 'none'}"
+                        + (" (ratio is against the competitors present only)" if missing else ""))
                 out.append("")
                 ip = track == "ipopt"
                 out.append("| solver | solved/total | inaccurate | failed | unavail | "

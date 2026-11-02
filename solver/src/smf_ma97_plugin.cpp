@@ -104,12 +104,6 @@ struct SmfFkeep
     bool aborted = false; // factor stopped on wrong inertia: num_neg is a partial count
 };
 
-static bool env_flag(const char* name, bool fallback)
-{
-    const char* v = std::getenv(name);
-    return (v == nullptr || *v == '\0') ? fallback : std::atoi(v) != 0;
-}
-
 // The IPM features are opt-in through the environment (the MA97 interface
 // has no slots for them). Their defaults were decided on the held-out IPOPT
 // models (docs/performance/2026-10-26-ipm-mode.md): every feature failed its
@@ -490,25 +484,18 @@ extern "C"
         // (dynamic) factors unscaled first, so its requests always come after
         // the analysis; with ma97_scaling = mc64 the first scale is matching
         // and its reuse keeps it, the pre-Task-17 behaviour.
-        static const bool mc64_always = [] {
-            const char* v = std::getenv("SMF_PLUGIN_MC64");
-            return v != nullptr && std::strcmp(v, "always") == 0;
-        }();
-        const smf::AnalysisKeep* analysed = ak->session->analysis_keep();
-        const bool unit_scale = !mc64_always && ak->ctrl.scaling == smf::ScalingMethod::Matching &&
-                                analysed != nullptr && analysed->matching_rejected;
-        if (unit_scale)
-            ak->ctrl.scaling = smf::ScalingMethod::None;
         // IPOPT's "reuse" scaling strategies compute MC64 scaling once
         // (scaling = 1, returned in `scale`) and pass it back with
         // scaling = 0 on later factorizations. A unit scale passed back is
-        // no scaling.
-        bool computed_scaling = ak->ctrl.scaling != smf::ScalingMethod::None;
-        const bool reuse_scaling =
-            !computed_scaling && !unit_scale && scale &&
-            !std::all_of(scale, scale + ak->n, [](double s) { return s == 1.0; });
-        if (reuse_scaling)
-            ak->ctrl.scaling = smf::ScalingMethod::UserSupplied;
+        // no scaling. The decision is smf::ma97_scaling_call()
+        // (smf/ipopt_plugin_control.hpp), shared with bench_replay's
+        // ipopt-plugin track; SMF_PLUGIN_MC64 is smf::plugin_mc64_always().
+        const smf::AnalysisKeep* analysed = ak->session->analysis_keep();
+        const smf::Ma97ScalingCall scaling_call =
+            smf::ma97_scaling_call(ak->ctrl, analysed != nullptr && analysed->matching_rejected, scale, ak->n);
+        const bool unit_scale = scaling_call.unit_scale;
+        bool computed_scaling = scaling_call.computed;
+        const bool reuse_scaling = scaling_call.reuse;
 
         fill_values(ak, val);
         dump_kkt(ak);
@@ -532,8 +519,7 @@ extern "C"
         // high-delay check), so refactor once with a fresh matching scaling
         // and hand that scale back for its later reuses. If the fresh scaling
         // cannot be computed, the stale-scale result stands.
-        static const bool stale_retry = env_flag("SMF_STALE_SCALE_RETRY", true);
-        if (stale_retry && reuse_scaling && status == smf::IpmFactorStatus::Singular)
+        if (smf::plugin_stale_scale_retry() && reuse_scaling && status == smf::IpmFactorStatus::Singular)
         {
             if (g_stats.trace)
                 std::fprintf(stderr, "[smf_ma97] factor %ld: singular with a reused scale (zero=%d): rescaling\n",

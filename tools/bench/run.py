@@ -108,12 +108,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Comma-separated solvers that only run at 1 thread (no parallelism to measure)")
     parser.add_argument("--solvers", default=None, help="Comma-separated override of the manifest's solver list")
     parser.add_argument("--cases", default=None, help="Comma-separated matrix_id filter")
-    parser.add_argument("--track-override", default=None, choices=score.TRACKS,
+    parser.add_argument("--track-override", default=None, choices=score.OVERRIDE_TRACKS,
                         help="run every selected case once on this track instead of its manifest "
                              "track(s): one run per matrix_id, taking mode/sequence/settings from "
-                             "its ipopt entry when it has one. ipopt-plugin = smf with the IPOPT "
-                             "plugin's Control (smf only; other solvers are skipped). "
-                             "See tools/bench/tracks.md")
+                             "its ipopt entry when it has one (per-case ordering pins dropped). "
+                             "ipopt-plugin = smf with the IPOPT plugin's Control (smf only; other "
+                             "solvers are skipped). See tools/bench/tracks.md")
     parser.add_argument("--runner", choices=("native", "wsl"), default="native",
                         help="'wsl' runs the Linux-only solvers (ssids) through WSL2 via run_wsl.py; "
                              "the others stay native")
@@ -159,7 +159,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"note: track {args.track_override} runs smf only; skipping {','.join(skipped)}",
                   file=sys.stderr)
         solvers = [s for s in solvers if s == "smf"]
+        if not solvers:
+            print(f"error: track {args.track_override} runs smf only and no smf is selected",
+                  file=sys.stderr)
+            return 2
     thread_list = [int(t) for t in args.threads.split(",") if t]
+    if args.track_override == "ipopt-plugin" and any(t > 1 for t in thread_list):
+        # Until the plugin sets Control::num_threads (it keeps the default 1).
+        print("warning: the IPOPT plugin runs smf with Control::num_threads = 1 (serial tree, "
+              "only BLAS threads): ipopt-plugin rows at N threads are 1-thread-tree rows",
+              file=sys.stderr)
     serial_solvers = {x for x in args.serial_solvers.split(",") if x}
     case_filter = {x for x in args.cases.split(",") if x} if args.cases else None
     required_baselines = manifest.get("required_baselines", []) if args.require_baselines else []

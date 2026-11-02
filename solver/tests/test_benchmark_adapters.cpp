@@ -225,6 +225,57 @@ TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {
     EXPECT_EQ(ad->stats().inertia_neg, 1);
     EXPECT_TRUE(refine_on_track("ipopt-plugin", 1));
     EXPECT_FALSE(refine_on_track("ipopt-plugin", 2));
+
+    // A pattern large enough to time: analyse() only records the pattern,
+    // the first factor() runs the analysis and books it as analyse_ms.
+    CscLower T;
+    T.n = 3000;
+    T.col_ptr.push_back(0);
+    for (Int j = 0; j < T.n; ++j) {
+        T.row_idx.push_back(j);
+        T.values.push_back(j % 2 == 0 ? 2.0 : -2.0);
+        if (j + 1 < T.n) {
+            T.row_idx.push_back(j + 1);
+            T.values.push_back(1.0);
+        }
+        T.col_ptr.push_back(static_cast<Int>(T.row_idx.size()));
+    }
+    auto big = make_smf_ipopt_plugin_adapter(ipopt_plugin_ipm_control());
+    big->configure(*ipopt_plugin_control(), "ipopt-plugin");
+    ASSERT_EQ(big->analyse(T), Outcome::Success);
+    EXPECT_FALSE(big->stats().has_analyse_phases);
+    const double deferred_ms = big->stats().analyse_ms;
+    ASSERT_EQ(big->factor(T.values), Outcome::Success);
+    EXPECT_TRUE(big->stats().has_analyse_phases);
+    EXPECT_GT(big->stats().analyse_ms, deferred_ms);
+    EXPECT_GT(big->stats().analyse_ms, 0.0);
+}
+
+TEST(BenchmarkAdapters, Ma97ScalingCallMatchesPlugin) {
+    const std::vector<double> unit(4, 1.0), s = {1.0, 2.0, 0.5, 1.0};
+    // MC64 request after the analysis rejected the matching: unit scale.
+    Control c = *ipopt_plugin_control();
+    c.scaling = ScalingMethod::Matching;
+    Ma97ScalingCall r = ma97_scaling_call(c, true, nullptr, 4);
+    EXPECT_TRUE(r.unit_scale);
+    EXPECT_FALSE(r.computed);
+    EXPECT_EQ(c.scaling, ScalingMethod::None);
+    // MC64 request otherwise: computed.
+    c.scaling = ScalingMethod::Matching;
+    r = ma97_scaling_call(c, false, s.data(), 4);
+    EXPECT_TRUE(r.computed);
+    EXPECT_FALSE(r.reuse);
+    EXPECT_EQ(c.scaling, ScalingMethod::Matching);
+    // No request, a non-unit scale passed back: reuse.
+    c.scaling = ScalingMethod::None;
+    r = ma97_scaling_call(c, false, s.data(), 4);
+    EXPECT_TRUE(r.reuse);
+    EXPECT_EQ(c.scaling, ScalingMethod::UserSupplied);
+    // A unit scale passed back is no scaling.
+    c.scaling = ScalingMethod::None;
+    r = ma97_scaling_call(c, false, unit.data(), 4);
+    EXPECT_FALSE(r.reuse || r.computed || r.unit_scale);
+    EXPECT_EQ(c.scaling, ScalingMethod::None);
 }
 
 TEST(BenchmarkAdapters, ReplayStepPicks) {
