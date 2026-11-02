@@ -108,6 +108,40 @@ FAIL on accuracy (ncvxqp1 rec) and on ncvxqp7's 2x target. The default stays Sho
 
 ncvxqp1's inaccuracy comes from a different, equally maximal matching. Two untested ideas: a tie-break that prefers the shortest-path matching's choice, or not switching when the remaining free share is small.
 
+## Re-gate with canonical duals
+
+### Why ncvxqp1 failed
+
+A probe (commit `bb5783e`) showed it is the scale, not the matching: the hybrid matching with the shortest-path scale gives omega 2.5e-12, the shortest-path matching with the hybrid scale gives 3.7e-8. The switch fires on ncvxqp1 with only 18 free columns, but the auction's displaced bids lower u on many rows, the repair hands back 8234 of 12111 columns, and the duals land on a different optimum (the scale moved up to e^8.5).
+
+Candidates tried:
+- No switch below a free share of 0.005 or 0.01: fixes it, but is a threshold fitted to one matrix.
+- Tie-breaks: fail.
+- eps_final 1e-3: marginal.
+- Later switch: costs the speedup.
+- Canonical duals: chosen.
+
+### Canonical duals (f7dc144)
+
+After the final phase-1 matching, one Dijkstra over rows moves the duals to the largest optimal u not above the duals at the switch point. It is exact, costs about one extra pass, and reproduces the shortest-path scale to 4.4e-14 on the switched matrices. It runs before the dense duals, so phases 2-3 see consistent duals.
+
+### Re-gate (12900K, interleaved A/B, indefinite tier, 3 rounds)
+
+| criterion | 1T | 8T | pass |
+|---|---|---|---|
+| accuracy | no case-track lost (ncvxqp1 rec omega 5.7e-12) | same | yes |
+| trial verdicts | 0 changes on 50 matrices (default and IPOPT-plugin config) | | yes |
+| no case-track > 1.10x wall | board: kkt_auglag ipopt 1.17 (1.13 -> 1.33 ms); 5-round rerun: 1.00 | board: kkt_contact_h40 1.11, kkt_lqr_h20 1.15 (sub-ms); rerun at 1T 0.97-1.04 | yes (noise) |
+| no matrix > 1.5x matcher work | none (probe; the extra step is about one pass after 40) | | yes |
+| ncvxqp3 analysis >= 2x | 2.34x (2641 -> 1128 ms), wall 0.643x | 2.49x, wall 0.511x | yes |
+| ncvxqp7 analysis >= 1.8x | 1.70-1.75x board, 1.76-1.77x rerun, wall 0.76-0.78x | 1.83-1.85x, wall 0.63-0.72x | no at 1T |
+
+All-case wall geomean 0.990 (1T) / 0.983 (8T); analyse geomean 0.978 / 0.974.
+
+### Verdict
+
+Misses only ncvxqp7's 1T bar, by about 2%. The default stays ShortestPath pending the owner's decision. ncvxqp7's analysis time outside the matcher (about 0.6 s at 1T) caps its speedup.
+
 ## Code state
 
 Branch `feat/auction-matching`:
@@ -120,5 +154,8 @@ Branch `feat/auction-matching`:
 - `ac21660`: `Control::matching_algorithm` wiring.
 - Hybrid gate write-up and the control.hpp comment (docs only, no code change).
 - This write-up.
+- `bb5783e`: ncvxqp1 hybrid accuracy probe.
+- `f7dc144`: canonical duals after the auction.
+- Re-gate write-up and the control.hpp comment (docs only, no code change).
 
 Nothing calls `MatchingAlgorithm::Auction` outside the tests and `bench_matching_trial`. Every existing caller defaults to ShortestPath and is bitwise unchanged. The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.

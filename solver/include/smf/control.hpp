@@ -60,15 +60,15 @@ struct Control {
     // shortest-path searches and, past 40 passes of search work, a warm
     // auction on the remaining tail (scaling_matching.hpp); up to that point
     // it is ShortestPath bitwise, so within the 2-pass budget above no
-    // verdict moves. The default stays ShortestPath because the board gate
-    // failed (12900K, 1T / 8T): ncvxqp1 rec turns inaccurate under Hybrid
-    // (omega 1.6e-8 / 4.7e-8 against 5.7e-12 / 8.8e-12; the switch fires
-    // there and picks another max-product matching, r_exact 1.004 -> 1.103),
-    // and ncvxqp7's analysis is only 1.80x / 1.90x faster against the 2x
-    // target. What it does give: ncvxqp3 analysis 0.405x / 0.394x (wall
-    // 0.572x / 0.464x), ncvxqp7 analysis 0.554x / 0.527x (wall 0.775x /
-    // 0.586x), wall geomean 0.984 / 0.978; no trial verdict or ordering
-    // changes on 50 matrices.
+    // verdict moves. The default stays ShortestPath. Re-gate (12900K,
+    // interleaved A/B, indefinite tier, 3 rounds; f7dc144, canonical duals):
+    // accuracy passed (no case-track lost, ncvxqp1 rec omega 5.7e-12),
+    // verdicts passed (0 changes on 50 matrices), no case-track above 1.10x
+    // after a 5-round rerun of the flagged sub-ms cases, ncvxqp3 analysis
+    // 2.34x (1T) / 2.49x (8T) faster (wall 0.643x / 0.511x). It missed
+    // ncvxqp7's 1.8x analysis target at 1T: 1.70-1.75x on the board,
+    // 1.76-1.77x on a 5-round rerun (8T 1.83-1.85x). All-case wall geomean
+    // 0.990 (1T) / 0.983 (8T).
     MatchingAlgorithm matching_algorithm = MatchingAlgorithm::ShortestPath;
 
     // Scaling
