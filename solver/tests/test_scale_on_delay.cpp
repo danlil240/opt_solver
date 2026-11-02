@@ -11,6 +11,7 @@
 #include "smf/factor_indef.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/refinement.hpp"
 #include "smf/scaling.hpp"
 #include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
@@ -637,12 +638,36 @@ TEST(ScaleOnDelay, ProbeErrorAndNaN) {
     EXPECT_EQ(scale_on_delay_probe(*ak, bad, fk, ctrl), std::numeric_limits<double>::infinity());
 }
 
+// Solve M x = b and refine it with smf::refine, as the IPOPT path solves
+// these captures; the refined x must meet the accuracy gate. The unrefined
+// backward error is only printed: at PGLib case500 step 26 it sits at the
+// gate, omega 6.5e-9 on a Ryzen 9950X3D and 1.12e-8 on an i9-12900K with the
+// same binary and the same rescale decisions, so the test cannot assert on it.
+void expect_accurate_refined_solve(const Solver &s, const FactorKeep &fk, const Control &ctrl,
+                                   const CscLower &M, std::size_t step) {
+    const int n = static_cast<int>(M.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * (i % 97);
+    std::vector<double> x = b;
+    Info si;
+    ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), n, 1), 0) << "step " << step;
+    const auto raw = smf::bench::validate(M, b, x, 1);
+    SolveWorkspace sws;
+    const RefinementResult rr = refine(M, fk, ctrl, b, x, 1, sws);
+    const auto val = smf::bench::validate(M, b, x, 1);
+    std::printf("[ScaleOnDelay] case500 step %zu: omega %.2e unrefined, %.2e after %d refinement steps\n",
+                step, raw.omega, val.omega, rr.iterations);
+    EXPECT_EQ(rr.status, ErrorCode::Success) << "step " << step;
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "step " << step << ": eta_inf=" << val.eta_inf << " omega=" << val.omega;
+}
+
 // A real reuse that the probe rejects: PGLib case500's IPOPT capture,
 // factored at the replay's 5 evenly spaced steps into one FactorKeep. On
 // the tuning split the kept scale of step 13 fits step 52 but its factor
 // probes 75x the fresh error there, so step 52 is refactored with a new
-// matching scaling; every step solves to the accuracy gate. Skipped without
-// the (untracked) fixture.
+// matching scaling; every step solves to the accuracy gate after refinement.
+// Skipped without the (untracked) fixture.
 TEST(ScaleOnDelay, ProbeRejectsAStaleReuseOnPglib) {
     namespace fs = std::filesystem;
     const fs::path dir = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
@@ -682,7 +707,7 @@ TEST(ScaleOnDelay, ProbeRejectsAStaleReuseOnPglib) {
         }
         CscLower M = A;
         M.values = vals;
-        expect_accurate_solve(s, fk, ctrl, M);
+        expect_accurate_refined_solve(s, fk, ctrl, M, step);
     }
     EXPECT_EQ(rescales_at_39, 0);  // reused
     EXPECT_EQ(rescales_at_52, 1);  // rejected by the probe, recomputed
