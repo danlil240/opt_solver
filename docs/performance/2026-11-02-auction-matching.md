@@ -60,6 +60,54 @@ The auction wins only where the shortest-path searches have a long tail: ncvxqp3
 - Goldberg-Kennedy cost-scaling (CSA), which the plan names as the follow-up, has the same per-phase floor as reason 1. It is not recommended without such a probe.
 - Task 7 (the initial-rejection candidate-ordering cost on darcy003/mario002) does not depend on the auction and is still open.
 
+## Hybrid: shortest-path first, auction on the tail
+
+### The probe
+
+`bench_matching_trial --hybrid-probe` (efbca8d, selectable switch rules in 6f2dc96) runs the ShortestPath searches and counts edges scanned, then switches to a warm auction on the still-free columns by a rule. Over the 50 corpus matrices:
+
+- **Switch after 40 passes of search work (w40), eps_start 0.1:** total edges 0.74x, matcher ms 0.68x, no matrix above 1.5x, ncvxqp3 0.35x, ncvxqp7 0.51x. Chosen.
+- **Switch after 5 passes (w5):** 0.70x total, but dawson5 3.0x, cops_pinene_400 1.9x, copter2 1.9x.
+- **Free-share rules** (switch when the free share of columns passes a threshold): 2.6-2.9x.
+- **Per-search-cost rules:** 1.1-1.6x, stokes128 up to 140x.
+
+### The engine and the gate
+
+7497102 adds the hybrid engine (shortest-path searches, then the auction with exact repair after 40 passes). ac21660 exposes it as `Control::matching_algorithm = Hybrid` for analyse()'s trial; `SMF_BENCH_MATCHER` selects it in the benchmark. Up to the switch it is ShortestPath bitwise.
+
+The owner restated the gate (the 0.6x total-edges G2 was not met):
+
+1. No accuracy loss.
+2. No case-track above 1.10x wall.
+3. No matrix above 1.5x matcher work.
+4. ncvxqp3 and ncvxqp7 analysis at least 2x faster.
+5. Same verdicts, or explained.
+
+### Board result
+
+12900K, interleaved A/B from one binary, small_kkt + large_kkt + hard_indef, 3 rounds, all splits. Ratios are Hybrid / ShortestPath.
+
+| | 1T | 8T |
+|---|---|---|
+| wall geomean (all case-tracks) | 0.984 | 0.978 |
+| analyse geomean | 0.973 | 0.971 |
+| ncvxqp3 rec analyse / wall | 0.405x / 0.572x (2704 -> 1096 ms analyse) | 0.394x / 0.464x |
+| ncvxqp7 rec analyse / wall | 0.554x / 0.775x (2075 -> 1150 ms) | 0.527x / 0.586x |
+| ncvxqp1 rec accuracy | inaccurate (omega 1.6e-8) | inaccurate (4.7e-8) |
+| cases > 1.10x wall | sub-ms only: kkt_ineq_slack rec 1.18 (0.47 -> 0.56 ms) | kkt_ineq_slack ipopt 1.16, kkt_auglag rec 1.12 (sub-ms; the switch cannot fire there) |
+
+ncvxqp1 rec: omega 1.6e-8 at 1T and 4.7e-8 at 8T, against 5.7e-12 and 8.8e-12 with ShortestPath. The switch fires there and picks another maximum-product matching (r_exact 1.004 -> 1.103). ncvxqp7's analysis speeds up 1.80x (1T) and 1.90x (8T), under the 2x target.
+
+**G3 (verdicts):** 0 verdict or ordering changes on the 50 matrices, in the default and the IPOPT-plugin configuration. The permutation changes only on cvxqp3, ncvxqp1, ncvxqp3 and ncvxqp7, all resumed trials whose matching is still adopted.
+
+### Verdict
+
+FAIL on accuracy (ncvxqp1 rec) and on ncvxqp7's 2x target. The default stays ShortestPath; Hybrid stays selectable and unused.
+
+### Open
+
+ncvxqp1's inaccuracy comes from a different, equally maximal matching. Two untested ideas: a tie-break that prefers the shortest-path matching's choice, or not switching when the remaining free share is small.
+
 ## Code state
 
 Branch `feat/auction-matching`:
@@ -67,6 +115,10 @@ Branch `feat/auction-matching`:
 - `debd0c7`: auction kernel.
 - `5e85cef`: `SymmetricMatcher` Auction engine and exact repair.
 - `9b732c4`: prototype columns.
+- `efbca8d`, `6f2dc96`: hybrid probes.
+- `7497102`: hybrid engine.
+- `ac21660`: `Control::matching_algorithm` wiring.
+- Hybrid gate write-up and the control.hpp comment (docs only, no code change).
 - This write-up.
 
 Nothing calls `MatchingAlgorithm::Auction` outside the tests and `bench_matching_trial`. Every existing caller defaults to ShortestPath and is bitwise unchanged. The full suite is 72/73 on the 12900K; the one failure is the known Intel-only `ScaleOnDelay.ProbeRejectsAStaleReuseOnPglib`, which PR #19 fixes.

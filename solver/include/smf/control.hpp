@@ -60,11 +60,15 @@ struct Control {
     // shortest-path searches and, past 40 passes of search work, a warm
     // auction on the remaining tail (scaling_matching.hpp); up to that point
     // it is ShortestPath bitwise, so within the 2-pass budget above no
-    // verdict moves. Evidence for Hybrid (probe, 50 corpus matrices, 12900K):
-    // every matrix at most 1.5x ShortestPath's edges scanned, total 0.74x
-    // edges and 0.68x matcher ms, ncvxqp3 0.35x, ncvxqp7 0.51x (the 0.6x
-    // total edges gate G2 was not met; the owner restated the gate). The
-    // default stays ShortestPath until the interleaved board gate.
+    // verdict moves. The default stays ShortestPath because the board gate
+    // failed (12900K, 1T / 8T): ncvxqp1 rec turns inaccurate under Hybrid
+    // (omega 1.6e-8 / 4.7e-8 against 5.7e-12 / 8.8e-12; the switch fires
+    // there and picks another max-product matching, r_exact 1.004 -> 1.103),
+    // and ncvxqp7's analysis is only 1.80x / 1.90x faster against the 2x
+    // target. What it does give: ncvxqp3 analysis 0.405x / 0.394x (wall
+    // 0.572x / 0.464x), ncvxqp7 analysis 0.554x / 0.527x (wall 0.775x /
+    // 0.586x), wall geomean 0.984 / 0.978; no trial verdict or ordering
+    // changes on 50 matrices.
     MatchingAlgorithm matching_algorithm = MatchingAlgorithm::ShortestPath;
 
     // Scaling
