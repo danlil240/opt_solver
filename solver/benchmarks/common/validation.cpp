@@ -173,6 +173,7 @@ std::string RunRecord::to_json_line() const {
     if (aptp_failed_columns >= 0) oss << "\"aptp_failed_columns\":" << aptp_failed_columns << ",";
     if (static_pivots >= 0) oss << "\"static_pivots\":" << static_pivots << ",";
     if (delay_rescales >= 0) oss << "\"delay_rescales\":" << delay_rescales << ",";
+    if (delay_early_stops >= 0) oss << "\"delay_early_stops\":" << delay_early_stops << ",";
     if (delay_try_ms >= 0) oss << "\"delay_try_ms\":" << delay_try_ms << ",";
     if (delay_matching_ms >= 0) oss << "\"delay_matching_ms\":" << delay_matching_ms << ",";
     if (refine_iterations >= 0)

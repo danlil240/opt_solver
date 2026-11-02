@@ -715,6 +715,7 @@ int main(int argc, char **argv) {
         std::vector<std::vector<double>> step_solutions(static_cast<std::size_t>(kSeqSteps), b);
         double total_factor_ms = 0.0;
         int seq_delay_rescales = 0;
+        int seq_delay_early_stops = 0;
         double seq_delay_try_ms = 0.0;       // summed over the steps, like seq_delay_rescales
         double seq_delay_matching_ms = 0.0;
         std::vector<double> step_factor_ms;  // successful factors, in order
@@ -736,6 +737,7 @@ int main(int argc, char **argv) {
                 out_f = adapter->factor(seq_values[step]);
                 total_factor_ms += adapter->stats().factor_ms;
                 seq_delay_rescales += adapter->stats().delay_rescales;
+                seq_delay_early_stops += adapter->stats().delay_early_stops;
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
                 if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
@@ -775,9 +777,9 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
-                                 fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.inertia_pos,
+                                 fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.delay_early_stops, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
                                  fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
                                  fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms);
@@ -822,6 +824,7 @@ int main(int argc, char **argv) {
             rec.aptp_failed_columns = st.aptp_failed_columns;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = seq_delay_rescales;
+            rec.delay_early_stops = seq_delay_early_stops;
             rec.delay_try_ms = seq_delay_try_ms;
             rec.delay_matching_ms = seq_delay_matching_ms;
             rec.refine_iterations = st.refine_iterations;
@@ -911,6 +914,7 @@ int main(int argc, char **argv) {
             rec.aptp_failed_columns = st.aptp_failed_columns;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = st.delay_rescales;
+            rec.delay_early_stops = st.delay_early_stops;
             rec.delay_try_ms = st.delay_try_ms;
             rec.delay_matching_ms = st.delay_matching_ms;
             rec.refine_iterations = st.refine_iterations;

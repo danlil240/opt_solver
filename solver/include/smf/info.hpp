@@ -74,6 +74,9 @@ struct Info {
     /// work limit, or threw away a factor whose kept scale failed the
     /// accuracy probe (that work was spent), else 0.
     int          delay_stops         = 0;
+    /// 1 when the try delay_stops counts stopped at the early crossing
+    /// (Control::scale_on_delay_early_ratio), not at the work limit, else 0.
+    int          delay_early_stops   = 0;
     /// Seconds of the stopped or failed try that delay_stops counts (the
     /// part of factor_seconds folded in from it); 0 when no try was spent.
     double       delay_try_seconds   = 0.0;

@@ -292,6 +292,54 @@ TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
     EXPECT_EQ(i1.delay_rescales, 0);
     EXPECT_EQ(i1.delayed_pivots, i_off.delayed_pivots);
     EXPECT_EQ(fk.factor_values, fk_off.factor_values);
+
+    // The defaults (early stop on): the try stops at the early crossing and
+    // the matching scaling follows. Pinned: one early stop, one rescale,
+    // and the work spent (the stopped try plus the rescued factor) against
+    // the factor let through.
+    const Control dflt = base_control();
+    ASSERT_GE(dflt.scale_on_delay_early_ratio, 0.0);
+    FactorKeep fk_d;
+    Info i_d;
+    ASSERT_EQ(s.factor(*ak, dflt, i_d, fk_d), FactorStatus::Success);
+    EXPECT_EQ(i_d.delay_stops, 1);
+    EXPECT_EQ(i_d.delay_early_stops, 1);
+    EXPECT_EQ(i_d.delay_rescales, 1);
+    const double F = delay_free_front_work(*ak);
+    NumericWorkspace ws;
+    FactorKeep f_try;
+    Info i_try;
+    ASSERT_EQ(factor_indef(*ak, A, dflt, i_try, f_try, ws,
+                           std::floor(dflt.scale_on_delay_ratio * F),
+                           EarlyWorkStop{F, dflt.scale_on_delay_early_ratio,
+                                         dflt.scale_on_delay_early_proj}),
+              FactorStatus::MaxPivotDelays);
+    std::printf("[ScaleOnDelay] zero (2,2), defaults: try %.2f F + rescued %.2f F = %.2f F "
+                "(%d delays) against %.2f F let through; factor %.2f ms vs %.2f ms\n",
+                i_try.front_work / F, i_d.front_work / F, (i_try.front_work + i_d.front_work) / F,
+                i_d.delayed_pivots, i_off.front_work / F, 1e3 * i_d.factor_seconds,
+                1e3 * i_off.factor_seconds);
+    EXPECT_EQ(i_d.num_positive, kG * kG);
+    EXPECT_EQ(i_d.num_negative, kM);
+    // Measured: try 4.25 F + rescued 7.73 F = 11.98 F against 9.96 F let
+    // through. The rescued factor is cheaper than the one let through (so
+    // are the later factorizations that reuse its scale), but the stopped
+    // try makes this factor() cost more work than letting it through. With
+    // the early stop off the 9.96x factor arms the next limit (4x), whose try
+    // stops and rescales the next factor() anyway; with it on the next one
+    // reuses the kept scale: over two factorizations about 19.7 F against
+    // 21.7 F.
+    EXPECT_LT(i_d.front_work, i_off.front_work);
+    EXPECT_GT(i_try.front_work + i_d.front_work, i_off.front_work);
+    Info i_d2, i_2;
+    ASSERT_EQ(s.factor(*ak, dflt, i_d2, fk_d), FactorStatus::Success);
+    EXPECT_EQ(i_d2.delay_stops, 0);
+    EXPECT_EQ(i_d2.delay_rescales, 0);
+    ASSERT_EQ(s.factor(*ak, ctrl, i_2, fk), FactorStatus::Success);  // early stop off
+    EXPECT_EQ(i_2.delay_stops, 1);
+    EXPECT_EQ(i_2.delay_early_stops, 0);
+    EXPECT_EQ(i_2.delay_rescales, 1);
+    EXPECT_EQ(i_2.front_work, i_d2.front_work);
 }
 
 // Below pivot u = 1e-6 (IPOPT's 1e-8: the ipopt track, the MA97 plugin,
@@ -843,12 +891,21 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
     ASSERT_LT(unscaled_ratio(E, ctrl), 0.5 * r) << "premise: E factors cheaply";
     ctrl.scale_on_delay_ratio = 2.0 * r;  // lets A through
     ctrl.scale_on_delay_next_ratio = 0.5 * r;
-    ctrl.scale_on_delay_early_ratio = -1.0;  // a cascade: it would stop the first try
+    ASSERT_GT(ctrl.scale_on_delay_next_ratio, ctrl.scale_on_delay_early_ratio);
 
     struct Case { const CscLower *next_values; bool on; bool rescales; };
     for (const Case cs : {Case{&A1, true, true}, Case{&A1, false, false}, Case{&E, true, false}}) {
         Control c = ctrl;
         if (!cs.on) c.scale_on_delay_next_ratio = -1.0;
+        // The first factorization with the early stop off (A is a cascade:
+        // the early stop would end its first try). The second under the
+        // tighter next limit keeps the default early stop on: next tries are
+        // never early-stopped, even with a next ratio above the early one.
+        // Without the next limit (cs.on false) the second is a first try
+        // under the full limit, which the early stop would end: off there.
+        Control c1 = c;
+        c1.scale_on_delay_early_ratio = -1.0;
+        if (!cs.on) c.scale_on_delay_early_ratio = -1.0;
         Solver s;
         Info info;
         auto ak = s.analyse(A, c, info);
@@ -857,13 +914,13 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
         NumericWorkspace ws;
         FactorKeep fk;
         Info i1;
-        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, i1, fk, ws),
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c1, i1, fk, ws),
                   FactorStatus::Success);
         EXPECT_EQ(i1.delay_rescales, 0);
         EXPECT_EQ(i1.delay_stops, 0);
         EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::None));
         EXPECT_EQ(fk.delay_next, cs.on);
-        expect_accurate_solve(s, fk, c, A);
+        expect_accurate_solve(s, fk, c1, A);
 
         const CscLower &B = *cs.next_values;
         Info i2;
@@ -871,6 +928,7 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
         EXPECT_FALSE(fk.delay_next);
         EXPECT_EQ(i2.delay_stops, cs.rescales ? 1 : 0);
         EXPECT_EQ(i2.delay_rescales, cs.rescales ? 1 : 0);
+        EXPECT_EQ(i2.delay_early_stops, 0);
         EXPECT_EQ(i2.scaling_used, static_cast<int>(cs.rescales ? ScalingMethod::Matching
                                                                 : ScalingMethod::None));
         if (cs.rescales) EXPECT_EQ(fk.delay_scale, matching_scale_of(*ak, B));
@@ -942,7 +1000,6 @@ void expect_same_outcome(const Info &a, const FactorKeep &fa, const Info &b,
     EXPECT_EQ(fa.delay_next, fb.delay_next);
 }
 
-
 } // namespace
 
 // A first try headed past the full limit (a cascade) stops at the early
@@ -992,7 +1049,9 @@ TEST(ScaleOnDelay, EarlyStopEndsATryHeadedPastTheLimit) {
     ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), off, off_i, fk_off, ws),
               FactorStatus::Success);
     EXPECT_EQ(on_i.delay_stops, 1);
+    EXPECT_EQ(on_i.delay_early_stops, 1);
     EXPECT_EQ(on_i.delay_rescales, 1);
+    EXPECT_EQ(off_i.delay_early_stops, 0);  // a limit trip
     expect_same_outcome(on_i, fk_on, off_i, fk_off);
     expect_accurate_solve(s, fk_on, ctrl, A);
 }

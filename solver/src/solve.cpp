@@ -375,9 +375,10 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
               : limit;
       // Control::scale_on_delay_early_ratio: a try whose limit is above
       // the early ratio may stop at its crossing (EarlyWorkStop), as a
-      // limit trip; one under the tighter next limit is left as it is.
+      // limit trip. A next try (FactorKeep::delay_next) never does, whatever
+      // the next ratio.
       EarlyWorkStop early;
-      if (ctrl.scale_on_delay_early_ratio >= 0.0 &&
+      if (!next && ctrl.scale_on_delay_early_ratio >= 0.0 &&
           try_limit > std::floor(ctrl.scale_on_delay_early_ratio * free_work))
         early = {free_work, ctrl.scale_on_delay_early_ratio, ctrl.scale_on_delay_early_proj};
       const FactorStatus st = run(ak, ctrl, try_limit, early);
@@ -403,6 +404,9 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       extra_seconds += info.factor_seconds;
       info.delay_try_seconds += info.factor_seconds;
       info.delay_stops = 1;
+      // A limit trip counts the front past the limit; within it, the early
+      // crossing stopped the try.
+      if (early.on() && info.front_work <= try_limit) info.delay_early_stops = 1;
     }
   }
   // A new matching scaling of these values.
@@ -500,6 +504,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
@@ -522,6 +527,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
@@ -550,6 +556,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   const FactorValues fv{values.data(), values.size(), true};
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
