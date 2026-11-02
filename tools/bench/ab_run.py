@@ -15,6 +15,10 @@ Variants are NAME=VAR=value[,VAR=value...], e.g.
       --variant smf=SMF_BENCH_AMALGAMATION=smf \
       --variant cost=SMF_BENCH_AMALGAMATION=cost
 
+--track-override TRACK is passed through to run.py: each case runs once on
+TRACK (e.g. ipopt-plugin: smf with the IPOPT plugin's Control) instead of on
+every manifest track it is listed on.
+
 Runs below normal priority on Windows (the machine stays usable) and with 1
 thread unless --threads says otherwise.
 """
@@ -57,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--binary", default=None)
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--timeout", type=float, default=180.0)
+    ap.add_argument("--track-override", default=None,
+                    help="passed to run.py: run each case once on this track (e.g. ipopt-plugin)")
     args = ap.parse_args(argv)
 
     variants = [parse_variant(v) for v in args.variant]
@@ -93,6 +99,8 @@ def main(argv: list[str] | None = None) -> int:
                            "--timeout", str(args.timeout)]
                     if args.binary:
                         cmd += ["--binary", args.binary]
+                    if args.track_override:
+                        cmd += ["--track-override", args.track_override]
                     env = dict(os.environ)
                     env.update(venv)
                     subprocess.run(cmd, env=env, creationflags=priority,

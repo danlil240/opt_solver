@@ -28,6 +28,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import score  # noqa: E402
 
 CLASS_ORDER = score.CLASS_ORDER
+# Track column: the first 5 letters, except where they would be ambiguous.
+TRACK_LABEL = {"ipopt-plugin": "plugin"}
 
 
 def collect(path: pathlib.Path) -> dict[tuple[str, str, int], list[dict[str, Any]]]:
@@ -77,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     manifest = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
-    meta = {(c["matrix_id"], c.get("track", "recommended")): c for c in manifest["cases"]}
+    meta = score.manifest_case_index(manifest["cases"])
     A, B = collect(pathlib.Path(args.a)), collect(pathlib.Path(args.b))
 
     rows = []
@@ -103,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         flr = (b["flops"] / a["flops"]) if a["flops"] and b["flops"] else math.nan
         rr = (b["rss"] / a["rss"]) if a["rss"] and b["rss"] else math.nan
         lines.append(
-            f"| {key[0]} | {key[1][:5]} | {key[2]} | {c.get('class')} | {c.get('split')} | "
+            f"| {key[0]} | {TRACK_LABEL.get(key[1], key[1][:5])} | {key[2]} | {c.get('class')} | {c.get('split')} | "
             f"{a[m]:.2f} | {b[m]:.2f} | {ratio:.3f} | {a['factor']:.2f} | {b['factor']:.2f} | "
             f"{fr:.3f} | {a['delays']}>{b['delays']} | {er:.3f} | {flr:.3f} | {rr:.3f} | "
             f"{'y' if a['ok'] else 'N'}/{'y' if b['ok'] else 'N'} |")

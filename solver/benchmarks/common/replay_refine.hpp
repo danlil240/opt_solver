@@ -98,10 +98,11 @@ void refine_solution(SolveCorrection &&solve_correction, const CscLower &A,
 }
 
 // IPOPT wraps every linear solve in refinement, so the harness does the same on
-// the "ipopt" track for every solver and every mode (warm_sequence and cold).
-// Single right-hand side only; other tracks never refine.
+// the "ipopt" and "ipopt-plugin" tracks for every solver and every mode
+// (warm_sequence and cold). Single right-hand side only; other tracks never
+// refine.
 inline bool refine_on_track(const std::string &track, int nrhs) {
-    return track == "ipopt" && nrhs == 1;
+    return (track == "ipopt" || track == "ipopt-plugin") && nrhs == 1;
 }
 
 // refine_solution() timed, applied only when refine_on_track(); returns the

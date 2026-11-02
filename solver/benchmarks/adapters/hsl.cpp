@@ -436,7 +436,8 @@ private:
 };
 
 /// smf through IpmSession (make_smf_ipm_adapter): the MA97 plugin's path
-/// inside IPOPT with only the static mode on.
+/// inside IPOPT with only the static mode on; or with the plugin's own
+/// IpmControl (make_smf_ipopt_plugin_adapter).
 class SmfIpmSessionAdapter final : public SolverAdapter {
 public:
     SmfIpmSessionAdapter(StaticMode mode, bool static_zero) {
@@ -446,12 +447,13 @@ public:
         ipm_.static_mode = mode;
         ipm_.static_as_zero = static_zero;
     }
+    SmfIpmSessionAdapter(const IpmControl &ipm, std::string label) : ipm_(ipm), label_(std::move(label)) {}
 
     AdapterIdentity identity() const override {
         AdapterIdentity id;
         id.solver_id = "smf";
         id.version = "0.1.0";
-        id.library_path = "in-tree:libsmf (IpmSession)";
+        id.library_path = "in-tree:libsmf (" + label_ + ")";
         id.integer_abi = "int32_offsets64";
         id.available = true;
         id.supports_spd = true;
@@ -566,6 +568,7 @@ public:
 private:
     Control ctrl_{};
     IpmControl ipm_{};
+    std::string label_ = "IpmSession";
     IpmSession session_;
     const CscLower *pattern_ = nullptr;
     bool analysed_ = false;
@@ -625,6 +628,10 @@ std::unique_ptr<SolverAdapter> make_smf_adapter() {
 
 std::unique_ptr<SolverAdapter> make_smf_ipm_adapter(StaticMode mode, bool static_zero) {
     return std::make_unique<SmfIpmSessionAdapter>(mode, static_zero);
+}
+
+std::unique_ptr<SolverAdapter> make_smf_ipopt_plugin_adapter(const IpmControl &ipm) {
+    return std::make_unique<SmfIpmSessionAdapter>(ipm, "IpmSession, ipopt-plugin");
 }
 
 std::optional<StaticMode> parse_ipm_static(const std::string &name) {

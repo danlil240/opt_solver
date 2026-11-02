@@ -2,6 +2,7 @@
 #include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/replay_steps.hpp"
 #include "../benchmarks/common/validation.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 
 #include <gtest/gtest.h>
 
@@ -177,6 +178,53 @@ TEST(BenchmarkAdapters, ParseIpmStatic) {
     EXPECT_EQ(parse_ipm_static("regularized"), StaticMode::Regularized);
     EXPECT_FALSE(parse_ipm_static("").has_value());
     EXPECT_FALSE(parse_ipm_static("reg").has_value());
+}
+
+TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
+    // The Control the MA97 plugin factorizes with under IPOPT's defaults
+    // (bench_replay --track ipopt-plugin).
+    const auto ctrl = ipopt_plugin_control();
+    ASSERT_TRUE(ctrl.has_value());
+    EXPECT_EQ(ctrl->matrix_type, MatrixType::RealSymmetricIndefinite);
+    EXPECT_EQ(ctrl->expected_refactors, 10);
+    EXPECT_EQ(ctrl->ordering, OrderingMethod::AutoParallel);
+    EXPECT_EQ(ctrl->scaling, ScalingMethod::None);
+    EXPECT_EQ(ctrl->pivot_u, 1e-8);
+    EXPECT_EQ(ctrl->small_pivot, 1e-20);
+    EXPECT_EQ(ctrl->nemin, 8);
+    EXPECT_EQ(ctrl->factor_memory_multiplier, 1.2);
+    EXPECT_TRUE(ctrl->continue_on_singular);
+    EXPECT_EQ(ctrl->delay_budget, -1);
+    EXPECT_EQ(ctrl->num_threads, Control{}.num_threads);
+
+    Ma97Options o;
+    o.ordering = 1;
+    o.scaling = 1;
+    EXPECT_EQ(ipopt_plugin_control(o)->ordering, OrderingMethod::AMD);
+    EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Matching);
+    o.ordering = 3;
+    o.scaling = 3;
+    EXPECT_EQ(ipopt_plugin_control(o)->ordering, OrderingMethod::METIS);
+    EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Equilibration);
+    o.scaling = 7;
+    EXPECT_FALSE(ipopt_plugin_control(o).has_value());
+}
+
+TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {
+    auto ad = make_smf_ipopt_plugin_adapter(ipopt_plugin_ipm_control());
+    ASSERT_NE(ad.get(), nullptr);
+    EXPECT_EQ(ad->identity().solver_id, "smf");
+    ad->configure(*ipopt_plugin_control(), "ipopt-plugin");
+    CscLower E2 = make_exchange_2x2_indef();
+    ASSERT_EQ(ad->analyse(E2), Outcome::Success);
+    ASSERT_EQ(ad->factor(E2.values), Outcome::Success);
+    std::vector<double> x = {1.0, 2.0};
+    ASSERT_EQ(ad->solve(x, 1), Outcome::Success);
+    EXPECT_NEAR(x[0], 2.0, 1e-12);
+    EXPECT_NEAR(x[1], 1.0, 1e-12);
+    EXPECT_EQ(ad->stats().inertia_neg, 1);
+    EXPECT_TRUE(refine_on_track("ipopt-plugin", 1));
+    EXPECT_FALSE(refine_on_track("ipopt-plugin", 2));
 }
 
 TEST(BenchmarkAdapters, ReplayStepPicks) {

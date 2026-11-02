@@ -65,7 +65,44 @@ def competitor_set(cls: str) -> tuple[str, ...]:
     """Solvers eligible as "best competitor" for a class (R43). Fixed per class,
     independent of thread count; ma27 / cudss are reference columns only."""
     return SPD_COMPETITORS if cls == "spd" else INDEF_COMPETITORS
-TRACK_ORDER = ["recommended", "ipopt"]
+TRACK_ORDER = ["recommended", "ipopt", "ipopt-plugin"]
+# Tracks a manifest never lists: run.py --track-override runs a manifest's
+# cases on them (tools/bench/tracks.md). smf only for now.
+OVERRIDE_TRACKS = ("ipopt-plugin",)
+TRACKS = ("recommended", "ipopt") + OVERRIDE_TRACKS
+
+
+def track_override_cases(cases: Iterable[dict[str, Any]], track: str) -> list[dict[str, Any]]:
+    """The manifest cases run on `track` instead of their own: one entry per
+    matrix_id, in manifest order. A matrix listed on several tracks keeps its
+    `ipopt` entry (mode, sequence and per-case settings), else its first.
+    Each returned entry is a copy with "track" = `track` and "manifest_track"
+    = the track of the entry it came from."""
+    chosen: dict[str, dict[str, Any]] = {}
+    for c in cases:
+        mid = c["matrix_id"]
+        prev = chosen.get(mid)
+        if prev is None or (c.get("track", "recommended") == "ipopt"
+                            and prev.get("track", "recommended") != "ipopt"):
+            chosen[mid] = c
+    out = []
+    for c in chosen.values():
+        e = dict(c)
+        e["manifest_track"] = c.get("track", "recommended")
+        e["track"] = track
+        out.append(e)
+    return out
+
+
+def manifest_case_index(cases: Iterable[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    """(matrix_id, track) -> manifest case, including every override track
+    (records of run.py --track-override match the case's override entry)."""
+    cases = list(cases)
+    index = {(c["matrix_id"], c.get("track", "recommended")): c for c in cases}
+    for t in OVERRIDE_TRACKS:
+        for c in track_override_cases(cases, t):
+            index.setdefault((c["matrix_id"], t), c)
+    return index
 
 
 # --------------------------------------------------------------------------
@@ -301,12 +338,12 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
           classes: set[str] | None = None,
           max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> dict[str, Any]:
     cases: dict[tuple[str, str], dict[str, Any]] = {}
-    for c in manifest.get("cases", []):
+    for key, c in manifest_case_index(manifest.get("cases", [])).items():
         if split != "all" and c.get("split") != split:
             continue
         if classes and c.get("class") not in classes:
             continue
-        cases[(c["matrix_id"], c.get("track", "recommended"))] = c
+        cases[key] = c
 
     grouped: dict[tuple, list[dict[str, Any]]] = collections.defaultdict(list)
     for r in records:
@@ -352,6 +389,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 report_only[mid] = per
                 continue
             ref = _inertia_reference(per, subject) if track == "ipopt" else None
+            # (ipopt-plugin is smf only: no reference inertia to check against.)
             for sid in solver_ids:
                 a = per.get(sid)
                 if a is None:

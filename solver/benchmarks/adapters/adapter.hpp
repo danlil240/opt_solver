@@ -85,6 +85,12 @@ std::unique_ptr<SolverAdapter> make_smf_adapter();
 /// static_as_zero. analyse() defers the analysis to the first factor(), as
 /// the plugin does; a Singular session factor is Outcome::Singular.
 std::unique_ptr<SolverAdapter> make_smf_ipm_adapter(StaticMode mode, bool static_zero);
+/// smf exactly as the MA97 plugin (libsmf_ma97) runs it inside IPOPT:
+/// smf::IpmSession with `ipm` (bench_replay passes smf::
+/// ipopt_plugin_ipm_control()), configured with the plugin's Control
+/// (smf::ipopt_plugin_control()). Same deferred analysis as
+/// make_smf_ipm_adapter; bench_replay's --track ipopt-plugin.
+std::unique_ptr<SolverAdapter> make_smf_ipopt_plugin_adapter(const IpmControl &ipm);
 /// bench_replay's --ipm-static value: off | fallback | regularized.
 std::optional<StaticMode> parse_ipm_static(const std::string &name);
 std::unique_ptr<SolverAdapter> make_hsl_adapter(const std::string &hsl_id);

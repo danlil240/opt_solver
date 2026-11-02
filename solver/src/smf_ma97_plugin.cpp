@@ -3,6 +3,7 @@
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
 #include "smf/ipm_session.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/types.hpp"
 
 #include <algorithm>
@@ -124,29 +125,12 @@ static bool env_flag(const char* name, bool fallback)
 //                        the held-out outcome gate (new failures, iterations).
 //   SMF_IPM_STATIC_ZERO=1  static pivots count as zero eigenvalues instead of
 //                        by the hybrid rule (IpmControl::static_as_zero), default 0.
-static smf::StaticMode env_static_mode()
-{
-    const char* v = std::getenv("SMF_IPM_STATIC");
-    if (v != nullptr && std::strcmp(v, "fallback") == 0)
-        return smf::StaticMode::Fallback;
-    if (v != nullptr && std::strcmp(v, "regularized") == 0)
-        return smf::StaticMode::Regularized;
-    return smf::StaticMode::Off;
-}
-
+// The plugin's IpmControl: smf::ipopt_plugin_ipm_control()
+// (smf/ipopt_plugin_control.hpp), shared with bench_replay's ipopt-plugin
+// track, reads the variables above.
 static smf::IpmControl plugin_ipm_control()
 {
-    static const bool abort_on = env_flag("SMF_IPM_ABORT", false);
-    static const bool reanalyse_on = env_flag("SMF_IPM_REANALYSE", false);
-    static const smf::StaticMode static_mode = env_static_mode();
-    static const bool static_zero = env_flag("SMF_IPM_STATIC_ZERO", false);
-    smf::IpmControl ipm;
-    ipm.learn_inertia = abort_on;
-    ipm.abort_on_wrong_inertia = abort_on;
-    ipm.reanalyse = reanalyse_on;
-    ipm.static_mode = static_mode;
-    ipm.static_as_zero = static_zero;
-    return ipm;
+    return smf::ipopt_plugin_ipm_control();
 }
 
 // Test seam, never set in production: SMF_TEST_DELAY_BUDGET=k gives every
@@ -318,66 +302,31 @@ static void fill_values(SmfAkeep* ak, const double* val)
         ak->mat.values[static_cast<size_t>(k)] = val[static_cast<size_t>(ak->sort_perm[static_cast<size_t>(k)])];
 }
 
+// The MA97 control fields the plugin reads, as smf::Ma97Options.
+static smf::Ma97Options ma97_options(const ma97_control_d& c)
+{
+    smf::Ma97Options o;
+    o.action = c.action;
+    o.nemin = c.nemin;
+    o.multiplier = c.multiplier;
+    o.ordering = c.ordering;
+    o.print_level = c.print_level;
+    o.scaling = c.scaling;
+    o.small = c.small;
+    o.u = c.u;
+    o.solve_blas3 = c.solve_blas3;
+    o.solve_mf = c.solve_mf;
+    return o;
+}
+
+// Every MA97 control block maps through smf::apply_ma97_options()
+// (smf/ipopt_plugin_control.hpp), the single source of the plugin's Control
+// that bench_replay's ipopt-plugin track builds from too.
 static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl)
 {
     if (!ctrl)
         return true;
-
-    if (ctrl->nemin > 0)
-        out_ctrl.nemin = ctrl->nemin;
-    if (ctrl->u >= 0.0 && ctrl->u <= 0.5)
-        out_ctrl.pivot_u = ctrl->u;
-    if (ctrl->small > 0.0)
-        out_ctrl.small_pivot = ctrl->small;
-    if (ctrl->multiplier > 0.0)
-        out_ctrl.factor_memory_multiplier = ctrl->multiplier;
-    out_ctrl.solve_use_blas3_single_rhs = (ctrl->solve_blas3 != 0);
-    out_ctrl.solve_multifrontal_forward = (ctrl->solve_mf != 0);
-    out_ctrl.continue_on_singular = (ctrl->action == 0);
-    out_ctrl.print_level = ctrl->print_level;
-    // MA97 callers (IPOPT) refactor one pattern every iteration, which pays
-    // for a costlier ordering.
-    out_ctrl.expected_refactors = 10;
-    // No delay budget: delays are never traded for static pivots (inexact
-    // inertia), except through the test seam.
-    out_ctrl.delay_budget = test_delay_budget();
-
-    switch (ctrl->ordering)
-    {
-    case 0:
-    case 1:
-        out_ctrl.ordering = smf::OrderingMethod::AMD;
-        break;
-    case 3:
-        out_ctrl.ordering = smf::OrderingMethod::METIS;
-        break;
-    case 5:
-    default:
-        out_ctrl.ordering = smf::OrderingMethod::AutoParallel;
-        break;
-    }
-
-    // scaling <= 0 is "none", or the caller's own scale vector when factor
-    // receives one (applied in ma97_factor_d).
-    if (ctrl->scaling <= 0)
-    {
-        out_ctrl.scaling = smf::ScalingMethod::None;
-        return true;
-    }
-    switch (ctrl->scaling)
-    {
-    case 1:
-        out_ctrl.scaling = smf::ScalingMethod::Matching;
-        break;
-    case 2:
-    case 3:
-    case 4:
-        out_ctrl.scaling = smf::ScalingMethod::Equilibration;
-        break;
-    default:
-        return false;
-    }
-    return true;
+    return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), test_delay_budget());
 }
 
 extern "C"
@@ -397,22 +346,24 @@ extern "C"
         if (!ctrl)
             return;
         std::memset(ctrl, 0, sizeof(*ctrl));
+        // The fields the plugin reads default to smf::Ma97Options{}.
+        const smf::Ma97Options d;
         ctrl->f_arrays = 0;
-        ctrl->action = 0;
-        ctrl->nemin = 8;
-        ctrl->multiplier = 1.2;
-        ctrl->ordering = 5;
-        ctrl->print_level = -1;
-        ctrl->scaling = 0;
-        ctrl->small = 1e-20;
-        ctrl->u = 1e-8;
+        ctrl->action = d.action;
+        ctrl->nemin = d.nemin;
+        ctrl->multiplier = d.multiplier;
+        ctrl->ordering = d.ordering;
+        ctrl->print_level = d.print_level;
+        ctrl->scaling = d.scaling;
+        ctrl->small = d.small;
+        ctrl->u = d.u;
         ctrl->unit_diagnostics = 6;
         ctrl->unit_error = 6;
         ctrl->unit_warning = 6;
         ctrl->factor_min = 0;
-        ctrl->solve_blas3 = 1;
+        ctrl->solve_blas3 = d.solve_blas3;
         ctrl->solve_min = 1;
-        ctrl->solve_mf = 1;
+        ctrl->solve_mf = d.solve_mf;
         ctrl->consist_tol = 0.0;
     }
 
