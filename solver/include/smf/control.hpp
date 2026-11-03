@@ -75,6 +75,22 @@ struct Control {
     // owner accepted it (2026-11-02). ShortestPath reproduces the old trial
     // (and is what ShortestPath-specific tests set).
     MatchingAlgorithm matching_algorithm = MatchingAlgorithm::Hybrid;
+    // The auto matching trial's candidate ordering (compressed AMD and,
+    // under the Auto rule, METIS on the pair-compressed graph) at
+    // num_threads > 1, or in deterministic mode: its METIS is parallel
+    // nested dissection (parallel_nd_order, as the base ordering's
+    // AutoParallel METIS). Once the base ordering is done (any method) and
+    // its AMD flops pass the kMetisFlopsPerRow rule, the candidate's METIS
+    // and its flop prediction start speculatively on a helper thread
+    // alongside its compressed AMD and AMD's flop prediction (same outputs
+    // as the serial sequence; discarded when the candidate's own rule does
+    // not try METIS, at the cost of waiting for it). While the base ordering
+    // may still run its own parallel ND, the candidate takes half the
+    // threads (about 1.5x num_threads at the overlap). The
+    // order does not depend on the thread count (> 1, or any in
+    // deterministic mode); at 1 thread outside deterministic mode nothing
+    // changes. false: serial METIS_NodeND, no overlap.
+    bool candidate_parallel_nd = true;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;
