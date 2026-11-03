@@ -101,7 +101,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--build-dir", default="build", help="CMake build directory")
     parser.add_argument("--binary", default=None, help="Explicit benchmark runner binary")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for solver order")
-    parser.add_argument("--timeout", type=float, default=60.0, help="Per-attempt subprocess timeout in seconds")
+    parser.add_argument("--timeout", type=float, default=300.0, help="Per-attempt subprocess timeout in seconds (nd24k rec at 1T needs ~76 s: untimed warmup + timed run)")
     parser.add_argument("--threads", default="1",
                         help="Comma-separated thread counts to sweep (e.g. 1,8,16); applied to smf, BLAS and OpenMP")
     parser.add_argument("--serial-solvers", default="ma27",
