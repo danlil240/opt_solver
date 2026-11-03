@@ -1,4 +1,5 @@
 #include "smf/analysis.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
@@ -104,6 +105,18 @@ struct SmfFkeep
     bool aborted = false; // factor stopped on wrong inertia: num_neg is a partial count
 };
 
+// Threads: Control::num_threads is smf::plugin_num_threads()
+// (smf/ipopt_plugin_control.hpp, read once per process): SMF_NUM_THREADS,
+// else OMP_NUM_THREADS (its first entry), else the physical core count.
+// Real MA97 has no thread option (nor has IPOPT one for it): it factors on
+// OpenMP's default team, i.e. OMP_NUM_THREADS. Every analyse, factor and
+// solve call runs under a BlasThreadGuard of that count (the calling
+// thread's MKL setting, restored on return), so BLAS sees what it sees on
+// bench_replay's N-thread runs (mkl_set_num_threads(N), num_threads = N):
+// the factorization then splits those threads itself (serial BLAS in the
+// subtrees and tiles, shares at the top; deterministic mode: one), and
+// IPOPT's own BLAS setting outside the calls is left alone.
+//
 // The IPM features are opt-in through the environment (the MA97 interface
 // has no slots for them). Their defaults were decided on the held-out IPOPT
 // models (docs/performance/2026-10-26-ipm-mode.md): every feature failed its
@@ -174,7 +187,8 @@ struct PluginStats
         if (!enabled)
             return;
         std::fprintf(stderr,
-                     "[smf_ma97] factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
+                     "[smf_ma97] threads=%d (%s) factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
+                     smf::plugin_threads().threads, smf::plugin_threads_source_name(smf::plugin_threads().source),
                      factors, factor_s, solves, rhs, solve_s,
                      solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
         std::fprintf(stderr,
@@ -412,6 +426,7 @@ extern "C"
             fill_values(ak, val);
             values = ak->mat.values;
         }
+        const smf::BlasThreadGuard blas(ak->ctrl.num_threads);
         if (ak->session->analyse(ak->mat, values, ak->ctrl, plugin_ipm_control()) != smf::ErrorCode::Success)
         {
             info->flag = -3;
@@ -510,6 +525,7 @@ extern "C"
         // ra= trace: reverts decided before this factorization (a revert
         // decided at its end does not change the analysis it ran on).
         const int reverted_before = session.stats().reanalyses_reverted;
+        const smf::BlasThreadGuard blas(ak->ctrl.num_threads);
         const auto t_factor = std::chrono::steady_clock::now();
         smf::IpmFactorStatus status = session.factor(ak->mat.values);
         // A reused scale that makes the factor singular is presumed stale: one
@@ -781,6 +797,7 @@ extern "C"
         smf::IpmSession& session = *fw->session;
         session.set_control(fw->ctrl);
         int rc = 0;
+        const smf::BlasThreadGuard blas(fw->ctrl.num_threads);
 
         const auto t_solve = std::chrono::steady_clock::now();
         if (ldx == n)

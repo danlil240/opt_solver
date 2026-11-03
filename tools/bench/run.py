@@ -164,10 +164,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                   file=sys.stderr)
             return 2
     thread_list = [int(t) for t in args.threads.split(",") if t]
-    if args.track_override == "ipopt-plugin" and any(t > 1 for t in thread_list):
-        # Until the plugin sets Control::num_threads (it keeps the default 1).
-        print("warning: the IPOPT plugin runs smf with Control::num_threads = 1 (serial tree, "
-              "only BLAS threads): ipopt-plugin rows at N threads are 1-thread-tree rows",
+    if args.track_override == "ipopt-plugin" and os.environ.get("SMF_NUM_THREADS"):
+        # The plugin's thread count (smf::plugin_num_threads()): SMF_NUM_THREADS,
+        # else OMP_NUM_THREADS, which every run below exports as its --threads
+        # value. SMF_NUM_THREADS in this environment overrides that.
+        print(f"warning: SMF_NUM_THREADS={os.environ['SMF_NUM_THREADS']} overrides --threads on the "
+              "ipopt-plugin track: its rows run (and record) the SMF_NUM_THREADS count",
               file=sys.stderr)
     serial_solvers = {x for x in args.serial_solvers.split(",") if x}
     case_filter = {x for x in args.cases.split(",") if x} if args.cases else None

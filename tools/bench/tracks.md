@@ -7,7 +7,7 @@ whole run by `run.py --track-override`) decides how a case is factorized.
 |---|---|---|---|
 | `recommended` | smf defaults (`pivot_u` 0.01, AutoSerial ordering, Auto scaling, `expected_refactors` 1), `num_threads` = the run's thread count | plain `smf::Solver` adapter | all |
 | `ipopt` | as `recommended` but `pivot_u` = 1e-8 (IPOPT's `ma*_pivtol` / `ma97_u` default); harness refinement after every 1-RHS solve, as IPOPT refines | plain `smf::Solver` adapter | all (each rival at IPOPT's pivot threshold) |
-| `ipopt-plugin` | the IPOPT plugin's own Control: `smf::ipopt_plugin_control()` (`solver/include/smf/ipopt_plugin_control.hpp`), the function `libsmf_ma97` maps every MA97 control block through. Under IPOPT's defaults: `pivot_u` 1e-8, AutoParallel ordering, no scaling (IPOPT's dynamic `ma97_scaling` factors unscaled first), `expected_refactors` 10, `nemin` 8, indefinite matrix type for every case (IPOPT's KKT type), `num_threads` 1 (the plugin never sets it); same refinement as `ipopt` | `smf::IpmSession` with the plugin's `IpmControl` (`smf::ipopt_plugin_ipm_control()`, the `SMF_IPM_*` variables); analysis deferred to the first factorization, as IPOPT analyses the pattern without values; a singular factor in a replayed sequence is skipped (IPOPT rejects it and refactors) | **smf only** for now: other solvers get an `Unavailable` record from `bench_replay`, and `run.py` skips them |
+| `ipopt-plugin` | the IPOPT plugin's own Control: `smf::ipopt_plugin_control()` (`solver/include/smf/ipopt_plugin_control.hpp`), the function `libsmf_ma97` maps every MA97 control block through. Under IPOPT's defaults: `pivot_u` 1e-8, AutoParallel ordering, no scaling (IPOPT's dynamic `ma97_scaling` factors unscaled first), `expected_refactors` 10, `nemin` 8, indefinite matrix type for every case (IPOPT's KKT type), `num_threads` the plugin's (`smf::plugin_num_threads()`: `SMF_NUM_THREADS`, else `OMP_NUM_THREADS`, else the physical cores; see below); same refinement as `ipopt` | `smf::IpmSession` with the plugin's `IpmControl` (`smf::ipopt_plugin_ipm_control()`, the `SMF_IPM_*` variables); analysis deferred to the first factorization, as IPOPT analyses the pattern without values; a singular factor in a replayed sequence is skipped (IPOPT rejects it and refactors) | **smf only** for now: other solvers get an `Unavailable` record from `bench_replay`, and `run.py` skips them |
 
 `ipopt-plugin` measures what IPOPT users of the plugin get, including the
 plugin-side analysis cost (e.g. stokes128: matching phase ~180 ms against
@@ -57,10 +57,22 @@ and `ipopt`). `--track-override ipopt-plugin` (the only override track;
 run.py and ab_run.py reject other values) runs every selected matrix **once**
 on that track, taking mode, recorded sequence and per-case settings from its
 `ipopt` entry when it has one (else its first entry). Selecting no smf
-solver is an error (exit 2). With `--threads` above 1, run.py and
-bench_replay warn that the plugin runs smf with `Control::num_threads = 1`.
-Until the plugin sets the thread count, N-thread rows on this track are
-1-thread-tree rows (only BLAS is threaded).
+solver is an error (exit 2).
+
+Threads on this track are the plugin's, as inside IPOPT. The plugin sets
+`Control::num_threads` to `smf::plugin_num_threads()`
+(`solver/include/smf/ipopt_plugin_control.hpp`): `SMF_NUM_THREADS` (a
+positive int), else `OMP_NUM_THREADS` (a positive int; of a list `a,b` the
+first), else the machine's physical core count. Real MA97 has no thread
+option (IPOPT has none for it either) and factors on OpenMP's default team,
+so the plugin follows `OMP_NUM_THREADS` like the library it replaces. run.py
+exports `OMP_NUM_THREADS` (and `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS`) as
+each run's `--threads` value, so an N-thread row really runs N threads
+(tree parallelism, `auto_threads`, BLAS budget N, as on the `recommended`
+track at N threads). `SMF_NUM_THREADS` in the environment overrides that:
+run.py warns, and bench_replay warns whenever the plugin's count differs
+from `--threads` (also when it runs without run.py and `OMP_NUM_THREADS` is
+unset: then the physical cores) and runs and records the plugin's count.
 
     python tools/bench/run.py --manifest benchmarks/manifests/fronttier.json \
         --output benchmarks/results/plugin_t1 --track-override ipopt-plugin \

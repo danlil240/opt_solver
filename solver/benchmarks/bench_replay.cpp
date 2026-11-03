@@ -380,6 +380,23 @@ int main(int argc, char **argv) {
         else if (arg == "--warmup") is_warmup = true;
     }
 
+    // "ipopt-plugin" track: the thread count is the plugin's own,
+    // smf::plugin_num_threads() (SMF_NUM_THREADS, else OMP_NUM_THREADS, else
+    // the physical cores; ipopt_plugin_control.hpp), as inside IPOPT. run.py
+    // exports OMP_NUM_THREADS = --threads, so the two agree unless
+    // SMF_NUM_THREADS is set (or bench_replay runs without run.py): the run
+    // then uses the plugin's count, and its record says so.
+    const bool plugin_track = track == "ipopt-plugin";
+    if (plugin_track) {
+        const smf::PluginThreads pt = smf::plugin_threads();
+        if (pt.threads != threads) {
+            std::fprintf(stderr, "warning: ipopt-plugin track: the plugin runs %d thread(s) (%s), not --threads %d; "
+                                 "this run uses %d\n",
+                         pt.threads, smf::plugin_threads_source_name(pt.source), threads, pt.threads);
+        }
+        threads = pt.threads;
+    }
+
     // One thread budget for every library in the process: smf's tree
     // parallelism (Control::num_threads), MKL (BLAS / PARDISO) and OpenMP.
     // run.py also exports OMP/MKL/OPENBLAS_NUM_THREADS so third-party
@@ -411,12 +428,6 @@ int main(int argc, char **argv) {
     // is emulated by the adapter over the replayed steps. With
     // SMF_IPM_REANALYSE=1 a re-analysis runs inside factor() and its time
     // lands in factor_ms, not analyse_ms.
-    const bool plugin_track = track == "ipopt-plugin";
-    if (plugin_track && threads > 1) {
-        // Until the plugin sets Control::num_threads (it keeps the default 1).
-        std::fprintf(stderr, "warning: the IPOPT plugin runs smf with Control::num_threads = 1 (serial tree, "
-                             "only BLAS threads): this %d-thread run is a 1-thread-tree run\n", threads);
-    }
     // The IpmSession path (--ipm-static or the ipopt-plugin track): a singular
     // factor is one IPOPT rejects and refactors with delta_c, so a replay
     // skips it, and the analysis runs inside the first factor().
@@ -547,7 +558,7 @@ int main(int argc, char **argv) {
                            : smf::MatrixType::RealSymmetricIndefinite;
     ctrl.num_threads = threads;
     // "ipopt-plugin" track: the plugin's Control as is (IPOPT's KKT matrix
-    // type, the plugin's num_threads included); the overrides below still
+    // type, the plugin's num_threads included: `threads` above); the overrides below still
     // apply on top.
     if (plugin_track) {
         const auto plugin_ctrl = smf::ipopt_plugin_control();

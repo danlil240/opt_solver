@@ -10,6 +10,7 @@
 
 #include "smf/control.hpp"
 #include "smf/ipm_session.hpp"
+#include "smf/threading.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,14 +38,102 @@ struct Ma97Options {
     int    solve_mf     = 1;
 };
 
+/// Where the plugin's thread count came from (plugin_threads_resolve()).
+enum class PluginThreadsSource { SmfNumThreads, OmpNumThreads, PhysicalCores };
+
+struct PluginThreads {
+    int threads = 1;
+    PluginThreadsSource source = PluginThreadsSource::PhysicalCores;
+};
+
+/// A positive int at the start of `v` (OMP_NUM_THREADS may be a list per
+/// nesting level, "a,b": the first, the outer level's, counts), else 0.
+inline int plugin_threads_parse(const char *v)
+{
+    if (v == nullptr)
+        return 0;
+    while (*v == ' ' || *v == '\t')
+        ++v;
+    char *end = nullptr;
+    const long n = std::strtol(v, &end, 10);
+    if (end == v || n <= 0 || n > 4096)
+        return 0;
+    while (*end == ' ' || *end == '\t')
+        ++end;
+    return (*end == '\0' || *end == ',') ? static_cast<int>(n) : 0;
+}
+
+/// The plugin's Control::num_threads from these environment values (null:
+/// unset), first match wins:
+///  1. SMF_NUM_THREADS, a positive int: smf's own override;
+///  2. (no IPOPT option: IPOPT has no ma97 thread option, and the plugin
+///     sees only MA97's control block, which has no thread field either);
+///  3. OMP_NUM_THREADS, a positive int (a list "a,b": its first entry);
+///  4. `physical_cores`.
+/// Why OpenMP's setting: real MA97 has no thread knob and factors on
+/// OpenMP's default team (omp_get_max_threads(), from OMP_NUM_THREADS), so
+/// a drop-in MA97 replacement inside IPOPT takes the same count. Without
+/// OMP_NUM_THREADS the OpenMP runtimes default to every logical processor;
+/// smf takes the physical cores instead (SMT siblings add nothing to dense
+/// front kernels, and auto_threads trims the count to what the tree repays
+/// anyway). Invalid values (0, negative, text) are skipped as unset.
+inline PluginThreads plugin_threads_resolve(const char *smf_num_threads, const char *omp_num_threads,
+                                            int physical_cores)
+{
+    if (const int t = plugin_threads_parse(smf_num_threads))
+        return {t, PluginThreadsSource::SmfNumThreads};
+    if (const int t = plugin_threads_parse(omp_num_threads))
+        return {t, PluginThreadsSource::OmpNumThreads};
+    return {std::max(1, physical_cores), PluginThreadsSource::PhysicalCores};
+}
+
+/// plugin_threads_resolve() of the current environment and
+/// smf::physical_core_count(), read now (tests); the plugin uses
+/// plugin_num_threads().
+inline PluginThreads plugin_threads_from_env()
+{
+    return plugin_threads_resolve(std::getenv("SMF_NUM_THREADS"), std::getenv("OMP_NUM_THREADS"),
+                                  physical_core_count());
+}
+
+/// The plugin's thread count: plugin_threads_from_env(), read once per
+/// process (as the plugin's other environment knobs).
+inline PluginThreads plugin_threads()
+{
+    static const PluginThreads t = plugin_threads_from_env();
+    return t;
+}
+
+inline int plugin_num_threads() { return plugin_threads().threads; }
+
+inline const char *plugin_threads_source_name(PluginThreadsSource s)
+{
+    switch (s)
+    {
+    case PluginThreadsSource::SmfNumThreads:
+        return "SMF_NUM_THREADS";
+    case PluginThreadsSource::OmpNumThreads:
+        return "OMP_NUM_THREADS";
+    case PluginThreadsSource::PhysicalCores:
+    default:
+        return "physical cores";
+    }
+}
+
 /// Apply one MA97 control block to `ctrl`, as the plugin does at every
 /// analyse, factor and solve call: the mapped fields above plus the plugin's
 /// fixed settings (expected_refactors = 10, Control::delay_budget =
-/// `delay_budget`; the plugin passes -1 except through its test seam).
+/// `delay_budget`; the plugin passes -1 except through its test seam;
+/// Control::num_threads = `num_threads`, or plugin_num_threads() when it is
+/// <= 0, as the plugin passes). The rest of the parallel configuration stays
+/// at Control's defaults (auto_threads, top_tiles), as on the board's
+/// multi-thread runs.
 /// Returns false for an unsupported scaling value (MA97 flag -6); `ctrl` is
 /// then partially updated, as before.
-inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int delay_budget = -1)
+inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int delay_budget = -1,
+                               int num_threads = 0)
 {
+    out_ctrl.num_threads = num_threads > 0 ? num_threads : plugin_num_threads();
     if (opt.nemin > 0)
         out_ctrl.nemin = opt.nemin;
     if (opt.u >= 0.0 && opt.u <= 0.5)
@@ -104,14 +193,15 @@ inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int de
 
 /// The Control of the plugin's analysis and factorizations for the MA97
 /// control block `opt`: a default Control, matrix_type = indefinite (IPOPT's
-/// KKT systems), then apply_ma97_options(). std::nullopt for an invalid
-/// scaling value. Everything else stays at Control's defaults, as in the
-/// plugin (num_threads = 1 included).
-inline std::optional<Control> ipopt_plugin_control(const Ma97Options &opt = Ma97Options{}, int delay_budget = -1)
+/// KKT systems), then apply_ma97_options() (num_threads: `num_threads`, or
+/// plugin_num_threads() when <= 0). std::nullopt for an invalid scaling
+/// value. Everything else stays at Control's defaults, as in the plugin.
+inline std::optional<Control> ipopt_plugin_control(const Ma97Options &opt = Ma97Options{}, int delay_budget = -1,
+                                                   int num_threads = 0)
 {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
-    if (!apply_ma97_options(ctrl, opt, delay_budget))
+    if (!apply_ma97_options(ctrl, opt, delay_budget, num_threads))
         return std::nullopt;
     return ctrl;
 }

@@ -10,6 +10,8 @@
 
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
+#include "smf/ipm_session.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/multifrontal_serial.hpp"
 #include "smf/solver.hpp"
@@ -559,6 +561,128 @@ TEST(ParallelDeterminism, LateThreadsDealtTaskIsTakenOver) {
             EXPECT_EQ(bit_diff(r.x, ref.x).first, 0u) << "late thread " << late;
             EXPECT_EQ(bit_diff(r.d, ref.d).first, 0u) << "late thread " << late;
             EXPECT_EQ(bit_diff(r.xm, ref.xm).first, 0u) << "late thread " << late;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The IPOPT plugin's Control (ipopt_plugin_control(), which the plugin now
+// gives the OpenMP thread count) through the plugin's IpmSession, with
+// Control::deterministic on: factors, D, inertia and solutions bit for bit
+// identical at 1 and 4 threads. The session runs as in the plugin: deferred
+// analysis (pattern only), the plugin's IpmControl, a BlasThreadGuard of
+// num_threads around each call, and a refactorization with new values.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct PluginDetRun {
+    std::vector<double> l;  // factor_values of both factorizations
+    std::vector<double> d;  // D entries
+    std::vector<double> x;  // nrhs = 1 and nrhs = 3 solutions
+    int neg = 0, zero = 0;
+    int threads_used = 0, subtrees = 0;
+};
+
+PluginDetRun plugin_det_run(const CscLower &A, int threads, bool auto_threads) {
+    PluginDetRun r;
+    const std::optional<Control> base = ipopt_plugin_control(Ma97Options{}, -1, threads);
+    EXPECT_TRUE(base.has_value());
+    if (!base) return r;
+    Control ctrl = *base;
+    EXPECT_EQ(ctrl.num_threads, threads);
+    ctrl.deterministic = true;
+    ctrl.auto_threads = auto_threads;
+    IpmSession s;
+    {
+        const BlasThreadGuard blas(threads);
+        EXPECT_EQ(s.analyse(A, {}, ctrl, ipopt_plugin_ipm_control()), ErrorCode::Success);
+    }
+    const int n = static_cast<int>(A.n);
+    std::vector<double> v = A.values;
+    for (int it = 0; it < 2; ++it) {
+        if (it == 1)
+            for (std::size_t p = 0; p < v.size(); ++p)
+                v[p] *= 1.0 + 1e-3 * std::sin(0.37 * static_cast<double>(p));
+        const BlasThreadGuard blas(threads);
+        s.set_control(ctrl);
+        EXPECT_EQ(s.factor(v), IpmFactorStatus::Ok) << threads << " threads, factorization " << it;
+        const FactorKeep &fk = s.factor_keep();
+        // L supernode by supernode: the tree-parallel engine stores the
+        // subtrees' blocks per pass (factor_col_ptr[s] is where supernode s
+        // starts), so the flat layout depends on the partition, the blocks
+        // must not.
+        {
+            const std::size_t ns = fk.factor_col_ptr.empty() ? 0 : fk.factor_col_ptr.size() - 1;
+            std::vector<LongInt> starts(fk.factor_col_ptr.begin(), fk.factor_col_ptr.begin() + ns);
+            starts.push_back(static_cast<LongInt>(fk.factor_values.size()));
+            std::sort(starts.begin(), starts.end());
+            for (std::size_t sn = 0; sn < ns; ++sn) {
+                const LongInt b = fk.factor_col_ptr[sn];
+                // A supernode without stored pivots (all delayed) has no block.
+                const bool empty = sn < fk.pivot_types.size() && fk.pivot_types[sn].empty();
+                const auto next = std::upper_bound(starts.begin(), starts.end(), b);
+                const LongInt e = (empty || next == starts.end()) ? b : *next;
+                r.l.push_back(static_cast<double>(e - b));  // block length
+                r.l.insert(r.l.end(), fk.factor_values.begin() + b, fk.factor_values.begin() + e);
+            }
+        }
+        for (const DiagSolveEntry &e : fk.diag_entries) {
+            r.d.push_back(e.d00);
+            r.d.push_back(e.d10);
+            r.d.push_back(e.d11);
+        }
+        r.neg += s.info().num_negative;
+        r.zero += s.info().num_zero;
+        r.threads_used = std::max(r.threads_used, s.info().threads_used);
+        r.subtrees = std::max(r.subtrees, s.info().parallel_subtrees);
+        std::vector<double> b(static_cast<std::size_t>(n) * 4);
+        for (std::size_t i = 0; i < b.size(); ++i)
+            b[i] = std::sin(0.013 * static_cast<double>(i) + it) + 0.5;
+        EXPECT_EQ(s.solve(b.data(), n, 1), 0);
+        EXPECT_EQ(s.solve(b.data() + n, n, 3), 0);
+        r.x.insert(r.x.end(), b.begin(), b.end());
+    }
+    return r;
+}
+
+} // namespace
+
+TEST(ParallelDeterminism, IpoptPluginControlBitwiseAcrossThreads) {
+    struct Case {
+        std::string name;
+        CscLower A;
+        bool expect_parallel;  // 4 threads, auto_threads off: subtree-parallel engine
+    };
+    std::vector<Case> cases;
+    {
+        const fs::path mtx = fixture_root() / "optim20" / "kkt_pde_opt.mtx";
+        auto mm = read_matrix_market(mtx.string());
+        ASSERT_TRUE(mm.ok) << mtx.string() << ": " << mm.error_message;
+        cases.push_back({"kkt_pde_opt", std::move(mm.matrix), false});
+    }
+    cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9), true});
+    for (const Case &c : cases) {
+        for (const bool auto_threads : {true, false}) {
+            SCOPED_TRACE(c.name + (auto_threads ? " auto_threads" : " fixed threads"));
+            const PluginDetRun ref = plugin_det_run(c.A, 1, auto_threads);
+            ASSERT_FALSE(ref.x.empty());
+            const PluginDetRun r = plugin_det_run(c.A, 4, auto_threads);
+            if (!auto_threads && c.expect_parallel) {
+                EXPECT_GE(r.subtrees, 2) << "4 threads: subtree-parallel engine not taken";
+                EXPECT_GT(r.threads_used, 1);
+            }
+            EXPECT_EQ(r.neg, ref.neg);
+            EXPECT_EQ(r.zero, ref.zero);
+            const auto [dl, ml] = bit_diff(r.l, ref.l);
+            const auto [dd, md] = bit_diff(r.d, ref.d);
+            const auto [dx, mx] = bit_diff(r.x, ref.x);
+            EXPECT_EQ(dl, 0u) << dl << " of " << ref.l.size() << " factor entries differ (max " << ml << ")";
+            EXPECT_EQ(dd, 0u) << dd << " of " << ref.d.size() << " D entries differ (max " << md << ")";
+            EXPECT_EQ(dx, 0u) << dx << " of " << ref.x.size() << " solution entries differ (max " << mx << ")";
+            std::printf("[IpoptPluginControlBitwiseAcrossThreads] %s %s: n=%d, 4 threads used %d "
+                        "(subtrees %d), factor %zu entries\n",
+                        c.name.c_str(), auto_threads ? "auto" : "fixed", static_cast<int>(c.A.n),
+                        r.threads_used, r.subtrees, ref.l.size());
         }
     }
 }

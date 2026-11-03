@@ -35,4 +35,10 @@ void run_parallel_postorder(const AnalysisKeep &ak,
                             std::function<void(Int)> process_node,
                             int num_threads = 1);
 
+/// The machine's physical core count (SMT siblings counted once; every
+/// processor group on Windows), at least 1. Falls back to
+/// std::thread::hardware_concurrency() where the topology cannot be read.
+/// Computed once per process.
+int physical_core_count() noexcept;
+
 } // namespace smf

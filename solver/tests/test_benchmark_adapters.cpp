@@ -7,6 +7,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 using namespace smf;
@@ -196,7 +202,19 @@ TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
     EXPECT_EQ(ctrl->factor_memory_multiplier, 1.2);
     EXPECT_TRUE(ctrl->continue_on_singular);
     EXPECT_EQ(ctrl->delay_budget, -1);
-    EXPECT_EQ(ctrl->num_threads, Control{}.num_threads);
+    // The plugin's thread count (SMF_NUM_THREADS / OMP_NUM_THREADS /
+    // physical cores); the rest of the parallel set-up stays at the defaults.
+    EXPECT_EQ(ctrl->num_threads, plugin_num_threads());
+    EXPECT_GE(ctrl->num_threads, 1);
+    EXPECT_EQ(ctrl->auto_threads, Control{}.auto_threads);
+    EXPECT_EQ(ctrl->top_tiles, Control{}.top_tiles);
+    EXPECT_EQ(ctrl->deterministic, Control{}.deterministic);
+    EXPECT_EQ(ipopt_plugin_control(Ma97Options{}, -1, 3)->num_threads, 3);
+    Control c;
+    ASSERT_TRUE(apply_ma97_options(c, Ma97Options{}, -1, 5));
+    EXPECT_EQ(c.num_threads, 5);
+    ASSERT_TRUE(apply_ma97_options(c, Ma97Options{}));
+    EXPECT_EQ(c.num_threads, plugin_num_threads());
 
     Ma97Options o;
     o.ordering = 1;
@@ -209,6 +227,95 @@ TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
     EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Equilibration);
     o.scaling = 7;
     EXPECT_FALSE(ipopt_plugin_control(o).has_value());
+}
+
+namespace {
+
+void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value != nullptr ? value : "");  // "" removes it
+#else
+    if (value != nullptr) setenv(name, value, 1); else unsetenv(name);
+#endif
+}
+
+// Sets / unsets variables for its lifetime and restores their old values.
+struct EnvScope {
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+    void set(const char *name, const char *value) {
+        const char *old = std::getenv(name);
+        saved.emplace_back(name, old != nullptr ? std::optional<std::string>(old) : std::nullopt);
+        set_env(name, value);
+    }
+    ~EnvScope() {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+            set_env(it->first.c_str(), it->second ? it->second->c_str() : nullptr);
+    }
+};
+
+} // namespace
+
+TEST(BenchmarkAdapters, IpoptPluginThreadResolution) {
+    // Pure resolution: SMF_NUM_THREADS, else OMP_NUM_THREADS (its first
+    // entry), else the physical cores; invalid values count as unset.
+    using S = PluginThreadsSource;
+    const auto check = [](const char *smf_v, const char *omp_v, int cores, int want, S src) {
+        const PluginThreads t = plugin_threads_resolve(smf_v, omp_v, cores);
+        EXPECT_EQ(t.threads, want) << (smf_v ? smf_v : "unset") << " / " << (omp_v ? omp_v : "unset");
+        EXPECT_EQ(t.source, src) << (smf_v ? smf_v : "unset") << " / " << (omp_v ? omp_v : "unset");
+    };
+    check(nullptr, nullptr, 8, 8, S::PhysicalCores);
+    check(nullptr, nullptr, 0, 1, S::PhysicalCores);
+    check(nullptr, "4", 8, 4, S::OmpNumThreads);
+    check(nullptr, "6,2", 8, 6, S::OmpNumThreads);
+    check(nullptr, " 3 ", 8, 3, S::OmpNumThreads);
+    check("2", "4", 8, 2, S::SmfNumThreads);
+    check("2", nullptr, 8, 2, S::SmfNumThreads);
+    check("0", "4", 8, 4, S::OmpNumThreads);
+    check("-3", "4", 8, 4, S::OmpNumThreads);
+    check("abc", "4", 8, 4, S::OmpNumThreads);
+    check("", "4", 8, 4, S::OmpNumThreads);
+    check("2x", nullptr, 8, 8, S::PhysicalCores);
+    check(nullptr, "0", 8, 8, S::PhysicalCores);
+    check(nullptr, ",4", 8, 8, S::PhysicalCores);
+    check(nullptr, "", 8, 8, S::PhysicalCores);
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::SmfNumThreads)), "SMF_NUM_THREADS");
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::OmpNumThreads)), "OMP_NUM_THREADS");
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::PhysicalCores)), "physical cores");
+
+    // The same order through the environment (read now, not the cached
+    // plugin_threads()); the variables are restored afterwards.
+    const int cores = physical_core_count();
+    EXPECT_GE(cores, 1);
+    EXPECT_LE(cores, static_cast<int>(std::max(1u, std::thread::hardware_concurrency())));
+    const auto read = [](const char *name) {
+        const char *v = std::getenv(name);
+        return v != nullptr ? std::optional<std::string>(v) : std::nullopt;
+    };
+    const auto smf_before = read("SMF_NUM_THREADS");
+    const auto omp_before = read("OMP_NUM_THREADS");
+    {
+        EnvScope env;
+        env.set("SMF_NUM_THREADS", nullptr);
+        env.set("OMP_NUM_THREADS", nullptr);
+        EXPECT_EQ(plugin_threads_from_env().threads, cores);
+        EXPECT_EQ(plugin_threads_from_env().source, S::PhysicalCores);
+        set_env("OMP_NUM_THREADS", "3");
+        EXPECT_EQ(plugin_threads_from_env().threads, 3);
+        EXPECT_EQ(plugin_threads_from_env().source, S::OmpNumThreads);
+        set_env("OMP_NUM_THREADS", "5,1");
+        EXPECT_EQ(plugin_threads_from_env().threads, 5);
+        set_env("SMF_NUM_THREADS", "2");
+        EXPECT_EQ(plugin_threads_from_env().threads, 2);
+        EXPECT_EQ(plugin_threads_from_env().source, S::SmfNumThreads);
+        set_env("OMP_NUM_THREADS", nullptr);
+        EXPECT_EQ(plugin_threads_from_env().threads, 2);
+        set_env("SMF_NUM_THREADS", "0");
+        EXPECT_EQ(plugin_threads_from_env().threads, cores);
+        EXPECT_EQ(plugin_threads_from_env().source, S::PhysicalCores);
+    }
+    EXPECT_EQ(read("SMF_NUM_THREADS"), smf_before);
+    EXPECT_EQ(read("OMP_NUM_THREADS"), omp_before);
 }
 
 TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {

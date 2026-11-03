@@ -4,12 +4,76 @@
 
 #include "smf/ldlt_kernel.hpp"
 
+#include "smf/threading.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <queue>
+#include <thread>
+
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#else
+#  include <fstream>
+#  include <set>
+#  include <string>
+#  include <utility>
+#endif
 
 namespace smf {
+
+namespace {
+int count_physical_cores() noexcept {
+#ifdef _WIN32
+  // One SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX record per physical core,
+  // over every processor group.
+  DWORD len = 0;
+  GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+  if (len > 0) {
+    std::vector<unsigned char> buf(len);
+    auto *info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buf.data());
+    if (GetLogicalProcessorInformationEx(RelationProcessorCore, info, &len)) {
+      int cores = 0;
+      for (DWORD off = 0; off < len;) {
+        auto *rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buf.data() + off);
+        if (rec->Relationship == RelationProcessorCore) ++cores;
+        if (rec->Size == 0) break;
+        off += rec->Size;
+      }
+      if (cores > 0) return cores;
+    }
+  }
+#else
+  // Distinct (physical id, core id) pairs of /proc/cpuinfo.
+  std::ifstream in("/proc/cpuinfo");
+  std::set<std::pair<int, int>> cores;
+  int phys = 0;
+  std::string line;
+  while (in && std::getline(in, line)) {
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const int v = std::atoi(line.c_str() + colon + 1);
+    if (line.rfind("physical id", 0) == 0) phys = v;
+    else if (line.rfind("core id", 0) == 0) cores.emplace(phys, v);
+  }
+  if (!cores.empty()) return static_cast<int>(cores.size());
+#endif
+  const unsigned hw = std::thread::hardware_concurrency();
+  return hw > 0 ? static_cast<int>(hw) : 1;
+}
+} // namespace
+
+int physical_core_count() noexcept {
+  static const int cores = count_physical_cores();
+  return cores;
+}
 
 bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double min_abs_pivot,
                   bool det) {
