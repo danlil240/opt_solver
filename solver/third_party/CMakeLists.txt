@@ -38,9 +38,10 @@ target_compile_definitions(smf_metis PRIVATE NDEBUG NDEBUG2)
 
 if(MSVC)
     target_include_directories(smf_metis PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/gklib/win32")
-    # Upstream's MSVC defines, with __thread as real TLS (the fix).
+    # Upstream's MSVC defines, with __thread as real TLS (the fix); no
+    # USE_GKREGEX: GKlib's regex is removed (smf patch 5).
     target_compile_definitions(smf_metis PRIVATE
-        WIN32 MSC _CRT_SECURE_NO_DEPRECATE USE_GKREGEX "__thread=__declspec(thread)")
+        WIN32 MSC _CRT_SECURE_NO_DEPRECATE "__thread=__declspec(thread)")
     # /W0: upstream code, not ours to lint; C4005 (GKlib redefines INFINITY
     # before <math.h>) is reported even then, so it is named too.
     target_compile_options(smf_metis PRIVATE /W0 /wd4005)

@@ -168,7 +168,7 @@ double gk_CPUSeconds(void);
  * string.c
  *-------------------------------------------------------------*/
 char   *gk_strchr_replace(char *str, char *fromlist, char *tolist);
-int     gk_strstr_replace(char *str, char *pattern, char *replacement, char *options, char **new_str);
+/* smf patch 5: gk_strstr_replace() removed (regex; unused by METIS) */
 char   *gk_strtprune(char *, char *);
 char   *gk_strhprune(char *, char *);
 char   *gk_strtoupper(char *); 

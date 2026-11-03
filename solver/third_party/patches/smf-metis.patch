@@ -1,3 +1,34 @@
+diff --git a/solver/third_party/gklib/GKlib.h b/solver/third_party/gklib/GKlib.h
+index 9278fe4..a320b70 100644
+--- a/solver/third_party/gklib/GKlib.h
++++ b/solver/third_party/gklib/GKlib.h
+@@ -43,15 +43,8 @@
+ #include <assert.h>
+ #include <sys/stat.h>
+ 
+-#if defined(__WITHPCRE__)
+-  #include <pcreposix.h>
+-#else
+-  #if defined(USE_GKREGEX)
+-    #include "gkregex.h"
+-  #else
+-    #include <regex.h>
+-  #endif /* defined(USE_GKREGEX) */
+-#endif /* defined(__WITHPCRE__) */
++/* smf patch 5: no regex. gk_strstr_replace(), GKlib's only regex user, is
++   removed (METIS never calls it), and with it gkregex.c/.h (LGPL-2.1). */
+ 
+ 
+ 
+@@ -67,7 +60,7 @@
+ #include <gk_externs.h>
+ #include <gk_defs.h>
+ #include <gk_macros.h>
+-#include <gk_getopt.h>
++/* smf patch 5: <gk_getopt.h> dropped with getopt.c (glibc getopt, unused by METIS) */
+ 
+ #include <gk_mksort.h>
+ #include <gk_mkblas.h>
 diff --git a/solver/third_party/gklib/error.c b/solver/third_party/gklib/error.c
 index e2a18cf..9374d14 100644
 --- a/solver/third_party/gklib/error.c
@@ -37,6 +68,195 @@ index e2a18cf..9374d14 100644
  
    gk_cur_jbufs--;
  
+diff --git a/solver/third_party/gklib/getopt.c b/solver/third_party/gklib/getopt.c
+deleted file mode 100644
+index 2e7e042..0000000
+diff --git a/solver/third_party/gklib/gk_getopt.h b/solver/third_party/gklib/gk_getopt.h
+deleted file mode 100644
+index 597c080..0000000
+diff --git a/solver/third_party/gklib/gk_mksort.h b/solver/third_party/gklib/gk_mksort.h
+dissimilarity index 98%
+index 48674db..39fc2cd 100644
+--- a/solver/third_party/gklib/gk_mksort.h
++++ b/solver/third_party/gklib/gk_mksort.h
+@@ -?,? +1,158 @@
++/*
++ * gk_mksort.h -- GK_MKQSORT, GKlib's in-line sort template.
++ *
++ * smf patch 4: this file replaces GKlib's original gk_mksort.h, which was
++ * adapted from the GNU C Library's qsort and carried its LGPL-2.1 licence.
++ * Written from scratch for smf from a description of that algorithm (not
++ * from its code) and licensed under the Apache License 2.0, like the rest
++ * of GKlib (see LICENSE.txt and solver/third_party/README.md).
++ *
++ * It reproduces the original's element order, equal keys included, so
++ * METIS's orderings are unchanged (smf test ParallelNd.GkSortPinnedOrder):
++ *   - quicksort while a range has more than GK_QSORT_SMALL + 1 elements,
++ *     pivot = median of the first, middle and last elements (ordered in
++ *     place), ranges kept on an explicit stack, the smaller side sorted
++ *     next and ranges of at most GK_QSORT_SMALL + 1 elements left alone;
++ *   - then one insertion-sort pass over the whole array, after moving the
++ *     smallest of its first GK_QSORT_SMALL + 1 elements to the front as a
++ *     sentinel.
++ *
++ * Usage: GK_MKQSORT(TYPE, BASE, NELT, LT) sorts the NELT elements of type
++ * TYPE at BASE into ascending order of LT, where LT(a, b) gets two TYPE
++ * pointers and is nonzero when *a sorts before *b (LT is the only
++ * comparison made). BASE and NELT are evaluated once.
++ */
++
++#ifndef _GK_MKSORT_H_
++#define _GK_MKSORT_H_
++
++/* Ranges of at most GK_QSORT_SMALL + 1 elements are left to the final
++   insertion sort (the original's threshold). */
++#define GK_QSORT_SMALL 8
++
++/* One stack entry per pending range; the smaller side is always handled
++   first, so the stack never holds more than log2(n) entries. */
++#define GK_QSORT_STACK (8 * sizeof(size_t))
++
++#define GK_QSORT_SWAP(p, q, tmp) \
++  do { (tmp) = *(p); *(p) = *(q); *(q) = (tmp); } while (0)
++
++#define GK_MKQSORT(GKQS_T, GKQS_BASE, GKQS_N, GKQS_LT)                        \
++do {                                                                          \
++  GKQS_T *const gkqs_a = (GKQS_BASE);                                         \
++  const size_t gkqs_n = (GKQS_N);                                             \
++  GKQS_T gkqs_tmp;                                                            \
++                                                                              \
++  if (gkqs_n == 0)                                                            \
++    break;                                                                    \
++                                                                              \
++  /* Partition phase. */                                                     \
++  if (gkqs_n > GK_QSORT_SMALL) {                                              \
++    struct { GKQS_T *first, *last; } gkqs_stack[GK_QSORT_STACK];              \
++    size_t gkqs_depth = 0;                                                    \
++    GKQS_T *gkqs_first = gkqs_a;                                              \
++    GKQS_T *gkqs_last = gkqs_a + gkqs_n - 1;                                  \
++                                                                              \
++    for (;;) {                                                                \
++      GKQS_T *gkqs_piv = gkqs_first + ((gkqs_last - gkqs_first) >> 1);        \
++      GKQS_T *gkqs_l, *gkqs_r;                                                \
++                                                                              \
++      /* first <= pivot <= last, by three compare-and-swaps */                \
++      if (GKQS_LT(gkqs_piv, gkqs_first))                                      \
++        GK_QSORT_SWAP(gkqs_piv, gkqs_first, gkqs_tmp);                        \
++      if (GKQS_LT(gkqs_last, gkqs_piv)) {                                     \
++        GK_QSORT_SWAP(gkqs_piv, gkqs_last, gkqs_tmp);                         \
++        if (GKQS_LT(gkqs_piv, gkqs_first))                                    \
++          GK_QSORT_SWAP(gkqs_piv, gkqs_first, gkqs_tmp);                      \
++      }                                                                       \
++                                                                              \
++      /* Scan inwards from both ends; the pivot element moves with swaps. */  \
++      gkqs_l = gkqs_first + 1;                                                \
++      gkqs_r = gkqs_last - 1;                                                 \
++      while (gkqs_l <= gkqs_r) {                                              \
++        while (GKQS_LT(gkqs_l, gkqs_piv))                                     \
++          gkqs_l++;                                                           \
++        while (GKQS_LT(gkqs_piv, gkqs_r))                                     \
++          gkqs_r--;                                                           \
++        if (gkqs_l == gkqs_r) {                                               \
++          gkqs_l++;                                                           \
++          gkqs_r--;                                                           \
++          break;                                                              \
++        }                                                                     \
++        if (gkqs_l > gkqs_r)                                                  \
++          break;                                                              \
++        GK_QSORT_SWAP(gkqs_l, gkqs_r, gkqs_tmp);                              \
++        if (gkqs_piv == gkqs_l)                                               \
++          gkqs_piv = gkqs_r;                                                  \
++        else if (gkqs_piv == gkqs_r)                                          \
++          gkqs_piv = gkqs_l;                                                  \
++        gkqs_l++;                                                             \
++        gkqs_r--;                                                             \
++      }                                                                       \
++                                                                              \
++      /* [first, r] and [l, last] remain; small ones are left as they are. */ \
++      {                                                                       \
++        const int gkqs_lo_big = (size_t)(gkqs_r - gkqs_first) > GK_QSORT_SMALL; \
++        const int gkqs_hi_big = (size_t)(gkqs_last - gkqs_l) > GK_QSORT_SMALL;  \
++        if (gkqs_lo_big && gkqs_hi_big) {                                     \
++          if (gkqs_r - gkqs_first > gkqs_last - gkqs_l) {                     \
++            gkqs_stack[gkqs_depth].first = gkqs_first;                        \
++            gkqs_stack[gkqs_depth].last = gkqs_r;                             \
++            gkqs_depth++;                                                     \
++            gkqs_first = gkqs_l;                                              \
++          }                                                                   \
++          else {                                                              \
++            gkqs_stack[gkqs_depth].first = gkqs_l;                            \
++            gkqs_stack[gkqs_depth].last = gkqs_last;                          \
++            gkqs_depth++;                                                     \
++            gkqs_last = gkqs_r;                                               \
++          }                                                                   \
++        }                                                                     \
++        else if (gkqs_lo_big) {                                               \
++          gkqs_last = gkqs_r;                                                 \
++        }                                                                     \
++        else if (gkqs_hi_big) {                                               \
++          gkqs_first = gkqs_l;                                                \
++        }                                                                     \
++        else {                                                                \
++          if (gkqs_depth == 0)                                                \
++            break;                                                            \
++          gkqs_depth--;                                                       \
++          gkqs_first = gkqs_stack[gkqs_depth].first;                          \
++          gkqs_last = gkqs_stack[gkqs_depth].last;                            \
++        }                                                                     \
++      }                                                                       \
++    }                                                                         \
++  }                                                                           \
++                                                                              \
++  /* Insertion-sort phase, with the minimum of the first block in front. */   \
++  {                                                                           \
++    GKQS_T *const gkqs_end = gkqs_a + gkqs_n - 1;                             \
++    GKQS_T *const gkqs_scan_end =                                             \
++        gkqs_n - 1 < GK_QSORT_SMALL ? gkqs_end : gkqs_a + GK_QSORT_SMALL;     \
++    GKQS_T *gkqs_min = gkqs_a, *gkqs_i, *gkqs_j;                              \
++                                                                              \
++    for (gkqs_i = gkqs_a + 1; gkqs_i <= gkqs_scan_end; gkqs_i++)              \
++      if (GKQS_LT(gkqs_i, gkqs_min))                                          \
++        gkqs_min = gkqs_i;                                                    \
++    if (gkqs_min != gkqs_a)                                                   \
++      GK_QSORT_SWAP(gkqs_min, gkqs_a, gkqs_tmp);                              \
++                                                                              \
++    /* a[0] is now a lower bound for everything: no left-end check needed. */ \
++    for (gkqs_i = gkqs_a + 2; gkqs_i <= gkqs_end; gkqs_i++) {                 \
++      gkqs_j = gkqs_i - 1;                                                    \
++      while (GKQS_LT(gkqs_i, gkqs_j))                                         \
++        gkqs_j--;                                                             \
++      gkqs_j++;                                                               \
++      if (gkqs_j != gkqs_i) {                                                 \
++        GKQS_T *gkqs_k;                                                       \
++        gkqs_tmp = *gkqs_i;                                                   \
++        for (gkqs_k = gkqs_i; gkqs_k > gkqs_j; gkqs_k--)                      \
++          *gkqs_k = *(gkqs_k - 1);                                            \
++        *gkqs_j = gkqs_tmp;                                                   \
++      }                                                                       \
++    }                                                                         \
++  }                                                                           \
++} while (0)
++
++#endif /* _GK_MKSORT_H_ */
+diff --git a/solver/third_party/gklib/gk_proto.h b/solver/third_party/gklib/gk_proto.h
+index 6fd6bd4..a0b6322 100644
+--- a/solver/third_party/gklib/gk_proto.h
++++ b/solver/third_party/gklib/gk_proto.h
+@@ -168,7 +168,7 @@ double gk_CPUSeconds(void);
+  * string.c
+  *-------------------------------------------------------------*/
+ char   *gk_strchr_replace(char *str, char *fromlist, char *tolist);
+-int     gk_strstr_replace(char *str, char *pattern, char *replacement, char *options, char **new_str);
++/* smf patch 5: gk_strstr_replace() removed (regex; unused by METIS) */
+ char   *gk_strtprune(char *, char *);
+ char   *gk_strhprune(char *, char *);
+ char   *gk_strtoupper(char *); 
+diff --git a/solver/third_party/gklib/gkregex.c b/solver/third_party/gklib/gkregex.c
+deleted file mode 100644
+index 8a09caa..0000000
+diff --git a/solver/third_party/gklib/gkregex.h b/solver/third_party/gklib/gkregex.h
+deleted file mode 100644
+index 807c404..0000000
 diff --git a/solver/third_party/gklib/random.c b/solver/third_party/gklib/random.c
 index 3698614..359c897 100644
 --- a/solver/third_party/gklib/random.c
@@ -90,6 +310,160 @@ index 3698614..359c897 100644
 +  return gk_rand15();  /* smf patch 2 */
  #endif
  }
+ 
+diff --git a/solver/third_party/gklib/string.c b/solver/third_party/gklib/string.c
+index 4a3fb14..98140db 100644
+--- a/solver/third_party/gklib/string.c
++++ b/solver/third_party/gklib/string.c
+@@ -95,147 +95,8 @@ based substitution function.
+   returned in <tt>newstr</tt>, which also needs to be freed afterwards.
+ */
+ /************************************************************************/
+-int gk_strstr_replace(char *str, char *pattern, char *replacement, char *options,
+-      char **new_str)
+-{
+-  ssize_t i, len, rlen, nlen, offset, noffset;
+-  int j, rc, flags, global, nmatches;
+-  regex_t re;
+-  regmatch_t matches[10];
+-
+-  
+-  /* Parse the options */
+-  flags = REG_EXTENDED;
+-  if (strchr(options, 'i') != NULL)
+-    flags = flags | REG_ICASE;
+-  global = (strchr(options, 'g') != NULL ? 1 : 0);
+-
+-
+-  /* Compile the regex */
+-  if ((rc = regcomp(&re, pattern, flags)) != 0) { 
+-    len = regerror(rc, &re, NULL, 0);
+-    *new_str = gk_cmalloc(len, "gk_strstr_replace: new_str");
+-    regerror(rc, &re, *new_str, len);
+-    return 0;
+-  }
+-
+-  /* Prepare the output string */
+-  len = strlen(str);
+-  nlen = 2*len;
+-  noffset = 0;
+-  *new_str = gk_cmalloc(nlen+1, "gk_strstr_replace: new_str");
+-
+-
+-  /* Get into the matching-replacing loop */
+-  rlen = strlen(replacement);
+-  offset = 0;
+-  nmatches = 0;
+-  do {
+-    rc = regexec(&re, str+offset, 10, matches, 0);
+-
+-    if (rc == REG_ESPACE) {
+-      gk_free((void **)new_str, LTERM);
+-      *new_str = gk_strdup("regexec ran out of memory.");
+-      regfree(&re);
+-      return 0;
+-    }
+-    else if (rc == REG_NOMATCH) {
+-      if (nlen-noffset < len-offset) {
+-        nlen += (len-offset) - (nlen-noffset);
+-        *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-      }
+-      strcpy(*new_str+noffset, str+offset);
+-      noffset += (len-offset);
+-      break;
+-    }
+-    else { /* A match was found! */
+-      nmatches++;
+-
+-      /* Copy the left unmatched portion of the string */
+-      if (matches[0].rm_so > 0) {
+-        if (nlen-noffset < matches[0].rm_so) {
+-          nlen += matches[0].rm_so - (nlen-noffset);
+-          *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-        }
+-        strncpy(*new_str+noffset, str+offset, matches[0].rm_so);
+-        noffset += matches[0].rm_so;
+-      }
+-
+-      /* Go and append the replacement string */
+-      for (i=0; i<rlen; i++) {
+-        switch (replacement[i]) {
+-          case '\\':
+-            if (i+1 < rlen) {
+-              if (nlen-noffset < 1) {
+-                nlen += nlen + 1;
+-                *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-              }
+-              *new_str[noffset++] = replacement[++i];
+-            }
+-            else {
+-              gk_free((void **)new_str, LTERM);
+-              *new_str = gk_strdup("Error in replacement string. Missing character following '\'.");
+-              regfree(&re);
+-              return 0;
+-            }
+-            break;
+-
+-          case '$':
+-            if (i+1 < rlen) {
+-              j = (int)(replacement[++i] - '0');
+-              if (j < 0 || j > 9) {
+-                gk_free((void **)new_str, LTERM);
+-                *new_str = gk_strdup("Error in captured subexpression specification.");
+-                regfree(&re);
+-                return 0;
+-              }
+-
+-              if (nlen-noffset < matches[j].rm_eo-matches[j].rm_so) {
+-                nlen += nlen + (matches[j].rm_eo-matches[j].rm_so);
+-                *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-              }
+-
+-              strncpy(*new_str+noffset, str+offset+matches[j].rm_so, matches[j].rm_eo);
+-              noffset += matches[j].rm_eo-matches[j].rm_so;
+-            }
+-            else {
+-              gk_free((void **)new_str, LTERM);
+-              *new_str = gk_strdup("Error in replacement string. Missing subexpression number folloing '$'.");
+-              regfree(&re);
+-              return 0;
+-            }
+-            break;
+-
+-          default:
+-            if (nlen-noffset < 1) {
+-              nlen += nlen + 1;
+-              *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-            }
+-            (*new_str)[noffset++] = replacement[i];
+-        }
+-      }
+-
+-      /* Update the offset of str for the next match */
+-      offset += matches[0].rm_eo;
+-
+-      if (!global) {
+-        /* Copy the right portion of the string if no 'g' option */
+-        if (nlen-noffset < len-offset) {
+-          nlen += (len-offset) - (nlen-noffset);
+-          *new_str = (char *)gk_realloc(*new_str, (nlen+1)*sizeof(char), "gk_strstr_replace: new_str");
+-        }
+-        strcpy(*new_str+noffset, str+offset);
+-        noffset += (len-offset);
+-      }
+-    }
+-  } while (global);
+-
+-  (*new_str)[noffset] = '\0';
+-
+-  regfree(&re);
+-  return nmatches + 1;
+-
+-}
++/* smf patch 5: gk_strstr_replace() removed: its regex came from gkregex.c
++   (glibc, LGPL-2.1), and METIS never calls it. */
+ 
+ 
  
 diff --git a/solver/third_party/metis/include/metis.h b/solver/third_party/metis/include/metis.h
 index d5550ec..f8910e4 100644

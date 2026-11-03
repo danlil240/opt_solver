@@ -620,7 +620,6 @@ if(TARGET smf_metis)
     install(FILES
         third_party/README.md
         third_party/LICENSE-Apache-2.0.txt
-        third_party/LICENSE-LGPL-2.1.txt
         third_party/metis/LICENSE
         DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party)
     install(FILES third_party/gklib/LICENSE.txt

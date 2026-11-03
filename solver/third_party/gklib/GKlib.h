@@ -43,15 +43,8 @@
 #include <assert.h>
 #include <sys/stat.h>
 
-#if defined(__WITHPCRE__)
-  #include <pcreposix.h>
-#else
-  #if defined(USE_GKREGEX)
-    #include "gkregex.h"
-  #else
-    #include <regex.h>
-  #endif /* defined(USE_GKREGEX) */
-#endif /* defined(__WITHPCRE__) */
+/* smf patch 5: no regex. gk_strstr_replace(), GKlib's only regex user, is
+   removed (METIS never calls it), and with it gkregex.c/.h (LGPL-2.1). */
 
 
 
@@ -67,7 +60,7 @@
 #include <gk_externs.h>
 #include <gk_defs.h>
 #include <gk_macros.h>
-#include <gk_getopt.h>
+/* smf patch 5: <gk_getopt.h> dropped with getopt.c (glibc getopt, unused by METIS) */
 
 #include <gk_mksort.h>
 #include <gk_mkblas.h>

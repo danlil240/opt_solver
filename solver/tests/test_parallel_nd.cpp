@@ -448,3 +448,65 @@ TEST(ParallelNd, VendoredMetisMatchesCondaOrdering)
     EXPECT_EQ(fnv1a(sep.v), 0xf97248da81e2b681ull);
 }
 #endif
+
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+#include <cstddef>
+#include "../third_party/gklib/gk_mksort.h"
+
+namespace {
+struct SortKv {
+    int key;
+    int tag;
+};
+#define SMF_SORTKV_LT(a, b) ((a)->key < (b)->key)
+#define SMF_SORTKV_GT(a, b) ((a)->key > (b)->key)
+void gk_sort_lt(SortKv* a, std::size_t n) { GK_MKQSORT(SortKv, a, n, SMF_SORTKV_LT); }
+void gk_sort_gt(SortKv* a, std::size_t n) { GK_MKQSORT(SortKv, a, n, SMF_SORTKV_GT); }
+} // namespace
+
+// GK_MKQSORT (third_party/gklib/gk_mksort.h, smf patch 4) replaces GKlib's
+// glibc-derived (LGPL) sort. METIS sorts key-value pairs by key only
+// (ikvsorti in compress.c and coarsen.c), so the order of equal keys feeds
+// the orderings: it must be the original's exactly. Pinned: FNV-1a of the
+// tag sequence the ORIGINAL macro produced on random keys with many
+// duplicates (one xorshift stream across the cases), ascending and
+// descending. A scratch harness matched the two on 38,928 arrays.
+TEST(ParallelNd, GkSortPinnedOrder)
+{
+    struct Case {
+        std::size_t n;
+        int range;
+        int desc;
+        std::uint64_t hash;
+    };
+    const Case cases[] = {
+        {0, 1, 0, 0x14650fb0739d0383ull},      {1, 1, 0, 0x44bd2bd473ccf799ull},
+        {9, 3, 0, 0x1fe5c0b800afea73ull},      {10, 3, 1, 0xf265370049768c60ull},
+        {37, 3, 0, 0x3e54681c76a2e03bull},     {200, 2, 1, 0x88c4e38d6c38f923ull},
+        {1000, 5, 0, 0xe09b80adbe1b22c1ull},   {1000, 5, 1, 0x8462e491aac55507ull},
+        {4099, 1000, 0, 0x42355cf94d973058ull}, {100000, 50, 1, 0x98de7e13c43d83c5ull},
+    };
+    std::uint64_t s = 88172645463325252ull;
+    for (const Case& c : cases) {
+        std::vector<SortKv> a(c.n + 1);
+        for (std::size_t i = 0; i < c.n; ++i) {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            a[i].key = static_cast<int>(s % static_cast<std::uint64_t>(c.range));
+            a[i].tag = static_cast<int>(i);
+        }
+        if (c.desc) gk_sort_gt(a.data(), c.n);
+        else gk_sort_lt(a.data(), c.n);
+        std::uint64_t h = 1469598103934665603ull;
+        for (std::size_t i = 0; i < c.n; ++i) {
+            h ^= static_cast<std::uint32_t>(a[i].tag);
+            h *= 1099511628211ull;
+        }
+        EXPECT_EQ(h, c.hash) << "n " << c.n << " range " << c.range << " desc " << c.desc;
+        for (std::size_t i = 1; i < c.n; ++i)
+            ASSERT_FALSE(c.desc ? SMF_SORTKV_GT(&a[i], &a[i - 1]) : SMF_SORTKV_LT(&a[i], &a[i - 1]))
+                << "not sorted at " << i;
+    }
+}
+#endif
