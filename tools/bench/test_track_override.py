@@ -75,9 +75,11 @@ class RunTrackOverrideTests(unittest.TestCase):
             binary = td / "bench_replay.exe"
             binary.write_bytes(b"")
             calls = []
+            self.envs = []
 
             def fake(cmd, **kw):
                 calls.append(cmd)
+                self.envs.append(kw.get("env"))
                 return subprocess.CompletedProcess(cmd, 0, "", "")
 
             with mock.patch.object(run.subprocess, "run", fake):
@@ -124,15 +126,27 @@ class RunTrackOverrideTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("smf only", err.getvalue())
 
-    def test_threads_warning(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self._run(["--track-override", "ipopt-plugin", "--threads", "1,8"])
-        self.assertIn("num_threads = 1", err.getvalue())
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self._run(["--track-override", "ipopt-plugin", "--threads", "1"])
-        self.assertNotIn("num_threads = 1", err.getvalue())
+    def test_threads_follow_omp_num_threads(self):
+        # The plugin's thread count comes from OMP_NUM_THREADS, which every
+        # run exports as its --threads value: no warning, N-thread rows run N.
+        with mock.patch.dict(run.os.environ, {}, clear=False):
+            run.os.environ.pop("SMF_NUM_THREADS", None)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _, calls = self._run(["--track-override", "ipopt-plugin", "--threads", "1,8"])
+        self.assertNotIn("warning", err.getvalue())
+        self.assertEqual(sorted({(self._arg(c, "--threads"), e["OMP_NUM_THREADS"])
+                                 for c, e in zip(calls, self.envs)}),
+                         [("1", "1"), ("8", "8")])
+        self.assertTrue(all("SMF_NUM_THREADS" not in e for e in self.envs))
+
+    def test_smf_num_threads_override_warns(self):
+        with mock.patch.dict(run.os.environ, {"SMF_NUM_THREADS": "4"}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                _, calls = self._run(["--track-override", "ipopt-plugin", "--threads", "1"])
+        self.assertIn("SMF_NUM_THREADS=4 overrides --threads", err.getvalue())
+        self.assertTrue(all(e["SMF_NUM_THREADS"] == "4" for e in self.envs))
 
 
 class AbRunPassThroughTests(unittest.TestCase):

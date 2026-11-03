@@ -6,18 +6,25 @@
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
 #  include <mkl.h>
 static int  blas_get_num_threads()        { return MKL_Get_Max_Threads(); }
-static void blas_set_num_threads(int n)   { MKL_Set_Num_Threads_Local(n); }
+// This thread's local setting: returns the previous local one (0: none,
+// the global mkl_set_num_threads value applies), which blas_restore puts
+// back, so a guard never turns the global value into a local override.
+static int  blas_set_num_threads(int n)   { return MKL_Set_Num_Threads_Local(n); }
+static void blas_restore(int prev)        { MKL_Set_Num_Threads_Local(prev); }
 #  define SMF_BLAS_THREAD_API 1
 
 #elif defined(SMF_HAS_OPENBLAS) && SMF_HAS_OPENBLAS
 #  include <cblas.h>
 static int  blas_get_num_threads()        { return openblas_get_num_threads(); }
-static void blas_set_num_threads(int n)   { openblas_set_num_threads(n); }
+// Process-wide (OpenBLAS has no per-thread setting): restores the count.
+static int  blas_set_num_threads(int n)   { const int prev = openblas_get_num_threads(); openblas_set_num_threads(n); return prev; }
+static void blas_restore(int prev)        { openblas_set_num_threads(prev > 0 ? prev : 1); }
 #  define SMF_BLAS_THREAD_API 1
 
 #else
 static int  blas_get_num_threads()        { return 1; }
-static void blas_set_num_threads(int /*n*/) {}
+static int  blas_set_num_threads(int /*n*/) { return 0; }
+static void blas_restore(int /*prev*/)    {}
 #  define SMF_BLAS_THREAD_API 0
 #endif
 
@@ -44,14 +51,14 @@ void count_change(int delta) noexcept {
 } // namespace
 
 BlasThreadGuard::BlasThreadGuard(int n_threads) noexcept
-    : saved_threads_(1), prev_counted_(tl_counted)
+    : saved_threads_(1), prev_setting_(0), prev_counted_(tl_counted)
 {
     const int requested = (n_threads > 0) ? n_threads : 1;
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         saved_threads_ = blas_get_num_threads();
         if (saved_threads_ <= 0) saved_threads_ = 1;
-        blas_set_num_threads(requested);
+        prev_setting_ = blas_set_num_threads(requested);
     }
     tl_counted = requested;
     count_change(requested - prev_counted_);
@@ -61,7 +68,7 @@ BlasThreadGuard::~BlasThreadGuard() noexcept
 {
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
-        blas_set_num_threads(saved_threads_);
+        blas_restore(prev_setting_);
     }
     count_change(prev_counted_ - tl_counted);
     tl_counted = prev_counted_;

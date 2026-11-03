@@ -7,6 +7,12 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdlib>
+#include <optional>
+#include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 using namespace smf;
@@ -196,7 +202,19 @@ TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
     EXPECT_EQ(ctrl->factor_memory_multiplier, 1.2);
     EXPECT_TRUE(ctrl->continue_on_singular);
     EXPECT_EQ(ctrl->delay_budget, -1);
-    EXPECT_EQ(ctrl->num_threads, Control{}.num_threads);
+    // The plugin's thread count (SMF_NUM_THREADS / OMP_NUM_THREADS /
+    // performance cores); the rest of the parallel set-up stays at the defaults.
+    EXPECT_EQ(ctrl->num_threads, plugin_num_threads());
+    EXPECT_GE(ctrl->num_threads, 1);
+    EXPECT_EQ(ctrl->auto_threads, Control{}.auto_threads);
+    EXPECT_EQ(ctrl->top_tiles, Control{}.top_tiles);
+    EXPECT_EQ(ctrl->deterministic, Control{}.deterministic);
+    EXPECT_EQ(ipopt_plugin_control(Ma97Options{}, -1, 3)->num_threads, 3);
+    Control c;
+    ASSERT_TRUE(apply_ma97_options(c, Ma97Options{}, -1, 5));
+    EXPECT_EQ(c.num_threads, 5);
+    ASSERT_TRUE(apply_ma97_options(c, Ma97Options{}));
+    EXPECT_EQ(c.num_threads, plugin_num_threads());
 
     Ma97Options o;
     o.ordering = 1;
@@ -209,6 +227,160 @@ TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
     EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Equilibration);
     o.scaling = 7;
     EXPECT_FALSE(ipopt_plugin_control(o).has_value());
+}
+
+namespace {
+
+void set_env(const char *name, const char *value) {
+#ifdef _WIN32
+    _putenv_s(name, value != nullptr ? value : "");  // "" removes it
+#else
+    if (value != nullptr) setenv(name, value, 1); else unsetenv(name);
+#endif
+}
+
+// Sets / unsets variables for its lifetime and restores their old values.
+struct EnvScope {
+    std::vector<std::pair<std::string, std::optional<std::string>>> saved;
+    void set(const char *name, const char *value) {
+        const char *old = std::getenv(name);
+        saved.emplace_back(name, old != nullptr ? std::optional<std::string>(old) : std::nullopt);
+        set_env(name, value);
+    }
+    ~EnvScope() {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+            set_env(it->first.c_str(), it->second ? it->second->c_str() : nullptr);
+    }
+};
+
+} // namespace
+
+TEST(BenchmarkAdapters, IpoptPluginThreadResolution) {
+    // Pure resolution: SMF_NUM_THREADS, else OMP_NUM_THREADS (its first
+    // entry), else the performance cores; invalid values count as unset.
+    using S = PluginThreadsSource;
+    const auto check = [](const char *smf_v, const char *omp_v, int cores, int want, S src) {
+        const PluginThreads t = plugin_threads_resolve(smf_v, omp_v, cores);
+        EXPECT_EQ(t.threads, want) << (smf_v ? smf_v : "unset") << " / " << (omp_v ? omp_v : "unset");
+        EXPECT_EQ(t.source, src) << (smf_v ? smf_v : "unset") << " / " << (omp_v ? omp_v : "unset");
+    };
+    check(nullptr, nullptr, 8, 8, S::PerformanceCores);
+    check(nullptr, nullptr, 0, 1, S::PerformanceCores);
+    check(nullptr, "4", 8, 4, S::OmpNumThreads);
+    check(nullptr, "6,2", 8, 6, S::OmpNumThreads);
+    check(nullptr, " 3 ", 8, 3, S::OmpNumThreads);
+    check("2", "4", 8, 2, S::SmfNumThreads);
+    check("2", nullptr, 8, 2, S::SmfNumThreads);
+    check("0", "4", 8, 4, S::OmpNumThreads);
+    check("-3", "4", 8, 4, S::OmpNumThreads);
+    check("abc", "4", 8, 4, S::OmpNumThreads);
+    check("", "4", 8, 4, S::OmpNumThreads);
+    check("2x", nullptr, 8, 8, S::PerformanceCores);
+    check(nullptr, "0", 8, 8, S::PerformanceCores);
+    check(nullptr, ",4", 8, 8, S::PerformanceCores);
+    check(nullptr, "", 8, 8, S::PerformanceCores);
+    check(nullptr, "+4", 8, 8, S::PerformanceCores);
+    check(nullptr, "3\r\n", 8, 3, S::OmpNumThreads);
+    check("5\n", "3", 8, 5, S::SmfNumThreads);
+    check(nullptr, " \t", 8, 8, S::PerformanceCores);
+    check("8000", nullptr, 8, kPluginMaxThreads, S::SmfNumThreads);
+    check(nullptr, "99999999999999999999999", 8, kPluginMaxThreads, S::OmpNumThreads);
+    check(nullptr, "4096", 8, 4096, S::OmpNumThreads);
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::SmfNumThreads)), "SMF_NUM_THREADS");
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::OmpNumThreads)), "OMP_NUM_THREADS");
+    EXPECT_EQ(std::string(plugin_threads_source_name(S::PerformanceCores)), "performance cores");
+
+    // The same order through the environment (read now, not the cached
+    // plugin_threads()); the variables are restored afterwards. (No upper
+    // bound from hardware_concurrency(): it sees one processor group only
+    // on Windows machines with more than 64 logical processors.)
+    const int cores = performance_core_count();
+    EXPECT_GE(cores, 1);
+    std::printf("[IpoptPluginThreadResolution] performance_core_count() = %d\n", cores);
+    const auto read = [](const char *name) {
+        const char *v = std::getenv(name);
+        return v != nullptr ? std::optional<std::string>(v) : std::nullopt;
+    };
+    const auto smf_before = read("SMF_NUM_THREADS");
+    const auto omp_before = read("OMP_NUM_THREADS");
+    {
+        EnvScope env;
+        env.set("SMF_NUM_THREADS", nullptr);
+        env.set("OMP_NUM_THREADS", nullptr);
+        EXPECT_EQ(plugin_threads_from_env().threads, cores);
+        EXPECT_EQ(plugin_threads_from_env().source, S::PerformanceCores);
+        set_env("OMP_NUM_THREADS", "3");
+        EXPECT_EQ(plugin_threads_from_env().threads, 3);
+        EXPECT_EQ(plugin_threads_from_env().source, S::OmpNumThreads);
+        set_env("OMP_NUM_THREADS", "5,1");
+        EXPECT_EQ(plugin_threads_from_env().threads, 5);
+        set_env("SMF_NUM_THREADS", "2");
+        EXPECT_EQ(plugin_threads_from_env().threads, 2);
+        EXPECT_EQ(plugin_threads_from_env().source, S::SmfNumThreads);
+        set_env("OMP_NUM_THREADS", nullptr);
+        EXPECT_EQ(plugin_threads_from_env().threads, 2);
+        set_env("SMF_NUM_THREADS", "0");
+        EXPECT_EQ(plugin_threads_from_env().threads, cores);
+        EXPECT_EQ(plugin_threads_from_env().source, S::PerformanceCores);
+    }
+    EXPECT_EQ(read("SMF_NUM_THREADS"), smf_before);
+    EXPECT_EQ(read("OMP_NUM_THREADS"), omp_before);
+}
+
+TEST(BenchmarkAdapters, PhysicalCoresFollowAffinity) {
+    // physical_core_count()'s rule on a synthetic topology: 4 cores with 2
+    // SMT siblings each (CPUs 0-7), plus a core of processor group 1
+    // (Windows ids: group * 64 + bit).
+    const std::vector<std::vector<int>> cores = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {64, 65}};
+    EXPECT_EQ(count_allowed_cores(cores, {}), 5);                       // affinity unknown: all
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1, 2, 3, 4, 5, 6, 7, 64, 65}), 5);
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1}), 1);                   // taskset -c 0,1: one core
+    EXPECT_EQ(count_allowed_cores(cores, {0, 2}), 2);                   // one sibling of two cores
+    EXPECT_EQ(count_allowed_cores(cores, {7, 3, 5}), 3);                // unsorted
+    EXPECT_EQ(count_allowed_cores(cores, {64}), 1);                     // group 1 only
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1, 2, 3, 4, 5, 6, 7}), 4); // primary group only
+    EXPECT_EQ(count_allowed_cores(cores, {100}), 0);                    // ids from elsewhere
+}
+
+TEST(BenchmarkAdapters, PerformanceCoresTakeTopClass) {
+    // performance_core_count()'s rule on synthetic topologies.
+    // Non-hybrid: 4 cores with SMT siblings, all of one class: every core.
+    const std::vector<std::vector<int>> smt = {{0, 1}, {2, 3}, {4, 5}, {6, 7}};
+    EXPECT_EQ(count_allowed_performance_cores(smt, {0, 0, 0, 0}, {}), 4);
+    EXPECT_EQ(count_allowed_performance_cores(smt, {0, 0, 0, 0}, {0, 2, 5}), 3);
+    // No class information (empty, or not one per core): as count_allowed_cores().
+    EXPECT_EQ(count_allowed_performance_cores(smt, {}, {}), 4);
+    EXPECT_EQ(count_allowed_performance_cores(smt, {}, {0, 1}), 1);
+    EXPECT_EQ(count_allowed_performance_cores(smt, {1, 0}, {}), 4);
+    // i9-12900K: 8 P-cores with 2 CPUs each (0-15, EfficiencyClass 1) and 8
+    // E-cores with one (16-23, class 0).
+    std::vector<std::vector<int>> hyb;
+    std::vector<int> cls;
+    for (int c = 0; c < 8; ++c) hyb.push_back({2 * c, 2 * c + 1}), cls.push_back(1);
+    for (int c = 16; c < 24; ++c) hyb.push_back({c}), cls.push_back(0);
+    std::vector<int> all(24);
+    for (int c = 0; c < 24; ++c) all[static_cast<std::size_t>(c)] = c;
+    EXPECT_EQ(count_allowed_cores(hyb, all), 16);
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, {}), 8);
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, all), 8);
+    // Affinity: two P-cores and every E-core: the two P-cores.
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, {0, 3, 16, 17, 18, 19, 20, 21, 22, 23}), 2);
+    // Affinity without any P-core: the allowed E-cores (top class among the allowed).
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, {16, 17, 18, 19, 20, 21, 22, 23}), 8);
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, {20, 22}), 2);
+    // More than two classes (e.g. a CPU with low-power E-cores): only the top one.
+    EXPECT_EQ(count_allowed_performance_cores({{0}, {1}, {2}, {3}}, {2, 1, 0, 2}, {}), 2);
+    EXPECT_EQ(count_allowed_performance_cores({{0}, {1}, {2}, {3}}, {2, 1, 0, 2}, {1, 2}), 1);
+    // Ids from elsewhere: nothing allowed (the caller falls back).
+    EXPECT_EQ(count_allowed_performance_cores(hyb, cls, {100}), 0);
+
+    // This machine's counts (the plugin's default is the second).
+    const int physical = physical_core_count();
+    const int performance = performance_core_count();
+    std::printf("[PerformanceCoresTakeTopClass] physical_core_count() = %d, performance_core_count() = %d\n",
+                physical, performance);
+    EXPECT_GE(performance, 1);
+    EXPECT_LE(performance, physical);
 }
 
 TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {
