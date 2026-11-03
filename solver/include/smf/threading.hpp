@@ -35,10 +35,21 @@ void run_parallel_postorder(const AnalysisKeep &ak,
                             std::function<void(Int)> process_node,
                             int num_threads = 1);
 
-/// The machine's physical core count (SMT siblings counted once; every
-/// processor group on Windows), at least 1. Falls back to
-/// std::thread::hardware_concurrency() where the topology cannot be read.
-/// Computed once per process.
+/// The physical cores this process may run on (SMT siblings counted once),
+/// at least 1: cores with at least one logical CPU in the process affinity
+/// (Linux: sched_getaffinity, so cpusets of Docker --cpuset-cpus, Slurm,
+/// taskset; Windows: the process' groups and, within a single group, its
+/// affinity mask, so job objects and `start /affinity`), and never more
+/// than the allowed CPUs. Falls back to std::thread::hardware_concurrency()
+/// where the topology cannot be read. Computed once per process (later
+/// affinity changes are not seen). CPU quotas (docker --cpus) are not
+/// affinity and are not taken into account.
 int physical_core_count() noexcept;
+
+/// The counting rule of physical_core_count(): of `core_cpus` (one entry per
+/// physical core, its logical CPU ids), the cores with at least one id in
+/// `allowed_cpus` (empty: every core counts). Exposed for tests.
+int count_allowed_cores(const std::vector<std::vector<int>> &core_cpus,
+                        const std::vector<int> &allowed_cpus);
 
 } // namespace smf

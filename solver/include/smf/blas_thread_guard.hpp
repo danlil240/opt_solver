@@ -16,7 +16,10 @@
 namespace smf {
 
 /// RAII guard: sets BLAS thread count on construct, restores previous value on
-/// destruct.  Non-copyable.
+/// destruct.  Non-copyable. MKL: the calling thread's local setting
+/// (MKL_Set_Num_Threads_Local), restored to the previous local setting, so
+/// a thread without one keeps following the global mkl_set_num_threads
+/// value afterwards. OpenBLAS: process-wide, the previous count restored.
 class BlasThreadGuard {
 public:
     /// Construct: save current thread count, then set to \p n_threads.
@@ -37,6 +40,7 @@ public:
 
 private:
     int saved_threads_;
+    int prev_setting_; // what the destructor restores (MKL: the previous local setting, 0 = none)
     int prev_counted_; // this thread's counted BLAS threads before the guard
 };
 

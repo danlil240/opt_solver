@@ -279,15 +279,24 @@ TEST(BenchmarkAdapters, IpoptPluginThreadResolution) {
     check(nullptr, "0", 8, 8, S::PhysicalCores);
     check(nullptr, ",4", 8, 8, S::PhysicalCores);
     check(nullptr, "", 8, 8, S::PhysicalCores);
+    check(nullptr, "+4", 8, 8, S::PhysicalCores);
+    check(nullptr, "3\r\n", 8, 3, S::OmpNumThreads);
+    check("5\n", "3", 8, 5, S::SmfNumThreads);
+    check(nullptr, " \t", 8, 8, S::PhysicalCores);
+    check("8000", nullptr, 8, kPluginMaxThreads, S::SmfNumThreads);
+    check(nullptr, "99999999999999999999999", 8, kPluginMaxThreads, S::OmpNumThreads);
+    check(nullptr, "4096", 8, 4096, S::OmpNumThreads);
     EXPECT_EQ(std::string(plugin_threads_source_name(S::SmfNumThreads)), "SMF_NUM_THREADS");
     EXPECT_EQ(std::string(plugin_threads_source_name(S::OmpNumThreads)), "OMP_NUM_THREADS");
     EXPECT_EQ(std::string(plugin_threads_source_name(S::PhysicalCores)), "physical cores");
 
     // The same order through the environment (read now, not the cached
-    // plugin_threads()); the variables are restored afterwards.
+    // plugin_threads()); the variables are restored afterwards. (No upper
+    // bound from hardware_concurrency(): it sees one processor group only
+    // on Windows machines with more than 64 logical processors.)
     const int cores = physical_core_count();
     EXPECT_GE(cores, 1);
-    EXPECT_LE(cores, static_cast<int>(std::max(1u, std::thread::hardware_concurrency())));
+    std::printf("[IpoptPluginThreadResolution] physical_core_count() = %d\n", cores);
     const auto read = [](const char *name) {
         const char *v = std::getenv(name);
         return v != nullptr ? std::optional<std::string>(v) : std::nullopt;
@@ -316,6 +325,21 @@ TEST(BenchmarkAdapters, IpoptPluginThreadResolution) {
     }
     EXPECT_EQ(read("SMF_NUM_THREADS"), smf_before);
     EXPECT_EQ(read("OMP_NUM_THREADS"), omp_before);
+}
+
+TEST(BenchmarkAdapters, PhysicalCoresFollowAffinity) {
+    // physical_core_count()'s rule on a synthetic topology: 4 cores with 2
+    // SMT siblings each (CPUs 0-7), plus a core of processor group 1
+    // (Windows ids: group * 64 + bit).
+    const std::vector<std::vector<int>> cores = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {64, 65}};
+    EXPECT_EQ(count_allowed_cores(cores, {}), 5);                       // affinity unknown: all
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1, 2, 3, 4, 5, 6, 7, 64, 65}), 5);
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1}), 1);                   // taskset -c 0,1: one core
+    EXPECT_EQ(count_allowed_cores(cores, {0, 2}), 2);                   // one sibling of two cores
+    EXPECT_EQ(count_allowed_cores(cores, {7, 3, 5}), 3);                // unsorted
+    EXPECT_EQ(count_allowed_cores(cores, {64}), 1);                     // group 1 only
+    EXPECT_EQ(count_allowed_cores(cores, {0, 1, 2, 3, 4, 5, 6, 7}), 4); // primary group only
+    EXPECT_EQ(count_allowed_cores(cores, {100}), 0);                    // ids from elsewhere
 }
 
 TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {

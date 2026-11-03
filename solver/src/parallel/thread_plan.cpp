@@ -22,51 +22,141 @@
 #  include <windows.h>
 #else
 #  include <fstream>
-#  include <set>
+#  include <map>
+#  if defined(__linux__)
+#    include <sched.h>
+#  endif
 #  include <string>
 #  include <utility>
 #endif
 
 namespace smf {
 
+int count_allowed_cores(const std::vector<std::vector<int>> &core_cpus,
+                        const std::vector<int> &allowed_cpus) {
+  if (allowed_cpus.empty()) return static_cast<int>(core_cpus.size());
+  std::vector<int> allowed(allowed_cpus);
+  std::sort(allowed.begin(), allowed.end());
+  int cores = 0;
+  for (const std::vector<int> &cpus : core_cpus)
+    for (const int c : cpus)
+      if (std::binary_search(allowed.begin(), allowed.end(), c)) {
+        ++cores;
+        break;
+      }
+  return cores;
+}
+
 namespace {
-int count_physical_cores() noexcept {
+// The physical cores (each as its logical CPU ids) and the logical CPUs
+// this process may run on (empty: unknown, every CPU).
+struct CpuTopology {
+  std::vector<std::vector<int>> core_cpus;
+  std::vector<int> allowed;
+};
+
 #ifdef _WIN32
-  // One SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX record per physical core,
-  // over every processor group.
+// Logical CPU id: group * 64 + bit.
+int win_cpu_id(WORD group, int bit) { return static_cast<int>(group) * 64 + bit; }
+
+CpuTopology read_topology() {
+  CpuTopology t;
+  // One RelationProcessorCore record per physical core, over every
+  // processor group; its GroupMask lists the core's logical CPUs.
   DWORD len = 0;
   GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
   if (len > 0) {
     std::vector<unsigned char> buf(len);
     auto *info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buf.data());
     if (GetLogicalProcessorInformationEx(RelationProcessorCore, info, &len)) {
-      int cores = 0;
       for (DWORD off = 0; off < len;) {
         auto *rec = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *>(buf.data() + off);
-        if (rec->Relationship == RelationProcessorCore) ++cores;
+        if (rec->Relationship == RelationProcessorCore) {
+          std::vector<int> cpus;
+          for (WORD g = 0; g < rec->Processor.GroupCount; ++g) {
+            const GROUP_AFFINITY &ga = rec->Processor.GroupMask[g];
+            for (int b = 0; b < 64; ++b)
+              if (ga.Mask & (KAFFINITY{1} << b)) cpus.push_back(win_cpu_id(ga.Group, b));
+          }
+          t.core_cpus.push_back(std::move(cpus));
+        }
         if (rec->Size == 0) break;
         off += rec->Size;
       }
-      if (cores > 0) return cores;
     }
   }
+  // The process affinity (job objects and `start /affinity` restrict it):
+  // the groups the process is in; within a single group its affinity mask.
+  // A process spanning several groups (GetProcessAffinityMask then reports
+  // 0) may run on every CPU of those groups.
+  const HANDLE self = GetCurrentProcess();
+  USHORT ngroups = 0;
+  GetProcessGroupAffinity(self, &ngroups, nullptr);
+  std::vector<USHORT> groups(ngroups > 0 ? ngroups : 1);
+  if (ngroups == 0 || !GetProcessGroupAffinity(self, &ngroups, groups.data())) {
+    groups.assign(1, 0);
+    ngroups = 1;
+  }
+  groups.resize(ngroups);
+  DWORD_PTR proc_mask = 0, sys_mask = 0;
+  const bool have_mask = GetProcessAffinityMask(self, &proc_mask, &sys_mask) && proc_mask != 0;
+  for (const USHORT g : groups) {
+    KAFFINITY mask = 0;
+    if (have_mask && groups.size() == 1) {
+      mask = static_cast<KAFFINITY>(proc_mask);
+    } else {
+      const DWORD n = GetActiveProcessorCount(g);
+      mask = n >= 64 ? ~KAFFINITY{0} : ((KAFFINITY{1} << n) - 1);
+    }
+    for (int b = 0; b < 64; ++b)
+      if (mask & (KAFFINITY{1} << b)) t.allowed.push_back(win_cpu_id(g, b));
+  }
+  return t;
+}
 #else
-  // Distinct (physical id, core id) pairs of /proc/cpuinfo.
+CpuTopology read_topology() {
+  CpuTopology t;
+  // /proc/cpuinfo: processor, physical id and core id per logical CPU.
+  std::map<std::pair<int, int>, std::vector<int>> cores;
   std::ifstream in("/proc/cpuinfo");
-  std::set<std::pair<int, int>> cores;
-  int phys = 0;
+  int proc = -1, phys = 0;
   std::string line;
   while (in && std::getline(in, line)) {
     const auto colon = line.find(':');
     if (colon == std::string::npos) continue;
     const int v = std::atoi(line.c_str() + colon + 1);
-    if (line.rfind("physical id", 0) == 0) phys = v;
-    else if (line.rfind("core id", 0) == 0) cores.emplace(phys, v);
+    if (line.rfind("processor", 0) == 0) proc = v, phys = 0;
+    else if (line.rfind("physical id", 0) == 0) phys = v;
+    else if (line.rfind("core id", 0) == 0 && proc >= 0) cores[{phys, v}].push_back(proc);
   }
-  if (!cores.empty()) return static_cast<int>(cores.size());
+  for (auto &kv : cores) t.core_cpus.push_back(std::move(kv.second));
+#  if defined(__linux__)
+  // cpusets (Docker --cpuset-cpus, Slurm, taskset) restrict the affinity.
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) == 0)
+    for (int c = 0; c < CPU_SETSIZE; ++c)
+      if (CPU_ISSET(c, &set)) t.allowed.push_back(c);
+#  endif
+  return t;
+}
 #endif
+
+int count_physical_cores() noexcept {
   const unsigned hw = std::thread::hardware_concurrency();
-  return hw > 0 ? static_cast<int>(hw) : 1;
+  const int fallback = hw > 0 ? static_cast<int>(hw) : 1;
+  try {
+    const CpuTopology t = read_topology();
+    const int allowed_cpus = t.allowed.empty() ? fallback : static_cast<int>(t.allowed.size());
+    if (t.core_cpus.empty()) return std::max(1, std::min(fallback, allowed_cpus));
+    // Cores with at least one CPU the process may run on (never more than
+    // those CPUs).
+    const int cores = count_allowed_cores(t.core_cpus, t.allowed);
+    if (cores == 0) return std::max(1, std::min(fallback, allowed_cpus));  // ids did not match
+    return std::max(1, std::min(cores, allowed_cpus));
+  } catch (...) {
+    return fallback;
+  }
 }
 } // namespace
 

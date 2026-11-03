@@ -73,6 +73,20 @@ track at N threads). `SMF_NUM_THREADS` in the environment overrides that:
 run.py warns, and bench_replay warns whenever the plugin's count differs
 from `--threads` (also when it runs without run.py and `OMP_NUM_THREADS` is
 unset: then the physical cores) and runs and records the plugin's count.
+The physical core count is that of the cores the process affinity allows
+(cpusets of Docker `--cpuset-cpus`, Slurm, `taskset`; Windows job objects
+and `start /affinity`), read once per process, like both variables.
+
+More than one thread changes the analysis as well as the speed. Under
+IPOPT's default ordering (AutoParallel) large matrices are ordered by
+parallel nested dissection instead of serial METIS, and the matching trial
+runs concurrently. Orderings, delays and fill, and so IPOPT's iterates, can
+therefore differ from the old serial plugin (`num_threads` 1) and depend on
+the thread count. `SMF_NUM_THREADS=1` restores the serial plugin;
+`Control::deterministic` makes results independent of the thread count.
+Several IPOPT instances on one machine (multistart, parallel batches) now
+take all physical cores each unless `SMF_NUM_THREADS` / `OMP_NUM_THREADS`
+splits them.
 
     python tools/bench/run.py --manifest benchmarks/manifests/fronttier.json \
         --output benchmarks/results/plugin_t1 --track-override ipopt-plugin \

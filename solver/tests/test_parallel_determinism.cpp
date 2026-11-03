@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <gtest/gtest.h>
 #include <string>
 #include <span>
@@ -572,6 +573,9 @@ TEST(ParallelDeterminism, LateThreadsDealtTaskIsTakenOver) {
 // identical at 1 and 4 threads. The session runs as in the plugin: deferred
 // analysis (pattern only), the plugin's IpmControl, a BlasThreadGuard of
 // num_threads around each call, and a refactorization with new values.
+// Not covered: deterministic mode orders with parallel ND at every thread
+// count, so the non-deterministic switch from serial METIS (1 thread) to
+// parallel ND (more) under AutoParallel is outside this test.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -610,21 +614,34 @@ PluginDetRun plugin_det_run(const CscLower &A, int threads, bool auto_threads) {
         // L supernode by supernode: the tree-parallel engine stores the
         // subtrees' blocks per pass (factor_col_ptr[s] is where supernode s
         // starts), so the flat layout depends on the partition, the blocks
-        // must not.
+        // must not. A block is its front's rows x pivot columns (f x p,
+        // column-major), taken from the front's solve step (the realized
+        // front, delayed rows included, which the symbolic size lacks);
+        // a supernode whose pivots were all delayed has none.
         {
+            std::map<LongInt, const SolveStep *> step_at;
+            for (const SolveStep &st : fk.solve_steps)
+                if (st.p > 0) step_at[st.factor_offset] = &st;
             const std::size_t ns = fk.factor_col_ptr.empty() ? 0 : fk.factor_col_ptr.size() - 1;
-            std::vector<LongInt> starts(fk.factor_col_ptr.begin(), fk.factor_col_ptr.begin() + ns);
-            starts.push_back(static_cast<LongInt>(fk.factor_values.size()));
-            std::sort(starts.begin(), starts.end());
+            LongInt total = 0;
             for (std::size_t sn = 0; sn < ns; ++sn) {
+                const std::size_t p = sn < fk.pivot_types.size() ? fk.pivot_types[sn].size() : 0;
+                LongInt len = 0;
+                if (p > 0) {
+                    const auto found = step_at.find(fk.factor_col_ptr[sn]);
+                    if (found == step_at.end()) {
+                        ADD_FAILURE() << "supernode " << sn << ": no solve step at its factor offset";
+                        continue;
+                    }
+                    EXPECT_EQ(static_cast<std::size_t>(found->second->p), p) << "supernode " << sn;
+                    len = static_cast<LongInt>(found->second->f) * found->second->p;
+                }
                 const LongInt b = fk.factor_col_ptr[sn];
-                // A supernode without stored pivots (all delayed) has no block.
-                const bool empty = sn < fk.pivot_types.size() && fk.pivot_types[sn].empty();
-                const auto next = std::upper_bound(starts.begin(), starts.end(), b);
-                const LongInt e = (empty || next == starts.end()) ? b : *next;
-                r.l.push_back(static_cast<double>(e - b));  // block length
-                r.l.insert(r.l.end(), fk.factor_values.begin() + b, fk.factor_values.begin() + e);
+                r.l.push_back(static_cast<double>(len));
+                r.l.insert(r.l.end(), fk.factor_values.begin() + b, fk.factor_values.begin() + b + len);
+                total += len;
             }
+            EXPECT_EQ(total, static_cast<LongInt>(fk.factor_values.size())) << "blocks do not tile L";
         }
         for (const DiagSolveEntry &e : fk.diag_entries) {
             r.d.push_back(e.d00);

@@ -106,16 +106,27 @@ struct SmfFkeep
 };
 
 // Threads: Control::num_threads is smf::plugin_num_threads()
-// (smf/ipopt_plugin_control.hpp, read once per process): SMF_NUM_THREADS,
-// else OMP_NUM_THREADS (its first entry), else the physical core count.
+// (smf/ipopt_plugin_control.hpp, read once per process at the first call:
+// later environment changes or omp_set_num_threads() have no effect):
+// SMF_NUM_THREADS, else OMP_NUM_THREADS (its first entry), else the physical
+// cores the process affinity allows.
 // Real MA97 has no thread option (nor has IPOPT one for it): it factors on
 // OpenMP's default team, i.e. OMP_NUM_THREADS. Every analyse, factor and
 // solve call runs under a BlasThreadGuard of that count (the calling
-// thread's MKL setting, restored on return), so BLAS sees what it sees on
-// bench_replay's N-thread runs (mkl_set_num_threads(N), num_threads = N):
-// the factorization then splits those threads itself (serial BLAS in the
-// subtrees and tiles, shares at the top; deterministic mode: one), and
-// IPOPT's own BLAS setting outside the calls is left alone.
+// thread's local MKL setting, its previous one restored on return), so BLAS
+// sees what it sees on bench_replay's N-thread runs (mkl_set_num_threads(N),
+// num_threads = N): the factorization then splits those threads itself
+// (serial BLAS in the subtrees and tiles, shares at the top; deterministic
+// mode: one), and IPOPT's own BLAS setting outside the calls is left alone.
+// More than one thread changes the analysis too, not only its speed: under
+// IPOPT's default ordering (AutoParallel) large matrices get parallel nested
+// dissection instead of serial METIS and the matching trial runs
+// concurrently, so orderings, delays, fill and IPOPT's iterates can differ
+// from the serial plugin and depend on the core count. SMF_NUM_THREADS=1
+// gives the serial plugin back (also the reproducible choice; deterministic
+// mode, Control::deterministic, is the other one). Concurrent IPOPT
+// instances in one machine (multistart, parallel batches) now get P threads
+// each: set SMF_NUM_THREADS (or OMP_NUM_THREADS) to share the cores.
 //
 // The IPM features are opt-in through the environment (the MA97 interface
 // has no slots for them). Their defaults were decided on the held-out IPOPT
@@ -332,6 +343,9 @@ static smf::Ma97Options ma97_options(const ma97_control_d& c)
 // that bench_replay's ipopt-plugin track builds from too.
 static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl)
 {
+    // No control block: the MA97 defaults stay, but the thread count is
+    // the plugin's all the same.
+    out_ctrl.num_threads = smf::plugin_num_threads();
     if (!ctrl)
         return true;
     return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), test_delay_budget());

@@ -46,21 +46,34 @@ struct PluginThreads {
     PluginThreadsSource source = PluginThreadsSource::PhysicalCores;
 };
 
+/// The largest thread count the plugin takes from the environment; larger
+/// values are clamped to it.
+inline constexpr int kPluginMaxThreads = 4096;
+
 /// A positive int at the start of `v` (OMP_NUM_THREADS may be a list per
 /// nesting level, "a,b": the first, the outer level's, counts), else 0.
+/// Surrounding whitespace (also a trailing \r\n) is ignored; values above
+/// kPluginMaxThreads are clamped to it.
 inline int plugin_threads_parse(const char *v)
 {
     if (v == nullptr)
         return 0;
-    while (*v == ' ' || *v == '\t')
+    const auto space = [](char c) {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f';
+    };
+    while (space(*v))
         ++v;
+    if (*v < '0' || *v > '9')
+        return 0;  // no sign, no empty value
     char *end = nullptr;
-    const long n = std::strtol(v, &end, 10);
-    if (end == v || n <= 0 || n > 4096)
+    const long long n = std::strtoll(v, &end, 10);
+    if (end == v || n <= 0)
         return 0;
-    while (*end == ' ' || *end == '\t')
+    while (space(*end))
         ++end;
-    return (*end == '\0' || *end == ',') ? static_cast<int>(n) : 0;
+    if (*end != '\0' && *end != ',')
+        return 0;
+    return n > kPluginMaxThreads ? kPluginMaxThreads : static_cast<int>(n);
 }
 
 /// The plugin's Control::num_threads from these environment values (null:
@@ -77,6 +90,15 @@ inline int plugin_threads_parse(const char *v)
 /// smf takes the physical cores instead (SMT siblings add nothing to dense
 /// front kernels, and auto_threads trims the count to what the tree repays
 /// anyway). Invalid values (0, negative, text) are skipped as unset.
+/// physical_cores (smf::physical_core_count()) counts only the cores the
+/// process' affinity allows (cpusets, taskset, job objects).
+/// Note: with num_threads > 1 the analysis changes too, not only the
+/// factorization's speed: AutoParallel orders large matrices with parallel
+/// nested dissection instead of serial METIS and the matching trial runs
+/// concurrently, so orderings, delays, fill and hence IPOPT's iterates can
+/// differ from the serial plugin and depend on the thread count.
+/// SMF_NUM_THREADS=1 restores the serial plugin; Control::deterministic
+/// makes the results independent of the thread count.
 inline PluginThreads plugin_threads_resolve(const char *smf_num_threads, const char *omp_num_threads,
                                             int physical_cores)
 {
@@ -97,7 +119,9 @@ inline PluginThreads plugin_threads_from_env()
 }
 
 /// The plugin's thread count: plugin_threads_from_env(), read once per
-/// process (as the plugin's other environment knobs).
+/// process, at its first use (as the plugin's other environment knobs):
+/// later changes to SMF_NUM_THREADS / OMP_NUM_THREADS, and the host's
+/// omp_set_num_threads() calls, have no effect on it.
 inline PluginThreads plugin_threads()
 {
     static const PluginThreads t = plugin_threads_from_env();
