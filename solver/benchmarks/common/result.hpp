@@ -85,6 +85,9 @@ struct RunRecord {
     // computed a matching scaling (Info::delay_rescales, summed over a
     // warm sequence's steps); -1 = not reported.
     int delay_rescales = -1;
+    // smf only: of those, tries stopped at the early crossing
+    // (Info::delay_early_stops, summed likewise); -1 = not reported.
+    int delay_early_stops = -1;
     // smf only: time of the stopped or failed try and of the rescue matching
     // (Info::delay_try_seconds, delay_matching_seconds), ms; -1 = not reported.
     double delay_try_ms = -1.0;

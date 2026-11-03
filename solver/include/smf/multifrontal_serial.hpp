@@ -4,6 +4,7 @@
 #include "smf/control.hpp"
 #include "smf/dense_indef.hpp"
 #include "smf/error.hpp"
+#include "smf/factor_indef.hpp"  // EarlyWorkStop
 #include "smf/factor_posdef.hpp"
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
@@ -67,6 +68,10 @@ struct SerialFactorStats {
 /// fronts are skipped and ErrorCode::WorkLimitExceeded is returned. Work is only ever added, so
 /// this happens exactly when the finished factorization's count would
 /// exceed it, and a run within the limit does the work of an unarmed one.
+/// `early` (armed only with `work_limit` >= 0): the conditional early stop
+/// (EarlyWorkStop), evaluated over the fronts in postorder on every path
+/// (the subtree engine publishes each front's work and advances a postorder
+/// cursor), so its decision does not depend on the thread count or timing.
 ///
 /// Indefinite with `static_pivot` > 0: every front static-pivots (no
 /// delays). `fallback_static_pivot` > 0 (Control::fallback_static_pivot_tol,
@@ -86,7 +91,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                      double static_pivot, double fallback_static_pivot,
                                      double budget_static_pivot, bool posdef, FactorKeep &fkeep,
                                      NumericWorkspace &ws, SerialFactorStats &st,
-                                     double work_limit = -1.0);
+                                     double work_limit = -1.0,
+                                     const EarlyWorkStop &early = {});
 
 /// Subtree roots' contribution blocks the tree-parallel factorizations of
 /// this process put in their root arenas so far (tests use the difference).

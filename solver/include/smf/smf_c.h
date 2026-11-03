@@ -104,7 +104,9 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  *
  * Uses the default smf::Control: an SMF_INDEF factorization whose delayed
  * pivots inflate its work past Control::scale_on_delay_ratio stops and is
- * redone with the matching scaling of its values. Each call starts from a
+ * redone with the matching scaling of its values (the try may stop sooner,
+ * at Control::scale_on_delay_early_ratio, when its inflation so far projects
+ * past Control::scale_on_delay_early_proj). Each call starts from a
  * new factor, so a sequence of calls on such a matrix pays that stopped try
  * every time.
  */

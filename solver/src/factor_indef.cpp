@@ -339,15 +339,17 @@ bool finalize_factor_from_front_results(
 
 FactorStatus factor_indef(const AnalysisKeep &keep, const CscLower &updated,
                           const Control &ctrl, Info &info,
-                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit) {
+                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit,
+                          const EarlyWorkStop &early) {
   FactorValues values;
   if (!resolve_factor_values(keep, updated, values)) values.data = nullptr;
-  return factor_indef(keep, values, ctrl, info, fkeep, ws, work_limit);
+  return factor_indef(keep, values, ctrl, info, fkeep, ws, work_limit, early);
 }
 
 FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
                           const Control &ctrl, Info &info,
-                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit) {
+                          FactorKeep &fkeep, NumericWorkspace &ws, double work_limit,
+                          const EarlyWorkStop &early) {
   const auto t0 = std::chrono::steady_clock::now();
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
@@ -553,7 +555,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
         eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
-        fkeep, ws, st, work_limit);
+        fkeep, ws, st, work_limit, early);
     blas_threads.reset();
     if (err == ErrorCode::WorkLimitExceeded) {
       // Stopped at the scale-on-delay threshold: the factor is unusable.
@@ -717,7 +719,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   }
 
   info.delayed_pivots = total_delayed;
-  // work_limit: this engine has no early stop; checked on the finished
+  // work_limit: this engine has no early stop (nor EarlyWorkStop: the
+  // rescue is never armed here, scale_on_delay_armed); checked on the finished
   // factor, as max_negative_pivots below. Its fronts report accepted and
   // delayed columns, which stand in for the fully summed ones.
   double front_work = 0.0;
@@ -788,9 +791,10 @@ double delay_free_front_work(const AnalysisKeep &keep) {
 }
 
 FactorStatus factor_indef(const AnalysisKeep &keep, const Control &ctrl,
-                          Info &info, FactorKeep &fkeep, double work_limit) {
+                          Info &info, FactorKeep &fkeep, double work_limit,
+                          const EarlyWorkStop &early) {
   NumericWorkspace ws;
-  return factor_indef(keep, keep.cleaned, ctrl, info, fkeep, ws, work_limit);
+  return factor_indef(keep, keep.cleaned, ctrl, info, fkeep, ws, work_limit, early);
 }
 
 } // namespace smf
