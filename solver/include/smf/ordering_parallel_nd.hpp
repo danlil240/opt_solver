@@ -22,13 +22,14 @@ struct ParallelNdOptions {
 /// Parallel nested dissection: vertices with identical closed adjacency are
 /// compressed into weighted supervariables; METIS vertex separators split the
 /// compressed graph (disconnected parts are split along their components with
-/// an empty separator) to a fixed depth; the leaves are ordered concurrently
-/// on std::threads (AMD below kParallelNdAmdLeafMax supervariables,
-/// METIS_NodeND above); separators are numbered last at every level; the
-/// order is expanded with each supervariable's members contiguous. METIS
-/// calls are serialised (metis_node_nd / metis_vertex_separator: the linked
-/// METIS is not thread-safe), so the threads overlap AMD leaves and graph
-/// work only.
+/// an empty separator) to a fixed depth; the leaves are ordered with AMD below
+/// kParallelNdAmdLeafMax supervariables, METIS_NodeND above; separators are
+/// numbered last at every level; the order is expanded with each
+/// supervariable's members contiguous. Splits and leaves run as tasks on
+/// num_threads std::threads, a part's children starting as soon as it is
+/// split. METIS calls run concurrently when metis_is_thread_safe() (the
+/// vendored METIS); with an external METIS they are serialised, and the
+/// threads overlap only AMD leaves and graph work.
 ///
 /// The dissection tree depends on the graph only: num_threads changes the
 /// schedule, never the result. xadj/adjncy: symmetric adjacency, both

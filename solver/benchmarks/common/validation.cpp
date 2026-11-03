@@ -179,6 +179,7 @@ std::string RunRecord::to_json_line() const {
     if (refine_iterations >= 0)
         oss << "\"refine_iterations\":" << refine_iterations << ",\"refine_method\":\"" << refine_method
             << "\",";
+    if (!order_hash.empty()) oss << "\"order_hash\":\"" << order_hash << "\",";
     oss
         << "\"factor_entries\":" << factor_entries << ","
         << "\"flops\":";

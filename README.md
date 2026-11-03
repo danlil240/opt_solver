@@ -93,4 +93,6 @@ The long-term plan is in `docs/roadmap.md`: win the CPU KKT niche, then a GPU mi
 
 ## License
 
-MIT, see `LICENSE`.
+MIT, see `LICENSE`. The vendored METIS 5.2.1 and GKlib in `solver/third_party/`
+(built into smf by default) keep their own licence, Apache-2.0, plus a few
+BSD-style headers. See `solver/third_party/README.md`.

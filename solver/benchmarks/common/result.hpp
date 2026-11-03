@@ -98,6 +98,8 @@ struct RunRecord {
     std::string refine_method;     // "classical" | "fgmres"
     int64_t factor_entries = 0;
     double flops = 0.0;
+    // smf only: AdapterStats::order_hash as 16 hex digits; empty = left out.
+    std::string order_hash;
 
     std::string to_json_line() const;
 };

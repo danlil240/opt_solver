@@ -280,7 +280,8 @@ TEST(ParallelNd, DeterministicAcrossThreads)
 // Gate for running METIS from several std::threads. The raw conda-forge
 // METIS 5.2.1 aborts the process when called concurrently (GKlib's memory
 // core is process-global; see task-6-report.md), so smf only calls METIS
-// through the serialised wrappers, and this checks those: 8 threads x 50
+// through its wrappers, which serialise the calls unless the vendored,
+// thread-safe METIS is linked; this checks those: 8 threads x 50
 // METIS_NodeND (+ vertex separator) calls equal the serial results.
 TEST(ParallelNd, ConcurrentMetisIsSafe)
 {
@@ -324,5 +325,189 @@ TEST(ParallelNd, ConcurrentMetisIsSafe)
     for (auto& th : pool) th.join();
     for (int t = 0; t < kThreads; ++t)
         EXPECT_EQ(mismatches[static_cast<std::size_t>(t)], 0) << "thread " << t;
+}
+#endif
+
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+#include <metis.h>
+#ifndef SMF_VENDORED_METIS_H
+#error "these tests need the vendored metis.h (third_party/metis/include) first on the include path"
+#endif
+
+namespace {
+
+// 27-point 3D grid (every vertex coupled with all of its neighbours).
+Graph grid27(Int nx, Int ny, Int nz)
+{
+    std::vector<std::pair<Int, Int>> e;
+    auto id = [&](Int i, Int j, Int k) { return i + nx * (j + ny * k); };
+    for (Int k = 0; k < nz; ++k)
+        for (Int j = 0; j < ny; ++j)
+            for (Int i = 0; i < nx; ++i)
+                for (Int dk = 0; dk <= 1; ++dk)
+                    for (Int dj = -1; dj <= 1; ++dj)
+                        for (Int di = -1; di <= 1; ++di) {
+                            if (dk == 0 && (dj < 0 || (dj == 0 && di <= 0))) continue;
+                            const Int a = i + di, b = j + dj, c = k + dk;
+                            if (a < 0 || b < 0 || a >= nx || b >= ny || c >= nz) continue;
+                            e.push_back({id(i, j, k), id(a, b, c)});
+                        }
+    return from_edges(nx * ny * nz, e);
+}
+
+struct RawMetis {
+    int rc = 0;
+    std::vector<idx_t> v;  // NodeND: perm; separator: part
+    idx_t sepsize = 0;
+};
+
+// METIS called directly (no smf wrapper, no lock), with smf's options.
+RawMetis raw_metis(const Graph& g, bool separator)
+{
+    std::vector<idx_t> xadj(g.xadj.begin(), g.xadj.end()), adj(g.adj.begin(), g.adj.end());
+    idx_t n = g.n, opts[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(opts);
+    opts[METIS_OPTION_SEED] = 0;
+    opts[METIS_OPTION_NUMBERING] = 0;
+    RawMetis r;
+    r.v.assign(static_cast<std::size_t>(n), -1);
+    if (separator) {
+        r.rc = METIS_ComputeVertexSeparator(&n, xadj.data(), adj.data(), nullptr, opts, &r.sepsize,
+                                            r.v.data());
+    } else {
+        std::vector<idx_t> iperm(static_cast<std::size_t>(n));
+        r.rc = METIS_NodeND(&n, xadj.data(), adj.data(), nullptr, opts, r.v.data(), iperm.data());
+    }
+    return r;
+}
+
+std::uint64_t fnv1a(const std::vector<idx_t>& v)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    for (idx_t x : v) {
+        h ^= static_cast<std::uint32_t>(x);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+} // namespace
+
+// The vendored METIS (SMF_VENDORED_METIS) keeps GKlib's state thread-local
+// and its random stream per thread (third_party/README.md), so METIS itself
+// may be called concurrently: 16 threads x 200 direct calls, alternating
+// METIS_NodeND and METIS_ComputeVertexSeparator over 8 grids (7- and
+// 27-point), every result bitwise equal to the serial one. The conda-forge
+// DLL crashes this within 4 threads x 20 calls.
+TEST(ParallelNd, RawConcurrentMetisIsSafe)
+{
+    ASSERT_TRUE(smf::metis_is_thread_safe());
+    constexpr int kThreads = 16, kCalls = 200;
+    std::vector<Graph> graphs;
+    std::vector<bool> separator;
+    for (int k = 0; k < 4; ++k) {
+        graphs.push_back(grid(9 + k, 10, 8 + k % 2));
+        separator.push_back(k % 2 == 1);
+        graphs.push_back(grid27(7 + k, 8, 6 + k % 2));
+        separator.push_back(k % 2 == 0);
+    }
+    std::vector<RawMetis> serial;
+    for (std::size_t k = 0; k < graphs.size(); ++k) {
+        serial.push_back(raw_metis(graphs[k], separator[k]));
+        ASSERT_EQ(serial.back().rc, METIS_OK) << "graph " << k;
+    }
+    std::vector<int> mismatches(kThreads, 0);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < kThreads; ++t)
+        pool.emplace_back([&, t] {
+            for (int c = 0; c < kCalls; ++c) {
+                const std::size_t k = static_cast<std::size_t>(t * 7 + c) % graphs.size();
+                const RawMetis r = raw_metis(graphs[k], separator[k]);
+                if (r.rc != METIS_OK || r.v != serial[k].v || r.sepsize != serial[k].sepsize)
+                    ++mismatches[static_cast<std::size_t>(t)];
+            }
+        });
+    for (auto& th : pool) th.join();
+    for (int t = 0; t < kThreads; ++t)
+        EXPECT_EQ(mismatches[static_cast<std::size_t>(t)], 0) << "thread " << t;
+}
+
+// The vendored METIS gives the orderings of the METIS smf linked before
+// (conda-forge metis 5.2.1 on Windows): its random stream is a thread-local
+// copy of MSVC's rand() (third_party/README.md, patch 2), so the order is
+// also the same on Linux. Reference hashes recorded from conda-forge's
+// metis.dll: 20^3 7-point NodeND perm, 30x12x10 7-point vertex separator.
+TEST(ParallelNd, VendoredMetisMatchesCondaOrdering)
+{
+    const RawMetis nd = raw_metis(grid(20, 20, 20), false);
+    ASSERT_EQ(nd.rc, METIS_OK);
+    EXPECT_EQ(fnv1a(nd.v), 0xb1fef4826789ffbbull);
+    const RawMetis sep = raw_metis(grid(30, 12, 10), true);
+    ASSERT_EQ(sep.rc, METIS_OK);
+    EXPECT_EQ(sep.sepsize, 120);
+    EXPECT_EQ(fnv1a(sep.v), 0xf97248da81e2b681ull);
+}
+#endif
+
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+#include <cstddef>  // size_t, ptrdiff_t for gk_mksort.h
+#include "../third_party/gklib/gk_mksort.h"
+
+namespace {
+struct SortKv {
+    int key;
+    int tag;
+};
+#define SMF_SORTKV_LT(a, b) ((a)->key < (b)->key)
+#define SMF_SORTKV_GT(a, b) ((a)->key > (b)->key)
+void gk_sort_lt(SortKv* a, std::size_t n) { GK_MKQSORT(SortKv, a, n, SMF_SORTKV_LT); }
+void gk_sort_gt(SortKv* a, std::size_t n) { GK_MKQSORT(SortKv, a, n, SMF_SORTKV_GT); }
+} // namespace
+
+// GK_MKQSORT (third_party/gklib/gk_mksort.h, smf patch 4) replaces GKlib's
+// glibc-derived (LGPL) sort. METIS sorts key-value pairs by key only
+// (ikvsorti in compress.c and coarsen.c), so the order of equal keys feeds
+// the orderings: it must be the original's exactly. Pinned: an FNV-style
+// hash (FNV-1a's prime, a truncated offset basis) of the
+// tag sequence the ORIGINAL macro produced on random keys with many
+// duplicates (one xorshift stream across the cases), ascending and
+// descending. A scratch harness matched the two on 38,928 arrays.
+TEST(ParallelNd, GkSortPinnedOrder)
+{
+    struct Case {
+        std::size_t n;
+        int range;
+        int desc;
+        std::uint64_t hash;
+    };
+    const Case cases[] = {
+        {0, 1, 0, 0x14650fb0739d0383ull},      {1, 1, 0, 0x44bd2bd473ccf799ull},
+        {9, 3, 0, 0x1fe5c0b800afea73ull},      {10, 3, 1, 0xf265370049768c60ull},
+        {37, 3, 0, 0x3e54681c76a2e03bull},     {200, 2, 1, 0x88c4e38d6c38f923ull},
+        {1000, 5, 0, 0xe09b80adbe1b22c1ull},   {1000, 5, 1, 0x8462e491aac55507ull},
+        {4099, 1000, 0, 0x42355cf94d973058ull}, {100000, 50, 1, 0x98de7e13c43d83c5ull},
+    };
+    std::uint64_t s = 88172645463325252ull;
+    for (const Case& c : cases) {
+        std::vector<SortKv> a(c.n + 1);
+        for (std::size_t i = 0; i < c.n; ++i) {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            a[i].key = static_cast<int>(s % static_cast<std::uint64_t>(c.range));
+            a[i].tag = static_cast<int>(i);
+        }
+        if (c.desc) gk_sort_gt(a.data(), c.n);
+        else gk_sort_lt(a.data(), c.n);
+        std::uint64_t h = 1469598103934665603ull;
+        for (std::size_t i = 0; i < c.n; ++i) {
+            h ^= static_cast<std::uint32_t>(a[i].tag);
+            h *= 1099511628211ull;
+        }
+        EXPECT_EQ(h, c.hash) << "n " << c.n << " range " << c.range << " desc " << c.desc;
+        for (std::size_t i = 1; i < c.n; ++i)
+            ASSERT_FALSE(c.desc ? SMF_SORTKV_GT(&a[i], &a[i - 1]) : SMF_SORTKV_LT(&a[i], &a[i - 1]))
+                << "not sorted at " << i;
+    }
 }
 #endif

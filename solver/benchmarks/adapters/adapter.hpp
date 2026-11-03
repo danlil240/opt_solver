@@ -45,6 +45,12 @@ struct AdapterStats {
     int delayed_pivots = 0;
     int64_t factor_entries = 0;
     double flops = 0.0;
+    // smf adapters: an FNV-style hash (FNV-1a's prime; truncated offset
+    // basis) over the fill-reducing perm (AnalysisKeep::perm)
+    // of every distinct analysis the factorizations since analyse() used, in
+    // order of first use; 0 = no factorization. Compares orderings across
+    // builds (e.g. two METIS builds) without dumping them.
+    std::uint64_t order_hash = 0;
     int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
     int aptp_failed_columns = 0;  // Info::aptp_failed_columns of the last factor (smf adapters)
     int delay_rescales = 0;  // Info::delay_rescales of the last factor (smf adapters)

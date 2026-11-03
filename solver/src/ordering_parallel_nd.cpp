@@ -4,27 +4,32 @@
 //    supervariables (bmwcra_1 148770 -> 53877, pwtk 217918 -> 41531).
 // 2. The compressed graph is dissected to a fixed depth (kParallelNdLevels):
 //    a part with several connected components is split along them with an
-//    empty separator, otherwise METIS_ComputeVertexSeparator splits it. The
-//    parts of one level are processed concurrently.
-// 3. Leaves are ordered concurrently: below kParallelNdAmdLeafMax
-//    supervariables AMD on the uncompressed leaf (AMD has no vertex weights;
-//    its own supervariable detection sees the true degrees), members then
-//    gathered at their supervariable's first position; otherwise
-//    METIS_NodeND on the compressed leaf with weights.
+//    empty separator, otherwise METIS_ComputeVertexSeparator splits it.
+// 3. Leaves are ordered: below kParallelNdAmdLeafMax supervariables AMD on
+//    the uncompressed leaf (AMD has no vertex weights; its own supervariable
+//    detection sees the true degrees), members then gathered at their
+//    supervariable's first position; otherwise METIS_NodeND on the
+//    compressed leaf with weights.
 // 4. Separators are numbered after both halves at every level.
 //
-// METIS calls go through the serialised wrappers of ordering_metis.cpp (the
-// linked METIS is not thread-safe); everything else runs on std::threads.
-// The tree depends on the graph only, and each METIS call reseeds, so the
-// order is the same for every thread count.
+// Splits and leaves are tasks on one queue served by std::threads, largest
+// part first: a part's children are queued as soon as it is split, with no
+// barrier between levels. METIS calls go through the wrappers of
+// ordering_metis.cpp, which run them concurrently with the vendored,
+// thread-safe METIS and serialise them otherwise. The tree depends on the
+// graph only, and each METIS call reseeds, so the order is the same for
+// every thread count and schedule.
 #include "smf/ordering_parallel_nd.hpp"
 #include "smf/ordering.hpp"
 #include "smf/ordering_metis.hpp"
 
 #include <algorithm>
-#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <memory>
+#include <mutex>
 #include <numeric>
+#include <queue>
 #include <thread>
 
 namespace smf {
@@ -33,34 +38,6 @@ namespace {
 
 // Parts with fewer supervariables than this are not split further.
 constexpr std::size_t kMinSplit = 64;
-
-// Runs f(0..count-1) on up to `threads` std::threads (the caller's included).
-// Returns false when a task threw.
-template <class F>
-bool run_tasks(std::size_t count, int threads, F&& f)
-{
-    std::atomic<bool> ok{true};
-    std::atomic<std::size_t> next{0};
-    auto body = [&] {
-        for (std::size_t i; (i = next.fetch_add(1)) < count;) {
-            try {
-                if (!f(i)) ok = false;
-            } catch (...) {
-                ok = false;
-            }
-        }
-    };
-    const std::size_t t = std::min<std::size_t>(static_cast<std::size_t>(std::max(threads, 1)), count);
-    std::vector<std::thread> pool;
-    try {
-        for (std::size_t k = 1; k < t; ++k) pool.emplace_back(body);
-    } catch (...) {
-        // Thread creation failed: the caller's thread finishes the work.
-    }
-    body();
-    for (auto& th : pool) th.join();
-    return ok;
-}
 
 struct Node {
     std::vector<Int> verts;   // supervariables, ascending
@@ -118,7 +95,7 @@ Compressed compress(Int n, const Int* xadj, const Int* adj, const Int* vwgt)
 
 // Induced subgraph of the compressed graph on node `id`'s vertices; owner[]
 // marks membership and loc[] receives local indices (written for this node's
-// vertices only, so nodes of one level can build theirs concurrently).
+// vertices only, so several nodes can build theirs concurrently).
 void induced(const Compressed& c, const std::vector<Int>& verts, int id, const std::vector<int>& owner,
              std::vector<Int>& loc, std::vector<Int>& sx, std::vector<Int>& sa, std::vector<Int>& sw)
 {
@@ -302,72 +279,110 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
 #else
     const Compressed c = compress(n, xadj, adjncy, vwgt);
     const auto sc = static_cast<std::size_t>(c.n);
-    std::vector<Node> nodes(1);
-    nodes[0].verts.resize(sc);
-    std::iota(nodes[0].verts.begin(), nodes[0].verts.end(), 0);
+    // Nodes live behind unique_ptrs: a task keeps its Node* while others
+    // append children. owner[] (supervariable -> node id, -1 = separator),
+    // loc[] and oloc[] are written by a node's task for its own vertices only;
+    // a part's vertices have neighbours only in the part itself and in the
+    // separators above it, so concurrent tasks never touch the same entries.
+    std::vector<std::unique_ptr<Node>> nodes;
+    nodes.push_back(std::make_unique<Node>());
+    nodes[0]->verts.resize(sc);
+    std::iota(nodes[0]->verts.begin(), nodes[0]->verts.end(), 0);
     std::vector<int> owner(sc, 0);
     std::vector<Int> loc(sc), oloc(static_cast<std::size_t>(n));
 
-    // Level by level: split every part of the level concurrently.
-    std::vector<int> level{0};
-    for (int depth = 0; depth < options.levels && !level.empty(); ++depth) {
-        std::vector<std::vector<Int>> sides(level.size());
-        std::vector<char> split(level.size(), 0);
-        const bool ok = run_tasks(level.size(), num_threads, [&](std::size_t k) {
-            Node& nd = nodes[static_cast<std::size_t>(level[k])];
-            if (nd.verts.size() < kMinSplit) return true;
-            bool s = false;
-            if (!bisect(c, nd, level[k], owner, loc, sides[k], s)) return false;
-            split[k] = s ? 1 : 0;
-            return true;
-        });
-        if (!ok) return false;
-        std::vector<int> next;
-        for (std::size_t k = 0; k < level.size(); ++k) {
-            if (!split[k]) continue;
-            const int id = level[k];
-            Node half[2];
-            std::vector<Int> sep;
-            const std::vector<Int>& verts = nodes[static_cast<std::size_t>(id)].verts;
-            for (std::size_t v = 0; v < verts.size(); ++v) {
-                const Int s = sides[k][v];
-                (s == 2 ? sep : half[s].verts).push_back(verts[v]);
-            }
-            for (int h = 0; h < 2; ++h) {
-                half[h].depth = depth + 1;
-                const int cid = static_cast<int>(nodes.size());
-                for (Int v : half[h].verts) owner[v] = cid;
-                nodes.push_back(std::move(half[h]));
-                nodes[static_cast<std::size_t>(id)].child[h] = cid;
-                next.push_back(cid);
-            }
-            Node& parent = nodes[static_cast<std::size_t>(id)];
-            for (Int v : sep) owner[v] = -1;
-            parent.sep = std::move(sep);
-            parent.leaf = false;
-            parent.verts.clear();
-            parent.verts.shrink_to_fit();
-        }
-        level = std::move(next);
-    }
+    // Pending tasks, largest part first (ties: lower id). The order only
+    // changes the schedule, never the result.
+    struct Task {
+        std::size_t size;
+        int id;
+        bool operator<(const Task& o) const { return size != o.size ? size < o.size : id > o.id; }
+    };
+    std::mutex mu;  // guards queue, pending, failed and nodes.push_back
+    std::condition_variable cv;
+    std::priority_queue<Task> queue;
+    std::size_t pending = 1;  // queued or running
+    bool failed = false;
+    queue.push({sc, 0});
 
-    // Leaves, largest first (scheduling only; the result does not depend on it).
-    std::vector<int> leaves;
-    for (std::size_t i = 0; i < nodes.size(); ++i)
-        if (nodes[i].leaf) leaves.push_back(static_cast<int>(i));
-    std::stable_sort(leaves.begin(), leaves.end(), [&](int a, int b) {
-        return nodes[static_cast<std::size_t>(a)].verts.size() > nodes[static_cast<std::size_t>(b)].verts.size();
-    });
-    const bool ok = run_tasks(leaves.size(), num_threads, [&](std::size_t k) {
-        return order_leaf(c, nodes[static_cast<std::size_t>(leaves[k])], leaves[k], owner, loc, oloc,
-                          options.amd_leaf_max, xadj, adjncy);
-    });
-    if (!ok) return false;
+    // Splits node `id` (or orders it, when it stays a leaf); queues its children.
+    auto process = [&](int id, Node& nd) -> bool {
+        if (nd.depth < options.levels && nd.verts.size() >= kMinSplit) {
+            std::vector<Int> side;
+            bool split = false;
+            if (!bisect(c, nd, id, owner, loc, side, split)) return false;
+            if (split) {
+                Node half[2];
+                std::vector<Int> sep;
+                for (std::size_t v = 0; v < nd.verts.size(); ++v) {
+                    const Int s2 = side[v];
+                    (s2 == 2 ? sep : half[s2].verts).push_back(nd.verts[v]);
+                }
+                Node* child[2];
+                int cid[2];
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    for (int h = 0; h < 2; ++h) {
+                        half[h].depth = nd.depth + 1;
+                        cid[h] = static_cast<int>(nodes.size());
+                        nodes.push_back(std::make_unique<Node>(std::move(half[h])));
+                        child[h] = nodes.back().get();
+                    }
+                }
+                for (int h = 0; h < 2; ++h) {
+                    for (Int v : child[h]->verts) owner[v] = cid[h];
+                    nd.child[h] = cid[h];
+                }
+                for (Int v : sep) owner[v] = -1;
+                nd.sep = std::move(sep);
+                nd.leaf = false;
+                nd.verts.clear();
+                nd.verts.shrink_to_fit();
+                std::lock_guard<std::mutex> lk(mu);
+                for (int h = 0; h < 2; ++h) queue.push({child[h]->verts.size(), cid[h]});
+                pending += 2;
+                return true;
+            }
+        }
+        return order_leaf(c, nd, id, owner, loc, oloc, options.amd_leaf_max, xadj, adjncy);
+    };
+    auto worker = [&] {
+        std::unique_lock<std::mutex> lk(mu);
+        for (;;) {
+            cv.wait(lk, [&] { return !queue.empty() || pending == 0 || failed; });
+            if (failed || queue.empty()) return;
+            const int id = queue.top().id;
+            queue.pop();
+            Node* nd = nodes[static_cast<std::size_t>(id)].get();
+            lk.unlock();
+            bool ok = false;
+            try {
+                ok = process(id, *nd);
+            } catch (...) {
+                ok = false;
+            }
+            lk.lock();
+            if (!ok) failed = true;
+            --pending;
+            cv.notify_all();
+        }
+    };
+    // At most 2^levels tasks are ever ready at once (the leaves).
+    const int nthreads = std::min(num_threads, 1 << std::clamp(options.levels, 0, 16));
+    std::vector<std::thread> pool;
+    try {
+        for (int k = 1; k < nthreads; ++k) pool.emplace_back(worker);
+    } catch (...) {
+        // Thread creation failed: the threads already running finish the work.
+    }
+    worker();
+    for (auto& th : pool) th.join();
+    if (failed) return false;
 
     // Children before their separator, recursively (depth <= levels).
     Int pos = 0;
     auto emit = [&](auto&& self, int id) -> void {
-        const Node& nd = nodes[static_cast<std::size_t>(id)];
+        const Node& nd = *nodes[static_cast<std::size_t>(id)];
         if (nd.leaf) {
             for (Int v : nd.order) perm[pos++] = v;
             return;

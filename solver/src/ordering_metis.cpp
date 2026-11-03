@@ -1,6 +1,9 @@
 #include "smf/ordering_metis.hpp"
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
 #include <metis.h>
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE && !defined(SMF_VENDORED_METIS_H)
+#error "SMF_METIS_THREADSAFE needs the vendored metis.h (third_party/metis/include) first on the include path"
+#endif
 #endif
 #include <vector>
 #include <algorithm>
@@ -13,11 +16,23 @@ namespace smf {
 static_assert(sizeof(idx_t) == sizeof(Int), "METIS idx_t must match smf::Int");
 
 namespace {
+#if !(defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE)
 std::mutex& metis_mutex()
 {
     static std::mutex m;
     return m;
 }
+#endif
+
+// Holds the process-wide METIS lock for the duration of one call, unless
+// the linked METIS is the vendored, thread-safe one.
+struct MetisCallGuard {
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+    MetisCallGuard() {}  // no lock: the vendored METIS is thread-safe
+#else
+    std::lock_guard<std::mutex> lock{metis_mutex()};
+#endif
+};
 
 void metis_options(idx_t* options)
 {
@@ -28,13 +43,18 @@ void metis_options(idx_t* options)
 } // namespace
 #endif
 
+bool metis_is_thread_safe() noexcept
+{
+    return kMetisThreadSafe;
+}
+
 bool metis_node_nd(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* perm, Int* iperm)
 {
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
     idx_t nv = n;
     idx_t options[METIS_NOPTIONS];
     metis_options(options);
-    std::lock_guard<std::mutex> lock(metis_mutex());
+    const MetisCallGuard guard;
     return METIS_NodeND(&nv, xadj, adjncy, vwgt, options, perm, iperm) == METIS_OK;
 #else
     (void)n; (void)xadj; (void)adjncy; (void)vwgt; (void)perm; (void)iperm;
@@ -48,7 +68,7 @@ bool metis_vertex_separator(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* part,
     idx_t nv = n;
     idx_t options[METIS_NOPTIONS];
     metis_options(options);
-    std::lock_guard<std::mutex> lock(metis_mutex());
+    const MetisCallGuard guard;
     return METIS_ComputeVertexSeparator(&nv, xadj, adjncy, vwgt, options, sepsize, part) ==
            METIS_OK;
 #else
