@@ -814,14 +814,12 @@ void expect_same_trial_analysis(const AnalysisKeep &a, const Info &ia, const Ana
 
 } // namespace
 
-// Off (the default, negative, NaN, infinite) and on-but-not-firing (the
-// free share below the threshold, or a NaN threshold) give the default
+// Off (-1, negative, NaN, infinite) and on-but-not-firing (the free share
+// below the threshold, or a NaN threshold) give the plain budgeted trial's
 // analysis and factorization bitwise: verdict, ratios, ordering, scales,
 // factor size, delays, inertia and solution. The off path computes no free
 // share.
-TEST(MatchingTrial, DecideFirstOffIsTheDefaultTrial) {
-    EXPECT_LT(Control{}.matching_initial_decide_passes, 0.0);  // off by default
-    EXPECT_DOUBLE_EQ(Control{}.matching_initial_decide_free, 0.05);
+TEST(MatchingTrial, DecideFirstOffIsThePlainTrial) {
     const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(10000, 3000, 1),
                              opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 1, 4.0)};
     const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -872,6 +870,39 @@ TEST(MatchingTrial, DecideFirstOffIsTheDefaultTrial) {
             std::vector<double> x(static_cast<std::size_t>(n), 1.0);
             ASSERT_EQ(s.solve(f, c, i, x.data(), n), 0);
             EXPECT_EQ(x, xr);
+        }
+        ++k;
+    }
+}
+
+// The default (1.75 passes, 5% free) changes no verdict on the fixtures:
+// their searches finish within 0.3 passes, or (opf_like_kkt(6000, 5000, 7))
+// reject on the initial matching either way, now paused at 1.75 passes
+// instead of 2. Analysis bitwise the plain trial's, serial and threaded.
+TEST(MatchingTrial, DecideFirstDefaultKeepsTheVerdicts) {
+    EXPECT_DOUBLE_EQ(Control{}.matching_initial_decide_passes, 1.75);
+    EXPECT_DOUBLE_EQ(Control{}.matching_initial_decide_free, 0.05);
+    EXPECT_DOUBLE_EQ(Control{}.matching_search_budget, 2.0);
+    const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(10000, 3000, 1),
+                             opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 1, 4.0)};
+    int k = 0;
+    for (const CscLower &A : mats) {
+        for (int threads : {1, 4}) {
+            SCOPED_TRACE("matrix " + std::to_string(k) + " threads " + std::to_string(threads));
+            Control def = decide_control(-1.0, threads);
+            def.matching_initial_decide_passes = Control{}.matching_initial_decide_passes;
+            Solver so, sd;
+            Info io, id;
+            auto ao = so.analyse(A, decide_control(-1.0, threads), io);
+            auto ad = sd.analyse(A, def, id);
+            ASSERT_NE(ao, nullptr);
+            ASSERT_NE(ad, nullptr);
+            expect_same_trial_analysis(*ao, io, *ad, id);
+            if (k == 2) {
+                EXPECT_EQ(id.matching_decide_first, 1);
+                EXPECT_GE(id.matching_paused_passes, 1.75);
+                EXPECT_LE(id.matching_paused_passes, io.matching_paused_passes);
+            }
         }
         ++k;
     }
@@ -990,6 +1021,24 @@ TEST(MatchingTrial, DecideFirstIsCappedByTheBudget) {
     EXPECT_EQ(i5.matching_decide_first, 1);
     EXPECT_EQ(i5.matching_paused_passes, id.matching_paused_passes);
     expect_same_trial_analysis(*ad, id, *a5, i5);
+}
+
+// No search budget asks for the exact trial: the knob is off then too, so
+// a trial that would reject on the initial matching at knob 0 stays Exact.
+TEST(MatchingTrial, DecideFirstIsOffWithoutABudget) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    for (int threads : {1, 4}) {
+        SCOPED_TRACE("threads " + std::to_string(threads));
+        Control c = decide_control(0.0, threads);
+        c.matching_search_budget = -1.0;
+        Solver s;
+        Info i;
+        ASSERT_NE(s.analyse(A, c, i), nullptr);
+        EXPECT_EQ(i.matching_trial, MatchingTrial::Exact);
+        EXPECT_EQ(i.matching_decide_first, 0);
+        EXPECT_EQ(i.matching_initial_free, -1.0);
+        EXPECT_EQ(i.matching_paused_passes, -1.0);
+    }
 }
 
 // The first budget counts edges scanned by serial searches, and the free

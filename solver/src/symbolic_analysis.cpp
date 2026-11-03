@@ -554,18 +554,18 @@ namespace smf
         const long long budget =
             (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
         // Control::matching_initial_decide_passes: the first budget, in the
-        // same edges, capped by the budget (-1: off). It applies when the
-        // initial phase leaves at least matching_initial_decide_free of the
-        // columns free; past it, the initial phase decides in step 5 as past
-        // the budget (a pass resumes the searches to the end, as it would
-        // after continuing under the budget).
+        // same edges, capped by the budget (-1: off; also off without a
+        // budget, the exact trial). It applies when the initial phase leaves
+        // at least matching_initial_decide_free of the columns free; past
+        // it, the initial phase decides in step 5 as past the budget (a pass
+        // resumes the searches to the end, as it would after continuing
+        // under the budget).
         const double pass_edges = 2.0 * static_cast<double>(C.row_idx.size());
         const double decide_passes = control.matching_initial_decide_passes;
         const double decide_edges = decide_passes * pass_edges;
-        long long first_budget =
-            (decide_passes >= 0.0 && decide_edges < 1e18) ? static_cast<long long>(decide_edges) : -1;
-        if (first_budget >= 0 && budget >= 0)
-            first_budget = std::min(first_budget, budget);
+        long long first_budget = (budget >= 0 && decide_passes >= 0.0 && decide_edges < 1e18)
+                                     ? std::min(static_cast<long long>(decide_edges), budget)
+                                     : -1;
         const double decide_free = control.matching_initial_decide_free;
         const auto record_pause = [&](long long work) {
             info.matching_paused_passes = pass_edges > 0.0 ? static_cast<double>(work) / pass_edges : 0.0;

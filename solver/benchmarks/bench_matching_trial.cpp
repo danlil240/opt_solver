@@ -11,6 +11,10 @@
 // full matching's search work in units of the default budget's (2 x lower
 // entries of the matrix as read; analyse() matches its cleaned copy).
 //
+// The default-budget analysis keeps every other Control default, the
+// first budget of Control::matching_initial_decide_passes included (it
+// caps --budget for matrices whose initial phase leaves >= 5% free).
+//
 // Usage: bench_matching_trial --list file [--trials T] [--ordering m]
 //                             [--budget b] [--refactors r] [--case substring]
 //                             [--sample S [--lines]] [--pieces] [--matcher ssp|hybrid]

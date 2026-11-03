@@ -69,8 +69,8 @@ struct Info {
     /// matching_search_budget) and when the matcher failed (trial None).
     int          matching_decide_first  = 0;
     /// The initial phase's free-column share (free columns / n); computed
-    /// only when matching_initial_decide_passes is on and the trial ran
-    /// searches (not Diagonal), -1 otherwise.
+    /// only when matching_initial_decide_passes and matching_search_budget
+    /// are on and the trial ran searches (not Diagonal), -1 otherwise.
     double       matching_initial_free  = -1.0;
     /// The search work (in passes, as Control::matching_search_budget
     /// counts them) at which the trial's searches paused for the initial

@@ -65,16 +65,27 @@ struct Control {
     // and then resuming would give, so a resumed trial stays bitwise the
     // exact trial. 0: decide right after the initial phase. Negative, NaN,
     // infinite or 1e18 edges and beyond: off (the trial runs under
-    // matching_search_budget alone). With no matching_search_budget
-    // (negative) there is no cap, and the knob adds the pause and the
-    // initial verdict to a trial that would otherwise never pause.
+    // matching_search_budget alone). Also off when matching_search_budget is
+    // off (negative, NaN, infinite): that asks for the exact trial.
     // The free share costs no search; the short budget spares the searches
     // of trials the initial phase decides anyway (darcy003/mario002: ~20%
-    // free, rejected; ncvxqp9: 31%), while a trial whose exact matching is a
-    // few searches away (boyd2, catmix) can finish within a budget > 0 and
-    // keep its Exact verdict. Info::matching_decide_first reports whether
-    // the shorter budget applied. Off until a sweep picks the value.
-    double         matching_initial_decide_passes = -1.0;
+    // free, rejected; ncvxqp9: 31%), while a trial whose exact matching
+    // finishes within it keeps its Exact verdict. Info::
+    // matching_decide_first reports whether the shorter budget applied.
+    // Why 1.75 (12900K sweep, 1T, 3 rounds, 34 front-tier cases with a
+    // free share >= 3%, both tracks): the adopters' exact searches need
+    // 0.31 (cops_polygon_200), 0.53 (boyd2), 1.64 (cops_catmix_800) and
+    // 1.69 (c-big) passes, so every value up to 1.5 turns some Exact
+    // verdict into a resumed or rejected one: boyd2 1.20-1.22x wall at 0 to
+    // 0.5, catmix ipopt 1.10-1.11x at 0 to 1. 1.75 is the smallest value
+    // that changes no verdict; it saves 2-3% on darcy003/mario002 and the
+    // PGLib rejecters (gate: 1T geomean 0.998, no case-track above 1.03x,
+    // factors identical). Lower values save more on the rejecters (0:
+    // darcy003 0.85x) and need a separate rule to spare such adopters.
+    // The margin over c-big is small (1.69 of 1.75): a change to the search
+    // order or the work count can move its verdict, so keep c-big and
+    // cops_catmix_800 in the gate.
+    double         matching_initial_decide_passes = 1.75;
     // The initial phase's free-column share (free columns / n) from which
     // matching_initial_decide_passes applies. NaN: never.
     double         matching_initial_decide_free = 0.05;
