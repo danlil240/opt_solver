@@ -78,10 +78,16 @@ struct Compressed {
     std::vector<Int> super_of;       // original vertex -> supervariable
 };
 
-Compressed compress(Int n, const Int* xadj, const Int* adj, const Int* vwgt)
+Compressed compress(Int n, const Int* xadj, const Int* adj, const Int* vwgt,
+                    const Int* super_of, Int num_super)
 {
     Compressed c;
-    c.n = compress_closed_adjacency(n, xadj, adj, c.super_of);
+    if (super_of) {
+        c.super_of.assign(super_of, super_of + n);
+        c.n = num_super;
+    } else {
+        c.n = compress_closed_adjacency(n, xadj, adj, c.super_of);
+    }
     const auto sn = static_cast<std::size_t>(c.n);
     c.mptr.assign(sn + 1, 0);
     for (Int v = 0; v < n; ++v) ++c.mptr[static_cast<std::size_t>(c.super_of[v]) + 1];
@@ -300,7 +306,7 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
     (void)xadj; (void)adjncy; (void)vwgt; (void)num_threads; (void)options;
     return false;
 #else
-    const Compressed c = compress(n, xadj, adjncy, vwgt);
+    const Compressed c = compress(n, xadj, adjncy, vwgt, options.super_of, options.num_super);
     const auto sc = static_cast<std::size_t>(c.n);
     std::vector<Node> nodes(1);
     nodes[0].verts.resize(sc);

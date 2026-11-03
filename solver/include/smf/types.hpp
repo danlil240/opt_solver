@@ -124,6 +124,14 @@ enum class MatchingTrial {
     Diagonal        = 4
 };
 
+// The nested-dissection variant analyse()'s AutoParallel trial ran
+// (Info::nd_variant; Control::nd_variant_by_graph).
+//   None       - no ND trial.
+//   SerialMetis - METIS_NodeND on the uncompressed graph.
+//   ParallelNd - parallel_nd_order (compressed, weighted METIS separators,
+//                AMD/METIS leaves).
+enum class NdVariant { None = 0, SerialMetis = 1, ParallelNd = 2 };
+
 // The engine of SymmetricMatcher's sparse part (phase 1).
 //   ShortestPath - one shortest augmenting path search per free column
 //                  (MC64 job 5).

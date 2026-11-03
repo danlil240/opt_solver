@@ -17,6 +17,12 @@ inline constexpr int kParallelNdLevels = 4;
 struct ParallelNdOptions {
     int levels = kParallelNdLevels;
     Int amd_leaf_max = kParallelNdAmdLeafMax;
+    /// Optional: compress_closed_adjacency of this very graph, computed by
+    /// the caller (super_of, n entries, and its return value num_super), so
+    /// a caller that compresses to decide does not compress twice. Null:
+    /// computed here. The result is the same either way.
+    const Int* super_of = nullptr;
+    Int num_super = 0;
 };
 
 /// Parallel nested dissection: vertices with identical closed adjacency are

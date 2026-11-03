@@ -25,6 +25,22 @@ struct Control {
     // pairs cannot be forced together and are counted in Info::pairs_split.
     const Int*     user_pair_first = nullptr;
     Int            user_num_pairs  = 0;
+    // AutoParallel's nested-dissection trial (analyse step 5, when AMD's
+    // factor looks dear): true picks the ND variant from the graph alone, at
+    // every thread count. When exact compression (vertices with identical
+    // closed adjacency) leaves at most kNdCompressedMaxShare (0.8, ordering.hpp)
+    // of n supervariables: the compressed parallel ND (parallel_nd_order);
+    // otherwise serial METIS_NodeND on the uncompressed graph. Both results
+    // depend on the graph only, so deterministic mode keeps one permutation
+    // across thread counts. Probe (12900K, ND call only): bmwcra_1
+    // compresses to 0.36 n, and at 1T its serial METIS (700 ms) becomes
+    // compressed ND (~400 ms, flops 1.019x); nd24k, cfd2, G3_circuit,
+    // apache2 and thermal2 do not compress, and parallel ND there only adds
+    // time (its METIS calls are serialised, so it does not scale; nd24k 8T:
+    // 2648 vs 2269 ms). false: the previous rule (serial METIS at 1 thread;
+    // parallel ND above 1 thread, and at every thread count in deterministic
+    // mode).
+    bool           nd_variant_by_graph = true;
     // Auto orderings of indefinite matrices: when to switch to the matching
     // ordering (see MatchingTrigger). RealizedDelays makes factor() mutate
     // the analysis it is given (one re-analysis, stored inside it): do not

@@ -277,6 +277,89 @@ TEST(ParallelNd, DeterministicAcrossThreads)
 }
 
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
+namespace {
+struct NdChoice {
+    int nd_variant = -1;
+    int ordering_used = -1;
+    Int supervariables = -1;
+    std::vector<Int> perm;
+};
+
+// AutoParallel analysis with the ND trial forced (100 expected refactors).
+NdChoice analyse_nd(const smf::CscLower& A, int threads, bool by_graph, bool deterministic)
+{
+    smf::Control ctrl;
+    ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
+    ctrl.ordering = smf::OrderingMethod::AutoParallel;
+    ctrl.expected_refactors = 100;
+    ctrl.num_threads = threads;
+    ctrl.auto_threads = false;
+    ctrl.deterministic = deterministic;
+    ctrl.nd_variant_by_graph = by_graph;
+    smf::Info info;
+    smf::Solver solver;
+    auto ak = solver.analyse(A, ctrl, info);
+    NdChoice r;
+    EXPECT_NE(ak, nullptr);
+    if (!ak) return r;
+    r.nd_variant = info.nd_variant;
+    r.ordering_used = info.ordering_used;
+    r.supervariables = info.nd_supervariables;
+    r.perm = ak->perm;
+    return r;
+}
+} // namespace
+
+// Control::nd_variant_by_graph: the ND variant follows the graph's exact
+// compression at every thread count. A 3-dof-per-node grid (each node's dofs
+// share their rows) compresses to n/3: compressed parallel ND at 1 and 4
+// threads. A scalar grid does not compress: serial METIS at 1 and 4 threads.
+// Each gives one permutation across thread counts, deterministic or not, and
+// each is the permutation of the variant the old rule ran at that thread
+// count (parallel ND at 4 threads, serial METIS at 1).
+TEST(ParallelNd, VariantChosenByCompression)
+{
+    const Graph fem = multi_dof(grid(16, 16, 16), 3);  // n = 12288 > 8192
+    const Graph scalar = grid(24, 24, 24);             // n = 13824
+    const smf::CscLower A_fem = spd_from_graph(fem);
+    const smf::CscLower A_scalar = spd_from_graph(scalar);
+
+    for (const bool det : {false, true}) {
+        SCOPED_TRACE(det ? "deterministic" : "default");
+        const NdChoice f1 = analyse_nd(A_fem, 1, true, det);
+        const NdChoice f4 = analyse_nd(A_fem, 4, true, det);
+        EXPECT_EQ(f1.supervariables, fem.n / 3);
+        EXPECT_EQ(f1.nd_variant, static_cast<int>(smf::NdVariant::ParallelNd));
+        EXPECT_EQ(f4.nd_variant, static_cast<int>(smf::NdVariant::ParallelNd));
+        EXPECT_EQ(f1.ordering_used, static_cast<int>(smf::OrderingMethod::METIS))
+            << "ND candidate not kept: the permutation checks below test AMD";
+        EXPECT_EQ(f1.perm, f4.perm);
+        // The old rule runs parallel ND at 4 threads: the same permutation.
+        const NdChoice f4_old = analyse_nd(A_fem, 4, false, det);
+        EXPECT_EQ(f4_old.nd_variant, static_cast<int>(smf::NdVariant::ParallelNd));
+        EXPECT_EQ(f4_old.supervariables, 0);
+        EXPECT_EQ(f4_old.perm, f1.perm);
+
+        const NdChoice s1 = analyse_nd(A_scalar, 1, true, det);
+        const NdChoice s4 = analyse_nd(A_scalar, 4, true, det);
+        EXPECT_EQ(s1.supervariables, scalar.n);
+        EXPECT_EQ(s1.nd_variant, static_cast<int>(smf::NdVariant::SerialMetis));
+        EXPECT_EQ(s4.nd_variant, static_cast<int>(smf::NdVariant::SerialMetis));
+        EXPECT_EQ(s1.ordering_used, static_cast<int>(smf::OrderingMethod::METIS))
+            << "ND candidate not kept: the permutation checks below test AMD";
+        EXPECT_EQ(s1.perm, s4.perm);
+        // The old rule runs serial METIS at 1 thread outside deterministic
+        // mode (via build_symmetric_adjacency): the same permutation.
+        if (!det) {
+            const NdChoice s1_old = analyse_nd(A_scalar, 1, false, false);
+            EXPECT_EQ(s1_old.nd_variant, static_cast<int>(smf::NdVariant::SerialMetis));
+            EXPECT_EQ(s1_old.perm, s1.perm);
+        }
+    }
+}
+#endif
+
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS
 // Gate for running METIS from several std::threads. The raw conda-forge
 // METIS 5.2.1 aborts the process when called concurrently (GKlib's memory
 // core is process-global; see task-6-report.md), so smf only calls METIS

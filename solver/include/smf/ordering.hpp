@@ -79,6 +79,16 @@ enum class CompressedOrder { Amd, Metis, Auto };
 /// (af_shell7, G3_circuit, apache2).
 inline constexpr double kMetisFlopsPerRow = 4.5e5;
 
+/// Control::nd_variant_by_graph: the ND trial runs the compressed parallel
+/// ND when exact compression leaves at most this share of n supervariables,
+/// else serial METIS. The board's ND matrices sit far on either side: they
+/// compress to 0.19-0.36 n (pwtk, af_shell7, bmwcra_1; compressed ND at 1T
+/// 40% faster than serial METIS, flops 1.004-1.019x) or not at all (cfd2,
+/// nd24k, G3_circuit, apache2, thermal2: nsuper = n, where parallel ND costs
+/// 20-600 ms more than serial METIS). 0.8: compression must remove at least
+/// a fifth of the vertices to repay METIS working on weights.
+inline constexpr double kNdCompressedMaxShare = 0.8;
+
 struct MatchingOrderStats {
     Int pairs = 0;              ///< 2x2 pivot pairs kept adjacent
     Int nodes = 0;              ///< nodes of the compressed graph

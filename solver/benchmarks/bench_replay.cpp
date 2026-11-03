@@ -571,6 +571,8 @@ int main(int argc, char **argv) {
     }
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
+    // SMF_BENCH_ND_BY_GRAPH = 0 | 1 (Control::nd_variant_by_graph).
+    if (const char *e = std::getenv("SMF_BENCH_ND_BY_GRAPH")) ctrl.nd_variant_by_graph = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,
     // per_top_front,per_split_front_thread,split_cap" (Control::
     // thread_cost_per_thread, thread_cost_per_top_front,

@@ -37,6 +37,12 @@ struct Info {
 
     // Ordering used (value matches OrderingMethod enum)
     int          ordering_used       = 0;
+    /// AutoParallel's nested-dissection trial (Control::nd_variant_by_graph):
+    /// the variant that ran (an NdVariant value; None when no ND was tried;
+    /// whether it was kept, ordering_used says) and the supervariables of the
+    /// graph's exact compression (0 when not computed).
+    int          nd_variant          = 0;
+    Int          nd_supervariables   = 0;
     /// OrderingMethod::UserSupplied: user pairs that could not be kept in
     /// one supernode because the second is not the etree parent of the first.
     int          pairs_split         = 0;

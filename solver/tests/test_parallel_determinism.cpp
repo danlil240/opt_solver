@@ -442,8 +442,9 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
     }
     cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
                      true, false});
-    // AutoParallel: its METIS candidate (kept on a 3D grid) is serial METIS
-    // at 1 thread and parallel ND above, except in deterministic mode.
+    // AutoParallel: its METIS candidate (kept on a 3D grid). A scalar grid
+    // does not compress, so it is serial METIS at every thread count
+    // (Control::nd_variant_by_graph).
     cases.push_back({"poisson_3d_26/AutoParallel", grid_3d(26, 0.0),
                      MatrixType::RealSymmetricPositiveDefinite, true, false,
                      OrderingMethod::AutoParallel});

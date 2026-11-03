@@ -6,6 +6,7 @@
 #include "smf/etree.hpp"
 #include "smf/ldlt_kernel.hpp"
 #include "smf/ordering.hpp"
+#include "smf/ordering_metis.hpp"
 #include "smf/ordering_parallel_nd.hpp"
 #include "smf/scaling_matching.hpp"
 #include "smf/solver.hpp"
@@ -664,23 +665,58 @@ namespace smf
             if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
             {
                 std::vector<Int> mperm;
-                // Deterministic mode: parallel ND at every thread count (its
-                // permutation does not depend on the thread count; serial
-                // METIS at 1 thread would give another ordering).
-                if (control.num_threads > 1 || deterministic_mode(control))
+                // Which ND (Control::nd_variant_by_graph): by the graph's
+                // exact compression, at every thread count, so the
+                // permutation never depends on num_threads (deterministic
+                // mode included). Off: parallel ND above 1 thread and at
+                // every thread count in deterministic mode (its permutation
+                // does not depend on the thread count; serial METIS at 1
+                // thread would give another ordering), serial METIS else.
+                std::vector<Int> super_of;
+                bool parallel_nd;
+                if (control.nd_variant_by_graph)
+                {
+                    info.nd_supervariables = compress_closed_adjacency(n, xadj, adj, super_of);
+                    parallel_nd = static_cast<double>(info.nd_supervariables) <=
+                                  kNdCompressedMaxShare * static_cast<double>(n);
+                }
+                else
+                {
+                    parallel_nd = control.num_threads > 1 || deterministic_mode(control);
+                }
+                if (parallel_nd)
                 {
                     // Parallel nested dissection straight off the arena's
-                    // adjacency (compressed, AMD leaves on threads).
+                    // adjacency (compressed, AMD leaves on threads), reusing
+                    // the compression computed above.
+                    info.nd_variant = static_cast<int>(NdVariant::ParallelNd);
+                    ParallelNdOptions nd_options;
+                    if (!super_of.empty())
+                    {
+                        nd_options.super_of = super_of.data();
+                        nd_options.num_super = info.nd_supervariables;
+                    }
                     mperm.resize(sn_sz);
                     if (!parallel_nd_order(n, xadj, adj, nullptr, std::max(1, control.num_threads),
-                                           mperm.data()))
+                                           mperm.data(), nd_options))
                         mperm.clear();
                 }
                 else
                 {
-                    auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
-                    auto [xadj_m, adjncy_m] = build_symmetric_adjacency(C);
-                    mperm = backend->compute_ordering(n, xadj_m, adjncy_m);
+                    // Serial METIS_NodeND on a copy of the arena's adjacency
+                    // (METIS takes its arrays mutable; the arena's is read
+                    // again for the counts). lower_csc_adjacency lists each
+                    // vertex's neighbours ascending, as
+                    // build_symmetric_adjacency does, so the permutation is
+                    // MetisOrdering's on the same matrix.
+                    info.nd_variant = static_cast<int>(NdVariant::SerialMetis);
+                    std::vector<Int> xadj_m(xadj, xadj + sn_sz + 1);
+                    std::vector<Int> adjncy_m(adj, adj + xadj[n]);
+                    std::vector<Int> miperm(sn_sz);
+                    mperm.resize(sn_sz);
+                    if (!metis_node_nd(n, xadj_m.data(), adjncy_m.data(), nullptr, mperm.data(),
+                                       miperm.data()))
+                        mperm.clear();
                 }
                 if (mperm.size() == sn_sz)
                 {
