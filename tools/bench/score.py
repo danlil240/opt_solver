@@ -18,7 +18,13 @@ Per (class, track, thread count) it reports, for a chosen split:
   * backward error after refinement (worst eta_inf / omega),
   * median time per phase: analyse, first factorization, warm refactorization,
     solve + refine (a library's internal refinement is part of its solve time),
-  * an inertia pass column on the `ipopt` track,
+  * inertia agreement: with --inertia-ref (a reference file from
+    tools/bench/inertia_ref.py: dense eigenvalues, or spectrum slicing with two
+    strict-pivoting LDL^T solvers), every solver's reported inertia on every
+    track is classed exact / consistent (differs from the reference only in
+    how it splits the reference's near-zero eigenvalue cluster) / wrong, and
+    the disagreements are listed. Without it, the old check: on the `ipopt`
+    track only, against the modal inertia of the accurate non-subject solvers,
   * a performance-profile CSV (one row per tau, one column per solver).
 
 1-thread and tuned-thread results are separate tables (one per thread count).
@@ -29,6 +35,7 @@ Usage:
   python tools/bench/score.py --records benchmarks/results/x/records.jsonl \
       --manifest benchmarks/manifests/fronttier.json --split tuning \
       [--class hard_indef] [--shift-ms 10] [--profile-csv outdir] [--output out.md]
+      [--inertia-ref benchmarks/manifests/fronttier_inertia.json]
 """
 
 from __future__ import annotations
@@ -331,6 +338,34 @@ def _inertia_reference(per_solver: dict[str, dict[str, Any]], subject: str):
     return ranked[0][0]
 
 
+def load_inertia_ref(path: pathlib.Path) -> dict[str, tuple[int, int, int]]:
+    """matrix_id -> reference (pos, neg, zero) from an inertia_ref.py file;
+    cases whose reference is disputed or failed are left out (not checked)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    out = {}
+    for mid, r in (data.get("cases") or {}).items():
+        if r.get("status") == "ok":
+            out[mid] = (int(r["pos"]), int(r["neg"]), int(r["zero"]))
+    return out
+
+
+def classify_inertia(got: tuple[int, int, int] | None, ref: tuple[int, int, int] | None) -> str | None:
+    """'exact' | 'consistent' | 'wrong' against a reference (pos, neg, zero), or
+    None when either is missing. 'consistent': the same dimension, and the
+    solver's counts differ from the reference only inside its zero cluster
+    (pos >= ref pos, neg >= ref neg): the reference eigenvalues within the
+    slicing shift of 0 have no well-defined sign, so any split of them is
+    acceptable, while a sign flip of a well-separated eigenvalue is not."""
+    if got is None or ref is None:
+        return None
+    if got == ref:
+        return "exact"
+    if (sum(got) == sum(ref) and got[0] >= ref[0] and got[1] >= ref[1]
+            and got[2] <= ref[2]):
+        return "consistent"
+    return "wrong"
+
+
 # --------------------------------------------------------------------------
 # scoring
 # --------------------------------------------------------------------------
@@ -338,7 +373,10 @@ def _inertia_reference(per_solver: dict[str, dict[str, Any]], subject: str):
 def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = "all",
           shift_ms: float = DEFAULT_SHIFT_MS, subject: str = "smf",
           classes: set[str] | None = None,
-          max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> dict[str, Any]:
+          max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD,
+          inertia_ref: dict[str, tuple[int, int, int]] | None = None) -> dict[str, Any]:
+    """inertia_ref (load_inertia_ref): when given, every track's inertia is
+    checked against it instead of the ipopt-track vote among rivals."""
     cases: dict[tuple[str, str], dict[str, Any]] = {}
     for key, c in manifest_case_index(manifest.get("cases", [])).items():
         if split != "all" and c.get("split") != split:
@@ -372,6 +410,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         stats = {s: {"total": 0, "solved": 0, "inaccurate": 0, "failed": 0,
                      "implausible": 0,
                      "unavailable": 0, "inertia_pass": 0, "inertia_checked": 0,
+                     "inertia_consistent": 0, "inertia_wrong": 0,
                      "eta_max": None, "omega_max": None,
                      "wall_median_ms": None,
                      "phases": {}} for s in solver_ids}
@@ -385,13 +424,17 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
         report_only: dict[str, dict[str, dict[str, Any]]] = {}
         implausible: list[dict[str, Any]] = []
         times: dict[str, dict[str, float | None]] = {s: {} for s in solver_ids}
+        inertia_issues: list[dict[str, Any]] = []
 
         for mid, per in per_case.items():
             if cases[(mid, track)].get("report_only"):
                 report_only[mid] = per
                 continue
-            ref = _inertia_reference(per, subject) if track == "ipopt" else None
-            # (ipopt-plugin is smf only: no reference inertia to check against.)
+            if inertia_ref is not None:
+                ref = inertia_ref.get(mid)
+            else:
+                ref = _inertia_reference(per, subject) if track == "ipopt" else None
+            # (without a reference file, ipopt-plugin is smf only: no vote to check against.)
             for sid in solver_ids:
                 a = per.get(sid)
                 if a is None:
@@ -418,10 +461,20 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 for key_, val in (("eta_max", a["eta"]), ("omega_max", a["omega"])):
                     if val is not None:
                         st[key_] = val if st[key_] is None else max(st[key_], val)
-                if (track == "ipopt" and ref is not None and a["status"] in ("ok", "inaccurate")
-                        and a["inertia"] is not None):
+                if ((track == "ipopt" or inertia_ref is not None) and ref is not None
+                        and a["status"] in ("ok", "inaccurate") and a["inertia"] is not None):
                     st["inertia_checked"] += 1
-                    st["inertia_pass"] += int(a["inertia"] == ref)
+                    if inertia_ref is None:
+                        st["inertia_pass"] += int(a["inertia"] == ref)
+                    else:
+                        cl = classify_inertia(a["inertia"], ref)
+                        st["inertia_pass"] += int(cl == "exact")
+                        st["inertia_consistent"] += int(cl == "consistent")
+                        st["inertia_wrong"] += int(cl == "wrong")
+                        if cl != "exact":
+                            inertia_issues.append({"case": mid, "solver": sid, "class": cl,
+                                                   "reported": a["inertia"], "reference": ref,
+                                                   "status": a["status"]})
 
             subj = per.get(subject)
             comp = [(a["wall_ms"], sid) for sid, a in per.items()
@@ -456,6 +509,8 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
             },
             "report_only": report_only,
             "implausible": sorted(implausible, key=lambda i: (i["case"], i["solver"])),
+            "inertia_issues": sorted(inertia_issues, key=lambda i: (i["case"], i["solver"])),
+            "inertia_ref": inertia_ref is not None,
             "max_gflops_per_thread": max_gflops_per_thread,
             "times": times,
             "n_cases": len(per_case) - len(report_only),
@@ -506,15 +561,22 @@ def render(result: dict[str, Any], split: str) -> str:
                         f"missing in this table: {', '.join(missing) if missing else 'none'}"
                         + (" (ratio is against the competitors present only)" if missing else ""))
                 out.append("")
-                ip = track == "ipopt"
+                has_ref = g.get("inertia_ref", False)
+                ip = track == "ipopt" or has_ref
+                head = (" inertia exact / consistent / wrong of checked |" if has_ref
+                        else " inertia ok |")
                 out.append("| solver | solved/total | inaccurate | failed | unavail | "
-                           "max eta_inf | max omega |" + (" inertia ok |" if ip else ""))
+                           "max eta_inf | max omega |" + (head if ip else ""))
                 out.append("|---|---:|---:|---:|---:|---:|---:|" + ("---:|" if ip else ""))
                 for sid, s in g["solvers"].items():
                     row = (f"| {sid} | {s['solved']}/{s['total']} | {s['inaccurate']} | "
                            f"{s['failed']} | {s['unavailable']} | {_fmt(s['eta_max'])} | "
                            f"{_fmt(s['omega_max'])} |")
-                    if ip:
+                    if ip and has_ref:
+                        row += (f" {s['inertia_pass']} / {s['inertia_consistent']} / "
+                                f"{s['inertia_wrong']} of {s['inertia_checked']} "
+                                f"{'FAIL' if s['inertia_wrong'] else 'PASS'} |")
+                    elif ip:
                         row += (f" {s['inertia_pass']}/{s['inertia_checked']} "
                                 f"{'PASS' if s['inertia_pass'] == s['inertia_checked'] else 'FAIL'} |")
                     out.append(row)
@@ -530,13 +592,26 @@ def render(result: dict[str, Any], split: str) -> str:
                            f"{_fmt(p.get('first_factor_ms'))} | {_fmt(p.get('refactor_ms'))} | "
                            f"{_fmt(p.get('solve_refine_ms'))} | {_fmt(s['wall_median_ms'])} |")
                     if ip:
-                        if s["inertia_checked"]:
+                        if not s["inertia_checked"]:
+                            row += " n/a |"
+                        elif has_ref:
+                            row += (f" FAIL ({s['inertia_wrong']}) |" if s["inertia_wrong"]
+                                    else " pass |")
+                        else:
                             row += (" pass |" if s["inertia_pass"] == s["inertia_checked"]
                                     else f" FAIL ({s['inertia_checked'] - s['inertia_pass']}) |")
-                        else:
-                            row += " n/a |"
                     out.append(row)
                 out.append("")
+                if g.get("inertia_issues"):
+                    out.append("Inertia not exact vs the reference (pos, neg, zero); "
+                               "consistent = differs only inside the reference's zero cluster:")
+                    out.append("")
+                    out.append("| case | solver | class | reported | reference | status |")
+                    out.append("|---|---|---|---|---|---|")
+                    for i in g["inertia_issues"]:
+                        out.append(f"| {i['case']} | {i['solver']} | {i['class']} | "
+                                   f"{i['reported']} | {i['reference']} | {i['status']} |")
+                    out.append("")
                 if g["report_only"]:
                     out.append("Report-only (singular; excluded from gates, ratio and profile):")
                     out.append("")
@@ -592,13 +667,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--profile-csv", default=None,
                     help="directory receiving one profile CSV per class/track/thread count")
     ap.add_argument("--output", default=None)
+    ap.add_argument("--inertia-ref", default=None,
+                    help="reference inertia file (tools/bench/inertia_ref.py) checked on every "
+                         "track; default: the ipopt-track vote among the accurate rivals")
     args = ap.parse_args(argv)
 
     records = load_records(pathlib.Path(args.records))
     manifest = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
     classes = {c for c in args.classes.split(",") if c} or None
+    inertia_ref = load_inertia_ref(pathlib.Path(args.inertia_ref)) if args.inertia_ref else None
     result = score(records, manifest, args.split, args.shift_ms, args.subject, classes,
-                   args.max_gflops_per_thread)
+                   args.max_gflops_per_thread, inertia_ref)
     if not result:
         print("error: no records matched the manifest/split", file=sys.stderr)
         return 2

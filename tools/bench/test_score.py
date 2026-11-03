@@ -174,6 +174,60 @@ class TestScore(unittest.TestCase):
         rc = res["hard_indef"]["recommended"][1]["solvers"]
         self.assertEqual(rc["smf"]["inertia_checked"], 0)
 
+    def test_classify_inertia(self):
+        ref = (6, 2, 2)  # two eigenvalues in the reference's zero cluster
+        self.assertEqual(score.classify_inertia((6, 2, 2), ref), "exact")
+        self.assertEqual(score.classify_inertia((7, 3, 0), ref), "consistent")
+        self.assertEqual(score.classify_inertia((6, 4, 0), ref), "consistent")
+        self.assertEqual(score.classify_inertia((8, 2, 0), ref), "consistent")
+        self.assertEqual(score.classify_inertia((5, 5, 0), ref), "wrong")    # a positive flipped
+        self.assertEqual(score.classify_inertia((7, 2, 0), ref), "wrong")    # wrong dimension
+        self.assertEqual(score.classify_inertia((6, 4, 0), (6, 4, 0)), "exact")
+        self.assertEqual(score.classify_inertia((7, 3, 0), (6, 4, 0)), "wrong")
+        self.assertIsNone(score.classify_inertia(None, ref))
+        self.assertIsNone(score.classify_inertia((6, 4, 0), None))
+
+    def test_inertia_reference_file_checks_every_track(self):
+        # The reference replaces the vote: two rivals agreeing on a wrong
+        # inertia no longer make it the reference, and recommended is checked.
+        m = manifest([case("a", "hard_indef", "tuning", track="ipopt"),
+                      case("a", "hard_indef", "tuning", track="recommended"),
+                      case("b", "hard_indef", "tuning", track="recommended")])
+        wrong = {"pos": 5, "neg": 5, "zero": 0}
+        records = [
+            rec("a", "smf", 5.0, track="ipopt"),                     # (6, 4, 0) exact
+            rec("a", "ma57", 6.0, track="ipopt", inertia=wrong),
+            rec("a", "ma97", 6.0, track="ipopt", inertia=wrong),
+            rec("a", "smf", 5.0), rec("a", "ma57", 6.0, inertia=wrong),
+            rec("b", "smf", 5.0), rec("b", "ma57", 6.0),            # b: no reference
+        ]
+        res = score.score(records, m, split="all", shift_ms=10.0,
+                          inertia_ref={"a": (6, 4, 0)})
+        ip = res["hard_indef"]["ipopt"][1]
+        self.assertEqual((ip["solvers"]["smf"]["inertia_pass"], ip["solvers"]["smf"]["inertia_checked"]),
+                         (1, 1))
+        self.assertEqual(ip["solvers"]["ma57"]["inertia_wrong"], 1)
+        self.assertEqual(ip["solvers"]["ma97"]["inertia_wrong"], 1)
+        rc = res["hard_indef"]["recommended"][1]
+        self.assertEqual(rc["solvers"]["smf"]["inertia_checked"], 1)   # a only
+        self.assertEqual(rc["solvers"]["ma57"]["inertia_wrong"], 1)
+        self.assertEqual([(i["case"], i["solver"], i["class"]) for i in rc["inertia_issues"]],
+                         [("a", "ma57", "wrong")])
+        md = score.render(res, "all")
+        self.assertIn("inertia exact / consistent / wrong", md)
+        self.assertIn("| a | ma57 | wrong |", md)
+
+    def test_load_inertia_ref_skips_disputed(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "ref.json"
+            f.write_text(json.dumps({"cases": {
+                "a": {"status": "ok", "pos": 6, "neg": 4, "zero": 0},
+                "b": {"status": "disputed"},
+                "c": {"status": "failed", "error": "x"}}}), encoding="utf-8")
+            self.assertEqual(score.load_inertia_ref(f), {"a": (6, 4, 0)})
+
 
     def test_thread_groups_are_separate_tables(self):
         m = manifest([case("a", "spd", "tuning")])
