@@ -6,6 +6,7 @@
 #endif
 
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -76,17 +77,56 @@ public:
     // iparm is session state: it is only (re)built when a new factor session is
     // created in analyse(), never reconfigured mid-session, so release_handle()
     // always sees the settings the handle was created with.
+    //
+    // iparm is 0-based here (C array); MKL's documentation numbers it 1-based,
+    // so iparm_[k] is the manual's iparm(k+1). iparm_[0] = 1 means "every
+    // entry below is user-supplied", so each one must match MKL's own default
+    // unless there is a reason not to. Reference: pardisoinit() of the linked
+    // oneMKL 2026.2 (mkl_version.h INTEL_MKL_VERSION 20260200; the 12900K kit
+    // runs the same build, 20260915) returns, for mtype = -2:
+    //   iparm[1]=3, iparm[7]=2, iparm[9]=8, iparm[17]=-1, iparm[18]=-1,
+    //   iparm[20]=1, everything else 0;
+    // for mtype = 2 the same without iparm[9] and iparm[20].
     void build_iparm() {
         std::memset(iparm_, 0, sizeof(iparm_));
         iparm_[0] = 1;   // use non-default iparm values
-        iparm_[1] = 2;   // METIS nested dissection ordering
+        // Fill-in reducing ordering: 3 = parallel (OpenMP) METIS nested
+        // dissection, oneMKL 2026.2's pardisoinit default (it was 2, serial
+        // METIS, in older releases). Same algorithm family; at 1 thread it
+        // runs serially. SMF_BENCH_PARDISO_ORDERING=0|2|3 overrides it for
+        // A/B checks.
+        iparm_[1] = 3;
+        if (const char *e = std::getenv("SMF_BENCH_PARDISO_ORDERING")) {
+            // Only an exact 0, 2 or 3 is taken; anything else keeps the default.
+            char *end = nullptr;
+            const long v = std::strtol(e, &end, 10);
+            if (end != e && *end == '\0' && (v == 0 || v == 2 || v == 3)) {
+                iparm_[1] = static_cast<MKL_INT>(v);
+            }
+        }
         iparm_[5] = 0;   // write solution to x (not b)
-        iparm_[23] = 1;  // parallel numerical factorization
+        // iparm_[7] = 0: up to two refinement steps when pivots were perturbed
+        // (MKL documents 0 as "two steps"; pardisoinit's 2 is the same cap).
+        // Two-level parallel factorization: a deliberate deviation from the
+        // default (0) at every thread count, kept from the original setup; MKL
+        // recommends it for parallel runs and it is a no-op at one thread.
+        iparm_[23] = 1;
         iparm_[26] = (track_ == "common") ? 1 : 0;
         if (indefinite_) {
-            iparm_[9] = 13;   // perturb pivots below 10^-13 (recommended for indef)
-            iparm_[10] = 1;   // scaling vectors
-            iparm_[12] = 1;   // weighted matching
+            // Pivot perturbation 10^-8 (iparm(10) = 8): MKL's default for
+            // symmetric indefinite matrices (13 is its nonsymmetric default).
+            iparm_[9] = 8;
+            // Scaling + weighted matching (iparm(11), iparm(13)): off by default
+            // for mtype -2, but the MKL manual recommends both for highly
+            // indefinite saddle-point / interior-point systems, which is what
+            // this suite is.
+            iparm_[10] = 1;
+            iparm_[12] = 1;
+            // Bunch-Kaufman 1x1 and 2x2 pivoting (iparm(21) = 1), MKL's
+            // default for symmetric indefinite matrices. With iparm_[0] = 1 a
+            // zero here meant 1x1 diagonal pivoting only, contradicting the
+            // class comment above.
+            iparm_[20] = 1;
         }
         iparm_[34] = 1;  // 0-based indexing
     }

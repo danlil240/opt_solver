@@ -295,7 +295,7 @@ public:
         return id;
     }
 
-    void configure(const Control &ctrl, const std::string &) override {
+    void configure(const Control &ctrl, const std::string &track) override {
         if (!available_) return;
         id_(cntl_, icntl_);
         // Silence error/warning/monitor streams and diagnostics; keep the
@@ -305,8 +305,21 @@ public:
         icntl_[2] = -1;
         icntl_[3] = -1;
         icntl_[4] = 0;
+        // CNTL(1), the pivot threshold: bench_replay's Control::pivot_u, which
+        // the ipopt track sets to 1e-8 (IPOPT's ma57_pivtol default).
         cntl_[0] = (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) ? 0.0
                                                                                     : ctrl.pivot_u;
+        if (track == "ipopt") {
+            // MA57 the way IPOPT's Ma57TSolverInterface drives it with its
+            // default options (the `recommended` track keeps MA57's own
+            // defaults, MC64 scaling included). Spelled out even where they
+            // equal MA57's defaults, so the track does not depend on them:
+            icntl_[5] = 5;    // ICNTL(6)  ma57_pivot_order 5 (automatic choice)
+            icntl_[10] = 16;  // ICNTL(11) ma57_block_size 16
+            icntl_[11] = 16;  // ICNTL(12) ma57_node_amalgamation 16
+            icntl_[14] = 0;   // ICNTL(15) ma57_automatic_scaling "no" (MA57 default: 1, MC64)
+            icntl_[15] = 0;   // ICNTL(16) ma57_small_pivot_flag 0
+        }
     }
 
     Outcome analyse(const CscLower &A) override {

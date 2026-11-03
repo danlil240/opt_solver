@@ -311,6 +311,50 @@ smf::CscLower make_builtin_fixture(const std::string &case_id, bool &is_spd) {
     return A;
 }
 
+// Matrix Market (lower triangle, symmetric) writer for --export-mtx / --export-step.
+bool write_matrix_market(const std::string &path, const smf::CscLower &A) {
+    std::FILE *f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    std::fprintf(f, "%%%%MatrixMarket matrix coordinate real symmetric\n%d %d %lld\n", static_cast<int>(A.n),
+                 static_cast<int>(A.n), static_cast<long long>(A.nnz()));
+    for (smf::Int j = 0; j < A.n; ++j) {
+        for (smf::Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            std::fprintf(f, "%d %d %.17g\n", static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]) + 1,
+                         static_cast<int>(j) + 1, A.values[static_cast<std::size_t>(p)]);
+        }
+    }
+    return std::fclose(f) == 0;
+}
+
+// The values of the last factorization a warm_sequence replay runs (the matrix
+// its record's inertia belongs to): the last of the --seq-steps picks of a
+// recorded sequence, else the last of the 5 synthetic steps (nonzero leading
+// diagonal entries x 1.2), mirroring the replay loop in main().
+bool last_replayed_values(const smf::CscLower &A, const std::string &seq_values_path, int seq_steps,
+                          std::vector<double> &out) {
+    out = A.values;
+    if (!seq_values_path.empty()) {
+        const std::size_t step_bytes = A.values.size() * sizeof(double);
+        std::ifstream in(seq_values_path, std::ios::binary | std::ios::ate);
+        const std::size_t bytes = in ? static_cast<std::size_t>(in.tellg()) : 0;
+        const std::size_t nsteps = step_bytes ? bytes / step_bytes : 0;
+        if (nsteps == 0) return false;
+        const auto picks = smf::bench::replay_step_picks(nsteps, seq_steps);
+        in.seekg(static_cast<std::streamoff>(picks.back() * step_bytes));
+        in.read(reinterpret_cast<char *>(out.data()), static_cast<std::streamsize>(step_bytes));
+        return static_cast<bool>(in);
+    }
+    const double delta = 1.0 + 0.05 * 4.0;
+    for (smf::Int j = 0; j < A.n; ++j) {
+        const smf::Int p0 = A.col_ptr[static_cast<std::size_t>(j)];
+        if (p0 < A.col_ptr[static_cast<std::size_t>(j) + 1] && A.row_idx[static_cast<std::size_t>(p0)] == j) {
+            const double v0 = A.values[static_cast<std::size_t>(p0)];
+            if (v0 != 0.0) out[static_cast<std::size_t>(p0)] = v0 * delta;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -354,6 +398,11 @@ int main(int argc, char **argv) {
     // as Matrix Market, print "mtype=spd|indefinite", and exit. run_wsl.py uses
     // it to hand the built-in cases to the Linux SSIDS driver.
     std::string export_mtx;
+    // --export-step PATH: write the matrix whose inertia the record reports
+    // (cold: the case's matrix; warm_sequence: its last replayed step, see
+    // last_replayed_values) as Matrix Market and exit. tools/bench/inertia_ref.py
+    // builds its reference inertia from it.
+    std::string export_step;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -380,6 +429,7 @@ int main(int argc, char **argv) {
         else if (arg == "--ipm-static-zero") ipm_static_zero = true;
         else if (arg == "--print-steps") print_steps = true;
         else if (arg == "--export-mtx" && i + 1 < argc) export_mtx = argv[++i];
+        else if (arg == "--export-step" && i + 1 < argc) export_step = argv[++i];
         else if (arg == "--seq-steps" && i + 1 < argc) {
             const std::string v = argv[++i];
             seq_steps = (v == "all") ? -1 : std::max(1, std::atoi(v.c_str()));
@@ -518,20 +568,23 @@ int main(int argc, char **argv) {
     else if (mtype == "indefinite") is_spd = false;
 
     if (!export_mtx.empty()) {
-        std::FILE *f = std::fopen(export_mtx.c_str(), "wb");
-        if (!f) {
+        if (!write_matrix_market(export_mtx, A)) {
             std::fprintf(stderr, "cannot write %s\n", export_mtx.c_str());
             return 2;
         }
-        std::fprintf(f, "%%%%MatrixMarket matrix coordinate real symmetric\n%d %d %lld\n", static_cast<int>(A.n),
-                     static_cast<int>(A.n), static_cast<long long>(A.nnz()));
-        for (smf::Int j = 0; j < A.n; ++j) {
-            for (smf::Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-                std::fprintf(f, "%d %d %.17g\n", static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]) + 1,
-                             static_cast<int>(j) + 1, A.values[static_cast<std::size_t>(p)]);
-            }
+        std::printf("mtype=%s\n", is_spd ? "spd" : "indefinite");
+        return 0;
+    }
+    if (!export_step.empty()) {
+        smf::CscLower S = A;
+        if (mode == "warm_sequence" && !last_replayed_values(A, seq_values_path, seq_steps, S.values)) {
+            std::fprintf(stderr, "unreadable --seq-values file %s\n", seq_values_path.c_str());
+            return 2;
         }
-        std::fclose(f);
+        if (!write_matrix_market(export_step, S)) {
+            std::fprintf(stderr, "cannot write %s\n", export_step.c_str());
+            return 2;
+        }
         std::printf("mtype=%s\n", is_spd ? "spd" : "indefinite");
         return 0;
     }
