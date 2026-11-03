@@ -120,12 +120,25 @@ struct MatchingResult;
 /// unavailable. a_xadj / a_adj: A's symmetric adjacency from
 /// lower_csc_adjacency, when the caller has it (analyse() does); built
 /// here for the flop prediction otherwise.
+///
+/// nd: how METIS runs. threads 0 (default): serial METIS_NodeND, after AMD
+/// and its flop prediction. threads >= 1: parallel_nd_order on that many
+/// threads (its order does not depend on the count). speculate (with
+/// threads >= 1, how != Amd): METIS and its flop prediction start on a
+/// helper thread before AMD, overlapping AMD and AMD's flop prediction;
+/// the result is the same as without (a METIS order the Auto rule would
+/// not try is discarded), only the schedule changes.
+struct CandidateNd {
+    int threads = 0;
+    bool speculate = false;
+};
 bool matching_order_from(const CscLower& A, const MatchingResult& mr, double pair_tol,
                          std::vector<Int>& perm, std::vector<Int>& amd_work,
                          MatchingOrderStats* stats = nullptr,
                          CompressedOrder how = CompressedOrder::Auto,
                          int expected_refactors = 1,
-                         const Int* a_xadj = nullptr, const Int* a_adj = nullptr);
+                         const Int* a_xadj = nullptr, const Int* a_adj = nullptr,
+                         CandidateNd nd = CandidateNd{});
 
 /// Build symmetric CSR adjacency (no self-loops, each edge once per direction)
 /// from a lower-CSC matrix. Returns {xadj, adjncy}.

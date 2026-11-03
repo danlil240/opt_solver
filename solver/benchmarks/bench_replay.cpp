@@ -694,6 +694,8 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // SMF_BENCH_CANDIDATE_PARALLEL_ND = 0 | 1 (Control::candidate_parallel_nd).
+    if (const char *e = std::getenv("SMF_BENCH_CANDIDATE_PARALLEL_ND")) ctrl.candidate_parallel_nd = std::atoi(e) != 0;
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,

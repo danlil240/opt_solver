@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <numeric>
 #include <set>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -313,4 +314,68 @@ int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+// CandidateNd (Control::candidate_parallel_nd): the compressed graph's METIS
+// as parallel nested dissection gives the same ordering at every thread
+// count, and the speculative METIS (started before AMD, overlapping AMD and
+// its flop prediction) changes nothing: the same ordering, flops, etree and
+// kept method as without, including where the Auto rule does not try METIS
+// (the speculative one is discarded: AMD's result, as serial). Repeats
+// reuse the AMD workspace.
+TEST(MetisOrdering, CandidateParallelNdIsExactAndThreadIndependent)
+{
+#if !(defined(SMF_HAS_METIS) && SMF_HAS_METIS)
+    GTEST_SKIP() << "METIS not compiled in";
+#endif
+    const int g = 60, m = 800, n = g * g + m;
+    const smf::CscLower A = kkt_grid(g, m);
+    const smf::MatchingResult mr = smf::compute_symmetric_matching(A);
+    ASSERT_EQ(mr.status, smf::ErrorCode::Success);
+    const auto sn = static_cast<std::size_t>(n);
+    std::vector<smf::Int> xadj(sn + 1), adj(smf::lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+    smf::lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), xadj.data(), adj.data());
+    for (smf::CompressedOrder how : {smf::CompressedOrder::Metis, smf::CompressedOrder::Auto}) {
+        for (int refactors : {1, 1000000}) {
+            const std::string what = "how " + std::to_string(static_cast<int>(how)) + " refactors " +
+                                     std::to_string(refactors);
+            std::vector<smf::Int> work, serial_perm, pnd_perm;
+            smf::MatchingOrderStats serial_st, pnd_st;
+            ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, serial_perm, work, &serial_st, how, refactors,
+                                                 xadj.data(), adj.data()));
+            ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, pnd_perm, work, &pnd_st, how, refactors, xadj.data(),
+                                                 adj.data(), smf::CandidateNd{1, false}));
+            ASSERT_TRUE(is_valid_permutation(pnd_perm, n)) << what;
+            if (how == smf::CompressedOrder::Metis || refactors > 1) {
+                EXPECT_EQ(pnd_st.used, smf::CompressedOrder::Metis) << what;  // METIS tried and kept
+            } else {
+                // AMD's factor is cheap: METIS is not tried, nothing changes.
+                EXPECT_EQ(serial_st.used, smf::CompressedOrder::Amd) << what;
+                EXPECT_EQ(pnd_perm, serial_perm) << what;
+                EXPECT_EQ(pnd_st.flops, serial_st.flops) << what;
+            }
+            for (int threads : {2, 4, 8}) {
+                for (bool speculate : {false, true}) {
+                    for (int rep = 0; rep < 2; ++rep) {
+                        std::vector<smf::Int> perm;
+                        smf::MatchingOrderStats st;
+                        // Without the caller's adjacency on the second repeat.
+                        ASSERT_TRUE(smf::matching_order_from(A, mr, 0.1, perm, work, &st, how, refactors,
+                                                             rep == 0 ? xadj.data() : nullptr,
+                                                             rep == 0 ? adj.data() : nullptr,
+                                                             smf::CandidateNd{threads, speculate}));
+                        const std::string at = what + " threads " + std::to_string(threads) + " speculate " +
+                                               std::to_string(speculate) + " rep " + std::to_string(rep);
+                        EXPECT_EQ(perm, pnd_perm) << at;
+                        EXPECT_EQ(st.flops, pnd_st.flops) << at;
+                        EXPECT_EQ(st.used, pnd_st.used) << at;
+                        EXPECT_EQ(st.etree, pnd_st.etree) << at;
+                        EXPECT_EQ(st.etree_depth, pnd_st.etree_depth) << at;
+                        EXPECT_EQ(st.pairs, pnd_st.pairs) << at;
+                        EXPECT_EQ(st.nodes, pnd_st.nodes) << at;
+                    }
+                }
+            }
+        }
+    }
 }

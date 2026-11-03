@@ -3,6 +3,7 @@
 
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
+#include "smf/determinism.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/scaling_matching.hpp"
@@ -669,7 +670,10 @@ TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
 // ConcurrentTrialIsTheSerialOne under Hybrid, plus a matrix whose searches
 // switch to the auction (43.9 passes): the concurrent trial's one-pass slices
 // pause the hybrid engine around its switch and auction, and 1 vs 4 threads
-// still give the same perm, scales, rejected flag and verdict.
+// still give the same perm, scales, rejected flag and verdict. The candidate's
+// METIS stays serial at 4 threads (candidate_parallel_nd off): the last
+// matrix's compressed AMD is dear enough to try METIS, whose parallel ND
+// (the default with threads) would move the exact ratio, not the trial.
 TEST(MatchingTrial, HybridConcurrentTrialIsTheSerialOne) {
     const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(8000, 2000, 1),
                              opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 6, 1.0),
@@ -677,8 +681,10 @@ TEST(MatchingTrial, HybridConcurrentTrialIsTheSerialOne) {
     for (const CscLower &A : mats) {
         for (double budget : {-1.0, 0.0, 2.0}) {
             SCOPED_TRACE("n " + std::to_string(A.n) + " budget " + std::to_string(budget));
-            const Control c1 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 1);
-            const Control c4 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 4);
+            Control c1 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 1);
+            c1.candidate_parallel_nd = false;  // as c4 (deterministic builds too)
+            Control c4 = hybrid_test_control(budget, MatchingAlgorithm::Hybrid, 4);
+            c4.candidate_parallel_nd = false;
             Solver s1, s4;
             Info i1, i4;
             auto a1 = s1.analyse(A, c1, i1);
@@ -775,6 +781,77 @@ TEST(MatchingTrial, ResumesWhenInitialMatchingPasses) {
     ASSERT_FALSE(a1->matching_scale.empty());
     EXPECT_EQ(a2->matching_scale, a1->matching_scale);
     EXPECT_FALSE(a2->matching_rejected);
+}
+
+
+// Control::candidate_parallel_nd. Many expected refactors make the matching
+// candidate's compressed AMD dear, so its Auto rule tries METIS (and the
+// base factor counts as dear, so the speculative METIS may run beside AMD).
+// At 1 thread (outside deterministic mode) the analysis is bitwise the one
+// with the switch off (serial METIS_NodeND, as before it); with threads the
+// candidate's METIS is parallel ND, whose order is the same at 2, 4 and 8
+// threads and across repeats on the same Solver; off, threads give the 1
+// thread analysis (as before). Deterministic mode takes parallel ND at every
+// thread count, 1 included.
+TEST(MatchingTrial, CandidateParallelNdThreadIndependence) {
+    for (const CscLower &A : {opf_like_kkt(10000, 1000, 7), opf_like_kkt(6000, 5000, 7)}) {
+        Control base;
+        base.matrix_type = MatrixType::RealSymmetricIndefinite;
+        base.ordering = OrderingMethod::AutoSerial;
+        base.matching_search_budget = -1.0;
+        base.expected_refactors = 1000000;
+        base.auto_threads = false;  // small test trees
+        const auto run = [&](Solver &s, int threads, bool on, bool det, Info &info) {
+            Control c = base;
+            c.num_threads = threads;
+            c.candidate_parallel_nd = on;
+            c.deterministic = det;
+            auto a = s.analyse(A, c, info);
+            EXPECT_NE(a, nullptr);
+            return a;
+        };
+        Solver s_on1, s_off1, s_off4;
+        Info i_on1, i_off1, i_off4;
+        auto on1 = run(s_on1, 1, true, false, i_on1);
+        auto off1 = run(s_off1, 1, false, false, i_off1);
+        auto off4 = run(s_off4, 4, false, false, i_off4);
+        ASSERT_TRUE(on1 && off1 && off4);
+        EXPECT_EQ(i_on1.matching_trial, MatchingTrial::Exact);
+        if (!deterministic_mode(Control{})) {  // an SMF_DETERMINISTIC build takes parallel ND at 1 thread
+            EXPECT_EQ(on1->perm, off1->perm);
+            EXPECT_EQ(i_on1.matching_exact_ratio, i_off1.matching_exact_ratio);
+            EXPECT_EQ(i_on1.ordering_used, i_off1.ordering_used);
+        }
+        EXPECT_EQ(off4->perm, off1->perm);
+        EXPECT_EQ(i_off4.matching_exact_ratio, i_off1.matching_exact_ratio);
+
+        Solver s2;
+        Info i2;
+        auto ref = run(s2, 2, true, false, i2);
+        ASSERT_TRUE(ref);
+        EXPECT_EQ(i2.matching_trial, MatchingTrial::Exact);
+        for (int threads : {2, 4, 8}) {
+            Solver s;
+            for (int rep = 0; rep < 2; ++rep) {
+                Info i;
+                auto a = run(s, threads, true, false, i);
+                ASSERT_TRUE(a);
+                EXPECT_EQ(a->perm, ref->perm) << "threads " << threads << " rep " << rep;
+                EXPECT_EQ(i.matching_trial, i2.matching_trial) << "threads " << threads;
+                EXPECT_EQ(i.matching_exact_ratio, i2.matching_exact_ratio) << "threads " << threads;
+                EXPECT_EQ(i.ordering_used, i2.ordering_used) << "threads " << threads;
+            }
+        }
+
+        Solver sd1, sd4;
+        Info id1, id4;
+        auto d1 = run(sd1, 1, true, true, id1);
+        auto d4 = run(sd4, 4, true, true, id4);
+        ASSERT_TRUE(d1 && d4);
+        EXPECT_EQ(d1->perm, d4->perm);
+        EXPECT_EQ(id1.matching_exact_ratio, id4.matching_exact_ratio);
+        EXPECT_EQ(d4->perm, ref->perm);  // AutoSerial base: the same candidate as without deterministic mode
+    }
 }
 
 } // namespace smf

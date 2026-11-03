@@ -118,9 +118,9 @@ namespace smf
     {
     public:
         ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, MatchingAlgorithm alg,
-                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work)
+                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work, int nd_threads)
             : C_(C), budget_(budget), refactors_(expected_refactors), alg_(alg), xadj_(xadj), adj_(adj),
-              amd_work_(amd_work)
+              amd_work_(amd_work), nd_threads_(nd_threads)
         {
             try
             {
@@ -160,6 +160,13 @@ namespace smf
         // diagonal_scale holds its scaling.
         bool diagonal() const { return diagonal_; }
         void stop() { stop_.store(true, std::memory_order_relaxed); }
+        // The calling thread has finished the base ordering (its parallel
+        // ND included); dear: its AMD flops pass the AutoParallel METIS rule
+        // (kMetisFlopsPerRow), so the candidate's compressed AMD most likely
+        // does too and its METIS is worth starting before AMD's verdict.
+        // Read once, when the candidate ordering starts: it only sets the
+        // schedule (threads, overlap), never the result.
+        void base_ordered(bool dear) { base_state_.store(dear ? 1 : 0, std::memory_order_release); }
         // Waits for the worker and rethrows what it threw. Afterwards
         // ordered() says whether the exact matching was perfect and its
         // ordering built (perm, stats).
@@ -212,9 +219,21 @@ namespace smf
                 if (stopped())
                     return;
                 const MatchingResult mr = matcher.current();
+                // Candidate METIS as parallel ND (Control::candidate_parallel_nd):
+                // half the threads while the base ordering may still run its
+                // own parallel ND, all of them once it is done (one fewer when
+                // the speculative METIS overlaps AMD on this thread).
+                CandidateNd nd;
+                if (nd_threads_ > 0)
+                {
+                    const int base = base_state_.load(std::memory_order_acquire);
+                    nd.speculate = base == 1 && nd_threads_ > 1;
+                    nd.threads = base < 0 ? std::max(1, nd_threads_ / 2)
+                                          : std::max(1, nd.speculate ? nd_threads_ - 1 : nd_threads_);
+                }
                 ordered_ = mr.status == ErrorCode::Success &&
                            matching_order_from(C_, mr, kMatchingPairTol, perm, amd_work_, &stats,
-                                               CompressedOrder::Auto, refactors_, xadj_, adj_);
+                                               CompressedOrder::Auto, refactors_, xadj_, adj_, nd);
             }
             catch (...)
             {
@@ -235,6 +254,8 @@ namespace smf
         const Int *const xadj_;
         const Int *const adj_;
         std::vector<Int> &amd_work_;
+        const int nd_threads_; // 0: serial METIS for the candidate
+        std::atomic<int> base_state_{-1}; // -1 running, 0 done, 1 done and dear
         std::thread thread_;
         std::mutex mutex_;
         std::condition_variable ready_cv_;
@@ -517,11 +538,19 @@ namespace smf
         const double budget_edges = budget_passes * 2.0 * static_cast<double>(C.row_idx.size());
         const long long budget =
             (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
+        // The candidate's METIS: parallel ND where the base ordering's is
+        // (more than one thread, or deterministic mode at any count), on
+        // Control::candidate_parallel_nd; serial METIS_NodeND otherwise.
+        const CandidateNd candidate_nd{
+            control.candidate_parallel_nd && (control.num_threads > 1 || deterministic_mode(control))
+                ? std::max(1, control.num_threads)
+                : 0,
+            false};
         if (auto_matching && control.num_threads > 1)
         {
             concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors,
                                                            control.matching_algorithm, xadj, adj,
-                                                           analyse_scratch_worker_);
+                                                           analyse_scratch_worker_, candidate_nd.threads);
         }
         else if (auto_matching)
         {
@@ -543,7 +572,7 @@ namespace smf
                 auto_matching = mr.status == ErrorCode::Success &&
                                 matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                     &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors, xadj, adj);
+                                                    control.expected_refactors, xadj, adj, candidate_nd);
                 if (auto_matching)
                     info.matching_trial = MatchingTrial::Exact;
             }
@@ -652,6 +681,8 @@ namespace smf
         Int *sym1 = sym_b;
         Int depth0 = symbolic_counts(perm.data(), sym0);
         lap(phases.etree_counts);
+        const bool base_dear = concurrent && factor_flops(sym0) * std::max(1, control.expected_refactors) >=
+                                                 kMetisFlopsPerRow * static_cast<double>(n);
 
         // AutoParallel on large matrices: METIS costs several us per vertex
         // (up to ~85% of analysis) and only pays off when AMD's factor is
@@ -697,6 +728,8 @@ namespace smf
         }
 
         lap(phases.ordering);
+        if (concurrent)
+            concurrent->base_ordered(base_dear);
 
         // Auto matching: the compressed ordering keeps 2x2 pivot pairs
         // together, which AMD's lower predicted fill ignores (AMD's factor
@@ -776,7 +809,7 @@ namespace smf
                 auto_matching = mr.status == ErrorCode::Success &&
                                 matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
                                                     &matching_stats, CompressedOrder::Auto,
-                                                    control.expected_refactors, xadj, adj);
+                                                    control.expected_refactors, xadj, adj, candidate_nd);
                 if (auto_matching)
                     info.matching_trial = MatchingTrial::ResumedExact;
             }

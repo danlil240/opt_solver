@@ -1,12 +1,16 @@
 #include "smf/ordering.hpp"
 #include "smf/etree.hpp"
 #include "smf/ordering_metis.hpp"
+#include "smf/ordering_parallel_nd.hpp"
 #include "smf/scaling_matching.hpp"
 #include "smf/supernode.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <exception>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 namespace smf {
@@ -32,7 +36,7 @@ bool matching_order_lower_csc(const CscLower &A, double pair_tol, std::vector<In
 
 bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pair_tol, std::vector<Int> &perm,
                          std::vector<Int> &amd_work, MatchingOrderStats *stats, CompressedOrder how,
-                         int expected_refactors, const Int *a_xadj, const Int *a_adj) {
+                         int expected_refactors, const Int *a_xadj, const Int *a_adj, CandidateNd nd) {
     const Int n = A.n;
     const auto sn = static_cast<std::size_t>(n);
     if (n == 0 || A.values.size() != A.row_idx.size() || mr.col_to_row.size() != sn || mr.scale.size() != sn)
@@ -168,21 +172,22 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
     };
 
     // Predicted flops (sum of exact column counts squared) of an ordering
-    // of A, from A's symmetric adjacency (the caller's, or built on first
-    // use). The ordering's elimination tree, postorder and column counts
-    // are left in `tree` (3n) and its depth in `depth`.
-    std::vector<Int> axadj, aadj, sym;
-    const auto predicted_flops = [&](const std::vector<Int> &p, std::vector<Int> &tree, Int &depth) {
-        if (sym.empty()) {
-            if (a_xadj == nullptr || a_adj == nullptr) {
-                axadj.resize(sn + 1);
-                aadj.resize(lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
-                lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), axadj.data(), aadj.data());
-                a_xadj = axadj.data();
-                a_adj = aadj.data();
-            }
-            sym.resize(5 * sn + 1);
-        }
+    // of A, from A's symmetric adjacency (the caller's, or built here). The
+    // ordering's elimination tree, postorder and column counts are left in
+    // `tree` (3n) and its depth in `depth`; `sym` is scratch (5n + 1), one
+    // per thread, so that METIS's prediction can run beside AMD's.
+    const bool need_flops = stats != nullptr || how == CompressedOrder::Auto;
+    std::vector<Int> axadj, aadj;
+    if (need_flops && (a_xadj == nullptr || a_adj == nullptr)) {
+        axadj.resize(sn + 1);
+        aadj.resize(lower_csc_adjacency_size(n, A.col_ptr.data(), A.row_idx.data()));
+        lower_csc_adjacency(n, A.col_ptr.data(), A.row_idx.data(), axadj.data(), aadj.data());
+        a_xadj = axadj.data();
+        a_adj = aadj.data();
+    }
+    const auto predicted_flops = [&](const std::vector<Int> &p, std::vector<Int> &tree, Int &depth,
+                                     std::vector<Int> &sym) {
+        sym.resize(5 * sn + 1);
         tree.resize(3 * sn);
         Int *iperm = sym.data();
         Int *work = iperm + sn;  // 4n + 1
@@ -202,6 +207,58 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
         return fl;
     };
 
+    // METIS nested dissection on the compressed graph, a pair weighing two
+    // vertices (serial METIS_NodeND, or parallel ND on nd.threads), expanded
+    // and its flops predicted. Reads only what is built above, so it may run
+    // on a helper thread.
+    std::vector<Int> metis_perm, cand_tree, metis_sym;  // the METIS ordering's
+    Int cand_depth = 0;
+    double mflops = 0.0;
+    const auto run_metis = [&]() {
+        std::vector<Int> vwgt(snodes), mperm(snodes);
+        for (Int J = 0; J < nnodes; ++J)
+            vwgt[static_cast<std::size_t>(J)] =
+                partner[static_cast<std::size_t>(first_of[static_cast<std::size_t>(J)])] >= 0 ? 2 : 1;
+        bool ok;
+        if (nd.threads > 0) {
+            ok = parallel_nd_order(nnodes, cxadj.data(), cadj.data(), vwgt.data(), nd.threads, mperm.data());
+        } else {
+            std::vector<Int> miperm(snodes);
+            ok = metis_node_nd(nnodes, cxadj.data(), cadj.data(), vwgt.data(), mperm.data(), miperm.data());
+        }
+        if (!ok) return false;
+        expand(mperm, metis_perm);
+        mflops = need_flops ? predicted_flops(metis_perm, cand_tree, cand_depth, metis_sym) : 0.0;
+        return true;
+    };
+
+    // Speculative METIS on a helper thread, overlapping AMD and its flops
+    // below; the Auto rule still decides whether it counts. Joined on every
+    // way out (the guard), its exception rethrown when its result is used.
+    bool speculative = nd.speculate && nd.threads > 0 && how != CompressedOrder::Amd && !cadj.empty();
+    bool spec_ok = false;
+    std::exception_ptr spec_error;
+    std::thread helper;
+    struct Joiner {
+        std::thread &t;
+        ~Joiner() {
+            if (t.joinable()) t.join();
+        }
+    } join_helper{helper};
+    if (speculative) {
+        try {
+            helper = std::thread([&] {
+                try {
+                    spec_ok = run_metis();
+                } catch (...) {
+                    spec_error = std::current_exception();
+                }
+            });
+        } catch (...) {
+            speculative = false;  // no thread: METIS runs below, if tried
+        }
+    }
+
     // AMD on the compressed graph (always: it is the fallback for METIS).
     std::vector<Int> node_perm(snodes);
     const std::size_t amd_need = amd_adjacency_work_size(nnodes, cadj.size());
@@ -210,14 +267,12 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
         return false;
     expand(node_perm, perm);
     CompressedOrder used = CompressedOrder::Amd;
-    const bool need_flops = stats != nullptr || how == CompressedOrder::Auto;
-    std::vector<Int> tree, cand_tree;  // the kept / the METIS ordering's
-    Int depth = 0, cand_depth = 0;
-    double flops = need_flops ? predicted_flops(perm, tree, depth) : 0.0;
+    std::vector<Int> tree, sym;  // the kept ordering's
+    Int depth = 0;
+    double flops = need_flops ? predicted_flops(perm, tree, depth, sym) : 0.0;
 
-    // METIS nested dissection on the same compressed graph, a pair weighing
-    // two vertices. Auto tries it only where AMD's factor is expensive per
-    // row (the AutoParallel rule of analyse()) and keeps the cheaper one.
+    // Auto tries METIS only where AMD's factor is expensive per row (the
+    // AutoParallel rule of analyse()) and keeps the cheaper one.
     // (A 0.8x margin was tried for ncvxqp1's u = 1e-8 accuracy: its METIS
     // ordering predicts 0.355x AMD's flops, so the margin changed nothing.)
     bool try_metis = how == CompressedOrder::Metis;
@@ -225,22 +280,20 @@ bool matching_order_from(const CscLower &A, const MatchingResult &mr, double pai
         try_metis = flops * static_cast<double>(std::max(1, expected_refactors)) >=
                     kMetisFlopsPerRow * static_cast<double>(n);
     if (try_metis && !cadj.empty()) {
-        std::vector<Int> vwgt(snodes), mperm(snodes), miperm(snodes);
-        for (Int J = 0; J < nnodes; ++J)
-            vwgt[static_cast<std::size_t>(J)] =
-                partner[static_cast<std::size_t>(first_of[static_cast<std::size_t>(J)])] >= 0 ? 2 : 1;
-        if (metis_node_nd(nnodes, cxadj.data(), cadj.data(), vwgt.data(), mperm.data(),
-                          miperm.data())) {
-            std::vector<Int> metis_perm;
-            expand(mperm, metis_perm);
-            const double mflops = need_flops ? predicted_flops(metis_perm, cand_tree, cand_depth) : 0.0;
-            if (how == CompressedOrder::Metis || mflops < flops) {
-                perm = std::move(metis_perm);
-                flops = mflops;
-                used = CompressedOrder::Metis;
-                tree.swap(cand_tree);
-                depth = cand_depth;
-            }
+        bool metis_ok;
+        if (speculative) {
+            helper.join();
+            if (spec_error) std::rethrow_exception(spec_error);
+            metis_ok = spec_ok;
+        } else {
+            metis_ok = run_metis();
+        }
+        if (metis_ok && (how == CompressedOrder::Metis || mflops < flops)) {
+            perm = std::move(metis_perm);
+            flops = mflops;
+            used = CompressedOrder::Metis;
+            tree.swap(cand_tree);
+            depth = cand_depth;
         }
     }
 
