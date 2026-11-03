@@ -1,5 +1,7 @@
 #include "adapter.hpp"
+#include "../common/ipopt_dynamic_scaling.hpp"
 #include "smf/ipm_session.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -437,7 +439,8 @@ private:
 };
 
 /// smf through IpmSession (make_smf_ipm_adapter): the MA97 plugin's path
-/// inside IPOPT with only the static mode on.
+/// inside IPOPT with only the static mode on; or with the plugin's own
+/// IpmControl (make_smf_ipopt_plugin_adapter).
 class SmfIpmSessionAdapter final : public SolverAdapter {
 public:
     SmfIpmSessionAdapter(StaticMode mode, bool static_zero) {
@@ -447,12 +450,16 @@ public:
         ipm_.static_mode = mode;
         ipm_.static_as_zero = static_zero;
     }
+    // The ipopt-plugin track: also emulates IPOPT's default dynamic scaling
+    // around the plugin's per-call scaling decision (see factor()).
+    SmfIpmSessionAdapter(const IpmControl &ipm, std::string label)
+        : ipm_(ipm), label_(std::move(label)), ipopt_scaling_(true) {}
 
     AdapterIdentity identity() const override {
         AdapterIdentity id;
         id.solver_id = "smf";
         id.version = "0.1.0";
-        id.library_path = "in-tree:libsmf (IpmSession)";
+        id.library_path = "in-tree:libsmf (" + label_ + ")";
         id.integer_abi = "int32_offsets64";
         id.available = true;
         id.supports_spd = true;
@@ -478,6 +485,7 @@ public:
         const ErrorCode ec = session_.analyse(A, {}, ctrl_, ipm_);
         stats_.analyse_ms = ms_since(t0, Clock::now());
         analysed_ = false;
+        ipopt_dyn_.reset();
         if (ec != ErrorCode::Success) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "smf::IpmSession::analyse failed";
@@ -498,11 +506,44 @@ public:
             stats_.reason = "values size mismatch";
             return stats_.outcome;
         }
-        session_.set_control(ctrl_);
+        // ipopt-plugin track: IPOPT 3.14's default dynamic scaling
+        // (IpoptDynamicScaling, common/ipopt_dynamic_scaling.hpp): MC64 is
+        // requested on the factor after a successful one with num_delay -
+        // numdelay_ > 0.05 n (numdelay_: the delays of the last MC64 factor),
+        // and the returned scale is passed back on later factors. The plugin
+        // answers each call through smf::ma97_scaling_call(), as here.
+        Control c = ctrl_;
+        Ma97ScalingCall call;
+        if (ipopt_scaling_) {
+            if (ipopt_dyn_.mc64_requested()) c.scaling = ScalingMethod::Matching;  // MA97 scaling = 1
+            const AnalysisKeep *ak = session_.analysis_keep();
+            call = ma97_scaling_call(c, ak != nullptr && ak->matching_rejected, ipopt_dyn_.scale(),
+                                     static_cast<int>(pattern_->n));
+        }
+        session_.set_control(c);
+        if (call.reuse) session_.set_user_scale(ipopt_dyn_.scale());
         const auto t0 = Clock::now();
-        const IpmFactorStatus st = session_.factor(values);
+        IpmFactorStatus st = session_.factor(values);
+        // The plugin's stale-scale retry (smf_ma97_plugin.cpp, ma97_factor_d).
+        if (plugin_stale_scale_retry() && call.reuse && st == IpmFactorStatus::Singular) {
+            Control fresh = c;
+            fresh.scaling = ScalingMethod::Matching;
+            session_.set_control(fresh);
+            const IpmFactorStatus retried = session_.factor(values);
+            if (retried == IpmFactorStatus::Ok || retried == IpmFactorStatus::Singular) {
+                st = retried;
+                call.computed = true;
+            } else {
+                session_.set_control(c);
+                session_.set_user_scale(ipopt_dyn_.scale());
+                st = session_.factor(values);
+            }
+        }
         const double ms = ms_since(t0, Clock::now());
         const Info &info = session_.info();
+        if (ipopt_scaling_)
+            ipopt_dyn_.after_factor(st, call, session_.factor_keep().scale, static_cast<int>(info.delayed_pivots),
+                                    static_cast<int>(pattern_->n));
         // The first factor() runs the deferred analysis: count it as analysis.
         const double analyse_ms = analysed_ ? 0.0 : 1e3 * info.analyse_seconds;
         analysed_ = analysed_ || session_.analysis_keep() != nullptr;
@@ -567,6 +608,9 @@ public:
 private:
     Control ctrl_{};
     IpmControl ipm_{};
+    std::string label_ = "IpmSession";
+    bool ipopt_scaling_ = false;   // emulate IPOPT's dynamic scaling (ipopt-plugin)
+    IpoptDynamicScaling ipopt_dyn_;  // IPOPT's side: MC64 requests and the scale it holds
     IpmSession session_;
     const CscLower *pattern_ = nullptr;
     bool analysed_ = false;
@@ -626,6 +670,10 @@ std::unique_ptr<SolverAdapter> make_smf_adapter() {
 
 std::unique_ptr<SolverAdapter> make_smf_ipm_adapter(StaticMode mode, bool static_zero) {
     return std::make_unique<SmfIpmSessionAdapter>(mode, static_zero);
+}
+
+std::unique_ptr<SolverAdapter> make_smf_ipopt_plugin_adapter(const IpmControl &ipm) {
+    return std::make_unique<SmfIpmSessionAdapter>(ipm, "IpmSession, ipopt-plugin");
 }
 
 std::optional<StaticMode> parse_ipm_static(const std::string &name) {

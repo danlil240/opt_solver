@@ -5,6 +5,7 @@
 #include "common/validation.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/matrix_market.hpp"
 
 #include <algorithm>
@@ -397,8 +398,45 @@ int main(int argc, char **argv) {
     if (sequence_id.empty()) sequence_id = case_id;
     if (family_id.empty()) family_id = sequence_id;
 
+    // "ipopt-plugin" track: smf exactly as the MA97 plugin (libsmf_ma97) runs
+    // it inside IPOPT under IPOPT's default ma97 options: the plugin's
+    // Control (smf::ipopt_plugin_control(), the function the plugin maps every
+    // MA97 control block through) and its IpmSession with the plugin's
+    // IpmControl (smf::ipopt_plugin_ipm_control(), SMF_IPM_* environment);
+    // the analysis is deferred to the first factorization, as IPOPT analyses
+    // the pattern without values. --ipm-static, when given, overrides the
+    // static mode. smf only: rivals inside IPOPT are not modelled yet.
+    // IPOPT's dynamic scaling (MC64 whenever delays grow by > 0.05 n over
+    // the last MC64 factor, reuse in between; common/ipopt_dynamic_scaling.hpp)
+    // is emulated by the adapter over the replayed steps. With
+    // SMF_IPM_REANALYSE=1 a re-analysis runs inside factor() and its time
+    // lands in factor_ms, not analyse_ms.
+    const bool plugin_track = track == "ipopt-plugin";
+    if (plugin_track && threads > 1) {
+        // Until the plugin sets Control::num_threads (it keeps the default 1).
+        std::fprintf(stderr, "warning: the IPOPT plugin runs smf with Control::num_threads = 1 (serial tree, "
+                             "only BLAS threads): this %d-thread run is a 1-thread-tree run\n", threads);
+    }
+    // The IpmSession path (--ipm-static or the ipopt-plugin track): a singular
+    // factor is one IPOPT rejects and refactors with delta_c, so a replay
+    // skips it, and the analysis runs inside the first factor().
+    const bool ipm_path = !ipm_static.empty() || plugin_track;
     std::unique_ptr<smf::bench::SolverAdapter> adapter;
-    if (!ipm_static.empty()) {
+    if (plugin_track) {
+        if (solver_id == "smf") {
+            smf::IpmControl ipm = smf::ipopt_plugin_ipm_control();
+            if (!ipm_static.empty()) {
+                const auto ipm_mode = smf::bench::parse_ipm_static(ipm_static);
+                if (!ipm_mode) {
+                    std::fprintf(stderr, "--ipm-static needs off|fallback|regularized\n");
+                    return 2;
+                }
+                ipm.static_mode = *ipm_mode;
+                ipm.static_as_zero = ipm_static_zero;
+            }
+            adapter = smf::bench::make_smf_ipopt_plugin_adapter(ipm);
+        }
+    } else if (!ipm_static.empty()) {
         const auto ipm_mode = smf::bench::parse_ipm_static(ipm_static);
         if (!ipm_mode || solver_id != "smf") {
             std::fprintf(stderr, "--ipm-static needs --solver smf and off|fallback|regularized\n");
@@ -429,7 +467,8 @@ int main(int argc, char **argv) {
 
     if (!adapter) {
         rec.outcome = smf::bench::Outcome::Unavailable;
-        rec.reason = "unregistered solver adapter: " + solver_id;
+        rec.reason = plugin_track ? "the ipopt-plugin track runs smf only (rivals inside IPOPT are not modelled)"
+                                  : "unregistered solver adapter: " + solver_id;
         if (!jsonl_out.empty()) {
             smf::bench::append_run_record_jsonl(jsonl_out, rec);
         }
@@ -507,6 +546,17 @@ int main(int argc, char **argv) {
                            ? smf::MatrixType::RealSymmetricPositiveDefinite
                            : smf::MatrixType::RealSymmetricIndefinite;
     ctrl.num_threads = threads;
+    // "ipopt-plugin" track: the plugin's Control as is (IPOPT's KKT matrix
+    // type, the plugin's num_threads included); the overrides below still
+    // apply on top.
+    if (plugin_track) {
+        const auto plugin_ctrl = smf::ipopt_plugin_control();
+        if (!plugin_ctrl) {
+            std::fprintf(stderr, "smf::ipopt_plugin_control() rejected the default MA97 options\n");
+            return 2;
+        }
+        ctrl = *plugin_ctrl;
+    }
     // "ipopt" track: the pivot threshold IPOPT itself drives HSL solvers with
     // (ma27_pivtol / ma57_pivtol / ma97_u default 1e-8), so KKT sequences
     // captured from IPOPT are factorized the way IPOPT factorizes them.
@@ -721,15 +771,15 @@ int main(int argc, char **argv) {
         std::vector<double> step_factor_ms;  // successful factors, in order
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
-        const bool refine = (track == "ipopt" && nrhs == 1);
-        // --ipm-static: a singular factor (zero pivots) is one IPOPT rejects and
-        // refactors with delta_c; it is never solved with, so the replay skips
-        // its solve and its validation instead of stopping.
+        const bool refine = smf::bench::refine_on_track(track, nrhs);
+        // IpmSession path: a singular factor (zero pivots) is one IPOPT rejects
+        // and refactors with delta_c; it is never solved with, so the replay
+        // skips its solve and its validation instead of stopping.
         std::vector<char> skipped(static_cast<std::size_t>(kSeqSteps), 0);
 
         const auto t0 = std::chrono::steady_clock::now();
         out_a = adapter->analyse(A);
-        const double analyse_ms = adapter->stats().analyse_ms;
+        double analyse_ms = adapter->stats().analyse_ms;
         bool has_phases = adapter->stats().has_analyse_phases;
         smf::AnalysePhaseSeconds phases = adapter->stats().analyse_phases;
         if (out_a == smf::bench::Outcome::Success) {
@@ -741,12 +791,14 @@ int main(int argc, char **argv) {
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
                 if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
-                // The IpmSession adapter runs the deferred analysis in factor().
+                // The IpmSession adapter runs the deferred analysis in factor()
+                // and adds its time to analyse_ms (not to factor_ms).
+                if (step == 0 && ipm_path) analyse_ms = adapter->stats().analyse_ms;
                 if (step == 0 && !has_phases && adapter->stats().has_analyse_phases) {
                     has_phases = true;
                     phases = adapter->stats().analyse_phases;
                 }
-                if (!ipm_static.empty() && out_f == smf::bench::Outcome::Singular) {
+                if (ipm_path && out_f == smf::bench::Outcome::Singular) {
                     const auto fst = adapter->stats();
                     skipped[static_cast<std::size_t>(step)] = 1;
                     out_f = smf::bench::Outcome::Success;
@@ -874,10 +926,14 @@ int main(int argc, char **argv) {
         for (int b_it = 0; b_it < batch_count; ++b_it) {
             x = b;
             out_a = adapter->analyse(A);
-            sum_a += adapter->stats().analyse_ms;
+            double a_ms = adapter->stats().analyse_ms;
             out_f = (out_a == smf::bench::Outcome::Success)
                         ? adapter->factor(A.values)
                         : out_a;
+            // The IpmSession adapter runs the deferred analysis in factor()
+            // and adds its time to analyse_ms (not to factor_ms).
+            if (ipm_path && out_a == smf::bench::Outcome::Success) a_ms = adapter->stats().analyse_ms;
+            sum_a += a_ms;
             sum_f += adapter->stats().factor_ms;
             out_s = (out_f == smf::bench::Outcome::Success)
                         ? adapter->solve(x, nrhs)

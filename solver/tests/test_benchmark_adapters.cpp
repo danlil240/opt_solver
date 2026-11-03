@@ -1,7 +1,9 @@
 #include "../benchmarks/adapters/adapter.hpp"
+#include "../benchmarks/common/ipopt_dynamic_scaling.hpp"
 #include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/replay_steps.hpp"
 #include "../benchmarks/common/validation.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 
 #include <gtest/gtest.h>
 
@@ -177,6 +179,162 @@ TEST(BenchmarkAdapters, ParseIpmStatic) {
     EXPECT_EQ(parse_ipm_static("regularized"), StaticMode::Regularized);
     EXPECT_FALSE(parse_ipm_static("").has_value());
     EXPECT_FALSE(parse_ipm_static("reg").has_value());
+}
+
+TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
+    // The Control the MA97 plugin factorizes with under IPOPT's defaults
+    // (bench_replay --track ipopt-plugin).
+    const auto ctrl = ipopt_plugin_control();
+    ASSERT_TRUE(ctrl.has_value());
+    EXPECT_EQ(ctrl->matrix_type, MatrixType::RealSymmetricIndefinite);
+    EXPECT_EQ(ctrl->expected_refactors, 10);
+    EXPECT_EQ(ctrl->ordering, OrderingMethod::AutoParallel);
+    EXPECT_EQ(ctrl->scaling, ScalingMethod::None);
+    EXPECT_EQ(ctrl->pivot_u, 1e-8);
+    EXPECT_EQ(ctrl->small_pivot, 1e-20);
+    EXPECT_EQ(ctrl->nemin, 8);
+    EXPECT_EQ(ctrl->factor_memory_multiplier, 1.2);
+    EXPECT_TRUE(ctrl->continue_on_singular);
+    EXPECT_EQ(ctrl->delay_budget, -1);
+    EXPECT_EQ(ctrl->num_threads, Control{}.num_threads);
+
+    Ma97Options o;
+    o.ordering = 1;
+    o.scaling = 1;
+    EXPECT_EQ(ipopt_plugin_control(o)->ordering, OrderingMethod::AMD);
+    EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Matching);
+    o.ordering = 3;
+    o.scaling = 3;
+    EXPECT_EQ(ipopt_plugin_control(o)->ordering, OrderingMethod::METIS);
+    EXPECT_EQ(ipopt_plugin_control(o)->scaling, ScalingMethod::Equilibration);
+    o.scaling = 7;
+    EXPECT_FALSE(ipopt_plugin_control(o).has_value());
+}
+
+TEST(BenchmarkAdapters, SmfIpoptPluginAdapterDefersAnalysis) {
+    auto ad = make_smf_ipopt_plugin_adapter(ipopt_plugin_ipm_control());
+    ASSERT_NE(ad.get(), nullptr);
+    EXPECT_EQ(ad->identity().solver_id, "smf");
+    ad->configure(*ipopt_plugin_control(), "ipopt-plugin");
+    CscLower E2 = make_exchange_2x2_indef();
+    ASSERT_EQ(ad->analyse(E2), Outcome::Success);
+    ASSERT_EQ(ad->factor(E2.values), Outcome::Success);
+    std::vector<double> x = {1.0, 2.0};
+    ASSERT_EQ(ad->solve(x, 1), Outcome::Success);
+    EXPECT_NEAR(x[0], 2.0, 1e-12);
+    EXPECT_NEAR(x[1], 1.0, 1e-12);
+    EXPECT_EQ(ad->stats().inertia_neg, 1);
+    EXPECT_TRUE(refine_on_track("ipopt-plugin", 1));
+    EXPECT_FALSE(refine_on_track("ipopt-plugin", 2));
+
+    // A pattern large enough to time: analyse() only records the pattern,
+    // the first factor() runs the analysis and books it as analyse_ms.
+    CscLower T;
+    T.n = 3000;
+    T.col_ptr.push_back(0);
+    for (Int j = 0; j < T.n; ++j) {
+        T.row_idx.push_back(j);
+        T.values.push_back(j % 2 == 0 ? 2.0 : -2.0);
+        if (j + 1 < T.n) {
+            T.row_idx.push_back(j + 1);
+            T.values.push_back(1.0);
+        }
+        T.col_ptr.push_back(static_cast<Int>(T.row_idx.size()));
+    }
+    auto big = make_smf_ipopt_plugin_adapter(ipopt_plugin_ipm_control());
+    big->configure(*ipopt_plugin_control(), "ipopt-plugin");
+    ASSERT_EQ(big->analyse(T), Outcome::Success);
+    EXPECT_FALSE(big->stats().has_analyse_phases);
+    const double deferred_ms = big->stats().analyse_ms;
+    ASSERT_EQ(big->factor(T.values), Outcome::Success);
+    EXPECT_TRUE(big->stats().has_analyse_phases);
+    EXPECT_GT(big->stats().analyse_ms, deferred_ms);
+    EXPECT_GT(big->stats().analyse_ms, 0.0);
+}
+
+TEST(BenchmarkAdapters, Ma97ScalingCallMatchesPlugin) {
+    const std::vector<double> unit(4, 1.0), s = {1.0, 2.0, 0.5, 1.0};
+    // MC64 request after the analysis rejected the matching: unit scale.
+    Control c = *ipopt_plugin_control();
+    c.scaling = ScalingMethod::Matching;
+    Ma97ScalingCall r = ma97_scaling_call(c, true, nullptr, 4);
+    EXPECT_TRUE(r.unit_scale);
+    EXPECT_FALSE(r.computed);
+    EXPECT_EQ(c.scaling, ScalingMethod::None);
+    // MC64 request otherwise: computed.
+    c.scaling = ScalingMethod::Matching;
+    r = ma97_scaling_call(c, false, s.data(), 4);
+    EXPECT_TRUE(r.computed);
+    EXPECT_FALSE(r.reuse);
+    EXPECT_EQ(c.scaling, ScalingMethod::Matching);
+    // No request, a non-unit scale passed back: reuse.
+    c.scaling = ScalingMethod::None;
+    r = ma97_scaling_call(c, false, s.data(), 4);
+    EXPECT_TRUE(r.reuse);
+    EXPECT_EQ(c.scaling, ScalingMethod::UserSupplied);
+    // A unit scale passed back is no scaling.
+    c.scaling = ScalingMethod::None;
+    r = ma97_scaling_call(c, false, unit.data(), 4);
+    EXPECT_FALSE(r.reuse || r.computed || r.unit_scale);
+    EXPECT_EQ(c.scaling, ScalingMethod::None);
+}
+
+TEST(BenchmarkAdapters, IpoptDynamicScalingStateMachine) {
+    // IPOPT 3.14 defaults (dynamic, od_hd_reuse): n = 100, threshold 5 delays
+    // over the last MC64 factor's count.
+    const int n = 100;
+    const std::vector<double> none, s1(100, 2.0), s2(100, 3.0);
+    IpoptDynamicScaling d;
+    Ma97ScalingCall plain;                      // unscaled / reuse call: no scale computed
+    Ma97ScalingCall computed;
+    computed.computed = true;                   // an MC64 call (or a stale-scale retry)
+    Ma97ScalingCall reuse;
+    reuse.reuse = true;
+
+    // Unscaled factors below the threshold: nothing requested, no scale held.
+    d.after_factor(IpmFactorStatus::Ok, plain, none, 5, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.scale(), nullptr);
+    // 6 > 0.05 n: MC64 on the next factor.
+    d.after_factor(IpmFactorStatus::Ok, plain, none, 6, n);
+    EXPECT_TRUE(d.mc64_requested());
+    // A singular factor returns before IPOPT's check: the request stays,
+    // the scale it computed is still handed back.
+    d.after_factor(IpmFactorStatus::Singular, computed, s1, 50, n);
+    EXPECT_TRUE(d.mc64_requested());
+    ASSERT_NE(d.scale(), nullptr);
+    EXPECT_EQ(d.scale()[0], 2.0);
+    // A failed call hands nothing back and changes nothing.
+    d.after_factor(IpmFactorStatus::Error, computed, s2, 50, n);
+    EXPECT_TRUE(d.mc64_requested());
+    EXPECT_EQ(d.scale()[0], 2.0);
+    // The MC64 factor: scale kept, its delays (40) become numdelay_.
+    d.after_factor(IpmFactorStatus::Ok, computed, s2, 40, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.numdelay(), 40);
+    EXPECT_EQ(d.scale()[0], 3.0);
+    // Reuse while delays stay within numdelay_ + 0.05 n.
+    d.after_factor(IpmFactorStatus::Ok, reuse, s2, 45, n);
+    EXPECT_FALSE(d.mc64_requested());
+    // Delays grow by more than 0.05 n: MC64 again.
+    d.after_factor(IpmFactorStatus::Ok, reuse, s2, 46, n);
+    EXPECT_TRUE(d.mc64_requested());
+    // That MC64 request answered with the unit scale (rejected matching).
+    Ma97ScalingCall unit;
+    unit.unit_scale = true;
+    d.after_factor(IpmFactorStatus::Ok, unit, none, 10, n);
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.numdelay(), 10);
+    EXPECT_EQ(d.scale()[0], 1.0);
+    // A stale-scale retry (reuse turned computed) replaces the held scale but
+    // is not an MC64 request: numdelay_ stays.
+    d.after_factor(IpmFactorStatus::Ok, computed, s1, 12, n);
+    EXPECT_EQ(d.numdelay(), 10);
+    EXPECT_EQ(d.scale()[0], 2.0);
+    d.reset();
+    EXPECT_FALSE(d.mc64_requested());
+    EXPECT_EQ(d.scale(), nullptr);
+    EXPECT_EQ(d.numdelay(), 0);
 }
 
 TEST(BenchmarkAdapters, ReplayStepPicks) {
