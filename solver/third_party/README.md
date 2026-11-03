@@ -87,7 +87,8 @@ sources above):
    installed, or drop the host's, after every call has returned. Now
    `gk_sigtrap` / `gk_siguntrap` only push and pop the thread's jump-buffer
    level, and `gk_errexit()` jumps straight to that buffer when a METIS call is
-   active on the thread (METIS then returns its error code, as before).
+   active on the thread (METIS then returns its error code, as before, in
+   every API function that sets a trap; see the gaps below).
 
 Known gaps, unchanged from upstream and not reached by smf in normal use:
 `METIS_ComputeVertexSeparator` sets no trap (`libmetis/parmetis.c`), so an
