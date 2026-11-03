@@ -29,6 +29,13 @@
 
 namespace {
 
+// RunRecord::order_hash: AdapterStats::order_hash as 16 hex digits.
+std::string order_hash_hex(std::uint64_t h) {
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", static_cast<unsigned long long>(h));
+    return buf;
+}
+
 // Binary cache next to a .mtx (<path>.smfbin): large Matrix Market files
 // take seconds to parse, and the harness reloads the matrix for every
 // attempt. Parsing is outside the timed region either way.
@@ -895,6 +902,7 @@ int main(int argc, char **argv) {
         }
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
+        if (solver_id == "smf" && st.order_hash != 0) rec.order_hash = order_hash_hex(st.order_hash);
 
         int last_solved = kSeqSteps - 1;
         while (last_solved > 0 && skipped[static_cast<std::size_t>(last_solved)]) --last_solved;
@@ -989,6 +997,7 @@ int main(int argc, char **argv) {
         }
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;
+        if (solver_id == "smf" && st.order_hash != 0) rec.order_hash = order_hash_hex(st.order_hash);
 
         if (out_s == smf::bench::Outcome::Success) {
             rec.per_rhs_validation = smf::bench::validate_per_rhs(A, b, x, nrhs);

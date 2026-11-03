@@ -31,6 +31,25 @@ namespace smf::bench {
 
 namespace {
 
+// AdapterStats::order_hash: chains the perm of each new analysis a factor()
+// used (AnalysisKeep::serial tells a new one from the last).
+struct OrderHash {
+    std::uint64_t hash = 0;
+    std::uint64_t last_serial = 0;
+    void add(const AnalysisKeep *ak) {
+        if (ak == nullptr || ak->serial == last_serial) return;
+        last_serial = ak->serial;
+        std::uint64_t h = hash == 0 ? 1469598103934665603ull : hash;
+        for (Int v : ak->perm) {
+            h ^= static_cast<std::uint32_t>(v);
+            h *= 1099511628211ull;
+        }
+        h ^= 0xffffffffull;  // analysis boundary
+        h *= 1099511628211ull;
+        hash = h;
+    }
+};
+
 using Clock = std::chrono::steady_clock;
 
 double ms_since(Clock::time_point t0, Clock::time_point t1) noexcept {
@@ -298,6 +317,7 @@ public:
 
     Outcome analyse(const CscLower &A) override {
         stats_ = AdapterStats{};
+        order_ = OrderHash{};
         // The caller keeps A (and each factor()'s values) alive: no copy.
         pattern_ = &A;
         Info info;
@@ -355,6 +375,8 @@ public:
         stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
+        order_.add(fk_.analysis);
+        stats_.order_hash = order_.hash;
 
         if (fs == FactorStatus::Success) {
             if (ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
@@ -433,6 +455,7 @@ private:
     NumericWorkspace nws_;
     SolveWorkspace sws_;
     AdapterStats stats_{};
+    OrderHash order_;
     int static_pivots_ = 0;
     bool refine_always_ = false;
     std::vector<double> rhs_copy_;
@@ -479,6 +502,7 @@ public:
 
     Outcome analyse(const CscLower &A) override {
         stats_ = AdapterStats{};
+        order_ = OrderHash{};
         pattern_ = &A;
         const auto t0 = Clock::now();
         // Deferred to the first factor(), which has values (as in the plugin).
@@ -562,6 +586,8 @@ public:
         stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
+        order_.add(session_.factor_keep().analysis);
+        stats_.order_hash = order_.hash;
         switch (st) {
         case IpmFactorStatus::Ok:
             stats_.outcome = Outcome::Success;
@@ -614,6 +640,7 @@ private:
     IpmSession session_;
     const CscLower *pattern_ = nullptr;
     bool analysed_ = false;
+    OrderHash order_;
     AdapterStats stats_{};
 };
 
