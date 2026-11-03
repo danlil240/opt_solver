@@ -62,21 +62,23 @@ To use smf from IPOPT, build the plugin and point IPOPT's `hsllib` option at `li
 
 The reference board is the front-tier manifest: 137 to 144 case-tracks of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8).
 
-Against the fastest other solver on each case, smf scores **0.64 at 1 thread and 0.46 at 8 threads**. That is the November 2 board on an i9-12900K at main `19320fe`, which includes the hybrid matcher (PR #23). It is a shifted geomean over 112 and 106 case-tracks, against MA57, MA97, MKL PARDISO and MUMPS; SSIDS does not run on that machine. The same machine and rivals on November 1, before PRs #17 to #23, gave 0.73 and 0.52. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
+Against the fastest other solver on each case, smf scores **0.63 at 1 thread and 0.45 at 8 threads**. That is the November 3 board on an i9-12900K at main `7e909b5`, which adds the rescue early stop (PR #26), the IPOPT plugin thread defaults (PR #28, which the board does not exercise) and the vendored thread-safe METIS (PR #29). It is a shifted geomean over 112 and 106 case-tracks, against MA57 (1 thread only), MA97, MKL PARDISO and MUMPS; SSIDS does not run on that machine. The same machine and rivals gave 0.64 and 0.46 on November 2 and 0.73 and 0.52 on November 1. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
 
 Head to head at 1 thread (October 30 board, Ryzen), smf against each solver: MA57 0.60, MA97 0.62, MKL PARDISO 0.58, SSIDS 0.37, MUMPS 0.26. smf also solves more case-tracks accurately than any of them. The one pairing it still loses is MA27 on small KKT systems, where MA27's low overhead wins.
 
 smf fails only d_pretok (both tracks), turon_m (both tracks) and robot_arm_8k (recommended), and no other solver solves those accurately either.
 
-What still loses by more than 1.1x (November 2 board):
+What changed since November 2: the rescue early stop cut pde_control_120 rec at 1 thread from 1.71x to 1.06x and ncvxqp9 rec from 1.50x to 1.31x. Parallel nested dissection on the vendored METIS cut cfd2 rec at 8 threads from 1.75x to 0.86x and bmwcra_1 from 0.86x to 0.63x. Fill and accuracy are unchanged on every case.
+
+What still loses by more than 1.1x (November 3 board):
 
 - **Factor time:**
-  - At 1 thread: pde_control_120 rec (1.71x against PARDISO), ncvxqp9 rec (1.50x against MA97) and bratu3d (1.17-1.19x against PARDISO).
-  - At 8 threads: bratu3d ipopt (1.48x) and acopf_grid_160 ipopt (1.27x).
+  - At 1 thread: ncvxqp9 rec (1.31x against MA97) and bratu3d (1.17-1.19x against PARDISO).
+  - At 8 threads: bratu3d ipopt (1.43x), acopf_grid_160 ipopt (1.25x), both against PARDISO, and ncvxqp9 rec (1.18x against MA97).
 - **The analysis' matching:**
-  - At 1 thread: stokes128 ipopt (1.45x against MA97), blockqp1 (1.11-1.21x), ncvxqp9 ipopt (1.18x) and darcy003/mario002 (1.10-1.13x against MA57).
-  - At 8 threads: ncvxqp5 (1.71-1.91x against PARDISO) and stokes128 (1.11-1.18x).
-- **Ordering time on large SPD matrices:** cfd2 rec, 1.18x at 1 thread and 1.75x at 8 threads against PARDISO, where serial METIS costs more than PARDISO's whole analysis.
+  - At 1 thread: stokes128 ipopt (1.45x against MA97), blockqp1 (1.12-1.21x against MA97), ncvxqp9 ipopt (1.17x against MA97) and darcy003/mario002 ipopt (1.12-1.13x against MA57).
+  - At 8 threads: ncvxqp5 (1.75-1.91x against PARDISO) and stokes128 (1.15-1.22x against MA97).
+- **Ordering time:** cfd2 rec at 1 thread (1.17x against PARDISO), where one thread of METIS costs more than PARDISO's whole analysis.
 
 The hybrid matcher write-up is `docs/performance/2026-11-02-auction-matching.md`. The latest results are in `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival is in `docs/performance/2026-10-30-branches-and-scoreboard.md`.
 
