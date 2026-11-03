@@ -65,6 +65,8 @@ def _first_difference(a: list[str], b: list[str]) -> str:
 # ------------------------------------------------------------ abort gate --
 # Plugin trace line (SMF_PLUGIN_STATS>=2), one per factorization:
 #   [smf_ma97] factor <k>: corr=<0|1> ... neg=<q> ... t=<s> ... abort=<0|1> flops=<f> skipped=<f>
+# corr=1: the previous call on the same analysis (akeep) was also a
+# factorization; other sessions' calls do not count.
 TRACE_LINE = re.compile(r"^\[smf_ma97\] factor (\d+): (.*)$")
 _TIME_FIELD = re.compile(r"\st=\S+")
 COMPLETED_LINE = re.compile(r"^\[smf_ma97\] completed aborted factor")

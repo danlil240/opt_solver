@@ -2,8 +2,11 @@
 
 Trace line, one per factorization, on stderr:
   [smf_ma97] factor <k>: corr=<0|1> delays=<d> static=<s> pos=<p> neg=<q> zero=<z> L=<entries> t=<seconds>
-corr=1 means the previous plugin call was also a factorization (no solve in
-between), i.e. IPOPT re-factorized to correct the inertia. A trailing
+corr=1 means the previous plugin call on the same analysis (MA97 akeep) was
+also a factorization (no solve in between), i.e. IPOPT re-factorized to
+correct the inertia. Calls on other sessions (another IPOPT instance in the
+process, IPOPT's restoration phase) do not count; a new analysis starts at
+corr=0. A trailing
 ra=<tried>/<adopted>/<reverted> gives the session's re-analysis counts (tried
 and adopted including this factorization, reverted as of its start), so
 adopted > reverted means the factorization ran on a re-analysed order.

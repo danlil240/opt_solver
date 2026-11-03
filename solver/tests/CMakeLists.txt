@@ -444,6 +444,8 @@ if(SMF_BUILD_MA97_PLUGIN)
     add_test(NAME Ma97PluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginRuntime.*)
     # Task 17: PGLib IPOPT captures replayed through the plugin (skips without fixtures).
     add_test(NAME IpoptPluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=IpoptPluginRuntime.*)
+    # Several MA97 sessions in one process: per-session trace state, process totals.
+    add_test(NAME Ma97PluginSessions COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginSessions.*)
 endif()
 
 # --- Task 10: Native portfolio dispatch policy tests ---
