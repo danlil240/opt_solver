@@ -183,6 +183,19 @@ inline void InitGoogleTest(int* argc, char** argv) {
             ctx.filter = arg + 15;
         } else if (std::strcmp(arg, "--gtest_list_tests") == 0) {
             ctx.list_tests = true;
+        } else if (std::strncmp(arg, "--gtest_color=", 14) == 0 ||
+                   std::strncmp(arg, "--gtest_brief=", 14) == 0 ||
+                   std::strncmp(arg, "--gtest_print_time=", 19) == 0) {
+            // Cosmetic only: accepted and ignored, results are unaffected.
+        } else if (std::strncmp(arg, "--gtest_", 8) == 0) {
+            // Anything else (--gtest_repeat, --gtest_shuffle, --gtest_output, ...) would change
+            // what runs or what is reported; silently ignoring it misleads flake hunts.
+            std::fprintf(stderr,
+                         "smf fallback gtest: unsupported flag '%s' (only --gtest_filter, "
+                         "--gtest_list_tests and cosmetic --gtest_color/brief/print_time are "
+                         "implemented); refusing to run. Build with a real GoogleTest to use it.\n",
+                         arg);
+            std::exit(2);
         }
     }
 }
