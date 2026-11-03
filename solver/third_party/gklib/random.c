@@ -67,6 +67,20 @@ GK_MKRANDOM(gk_zu,  size_t, size_t)
 static uint64_t mt[NN]; 
 /* mti==NN+1 means mt[NN] is not initialized */
 static int mti=NN+1; 
+#else
+/* smf patch 2 (thread-local rand): the CRT rand() keeps its state per thread
+   with MSVC but in one process-wide stream with glibc, so concurrent METIS
+   calls on Linux would interleave one stream and give run-dependent
+   orderings. This is MSVC's rand() (state 1 until seeded, srand(s) sets it
+   to s) on a __thread state: Windows orderings stay bit-identical and every
+   platform gets the same, per-thread sequence. */
+static __thread uint32_t gk_rand_state = 1;
+
+static uint32_t gk_rand15(void)
+{
+  gk_rand_state = gk_rand_state*214013u + 2531011u;
+  return (gk_rand_state >> 16) & 0x7fff;
+}
 #endif /* USE_GKRAND */
 
 /* initializes mt[NN] with a seed */
@@ -77,7 +91,7 @@ void gk_randinit(uint64_t seed)
   for (mti=1; mti<NN; mti++) 
     mt[mti] = (6364136223846793005ULL * (mt[mti-1] ^ (mt[mti-1] >> 62)) + mti);
 #else
-  srand((unsigned int) seed);
+  gk_rand_state = (uint32_t)(unsigned int) seed;  /* smf patch 2 */
 #endif
 }
 
@@ -119,7 +133,9 @@ uint64_t gk_randint64(void)
 
   return x & 0x7FFFFFFFFFFFFFFF;
 #else
-  return (uint64_t)(((uint64_t) rand()) << 32 | ((uint64_t) rand()));
+  /* smf patch 2: high word drawn first (unused by METIS with 32-bit idx_t) */
+  uint64_t hi = gk_rand15();
+  return (hi << 32) | (uint64_t) gk_rand15();
 #endif
 }
 
@@ -129,7 +145,7 @@ uint32_t gk_randint32(void)
 #ifdef USE_GKRAND
   return (uint32_t)(gk_randint64() & 0x7FFFFFFF);
 #else
-  return (uint32_t)rand();
+  return gk_rand15();  /* smf patch 2 */
 #endif
 }
 

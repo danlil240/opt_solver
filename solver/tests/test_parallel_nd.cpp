@@ -280,7 +280,8 @@ TEST(ParallelNd, DeterministicAcrossThreads)
 // Gate for running METIS from several std::threads. The raw conda-forge
 // METIS 5.2.1 aborts the process when called concurrently (GKlib's memory
 // core is process-global; see task-6-report.md), so smf only calls METIS
-// through the serialised wrappers, and this checks those: 8 threads x 50
+// through its wrappers, which serialise the calls unless the vendored,
+// thread-safe METIS is linked; this checks those: 8 threads x 50
 // METIS_NodeND (+ vertex separator) calls equal the serial results.
 TEST(ParallelNd, ConcurrentMetisIsSafe)
 {
@@ -324,5 +325,123 @@ TEST(ParallelNd, ConcurrentMetisIsSafe)
     for (auto& th : pool) th.join();
     for (int t = 0; t < kThreads; ++t)
         EXPECT_EQ(mismatches[static_cast<std::size_t>(t)], 0) << "thread " << t;
+}
+#endif
+
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+#include <metis.h>
+
+namespace {
+
+// 27-point 3D grid (every vertex coupled with all of its neighbours).
+Graph grid27(Int nx, Int ny, Int nz)
+{
+    std::vector<std::pair<Int, Int>> e;
+    auto id = [&](Int i, Int j, Int k) { return i + nx * (j + ny * k); };
+    for (Int k = 0; k < nz; ++k)
+        for (Int j = 0; j < ny; ++j)
+            for (Int i = 0; i < nx; ++i)
+                for (Int dk = 0; dk <= 1; ++dk)
+                    for (Int dj = -1; dj <= 1; ++dj)
+                        for (Int di = -1; di <= 1; ++di) {
+                            if (dk == 0 && (dj < 0 || (dj == 0 && di <= 0))) continue;
+                            const Int a = i + di, b = j + dj, c = k + dk;
+                            if (a < 0 || b < 0 || a >= nx || b >= ny || c >= nz) continue;
+                            e.push_back({id(i, j, k), id(a, b, c)});
+                        }
+    return from_edges(nx * ny * nz, e);
+}
+
+struct RawMetis {
+    int rc = 0;
+    std::vector<idx_t> v;  // NodeND: perm; separator: part
+    idx_t sepsize = 0;
+};
+
+// METIS called directly (no smf wrapper, no lock), with smf's options.
+RawMetis raw_metis(const Graph& g, bool separator)
+{
+    std::vector<idx_t> xadj(g.xadj.begin(), g.xadj.end()), adj(g.adj.begin(), g.adj.end());
+    idx_t n = g.n, opts[METIS_NOPTIONS];
+    METIS_SetDefaultOptions(opts);
+    opts[METIS_OPTION_SEED] = 0;
+    opts[METIS_OPTION_NUMBERING] = 0;
+    RawMetis r;
+    r.v.assign(static_cast<std::size_t>(n), -1);
+    if (separator) {
+        r.rc = METIS_ComputeVertexSeparator(&n, xadj.data(), adj.data(), nullptr, opts, &r.sepsize,
+                                            r.v.data());
+    } else {
+        std::vector<idx_t> iperm(static_cast<std::size_t>(n));
+        r.rc = METIS_NodeND(&n, xadj.data(), adj.data(), nullptr, opts, r.v.data(), iperm.data());
+    }
+    return r;
+}
+
+std::uint64_t fnv1a(const std::vector<idx_t>& v)
+{
+    std::uint64_t h = 1469598103934665603ull;
+    for (idx_t x : v) {
+        h ^= static_cast<std::uint32_t>(x);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+} // namespace
+
+// The vendored METIS (SMF_VENDORED_METIS) keeps GKlib's state thread-local
+// and its random stream per thread (third_party/README.md), so METIS itself
+// may be called concurrently: 16 threads x 200 direct calls, alternating
+// METIS_NodeND and METIS_ComputeVertexSeparator over 8 grids (7- and
+// 27-point), every result bitwise equal to the serial one. The conda-forge
+// DLL crashes this within 4 threads x 20 calls.
+TEST(ParallelNd, RawConcurrentMetisIsSafe)
+{
+    ASSERT_TRUE(smf::metis_is_thread_safe());
+    constexpr int kThreads = 16, kCalls = 200;
+    std::vector<Graph> graphs;
+    std::vector<bool> separator;
+    for (int k = 0; k < 4; ++k) {
+        graphs.push_back(grid(9 + k, 10, 8 + k % 2));
+        separator.push_back(k % 2 == 1);
+        graphs.push_back(grid27(7 + k, 8, 6 + k % 2));
+        separator.push_back(k % 2 == 0);
+    }
+    std::vector<RawMetis> serial;
+    for (std::size_t k = 0; k < graphs.size(); ++k) {
+        serial.push_back(raw_metis(graphs[k], separator[k]));
+        ASSERT_EQ(serial.back().rc, METIS_OK) << "graph " << k;
+    }
+    std::vector<int> mismatches(kThreads, 0);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < kThreads; ++t)
+        pool.emplace_back([&, t] {
+            for (int c = 0; c < kCalls; ++c) {
+                const std::size_t k = static_cast<std::size_t>(t * 7 + c) % graphs.size();
+                const RawMetis r = raw_metis(graphs[k], separator[k]);
+                if (r.rc != METIS_OK || r.v != serial[k].v || r.sepsize != serial[k].sepsize)
+                    ++mismatches[static_cast<std::size_t>(t)];
+            }
+        });
+    for (auto& th : pool) th.join();
+    for (int t = 0; t < kThreads; ++t)
+        EXPECT_EQ(mismatches[static_cast<std::size_t>(t)], 0) << "thread " << t;
+}
+
+// The vendored METIS gives the orderings of the METIS smf linked before
+// (conda-forge metis 5.2.1 on Windows): its random stream is a thread-local
+// copy of MSVC's rand() (third_party/README.md, patch 2), so the order is
+// also the same on Linux. Reference hashes recorded from conda-forge's
+// metis.dll: 20^3 7-point NodeND perm, 30x12x10 7-point vertex separator.
+TEST(ParallelNd, VendoredMetisMatchesCondaOrdering)
+{
+    const RawMetis nd = raw_metis(grid(20, 20, 20), false);
+    ASSERT_EQ(nd.rc, METIS_OK);
+    EXPECT_EQ(fnv1a(nd.v), 0xb1fef4826789ffbbull);
+    const RawMetis sep = raw_metis(grid(30, 12, 10), true);
+    ASSERT_EQ(sep.rc, METIS_OK);
+    EXPECT_EQ(sep.sepsize, 120);
+    EXPECT_EQ(fnv1a(sep.v), 0xf97248da81e2b681ull);
 }
 #endif

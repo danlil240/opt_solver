@@ -28,15 +28,28 @@ public:
         const std::vector<Int>& adjncy) override;
 };
 
-/// Serialised METIS entry points. The METIS linked here (conda-forge 5.2.1 on
-/// Windows) keeps GKlib's memory core in process-global state, so two
-/// concurrent METIS calls abort the process ("Could not find pointer ... in
-/// mcore"); every METIS call in smf goes through these, which hold one
-/// process-wide mutex. Options: METIS defaults with SEED = 0 and
-/// NUMBERING = 0, so a call's result does not depend on call order. The
-/// arrays are passed to METIS as-is (its API takes them mutable). vwgt may be
-/// null. Return false on a METIS error or when METIS is not compiled in.
-/// metis_node_nd: perm[new] = old, iperm[old] = new.
+/// True when METIS calls may run concurrently: smf is built with the
+/// vendored METIS (SMF_VENDORED_METIS, the default), whose GKlib state is
+/// thread-local. With an external METIS (find_package) it is false: the
+/// conda-forge 5.2.1 DLL on Windows keeps GKlib's memory core in
+/// process-global state, and two concurrent calls abort the process
+/// ("Could not find pointer ... in mcore").
+inline constexpr bool kMetisThreadSafe =
+#if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+    true;
+#else
+    false;
+#endif
+bool metis_is_thread_safe() noexcept;
+
+/// The METIS entry points of smf; every METIS call goes through these. Unless
+/// metis_is_thread_safe(), they hold one process-wide mutex (calls are
+/// serialised). Options: METIS defaults with SEED = 0 and NUMBERING = 0, and
+/// METIS's random stream is per thread and reseeded by every call, so a
+/// call's result depends on its arguments only (not on call order or the
+/// calling thread). The arrays are passed to METIS as-is (its API takes them
+/// mutable). vwgt may be null. Return false on a METIS error or when METIS
+/// is not compiled in. metis_node_nd: perm[new] = old, iperm[old] = new.
 bool metis_node_nd(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* perm, Int* iperm);
 /// metis_vertex_separator: part[v] in {0, 1, 2}, 2 = separator.
 bool metis_vertex_separator(Int n, Int* xadj, Int* adjncy, Int* vwgt, Int* part, Int* sepsize);

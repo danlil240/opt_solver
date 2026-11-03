@@ -30,7 +30,10 @@
  GCC does provides these definitions in stdint.h, but it may require some
  modifications on other architectures.
 --------------------------------------------------------------------------*/
-//#define IDXTYPEWIDTH 32
+/* smf patch 1: widths fixed as in conda-forge's build (smf::Int is 32-bit);
+   SMF_VENDORED_METIS_H tells smf this is the vendored, thread-safe copy. */
+#define SMF_VENDORED_METIS_H 1
+#define IDXTYPEWIDTH 32
 
 
 /*--------------------------------------------------------------------------
@@ -40,7 +43,7 @@
    32 : single precision floating point (float)
    64 : double precision floating point (double)
 --------------------------------------------------------------------------*/
-//#define REALTYPEWIDTH 32
+#define REALTYPEWIDTH 32
 
 
 

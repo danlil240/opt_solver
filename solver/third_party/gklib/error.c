@@ -85,6 +85,11 @@ void gk_errexit(int signum, char *f_str,...)
   fprintf(stderr,"\n");
   fflush(stderr);
 
+  /* smf patch 3: inside a METIS API call, jump straight to this thread's
+     gk_sigcatch() point instead of raise() -> gk_sigthrow -> longjmp. */
+  if (gk_cur_jbufs >= 0)
+    longjmp(gk_jbufs[gk_cur_jbufs], signum);
+
   if (gk_exit_on_error)
     raise(signum);
 }
@@ -102,8 +107,10 @@ int gk_sigtrap()
 
   gk_cur_jbufs++;
 
-  old_SIGMEM_handlers[gk_cur_jbufs]  = signal(SIGMEM,  gk_sigthrow);
-  old_SIGERR_handlers[gk_cur_jbufs]  = signal(SIGERR,  gk_sigthrow);
+  /* smf patch 3: no signal() here. Handlers are process-wide: concurrent
+     METIS calls would race on install/restore and could leave gk_sigthrow
+     (or drop the host's handler) for SIGABRT/SIGTERM. gk_errexit() jumps to
+     gk_jbufs[gk_cur_jbufs] itself. */
 
   return 1;
 }
@@ -118,8 +125,7 @@ int gk_siguntrap()
   if (gk_cur_jbufs == -1)
     return 0;
 
-  signal(SIGMEM,  old_SIGMEM_handlers[gk_cur_jbufs]);
-  signal(SIGERR,  old_SIGERR_handlers[gk_cur_jbufs]);
+  /* smf patch 3: no signal() restore (see gk_sigtrap) */
 
   gk_cur_jbufs--;
 

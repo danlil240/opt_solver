@@ -27,6 +27,12 @@ if(_smf_default_conda_lib AND EXISTS "${_smf_default_conda_lib}/include/mkl.h")
 endif()
 option(SMF_USE_MKL             "Use Intel MKL instead of OpenBLAS"      ${_smf_default_use_mkl})
 option(SMF_USE_METIS           "Enable METIS 5 fill-reducing ordering"  ON)
+# ON: build the vendored METIS 5.2.1 + GKlib (third_party/, static, real
+# thread-local GKlib state): METIS calls run concurrently
+# (SMF_METIS_THREADSAFE). OFF: find_package(METIS); its calls are then
+# serialised by a process-wide mutex (conda-forge's MSVC metis.dll keeps
+# GKlib's state in process globals and crashes under concurrent calls).
+option(SMF_VENDORED_METIS      "Build the vendored, thread-safe METIS (OFF: find_package(METIS))" ON)
 option(SMF_USE_SUITESPARSE_AMD "Enable SuiteSparse AMD ordering"        ON)
 option(SMF_DETERMINISTIC       "Enable deterministic (reproducible) mode" OFF)
 option(SMF_BUILD_TESTS         "Build unit tests"                       ON)
@@ -171,11 +177,18 @@ endif()
 
 # ---- Optional: METIS 5 (soft-fail with warning) -------------------------
 set(SMF_HAS_METIS OFF)
-if(SMF_USE_METIS)
+set(SMF_METIS_THREADSAFE OFF)
+if(SMF_USE_METIS AND SMF_VENDORED_METIS)
+    enable_language(C)
+    add_subdirectory(third_party)
+    set(SMF_HAS_METIS ON)
+    set(SMF_METIS_THREADSAFE ON)
+    message(STATUS "smf: vendored METIS 5.2.1 (thread-safe) -- SMF_HAS_METIS=ON")
+elseif(SMF_USE_METIS)
     find_package(METIS QUIET)
     if(METIS_FOUND)
         set(SMF_HAS_METIS ON)
-        message(STATUS "smf: METIS found -- SMF_HAS_METIS=ON")
+        message(STATUS "smf: METIS found -- SMF_HAS_METIS=ON (calls serialised)")
     else()
         message(WARNING "smf: METIS NOT found -- SMF_HAS_METIS=OFF; "
                         "METIS ordering will be unavailable. "
@@ -361,13 +374,17 @@ function(smf_stage_runtime_dlls target)
     foreach(_extra
             libiomp5md.dll libomp.dll
             cholmod.dll amd.dll camd.dll colamd.dll ccolamd.dll
-            suitesparseconfig.dll metis.dll
+            suitesparseconfig.dll
             dmumps.dll cmumps.dll smumps.dll zmumps.dll
             libblas.dll liblapack.dll libcblas.dll)
         if(EXISTS "${SMF_DEPS_DLL_DIR}/${_extra}")
             list(APPEND _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/${_extra}")
         endif()
     endforeach()
+    # The vendored METIS is static: metis.dll only for find_package(METIS).
+    if(SMF_HAS_METIS AND NOT SMF_METIS_THREADSAFE AND EXISTS "${SMF_DEPS_DLL_DIR}/metis.dll")
+        list(APPEND _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/metis.dll")
+    endif()
     # CoinHSL/MA27 ships as a MinGW/gfortran DLL; it needs its own runtime
     # stack (gfortran, openblas, winpthread, ...) staged alongside.
     if(SMF_COINHSL_DLL_DIR AND EXISTS "${SMF_COINHSL_DLL_DIR}")
@@ -535,7 +552,13 @@ if(SMF_HAS_AMD)
         /usr/include/suitesparse)
 endif()
 
-if(SMF_HAS_METIS)
+if(SMF_HAS_METIS AND SMF_METIS_THREADSAFE)
+    target_link_libraries(smf PUBLIC smf_metis)
+    # The vendored metis.h ahead of any other on the include path (the conda
+    # include dir, which also holds MKL's headers, has its own metis.h).
+    target_include_directories(smf BEFORE PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/metis/include>)
+elseif(SMF_HAS_METIS)
     target_link_libraries(smf PUBLIC METIS::metis)
 endif()
 
@@ -543,6 +566,7 @@ endif()
 target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_HAS_AMD}>:SMF_HAS_AMD=1>
     $<$<BOOL:${SMF_HAS_METIS}>:SMF_HAS_METIS=1>
+    $<$<BOOL:${SMF_METIS_THREADSAFE}>:SMF_METIS_THREADSAFE=1>
     $<$<BOOL:${SMF_DETERMINISTIC}>:SMF_DETERMINISTIC=1>
     $<$<BOOL:${SMF_HAS_OPENBLAS}>:SMF_HAS_OPENBLAS=1>
     $<$<BOOL:${SMF_USE_MKL}>:SMF_USE_MKL=1>
@@ -581,7 +605,11 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-install(TARGETS smf EXPORT smfTargets
+set(_smf_install_targets smf)
+if(TARGET smf_metis)
+    list(APPEND _smf_install_targets smf_metis)
+endif()
+install(TARGETS ${_smf_install_targets} EXPORT smfTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -619,6 +647,12 @@ if(SMF_BUILD_MA97_PLUGIN)
         SOVERSION 1
         VERSION   1.0.0)
     smf_stage_runtime_dlls(smf_ma97)
+    # ELF: the plugin exports its MA97 entry points only, not the symbols
+    # of the static libraries in it (smf, the vendored METIS/GKlib), so a
+    # host that also loads a system libmetis keeps the two copies apart.
+    if(UNIX AND NOT APPLE)
+        target_link_options(smf_ma97 PRIVATE "LINKER:--exclude-libs,ALL")
+    endif()
     install(TARGETS smf_ma97
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -633,7 +667,7 @@ message(STATUS "  C++ standard  : ${CMAKE_CXX_STANDARD}")
 message(STATUS "  OpenMP        : ${SMF_ENABLE_OPENMP}")
 message(STATUS "  MKL           : ${SMF_USE_MKL}")
 message(STATUS "  AMD found     : ${SMF_HAS_AMD}")
-message(STATUS "  METIS found   : ${SMF_HAS_METIS}")
+message(STATUS "  METIS found   : ${SMF_HAS_METIS} (vendored, thread-safe: ${SMF_METIS_THREADSAFE})")
 message(STATUS "  CHOLMOD found : ${SMF_HAS_CHOLMOD}")
 message(STATUS "  MA27 (CoinHSL): ${SMF_HAS_MA27}")
 message(STATUS "  MUMPS         : ${SMF_HAS_MUMPS}")
