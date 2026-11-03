@@ -15,6 +15,12 @@ Variants are NAME=VAR=value[,VAR=value...], e.g.
       --variant smf=SMF_BENCH_AMALGAMATION=smf \
       --variant cost=SMF_BENCH_AMALGAMATION=cost
 
+Two builds (e.g. main against a branch): the reserved key SMF_AB_BINARY in a
+variant names that variant's runner binary instead of --binary, and is not
+put into the environment:
+  --variant main=SMF_AB_BINARY=build-main/benchmarks/Release/bench_replay.exe
+  --variant branch=SMF_AB_BINARY=build/benchmarks/Release/bench_replay.exe
+
 --track-override TRACK is passed through to run.py: each case runs once on
 TRACK (e.g. ipopt-plugin: smf with the IPOPT plugin's Control) instead of on
 every manifest track it is listed on.
@@ -36,6 +42,10 @@ import tempfile
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import score  # noqa: E402
+
+
+# Reserved variant key: that variant's runner binary (not an env var).
+AB_BINARY_KEY = "SMF_AB_BINARY"
 
 
 def parse_variant(spec: str) -> tuple[str, dict[str, str]]:
@@ -99,12 +109,13 @@ def main(argv: list[str] | None = None) -> int:
                            "--allow-short-trials", "--cases", mid, "--solvers", "smf",
                            "--threads", args.threads, "--build-dir", args.build_dir,
                            "--timeout", str(args.timeout)]
-                    if args.binary:
-                        cmd += ["--binary", args.binary]
+                    binary = venv.get(AB_BINARY_KEY, args.binary)
+                    if binary:
+                        cmd += ["--binary", binary]
                     if args.track_override:
                         cmd += ["--track-override", args.track_override]
                     env = dict(os.environ)
-                    env.update(venv)
+                    env.update({k: v for k, v in venv.items() if k != AB_BINARY_KEY})
                     subprocess.run(cmd, env=env, creationflags=priority,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     rec_file = pathlib.Path(tmp) / "records.jsonl"

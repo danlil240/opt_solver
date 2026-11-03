@@ -176,6 +176,28 @@ class AbRunPassThroughTests(unittest.TestCase):
                              "--cases", "a"])
             self.assertTrue(all("--track-override" not in cmd for cmd in calls))
 
+    def test_per_variant_binary(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": CASES}))
+            calls = []
+
+            def fake(cmd, **kw):
+                calls.append((cmd, kw["env"]))
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(ab_run.subprocess, "run", fake):
+                ab_run.main(["--manifest", str(manifest), "--output", str(td / "o"),
+                             "--binary", "default.exe",
+                             "--variant", "A=SMF_AB_BINARY=a.exe,X=1", "--variant", "B=X=2",
+                             "--rounds", "2", "--cases", "a"])
+            self.assertEqual(len(calls), 4)
+            for cmd, env in calls:
+                binary = cmd[cmd.index("--binary") + 1]
+                self.assertEqual(binary, "a.exe" if env["X"] == "1" else "default.exe")
+                self.assertNotIn("SMF_AB_BINARY", env)
+
     def test_ab_run_rejects_other_tracks(self):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             ab_run.main(["--manifest", "m.json", "--output", "o", "--variant", "A=X=1",
