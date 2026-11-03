@@ -8,6 +8,7 @@
 #include "smf/types.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -19,6 +20,7 @@
 #include <fstream>
 #include <iomanip>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <sstream>
 #include <string>
@@ -75,11 +77,25 @@ struct ma97_info_d
 // last of akeep / fkeep frees it.
 static std::shared_ptr<smf::IpmSession> make_session();
 
+// The plugin's own per-session state, beside the IpmSession and shared by
+// akeep and fkeep like it. Only the SMF_PLUGIN_STATS trace reads it; it never
+// changes a factorization or a solve. It is per session, not process-wide, so
+// that MA97 sessions running concurrently or interleaved in one process
+// (concurrent IPOPT instances, IPOPT's restoration phase next to its main
+// solver) do not see each other's calls. As with MA97, one session is used by
+// one thread at a time.
+struct PluginSession
+{
+    bool last_call_was_factor = false; // no solve since this session's previous factorization => IPOPT inertia correction
+    long last_factor_id = 0;           // trace id of this session's latest factorization
+};
+
 // The IpmSession owns the analysis, the factor and the workspaces. akeep and
 // fkeep share it: MA97 callers may free akeep and still solve with fkeep.
 struct SmfAkeep
 {
     std::shared_ptr<smf::IpmSession> session = make_session();
+    std::shared_ptr<PluginSession> state = std::make_shared<PluginSession>();
     smf::Control ctrl;          // factor control, updated from every MA97 control block
     smf::CscLower mat;          // pattern + this factorization's values (CSC order)
     std::vector<int> sort_perm; // CSC entry -> caller's entry
@@ -97,6 +113,7 @@ struct SmfAkeep
 struct SmfFkeep
 {
     std::shared_ptr<smf::IpmSession> session;
+    std::shared_ptr<PluginSession> state; // the akeep's, set by the factorization
     smf::Control ctrl; // solve control: the factor's, updated by each solve's control block
     int n = 0;
     int num_neg = 0;
@@ -170,22 +187,41 @@ static int test_delay_budget()
 }
 
 // Call statistics for benchmarking (SMF_PLUGIN_STATS=1): counts and time of
-// factorizations and solves, printed to stderr when the plugin unloads.
+// the factorizations and solves of every session in the process, printed to
+// stderr when the plugin unloads. Sessions may run concurrently (one per
+// IPOPT instance), so the totals are atomics or guarded by `mutex`; the
+// per-session trace state is PluginSession's.
 struct PluginStats
 {
-    bool enabled = std::getenv("SMF_PLUGIN_STATS") != nullptr;
-    bool trace = std::getenv("SMF_PLUGIN_STATS") != nullptr && std::atoi(std::getenv("SMF_PLUGIN_STATS")) > 1;
-    bool last_call_was_factor = false;  // no solve since the previous factorization => IPOPT inertia correction
-    long factors = 0;
-    long solves = 0;
-    long rhs = 0;
+    const bool enabled = std::getenv("SMF_PLUGIN_STATS") != nullptr;
+    const bool trace = std::getenv("SMF_PLUGIN_STATS") != nullptr && std::atoi(std::getenv("SMF_PLUGIN_STATS")) > 1;
+    std::atomic<long> factors{0}; // also the trace id of the latest factorization
+    std::atomic<long> solves{0};
+    std::atomic<long> rhs{0};
+    std::mutex mutex; // guards the members below
     double factor_s = 0.0;
     double solve_s = 0.0;
     // IpmSession statistics of the sessions freed so far (one per analysis).
     long sessions = 0;
     smf::IpmStats ipm;
+    // Counts a factorization; returns its trace id (1, 2, ... over the process).
+    long add_factor(double seconds)
+    {
+        const long id = factors.fetch_add(1) + 1;
+        const std::lock_guard<std::mutex> lock(mutex);
+        factor_s += seconds;
+        return id;
+    }
+    void add_solve(int nrhs, double seconds)
+    {
+        solves.fetch_add(1);
+        rhs.fetch_add(nrhs);
+        const std::lock_guard<std::mutex> lock(mutex);
+        solve_s += seconds;
+    }
     void add_session(const smf::IpmStats& st)
     {
+        const std::lock_guard<std::mutex> lock(mutex);
         ++sessions;
         ipm.factorizations += st.factorizations;
         ipm.accepted += st.accepted;
@@ -201,11 +237,15 @@ struct PluginStats
     {
         if (!enabled)
             return;
+        const std::lock_guard<std::mutex> lock(mutex);
+        const long n_factors = factors.load();
+        const long n_solves = solves.load();
+        const long n_rhs = rhs.load();
         std::fprintf(stderr,
                      "[smf_ma97] threads=%d (%s) factors=%ld (%.3f s) solves=%ld rhs=%ld (%.3f s, %.1f us/solve)\n",
                      smf::plugin_threads().threads, smf::plugin_threads_source_name(smf::plugin_threads().source),
-                     factors, factor_s, solves, rhs, solve_s,
-                     solves > 0 ? 1e6 * solve_s / static_cast<double>(solves) : 0.0);
+                     n_factors, factor_s, n_solves, n_rhs, solve_s,
+                     n_solves > 0 ? 1e6 * solve_s / static_cast<double>(n_solves) : 0.0);
         std::fprintf(stderr,
                      "[smf_ma97] ipm: sessions=%ld factorizations=%d accepted=%d aborted=%d "
                      "reanalyses_tried=%d reanalyses_adopted=%d reanalyses_reverted=%d reanalyse_s=%.6f "
@@ -235,7 +275,7 @@ static void dump_kkt(SmfAkeep* ak)
     static const char* dir = std::getenv("SMF_KKT_DUMP_DIR");
     if (dir == nullptr || *dir == '\0')
         return;
-    static int next_id = 0;
+    static std::atomic<int> next_id{0};
     static const int max_dumps = std::getenv("SMF_KKT_DUMP_MAX") ? std::atoi(std::getenv("SMF_KKT_DUMP_MAX")) : 200;
     if (ak->dump_factorizations == 0)
         ak->capture_id = next_id++;
@@ -555,9 +595,11 @@ extern "C"
         // cannot be computed, the stale-scale result stands.
         if (smf::plugin_stale_scale_retry() && reuse_scaling && status == smf::IpmFactorStatus::Singular)
         {
+            // The id is the one this factorization will get; with other
+            // sessions factoring concurrently it is approximate.
             if (g_stats.trace)
                 std::fprintf(stderr, "[smf_ma97] factor %ld: singular with a reused scale (zero=%d): rescaling\n",
-                             g_stats.factors + 1, session.info().num_zero);
+                             g_stats.factors.load() + 1, session.info().num_zero);
             smf::Control fresh = ak->ctrl;
             fresh.scaling = smf::ScalingMethod::Matching;
             session.set_control(fresh);
@@ -593,21 +635,22 @@ extern "C"
         if (!fw)
             fw = new SmfFkeep();
         fw->session = ak->session;
+        fw->state = ak->state;
         fw->n = ak->n;
         fw->ctrl = ak->ctrl;
         fw->generation = session.factor_generation();
         fw->aborted = false;
+        PluginSession& state = *ak->state;
         if (g_stats.enabled)
-        {
-            ++g_stats.factors;
-            g_stats.factor_s +=
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s;
-        }
+            state.last_factor_id = g_stats.add_factor(
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s);
         // A successful SPD factor reports no inertia counts of its own.
         const bool pd = ak->ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite &&
                         fs == smf::FactorStatus::Success;
         // Per-factorization trace (SMF_PLUGIN_STATS>=2); corr=1 when the previous
-        // plugin call was also a factorization (IPOPT inertia correction).
+        // call on this session (akeep) was also a factorization (IPOPT inertia
+        // correction); other sessions' calls do not count, and a new analysis
+        // (IPOPT's restoration phase included) starts at corr=0.
         // abort=1: stopped on wrong inertia (partial counts); skipped = the
         // predicted flops of the fronts it did not factor; flops = actual.
         // ra=tried/adopted/reverted: the session's re-analysis counts, tried
@@ -621,7 +664,7 @@ extern "C"
                          "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
                          "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d abort=%d flops=%.6e "
                          "skipped=%.6e ra=%d/%d/%d\n",
-                         g_stats.factors, g_stats.last_call_was_factor ? 1 : 0, si.delayed_pivots,
+                         state.last_factor_id, state.last_call_was_factor ? 1 : 0, si.delayed_pivots,
                          si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
                          pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
@@ -632,7 +675,7 @@ extern "C"
                          aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
                          ist.reanalyses_tried, ist.reanalyses_adopted, reverted_before);
         }
-        g_stats.last_call_was_factor = true;
+        state.last_call_was_factor = true;
 
         // This early return comes before the inexact-inertia guard below on
         // purpose: an aborted factor (SMF_IPM_ABORT only, off by default)
@@ -738,7 +781,7 @@ extern "C"
         {
             if (g_stats.trace)
                 std::fprintf(stderr, "[smf_ma97] factor %ld: %d static pivots, inexact inertia: flag 7\n",
-                             g_stats.factors, si.static_pivots);
+                             state.last_factor_id, si.static_pivots);
             info->flag = 7;
             *fkeep = fw;
             return;
@@ -850,16 +893,13 @@ extern "C"
             fw->aborted = false;
             if (g_stats.trace)
                 std::fprintf(stderr, "[smf_ma97] completed aborted factor %ld before a solve: neg=%d\n",
-                             g_stats.factors, fw->num_neg);
+                             fw->state ? fw->state->last_factor_id : 0L, fw->num_neg);
         }
 
-        g_stats.last_call_was_factor = false;
+        if (fw->state)
+            fw->state->last_call_was_factor = false;
         if (g_stats.enabled)
-        {
-            ++g_stats.solves;
-            g_stats.rhs += nrhs;
-            g_stats.solve_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - t_solve).count();
-        }
+            g_stats.add_solve(nrhs, std::chrono::duration<double>(std::chrono::steady_clock::now() - t_solve).count());
         info->flag = (rc == 0) ? 0 : -5;
         info->num_neg = fw->num_neg;
         info->num_two = fw->num_two;

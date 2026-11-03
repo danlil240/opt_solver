@@ -10,7 +10,12 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <memory>
+#include <regex>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,11 +24,13 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
 #ifdef small
 #undef small
 #endif
 #else
 #include <dlfcn.h>
+#include <unistd.h>
 #endif
 
 struct ma97_control_d {
@@ -875,4 +882,274 @@ TEST(IpoptPluginRuntime, PglibReplayAccurate) {
         ++replayed;
     }
     if (replayed == 0) GTEST_SKIP() << "no PGLib capture under " << dir.string();
+}
+
+// --- Per-session plugin state (several MA97 sessions in one process) ---
+//
+// The plugin's per-factorization trace (SMF_PLUGIN_STATS=2) marks a
+// factorization corr=1 when the previous call on its session was also a
+// factorization (an IPOPT inertia correction). That state belongs to the
+// session: with two sessions in one process (concurrent IPOPT instances, or
+// IPOPT's restoration phase next to the main solver) one session's factor must
+// not make the other's next factor look like a correction. The process totals
+// printed at unload must count every call of every session.
+
+namespace {
+
+#ifndef _WIN32
+#ifdef SMF_MA97_PLUGIN_PATH
+#define SMF_PLUGIN_PATH_FOR_NOLOAD SMF_MA97_PLUGIN_PATH
+#else
+#define SMF_PLUGIN_PATH_FOR_NOLOAD "./libsmf_ma97.so"
+#endif
+#endif
+
+// Loads the plugin with SMF_PLUGIN_STATS=2 and stderr redirected to a file;
+// finish() unloads it (which prints the totals) and returns everything the
+// plugin wrote to stderr. The plugin reads SMF_PLUGIN_STATS when it is loaded
+// and prints its totals when it is unloaded, so this must be the only load of
+// the plugin in the process, and unloading must really unload it: where it
+// does not (unloaded() false, e.g. a dlclose no-op on glibc), the tests skip.
+class TracedPlugin {
+public:
+    explicit TracedPlugin(const std::string &tag) {
+#ifdef _WIN32
+        const unsigned long pid = GetCurrentProcessId();
+#else
+        const unsigned long pid = static_cast<unsigned long>(getpid());
+#endif
+        path_ = std::filesystem::temp_directory_path() /
+                ("smf_plugin_sessions_" + tag + "_" + std::to_string(pid) + ".log");
+        if (const char *v = std::getenv("SMF_PLUGIN_STATS")) {
+            had_env_ = true;
+            old_env_ = v;
+        }
+        set_env("SMF_PLUGIN_STATS", "2");
+        std::fflush(stderr);
+        saved_ = smf_dup(smf_fileno(stderr));
+        if (saved_ >= 0) {
+            if (FILE *f = std::fopen(path_.string().c_str(), "wb")) {
+                redirected = smf_dup2(smf_fileno(f), smf_fileno(stderr)) >= 0;
+                std::fclose(f);
+            }
+        }
+        sym = std::make_unique<PluginSymbols>();
+        loaded = sym->load();
+    }
+    // Unloads the plugin and returns what it wrote to stderr; sets unloaded.
+    std::string finish() {
+        sym.reset(); // unload: the plugin prints its totals
+#ifndef _WIN32
+        if (void *still = dlopen(SMF_PLUGIN_PATH_FOR_NOLOAD, RTLD_NOW | RTLD_NOLOAD)) {
+            dlclose(still);
+            unloaded = false;
+        }
+#endif
+        restore();
+        std::string text;
+        {
+            std::ifstream in(path_, std::ios::binary);
+            text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        remove_log();
+        return text;
+    }
+    ~TracedPlugin() {
+        sym.reset();
+        restore();
+        remove_log();
+    }
+    TracedPlugin(const TracedPlugin &) = delete;
+    TracedPlugin &operator=(const TracedPlugin &) = delete;
+
+    std::unique_ptr<PluginSymbols> sym;
+    bool loaded = false;
+    bool redirected = false;
+    bool unloaded = true;
+
+private:
+#ifdef _WIN32
+    static int smf_dup(int fd) { return _dup(fd); }
+    static int smf_dup2(int a, int b) { return _dup2(a, b); }
+    static int smf_close(int fd) { return _close(fd); }
+    static int smf_fileno(FILE *f) { return _fileno(f); }
+#else
+    static int smf_dup(int fd) { return dup(fd); }
+    static int smf_dup2(int a, int b) { return dup2(a, b); }
+    static int smf_close(int fd) { return close(fd); }
+    static int smf_fileno(FILE *f) { return fileno(f); }
+#endif
+    void restore() {
+        if (saved_ >= 0) {
+            std::fflush(stderr);
+            smf_dup2(saved_, smf_fileno(stderr));
+            smf_close(saved_);
+            saved_ = -1;
+        }
+        set_env("SMF_PLUGIN_STATS", had_env_ ? old_env_.c_str() : "");
+    }
+    void remove_log() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+    }
+    std::filesystem::path path_;
+    int saved_ = -1;
+    bool had_env_ = false;
+    std::string old_env_;
+};
+
+struct TraceFactor {
+    long id;
+    int corr;
+    int neg;
+};
+
+std::vector<TraceFactor> trace_factors(const std::string &text) {
+    static const std::regex line(R"(\[smf_ma97\] factor (\d+): corr=([01]) .*? neg=(-?\d+) )");
+    std::vector<TraceFactor> out;
+    for (auto it = std::sregex_iterator(text.begin(), text.end(), line); it != std::sregex_iterator(); ++it)
+        out.push_back({std::stol((*it)[1].str()), std::stoi((*it)[2].str()), std::stoi((*it)[3].str())});
+    return out;
+}
+
+// A total from the unload summary ("factors=7", "sessions=2", ...), -1 if absent.
+long trace_total(const std::string &text, const char *key) {
+    const std::regex re(std::string(R"(\[smf_ma97\] (threads|ipm:)[^\n]*? )") + key + R"(=(\d+))");
+    std::smatch m;
+    return std::regex_search(text, m, re) ? std::stol(m[2].str()) : -1;
+}
+
+// One 3x3 MA97 session (0-based arrays): the lower triangle of
+// [[4,1,.5],[1,-3,1],[.5,1,d]], one negative eigenvalue for d = 5, two for d = -5.
+struct Session3 {
+    PluginSymbols *sym;
+    ma97_control_d ctrl{};
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    static constexpr int n = 3;
+    static constexpr int ptr[4] = {0, 3, 5, 6};
+    static constexpr int row[6] = {0, 1, 2, 1, 2, 2};
+
+    explicit Session3(PluginSymbols *s) : sym(s) {
+        sym->default_control(&ctrl);
+        ctrl.f_arrays = 0;
+    }
+    ~Session3() { finalise(); }
+    Session3(const Session3 &) = delete;
+    Session3 &operator=(const Session3 &) = delete;
+    int analyse() {
+        ma97_info_d info{};
+        sym->analyse(1, n, ptr, row, nullptr, &akeep, &ctrl, &info, nullptr);
+        return info.flag;
+    }
+    ma97_info_d factor(double d) {
+        const double v[6] = {4.0, 1.0, 0.5, -3.0, 1.0, d};
+        ma97_info_d info{};
+        sym->factor(4, ptr, row, v, &akeep, &fkeep, &ctrl, &info, nullptr);
+        return info;
+    }
+    // Solves for x = [1,1,1]; returns the max error of the computed x.
+    double solve(double d) {
+        double b[3] = {5.5, -1.0, 1.5 + d};
+        ma97_info_d info{};
+        sym->solve(0, 1, b, 3, &akeep, &fkeep, &ctrl, &info);
+        if (info.flag != 0) return 1e300;
+        return std::max({std::abs(b[0] - 1.0), std::abs(b[1] - 1.0), std::abs(b[2] - 1.0)});
+    }
+    void finalise() {
+        if (akeep || fkeep) sym->finalise(&akeep, &fkeep);
+    }
+};
+
+} // namespace
+
+TEST(Ma97PluginSessions, InterleavedSessionsKeepOwnState) {
+    TracedPlugin tp("interleaved");
+    ASSERT_TRUE(tp.loaded);
+    ASSERT_TRUE(tp.redirected);
+    const double dA = 5.0, dB = -5.0; // A: one negative eigenvalue, B: two
+    Session3 A(tp.sym.get()), B(tp.sym.get());
+    ASSERT_EQ(A.analyse(), 0);
+    EXPECT_EQ(A.factor(dA).num_neg, 1); // factor 1: A, corr 0
+    ASSERT_EQ(B.analyse(), 0);
+    EXPECT_EQ(B.factor(dB).num_neg, 2); // factor 2: B, corr 0 (the factor before was A's)
+    EXPECT_LT(A.solve(dA), 1e-12);
+    EXPECT_LT(B.solve(dB), 1e-12);
+    EXPECT_EQ(A.factor(dA).num_neg, 1); // factor 3: A, corr 0
+    EXPECT_EQ(B.factor(dB).num_neg, 2); // factor 4: B, corr 0 (the factor before was A's)
+    EXPECT_LT(A.solve(dA), 1e-12);
+    EXPECT_LT(B.solve(dB), 1e-12);
+    EXPECT_EQ(A.factor(dA).num_neg, 1); // factor 5: A, corr 0
+    EXPECT_EQ(B.factor(dB).num_neg, 2); // factor 6: B, corr 0
+    EXPECT_EQ(A.factor(dA).num_neg, 1); // factor 7: A, corr 1 (A refactored; B's factor in between)
+    EXPECT_LT(A.solve(dA), 1e-12);
+    EXPECT_LT(B.solve(dB), 1e-12);
+    A.finalise();
+    B.finalise();
+    const std::string text = tp.finish();
+    if (!tp.unloaded) GTEST_SKIP() << "the plugin stays loaded after dlclose: no unload totals";
+
+    const std::vector<TraceFactor> f = trace_factors(text);
+    ASSERT_EQ(f.size(), 7u) << text;
+    const int want_corr[7] = {0, 0, 0, 0, 0, 0, 1};
+    const int want_neg[7] = {1, 2, 1, 2, 1, 2, 1};
+    for (size_t i = 0; i < f.size(); ++i) {
+        const char session = want_neg[i] == 1 ? 'A' : 'B';
+        EXPECT_EQ(f[i].id, static_cast<long>(i + 1)) << text;
+        EXPECT_EQ(f[i].corr, want_corr[i]) << "factor " << i + 1 << " (session " << session << ")\n" << text;
+        EXPECT_EQ(f[i].neg, want_neg[i]) << text;
+    }
+    EXPECT_EQ(trace_total(text, "factors"), 7) << text;
+    EXPECT_EQ(trace_total(text, "solves"), 6) << text;
+    EXPECT_EQ(trace_total(text, "rhs"), 6) << text;
+    EXPECT_EQ(trace_total(text, "sessions"), 2) << text;
+}
+
+TEST(Ma97PluginSessions, ConcurrentSessionsOnTwoThreads) {
+    TracedPlugin tp("threads");
+    ASSERT_TRUE(tp.loaded);
+    ASSERT_TRUE(tp.redirected);
+    constexpr int kIters = 200;
+    int bad[2] = {0, 0};
+    auto worker = [&](int t) {
+        const double d0 = t == 0 ? 5.0 : -5.0;
+        const int neg = t == 0 ? 1 : 2;
+        Session3 s(tp.sym.get());
+        if (s.analyse() != 0) {
+            bad[t] = kIters;
+            return;
+        }
+        for (int it = 0; it < kIters; ++it) {
+            const double d = d0 * (1.0 + 1e-3 * it);
+            const ma97_info_d info = s.factor(d);
+            if (info.flag != 0 || info.num_neg != neg || !(s.solve(d) < 1e-11)) ++bad[t];
+        }
+        s.finalise();
+    };
+    std::thread t0(worker, 0), t1(worker, 1);
+    t0.join();
+    t1.join();
+    const std::string text = tp.finish();
+    EXPECT_EQ(bad[0], 0);
+    EXPECT_EQ(bad[1], 0);
+    if (!tp.unloaded) GTEST_SKIP() << "the plugin stays loaded after dlclose: no unload totals";
+
+    // Every factor follows a solve on its own session, so none is a
+    // correction, whatever the other thread did in between; every factor has
+    // its own trace id and the totals count both sessions' calls.
+    const std::vector<TraceFactor> f = trace_factors(text);
+    ASSERT_EQ(f.size(), static_cast<size_t>(2 * kIters));
+    int corr = 0;
+    std::vector<long> ids;
+    for (const TraceFactor &x : f) {
+        corr += x.corr;
+        ids.push_back(x.id);
+    }
+    EXPECT_EQ(corr, 0) << "factors marked as inertia corrections because of the other session's calls";
+    std::sort(ids.begin(), ids.end());
+    for (size_t i = 0; i < ids.size(); ++i) EXPECT_EQ(ids[i], static_cast<long>(i + 1));
+    EXPECT_EQ(trace_total(text, "factors"), 2 * kIters);
+    EXPECT_EQ(trace_total(text, "solves"), 2 * kIters);
+    EXPECT_EQ(trace_total(text, "rhs"), 2 * kIters);
+    EXPECT_EQ(trace_total(text, "sessions"), 2);
 }
