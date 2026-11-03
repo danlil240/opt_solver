@@ -15,21 +15,25 @@
 #include "smf/info.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
+#include "smf/workspace.hpp"
 
+#include <cstddef>
 #include <memory>
+#include <span>
 
 /* -------------------------------------------------------------------------
  * Internal concrete structs for opaque handles
  * ------------------------------------------------------------------------- */
 
 /**
- * Holds the result of smf::Solver::analyse() together with a copy of the
- * CscLower that was analysed (needed to supply updated values at factor time).
+ * Holds the result of smf::Solver::analyse() together with the order and
+ * entry count of the analysed matrix. smf_factor() passes its values to
+ * smf::Solver::factor() in the entry order of that matrix.
  */
 struct smf_analysis_s {
-    smf::CscLower                      csc;    ///< copy of the analysed matrix
     std::unique_ptr<smf::AnalysisKeep> keep;   ///< symbolic analysis result
     int                                n;      ///< matrix order (cached)
+    std::size_t                        nnz;    ///< entries of the analysed matrix
 };
 
 /**
@@ -80,6 +84,9 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out) {
         A.n = static_cast<smf::Int>(csc->n);
 
         const int nnz = csc->col_ptr[csc->n];
+        if (csc->col_ptr[0] != 0 || nnz < 0) {
+            return SMF_ERR_INVALID_ARG;
+        }
         A.col_ptr.assign(csc->col_ptr, csc->col_ptr + csc->n + 1);
         A.row_idx.assign(csc->row_idx, csc->row_idx + nnz);
         A.values.assign (csc->values,  csc->values  + nnz);
@@ -96,9 +103,9 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out) {
         }
 
         auto* h  = new smf_analysis_s;
-        h->csc   = std::move(A);
         h->keep  = std::move(keep);
         h->n     = csc->n;
+        h->nnz   = static_cast<std::size_t>(nnz);
 
         *out = h;
         return SMF_OK;
@@ -125,11 +132,6 @@ int smf_factor(smf_analysis_t analysis,
     }
 
     try {
-        /* Update the stored CscLower with the new numerical values */
-        smf::CscLower A = analysis->csc;   // shallow copy of structure
-        const int nnz = static_cast<int>(A.col_ptr.back());
-        A.values.assign(values, values + nnz);
-
         smf::Control ctrl;
         if (mtype == SMF_POSDEF) {
             ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
@@ -139,15 +141,26 @@ int smf_factor(smf_analysis_t analysis,
 
         smf::Info info;
         smf::Solver solver;
+        smf::NumericWorkspace ws;
 
+        /* Factor the caller's values (entry order of the analysed matrix).
+         * The overload without values factors the values given to
+         * smf_analyse(), which ignored `values` here before. */
         auto fkeep = std::make_unique<smf::FactorKeep>();
-        smf::FactorStatus fs =
-            solver.factor(*analysis->keep, ctrl, info, *fkeep);
+        const smf::FactorStatus fs = solver.factor(
+            *analysis->keep, std::span<const double>(values, analysis->nnz),
+            ctrl, info, *fkeep, ws);
 
-        if (fs == smf::FactorStatus::Singular) {
-            return SMF_ERR_SINGULAR;
-        }
         if (fs != smf::FactorStatus::Success) {
+            /* Rejected values (NaN/Inf) come back as Singular or
+             * NotPositiveDefinite with info.status = IllegalValue. */
+            if (info.status == smf::ErrorCode::IllegalValue) {
+                return SMF_ERR_INVALID_ARG;
+            }
+            if (fs == smf::FactorStatus::Singular ||
+                fs == smf::FactorStatus::NotPositiveDefinite) {
+                return SMF_ERR_SINGULAR;
+            }
             return SMF_ERR_INTERNAL;
         }
 
@@ -195,7 +208,9 @@ int smf_solve(smf_analysis_t analysis,
         int rc = solver.solve(*factor->keep, ctrl, info,
                               rhs, analysis->n, nrhs, sjob);
         if (rc != 0) {
-            return SMF_ERR_INTERNAL;
+            return info.status == smf::ErrorCode::IllegalValue
+                       ? SMF_ERR_INVALID_ARG
+                       : SMF_ERR_INTERNAL;
         }
         return SMF_OK;
 

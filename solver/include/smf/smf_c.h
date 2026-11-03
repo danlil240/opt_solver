@@ -95,12 +95,21 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  * @brief Perform numerical factorisation of A.
  *
  * @param analysis  Handle obtained from smf_analyse().  Must not be NULL.
- * @param values    Numerical values array (same sparsity pattern as analysed).
+ * @param values    Numerical values to factor, length col_ptr[n] of the
+ *                  matrix passed to smf_analyse(), in the same entry order
+ *                  (same pattern; only the values may change).  These values
+ *                  are factored, not the ones given to smf_analyse().
  *                  Must not be NULL.
  * @param mtype     SMF_POSDEF or SMF_INDEF.
  * @param out       On success, *out is set to a newly allocated factor handle.
  *                  Must not be NULL.
- * @return SMF_OK, SMF_ERR_INVALID_ARG, SMF_ERR_SINGULAR, or SMF_ERR_INTERNAL.
+ * @return SMF_OK, SMF_ERR_INVALID_ARG (also for NaN/Inf values),
+ *         SMF_ERR_SINGULAR (singular, or not positive definite under
+ *         SMF_POSDEF), or SMF_ERR_INTERNAL.
+ *
+ * The analysis handle must outlive every factor made from it (the factor
+ * refers to it), and one analysis handle must not be factored from two
+ * threads at once (a factorization may attach a re-analysis to it).
  *
  * Uses the default smf::Control: an SMF_INDEF factorization whose delayed
  * pivots inflate its work past Control::scale_on_delay_ratio stops and is
@@ -124,7 +133,8 @@ int smf_factor(smf_analysis_t analysis,
  * @param rhs       Column-major array of size n * nrhs; overwritten with X.
  *                  Must not be NULL.
  * @param job       SMF_SOLVE_FULL, SMF_SOLVE_FORWARD, or SMF_SOLVE_BACKWARD.
- * @return SMF_OK, SMF_ERR_INVALID_ARG, or SMF_ERR_INTERNAL.
+ * @return SMF_OK, SMF_ERR_INVALID_ARG (also when the factor's order is not
+ *         the analysis'), or SMF_ERR_INTERNAL.
  */
 int smf_solve(smf_analysis_t analysis,
               smf_factor_t   factor,
