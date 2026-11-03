@@ -29,6 +29,14 @@
 
 namespace {
 
+// RunRecord's matching trial fields from the analysis' AdapterStats.
+void copy_matching_trial(smf::bench::RunRecord &rec, const smf::bench::AdapterStats &st) {
+    rec.matching_trial = st.matching_trial;
+    rec.matching_decide_first = st.matching_decide_first;
+    rec.matching_initial_free = st.matching_initial_free;
+    rec.matching_paused_passes = st.matching_paused_passes;
+}
+
 // RunRecord::order_hash: AdapterStats::order_hash as 16 hex digits.
 std::string order_hash_hex(std::uint64_t h) {
     char buf[17];
@@ -641,6 +649,24 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // SMF_BENCH_MATCHING_DECIDE_PASSES (double; negative = off):
+    // Control::matching_initial_decide_passes. SMF_BENCH_MATCHING_DECIDE_FREE
+    // (double): Control::matching_initial_decide_free. A value that is not a
+    // number is an error (exit code 2).
+    for (const auto &[name, field] : {std::pair<const char *, double *>{"SMF_BENCH_MATCHING_DECIDE_PASSES",
+                                                                        &ctrl.matching_initial_decide_passes},
+                                      std::pair<const char *, double *>{"SMF_BENCH_MATCHING_DECIDE_FREE",
+                                                                        &ctrl.matching_initial_decide_free}}) {
+        if (const char *e = std::getenv(name)) {
+            char *end = nullptr;
+            const double v = std::strtod(e, &end);
+            if (end == e || *end != '\0') {
+                std::fprintf(stderr, "error: %s=\"%s\" is not a number\n", name, e);
+                return 2;
+            }
+            *field = v;
+        }
+    }
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,
@@ -800,6 +826,7 @@ int main(int argc, char **argv) {
         double analyse_ms = adapter->stats().analyse_ms;
         bool has_phases = adapter->stats().has_analyse_phases;
         smf::AnalysePhaseSeconds phases = adapter->stats().analyse_phases;
+        smf::bench::AdapterStats trial_stats = adapter->stats();  // the analysis' matching trial
         if (out_a == smf::bench::Outcome::Success) {
             for (int step = 0; step < kSeqSteps; ++step) {
                 out_f = adapter->factor(seq_values[step]);
@@ -815,6 +842,7 @@ int main(int argc, char **argv) {
                 if (step == 0 && !has_phases && adapter->stats().has_analyse_phases) {
                     has_phases = true;
                     phases = adapter->stats().analyse_phases;
+                    trial_stats = adapter->stats();
                 }
                 if (ipm_path && out_f == smf::bench::Outcome::Singular) {
                     const auto fst = adapter->stats();
@@ -872,6 +900,7 @@ int main(int argc, char **argv) {
         rec.analyse_ms = analyse_ms;
         rec.has_analyse_phases = has_phases;
         rec.analyse_phases = phases;
+        copy_matching_trial(rec, trial_stats);
         rec.factor_ms = total_factor_ms;
         if (!step_factor_ms.empty()) {
             rec.first_factor_ms = step_factor_ms.front();
@@ -975,6 +1004,7 @@ int main(int argc, char **argv) {
         rec.analyse_ms = sum_a * inv_batch;
         rec.has_analyse_phases = st.has_analyse_phases;  // last repetition's phases
         rec.analyse_phases = st.analyse_phases;
+        copy_matching_trial(rec, st);
         rec.factor_ms = sum_f * inv_batch;
         rec.solve_ms = sum_s * inv_batch;
         rec.refine_ms = sum_r * inv_batch;

@@ -777,4 +777,285 @@ TEST(MatchingTrial, ResumesWhenInitialMatchingPasses) {
     EXPECT_FALSE(a2->matching_rejected);
 }
 
+// Control::matching_initial_decide_passes (decide on the initial matching
+// first, after a short first budget). Fixtures (Degree order, default
+// Hybrid matcher; free = the initial phase's free-column share, passes =
+// the full searches' work):
+//   opf_like_kkt(10000, 1000, 7):      free 2.4%,  0.07 passes, Exact, adopted
+//   opf_like_kkt(10000, 3000, 1):      free 7.1%,  0.27 passes, Exact, AMD kept
+//                                      (exact ratio 3.96, initial 3.46)
+//   opf_like_kkt(6000, 5000, 7):       free 18.6%, 15.3 passes, RejectedInitial
+//   scaled_opf_kkt(9000, 2000, 1, 4):  free 5.2%,  0.14 passes, Exact, adopted
+//                                      (exact ratio 1.21): boyd2-like
+namespace {
+
+Control decide_control(double passes, int threads) {
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.ordering = OrderingMethod::AutoSerial;
+    c.matching_initial_decide_passes = passes;
+    c.num_threads = threads;
+    c.auto_threads = false;  // small test trees
+    return c;
+}
+
+// The whole analysis of two runs agrees (verdict, ratios, ordering, scales).
+void expect_same_trial_analysis(const AnalysisKeep &a, const Info &ia, const AnalysisKeep &b, const Info &ib) {
+    EXPECT_EQ(ib.matching_trial, ia.matching_trial);
+    EXPECT_EQ(ib.matching_initial_ratio, ia.matching_initial_ratio);
+    EXPECT_EQ(ib.matching_exact_ratio, ia.matching_exact_ratio);
+    EXPECT_EQ(ib.ordering_used, ia.ordering_used);
+    EXPECT_EQ(b.perm, a.perm);
+    EXPECT_EQ(b.matching_scale, a.matching_scale);
+    EXPECT_EQ(b.rejected_matching_scale, a.rejected_matching_scale);
+    EXPECT_EQ(b.matching_scale_partial, a.matching_scale_partial);
+    EXPECT_EQ(b.matching_rejected, a.matching_rejected);
+}
+
+} // namespace
+
+// Off (the default, negative, NaN, infinite) and on-but-not-firing (the
+// free share below the threshold, or a NaN threshold) give the default
+// analysis and factorization bitwise: verdict, ratios, ordering, scales,
+// factor size, delays, inertia and solution. The off path computes no free
+// share.
+TEST(MatchingTrial, DecideFirstOffIsTheDefaultTrial) {
+    EXPECT_LT(Control{}.matching_initial_decide_passes, 0.0);  // off by default
+    EXPECT_DOUBLE_EQ(Control{}.matching_initial_decide_free, 0.05);
+    const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(10000, 3000, 1),
+                             opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 1, 4.0)};
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    int k = 0;
+    for (const CscLower &A : mats) {
+        const int n = static_cast<int>(A.n);
+        const Control ref = decide_control(-1.0, 1);
+        Solver sr;
+        Info ir;
+        auto ar = sr.analyse(A, ref, ir);
+        ASSERT_NE(ar, nullptr);
+        ASSERT_NE(ir.matching_trial, MatchingTrial::None);
+        EXPECT_EQ(ir.matching_decide_first, 0);
+        EXPECT_EQ(ir.matching_initial_free, -1.0);
+        FactorKeep fr;
+        ASSERT_EQ(sr.factor(*ar, ref, ir, fr), FactorStatus::Success);
+        std::vector<double> xr(static_cast<std::size_t>(n), 1.0);
+        ASSERT_EQ(sr.solve(fr, ref, ir, xr.data(), n), 0);
+
+        struct Variant {
+            const char *name;
+            double passes, free;
+        };
+        // On but not firing: a threshold above any share (1.5), or NaN.
+        const Variant variants[] = {{"-3", -3.0, 0.05}, {"nan", nan, 0.05}, {"inf", inf, 0.05},
+                                    {"on, free 1.5", 0.0, 1.5}, {"on, free nan", 0.0, nan}};
+        for (const Variant &v : variants) {
+            SCOPED_TRACE("matrix " + std::to_string(k) + " " + v.name);
+            Control c = decide_control(v.passes, 1);
+            c.matching_initial_decide_free = v.free;
+            Solver s;
+            Info i;
+            auto a = s.analyse(A, c, i);
+            ASSERT_NE(a, nullptr);
+            expect_same_trial_analysis(*ar, ir, *a, i);
+            EXPECT_EQ(i.matching_decide_first, 0);
+            EXPECT_EQ(i.matching_paused_passes, ir.matching_paused_passes);
+            if (v.passes < 0.0 || !(v.passes < inf)) EXPECT_EQ(i.matching_initial_free, -1.0);
+            else EXPECT_GE(i.matching_initial_free, 0.0);
+            FactorKeep f;
+            ASSERT_EQ(s.factor(*a, c, i, f), FactorStatus::Success);
+            EXPECT_EQ(i.actual_factor_entries, ir.actual_factor_entries);
+            EXPECT_EQ(i.delayed_pivots, ir.delayed_pivots);
+            EXPECT_EQ(i.num_negative, ir.num_negative);
+            EXPECT_EQ(i.num_positive, ir.num_positive);
+            EXPECT_EQ(i.num_zero, ir.num_zero);
+            std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+            ASSERT_EQ(s.solve(f, c, i, x.data(), n), 0);
+            EXPECT_EQ(x, xr);
+        }
+        ++k;
+    }
+}
+
+// Below the free-share threshold the knob does not fire: opf_like_kkt(10000,
+// 1000, 7) leaves 2.4% free, so even 0 passes runs the default budget and
+// the exact matching decides; a threshold below its share fires it.
+TEST(MatchingTrial, DecideFirstNeedsTheFreeShare) {
+    const CscLower A = opf_like_kkt(10000, 1000, 7);
+    Solver s1, s2;
+    Info i1, i2;
+    Control c = decide_control(0.0, 1);
+    ASSERT_NE(s1.analyse(A, c, i1), nullptr);
+    EXPECT_EQ(i1.matching_decide_first, 0);
+    EXPECT_GT(i1.matching_initial_free, 0.0);
+    EXPECT_LT(i1.matching_initial_free, 0.05);
+    EXPECT_EQ(i1.matching_trial, MatchingTrial::Exact);
+    EXPECT_EQ(i1.matching_paused_passes, -1.0);
+    c.matching_initial_decide_free = 0.01;
+    ASSERT_NE(s2.analyse(A, c, i2), nullptr);
+    EXPECT_EQ(i2.matching_decide_first, 1);
+    EXPECT_EQ(i2.matching_initial_free, i1.matching_initial_free);
+    EXPECT_EQ(i2.matching_paused_passes, 0.0);
+    EXPECT_EQ(i2.matching_trial, MatchingTrial::ResumedExact);  // adopter: the initial phase passes
+}
+
+// Knob 0 where the initial matching decides: no search runs (paused at 0
+// passes) and the trial rejects on the initial matching, keeping the
+// ordering the default trial keeps (AMD). On opf_like_kkt(10000, 3000, 1)
+// the default's searches finish (0.27 passes, Exact, rejected at 3.96); on
+// opf_like_kkt(6000, 5000, 7) the default pauses past its 2-pass budget and
+// rejects there, so knob 0 spares those 2 passes. Serial and threaded.
+TEST(MatchingTrial, DecideFirstAtZeroSkipsTheSearches) {
+    const CscLower mats[] = {opf_like_kkt(10000, 3000, 1), opf_like_kkt(6000, 5000, 7)};
+    const MatchingTrial default_verdict[] = {MatchingTrial::Exact, MatchingTrial::RejectedInitial};
+    for (int k = 0; k < 2; ++k) {
+        const CscLower &A = mats[k];
+        for (int threads : {1, 4}) {
+            SCOPED_TRACE("matrix " + std::to_string(k) + " threads " + std::to_string(threads));
+            Solver sd, sz;
+            Info id, iz;
+            auto ad = sd.analyse(A, decide_control(-1.0, threads), id);
+            auto az = sz.analyse(A, decide_control(0.0, threads), iz);
+            ASSERT_NE(ad, nullptr);
+            ASSERT_NE(az, nullptr);
+            EXPECT_EQ(id.matching_trial, default_verdict[k]);
+            EXPECT_EQ(id.ordering_used, static_cast<int>(OrderingMethod::AMD));
+            EXPECT_EQ(iz.matching_decide_first, 1);
+            EXPECT_GE(iz.matching_initial_free, 0.05);
+            EXPECT_EQ(iz.matching_paused_passes, 0.0);  // no search ran
+            if (k == 1) EXPECT_GE(id.matching_paused_passes, 2.0);
+            EXPECT_EQ(iz.matching_trial, MatchingTrial::RejectedInitial);
+            EXPECT_GT(iz.matching_initial_ratio, 2.4);
+            EXPECT_EQ(iz.matching_exact_ratio, 0.0);
+            EXPECT_EQ(iz.ordering_used, static_cast<int>(OrderingMethod::AMD));
+            EXPECT_EQ(az->perm, ad->perm);
+            EXPECT_TRUE(az->matching_rejected);
+            EXPECT_TRUE(az->matching_scale.empty());
+        }
+    }
+}
+
+// boyd2-like: an adopter whose exact matching is a few searches away (0.14
+// passes) and whose initial phase leaves 5.2% free. Knob 0 decides on the
+// initial matching first, which passes, so it pays the initial candidate and
+// resumes (ResumedExact). A first budget past its searches (0.25, 0.5, 1)
+// finishes them inside it: Exact, as the default trial, with no pause and
+// no initial candidate. One below them (0.05) pauses there and resumes.
+// Every variant is bitwise the default analysis (ordering, scale).
+TEST(MatchingTrial, DecideFirstShortBudgetKeepsExact) {
+    const CscLower A = scaled_opf_kkt(9000, 2000, 1, 4.0);
+    Solver sd;
+    Info id;
+    auto ad = sd.analyse(A, decide_control(-1.0, 1), id);
+    ASSERT_NE(ad, nullptr);
+    ASSERT_EQ(id.matching_trial, MatchingTrial::Exact);
+    ASSERT_EQ(id.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    ASSERT_FALSE(ad->matching_scale.empty());
+    for (double passes : {0.0, 0.05, 0.25, 0.5, 1.0}) {
+        SCOPED_TRACE("passes " + std::to_string(passes));
+        Solver s;
+        Info i;
+        auto a = s.analyse(A, decide_control(passes, 1), i);
+        ASSERT_NE(a, nullptr);
+        ASSERT_EQ(i.matching_decide_first, 1) << "fixture must leave >= 5% free";
+        EXPECT_EQ(i.ordering_used, id.ordering_used);
+        EXPECT_EQ(i.matching_exact_ratio, id.matching_exact_ratio);
+        EXPECT_EQ(a->perm, ad->perm);
+        EXPECT_EQ(a->matching_scale, ad->matching_scale);
+        EXPECT_FALSE(a->matching_rejected);
+        if (passes >= 0.25) {
+            EXPECT_EQ(i.matching_trial, MatchingTrial::Exact);
+            EXPECT_EQ(i.matching_paused_passes, -1.0);
+            EXPECT_EQ(i.matching_initial_ratio, 0.0);  // no initial candidate built
+        } else {
+            EXPECT_EQ(i.matching_trial, MatchingTrial::ResumedExact);
+            EXPECT_GE(i.matching_paused_passes, passes);
+            EXPECT_LT(i.matching_paused_passes, 0.14);
+            EXPECT_GT(i.matching_initial_ratio, 0.0);
+            EXPECT_LE(i.matching_initial_ratio, 2.4);
+        }
+    }
+}
+
+// The first budget is capped by matching_search_budget: past it (5 passes
+// against the default 2) the trial pauses where the default one does.
+TEST(MatchingTrial, DecideFirstIsCappedByTheBudget) {
+    const CscLower A = opf_like_kkt(6000, 5000, 7);
+    Solver sd, s5;
+    Info id, i5;
+    auto ad = sd.analyse(A, decide_control(-1.0, 1), id);
+    auto a5 = s5.analyse(A, decide_control(5.0, 1), i5);
+    ASSERT_NE(ad, nullptr);
+    ASSERT_NE(a5, nullptr);
+    EXPECT_EQ(i5.matching_decide_first, 1);
+    EXPECT_EQ(i5.matching_paused_passes, id.matching_paused_passes);
+    expect_same_trial_analysis(*ad, id, *a5, i5);
+}
+
+// The first budget counts edges scanned by serial searches, and the free
+// share is the constructor's: every path (rejected at 0, resumed below the
+// searches, exact within the first budget, not firing, dear factor) gives
+// the same analysis and telemetry at 1, 2 and 4 threads (ConcurrentTrial),
+// under AutoSerial and AutoParallel (these KKTs never try METIS).
+TEST(MatchingTrial, DecideFirstDoesNotDependOnThreads) {
+    const CscLower mats[] = {opf_like_kkt(10000, 1000, 7), opf_like_kkt(10000, 3000, 1),
+                             opf_like_kkt(6000, 5000, 7), scaled_opf_kkt(9000, 2000, 1, 4.0)};
+    int k = 0;
+    for (const CscLower &A : mats) {
+        for (OrderingMethod ord : {OrderingMethod::AutoSerial, OrderingMethod::AutoParallel}) {
+            for (double passes : {0.0, 0.05, 0.25}) {
+                for (int refactors : {1, 1000000}) {  // 1e6: a dear base factor resumes outright
+                    SCOPED_TRACE("matrix " + std::to_string(k) + " ord " + std::to_string(static_cast<int>(ord)) +
+                                 " passes " + std::to_string(passes) + " refactors " + std::to_string(refactors));
+                    Control c1 = decide_control(passes, 1);
+                    c1.ordering = ord;
+                    c1.expected_refactors = refactors;
+                    Solver s1;
+                    Info i1;
+                    auto a1 = s1.analyse(A, c1, i1);
+                    ASSERT_NE(a1, nullptr);
+                    ASSERT_NE(i1.matching_trial, MatchingTrial::None);
+                    for (int threads : {2, 4}) {
+                        Control ct = c1;
+                        ct.num_threads = threads;
+                        Solver st;
+                        Info it;
+                        for (int rep = 0; rep < (threads == 4 ? 2 : 1); ++rep) {  // rep 1 reuses st's buffers
+                            auto at = st.analyse(A, ct, it);
+                            ASSERT_NE(at, nullptr);
+                            expect_same_trial_analysis(*a1, i1, *at, it);
+                            EXPECT_EQ(it.matching_decide_first, i1.matching_decide_first);
+                            EXPECT_EQ(it.matching_initial_free, i1.matching_initial_free);
+                            EXPECT_EQ(it.matching_paused_passes, i1.matching_paused_passes);
+                        }
+                    }
+                }
+            }
+        }
+        ++k;
+    }
+}
+
+// A diagonal initial matching skips the trial before the knob: no free
+// share, no first budget, the default Diagonal analysis; serial and threaded.
+TEST(MatchingTrial, DecideFirstLeavesTheDiagonalPath) {
+    const CscLower A = diagonal_kkt(10000, 3);
+    for (int threads : {1, 4}) {
+        SCOPED_TRACE("threads " + std::to_string(threads));
+        Solver sd, sz;
+        Info id, iz;
+        auto ad = sd.analyse(A, decide_control(-1.0, threads), id);
+        Control z = decide_control(0.0, threads);
+        z.matching_initial_decide_free = 0.0;  // would fire on any share
+        auto az = sz.analyse(A, z, iz);
+        ASSERT_NE(ad, nullptr);
+        ASSERT_NE(az, nullptr);
+        ASSERT_EQ(id.matching_trial, MatchingTrial::Diagonal);
+        expect_same_trial_analysis(*ad, id, *az, iz);
+        EXPECT_EQ(iz.matching_decide_first, 0);
+        EXPECT_EQ(iz.matching_initial_free, -1.0);
+        EXPECT_EQ(iz.matching_paused_passes, -1.0);
+    }
+}
+
 } // namespace smf

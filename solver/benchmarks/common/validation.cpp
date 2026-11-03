@@ -149,6 +149,13 @@ std::string RunRecord::to_json_line() const {
         ms("keep_build", analyse_phases.keep_build);
         oss << "}";
     }
+    if (matching_trial >= 0) {
+        oss << ",\"matching_trial\":" << matching_trial
+            << ",\"matching_decide_first\":" << matching_decide_first << ",\"matching_initial_free\":";
+        write_json_double(oss, matching_initial_free);
+        oss << ",\"matching_paused_passes\":";
+        write_json_double(oss, matching_paused_passes);
+    }
     oss << ",\"factor_ms\":";
     write_json_double(oss, factor_ms);
     if (first_factor_ms >= 0.0) {

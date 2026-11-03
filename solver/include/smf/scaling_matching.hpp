@@ -150,6 +150,9 @@ public:
     MatchingResult current() const;
     /// The initial phase's partial matching and the scaling of its duals.
     MatchingResult initial() const;
+    /// initial().matched_rank without building the result (no scaling, no
+    /// copy): the columns the initial phase matched.
+    int initial_matched() const;
 
 private:
     struct State;

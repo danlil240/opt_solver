@@ -973,6 +973,15 @@ MatchingResult SymmetricMatcher::initial() const {
     return res;
 }
 
+int SymmetricMatcher::initial_matched() const {
+    const State &s = *s_;
+    if (s.init_col_to_row.empty() && s.n > 0) return current().matched_rank;  // as initial()
+    if (!s.shape_ok) return 0;  // result() leaves col_to_row empty
+    int matched = 0;
+    for (const Int i : s.init_col_to_row) matched += i >= 0 ? 1 : 0;
+    return matched;
+}
+
 MatchingResult compute_symmetric_matching(const CscLower &A) {
     SymmetricMatcher m(A);
     m.advance(-1);

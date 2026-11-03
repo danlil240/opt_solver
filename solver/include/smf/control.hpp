@@ -53,6 +53,31 @@ struct Control {
     // the same and the saving small (the sixth, aug3dcqp at 2.22, finishes
     // inside its last search).
     double         matching_search_budget = 2.0;
+    // Decide on the initial matching first (lever A; probe 2026-11-03):
+    // when the matching's initial phase (greedy + length-2 augmentations)
+    // leaves at least matching_initial_decide_free of the columns free, the
+    // searches first run under this shorter budget, in the same passes as
+    // matching_search_budget (capped by it). Finished within it, the exact
+    // matching decides (MatchingTrial::Exact). Past it, the trial decides on
+    // the initial phase exactly as past the full budget: a clear loss
+    // rejects (RejectedInitial), anything else resumes the searches to the
+    // end (ResumedExact). That is what continuing under the normal budget
+    // and then resuming would give, so a resumed trial stays bitwise the
+    // exact trial. 0: decide right after the initial phase. Negative, NaN,
+    // infinite or 1e18 edges and beyond: off (the trial runs under
+    // matching_search_budget alone). With no matching_search_budget
+    // (negative) there is no cap, and the knob adds the pause and the
+    // initial verdict to a trial that would otherwise never pause.
+    // The free share costs no search; the short budget spares the searches
+    // of trials the initial phase decides anyway (darcy003/mario002: ~20%
+    // free, rejected; ncvxqp9: 31%), while a trial whose exact matching is a
+    // few searches away (boyd2, catmix) can finish within a budget > 0 and
+    // keep its Exact verdict. Info::matching_decide_first reports whether
+    // the shorter budget applied. Off until a sweep picks the value.
+    double         matching_initial_decide_passes = -1.0;
+    // The initial phase's free-column share (free columns / n) from which
+    // matching_initial_decide_passes applies. NaN: never.
+    double         matching_initial_decide_free = 0.05;
     // The sparse-part engine of analyse()'s auto matching trial (its
     // Degree-order SymmetricMatcher, serial and ConcurrentTrial) and of
     // nothing else: compute_symmetric_matching, compute_matching_scale and

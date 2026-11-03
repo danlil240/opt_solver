@@ -60,6 +60,22 @@ struct Info {
     /// initial ratio.
     double       matching_initial_ratio = 0.0;
     double       matching_exact_ratio   = 0.0;
+    /// Control::matching_initial_decide_passes: 1 when the trial's searches
+    /// ran under that shorter first budget (the initial phase left at least
+    /// matching_initial_decide_free of the columns free), else 0. With
+    /// matching_trial: Exact = finished within it; RejectedInitial or
+    /// ResumedExact = the initial phase decided past it. It is also 1 when
+    /// the first budget equals the normal one (decide passes >=
+    /// matching_search_budget) and when the matcher failed (trial None).
+    int          matching_decide_first  = 0;
+    /// The initial phase's free-column share (free columns / n); computed
+    /// only when matching_initial_decide_passes is on and the trial ran
+    /// searches (not Diagonal), -1 otherwise.
+    double       matching_initial_free  = -1.0;
+    /// The search work (in passes, as Control::matching_search_budget
+    /// counts them) at which the trial's searches paused for the initial
+    /// phase's verdict; -1 when they never paused.
+    double       matching_paused_passes = -1.0;
     /// Indefinite factor(): the scaling the returned factor was computed
     /// with (a ScalingMethod value; Auto reports what it resolved to: None,
     /// or Matching for the analysis' or the scale-on-delay matching scale).

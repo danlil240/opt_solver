@@ -104,6 +104,14 @@ namespace smf
     // matching's fixed cost would dominate (optim20: n <= 4000).
     static constexpr Int kAutoMatchingMinN = 10000;
 
+    // Control::matching_initial_decide_passes: the initial phase's free
+    // share (free columns / n), which decides whether the shorter first
+    // budget applies.
+    static double initial_free_fraction(const SymmetricMatcher &m, Int n)
+    {
+        return n > 0 ? static_cast<double>(n - m.initial_matched()) / static_cast<double>(n) : 0.0;
+    }
+
     // The auto matching trial's searches and exact matching ordering on a
     // worker thread (Control::num_threads > 1), overlapping the base
     // ordering, its counts and the initial matching's ordering on the
@@ -117,10 +125,14 @@ namespace smf
     class ConcurrentTrial
     {
     public:
-        ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, MatchingAlgorithm alg,
-                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work)
-            : C_(C), budget_(budget), refactors_(expected_refactors), alg_(alg), xadj_(xadj), adj_(adj),
-              amd_work_(amd_work)
+        // first_budget >= 0: Control::matching_initial_decide_passes' first
+        // budget, applied when the initial phase leaves at least
+        // decide_free of the columns free (-1: off).
+        ConcurrentTrial(const CscLower &C, long long budget, long long first_budget, double decide_free,
+                        int expected_refactors, MatchingAlgorithm alg, const Int *xadj, const Int *adj,
+                        std::vector<Int> &amd_work)
+            : C_(C), budget_(budget), first_budget_(first_budget), decide_free_(decide_free),
+              refactors_(expected_refactors), alg_(alg), xadj_(xadj), adj_(adj), amd_work_(amd_work)
         {
             try
             {
@@ -159,6 +171,12 @@ namespace smf
         // (SymmetricMatcher::diagonal()), no search ran, and
         // diagonal_scale holds its scaling.
         bool diagonal() const { return diagonal_; }
+        // After within_budget() (not diagonal): whether the first budget
+        // applied, the initial free share (-1 when the knob is off) and the
+        // search work at the pause (edges; meaningful when not within).
+        bool decide_first() const { return decide_first_; }
+        double initial_free() const { return initial_free_; }
+        long long paused_work() const { return paused_work_; }
         void stop() { stop_.store(true, std::memory_order_relaxed); }
         // Waits for the worker and rethrows what it threw. Afterwards
         // ordered() says whether the exact matching was perfect and its
@@ -194,10 +212,23 @@ namespace smf
                     ready_cv_.notify_all();
                     return;
                 }
-                const bool within = matcher.advance(budget_);
+                long long budget = budget_;
+                double free_share = -1.0;
+                bool first = false;
+                if (first_budget_ >= 0)
+                {
+                    free_share = initial_free_fraction(matcher, C_.n);
+                    first = free_share >= decide_free_;
+                    if (first)
+                        budget = first_budget_;
+                }
+                const bool within = matcher.advance(budget);
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     within_ = within;
+                    decide_first_ = first;
+                    initial_free_ = free_share;
+                    paused_work_ = matcher.work();
                     if (!within)
                         initial_ = matcher.initial();
                     phase1_ready_ = true;
@@ -230,6 +261,8 @@ namespace smf
 
         const CscLower &C_;
         const long long budget_;
+        const long long first_budget_;
+        const double decide_free_;
         const int refactors_;
         const MatchingAlgorithm alg_;
         const Int *const xadj_;
@@ -241,6 +274,9 @@ namespace smf
         bool phase1_ready_ = false;
         bool within_ = false;
         bool diagonal_ = false;
+        bool decide_first_ = false;
+        double initial_free_ = -1.0;
+        long long paused_work_ = 0;
         MatchingResult initial_;
         std::atomic<bool> stop_{false};
         bool ordered_ = false;
@@ -517,17 +553,45 @@ namespace smf
         const double budget_edges = budget_passes * 2.0 * static_cast<double>(C.row_idx.size());
         const long long budget =
             (budget_passes >= 0.0 && budget_edges < 1e18) ? static_cast<long long>(budget_edges) : -1;
+        // Control::matching_initial_decide_passes: the first budget, in the
+        // same edges, capped by the budget (-1: off). It applies when the
+        // initial phase leaves at least matching_initial_decide_free of the
+        // columns free; past it, the initial phase decides in step 5 as past
+        // the budget (a pass resumes the searches to the end, as it would
+        // after continuing under the budget).
+        const double pass_edges = 2.0 * static_cast<double>(C.row_idx.size());
+        const double decide_passes = control.matching_initial_decide_passes;
+        const double decide_edges = decide_passes * pass_edges;
+        long long first_budget =
+            (decide_passes >= 0.0 && decide_edges < 1e18) ? static_cast<long long>(decide_edges) : -1;
+        if (first_budget >= 0 && budget >= 0)
+            first_budget = std::min(first_budget, budget);
+        const double decide_free = control.matching_initial_decide_free;
+        const auto record_pause = [&](long long work) {
+            info.matching_paused_passes = pass_edges > 0.0 ? static_cast<double>(work) / pass_edges : 0.0;
+        };
         if (auto_matching && control.num_threads > 1)
         {
-            concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors,
-                                                           control.matching_algorithm, xadj, adj,
-                                                           analyse_scratch_worker_);
+            concurrent = std::make_unique<ConcurrentTrial>(C, budget, first_budget, decide_free,
+                                                           control.expected_refactors, control.matching_algorithm,
+                                                           xadj, adj, analyse_scratch_worker_);
         }
         else if (auto_matching)
         {
             auto matcher =
                 std::make_unique<SymmetricMatcher>(C, MatchingSearchOrder::Degree, control.matching_algorithm);
-            if (matcher->diagonal())
+            const bool diagonal = matcher->diagonal();
+            long long search_budget = budget;
+            if (!diagonal && first_budget >= 0)
+            {
+                info.matching_initial_free = initial_free_fraction(*matcher, n);
+                if (info.matching_initial_free >= decide_free)
+                {
+                    search_budget = first_budget;
+                    info.matching_decide_first = 1;
+                }
+            }
+            if (diagonal)
             {
                 MatchingResult mr = matcher->diagonal_result();
                 auto_matching = false;
@@ -537,7 +601,7 @@ namespace smf
                     info.matching_trial = MatchingTrial::Diagonal;
                 }
             }
-            else if (matcher->advance(budget))
+            else if (matcher->advance(search_budget))
             {
                 const MatchingResult mr = matcher->current();
                 auto_matching = mr.status == ErrorCode::Success &&
@@ -549,6 +613,7 @@ namespace smf
             }
             else
             {
+                record_pause(matcher->work());
                 paused_matcher = std::move(matcher);
             }
         }
@@ -746,6 +811,13 @@ namespace smf
                 auto_matching = false;
                 diagonal_scale = std::move(concurrent->diagonal_scale);
                 info.matching_trial = MatchingTrial::Diagonal;
+            }
+            else
+            {
+                info.matching_decide_first = concurrent->decide_first() ? 1 : 0;
+                info.matching_initial_free = concurrent->initial_free();
+                if (!within)
+                    record_pause(concurrent->paused_work());
             }
             const bool resume = !within && !concurrent->diagonal() && initial_passes(concurrent->initial());
             if (within || resume)

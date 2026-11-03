@@ -62,6 +62,14 @@ struct RunRecord {
     double analyse_ms = 0.0;
     bool has_analyse_phases = false;  // smf solvers only
     AnalysePhaseSeconds analyse_phases;  // seconds, as Info::analyse_phases
+    // smf only, with the phases: the auto matching trial of the analysis
+    // (Info::matching_trial as an int; -1 = not reported, left out), and
+    // Info::matching_decide_first, matching_initial_free (-1 = not
+    // computed), matching_paused_passes (-1 = never paused).
+    int matching_trial = -1;
+    int matching_decide_first = 0;
+    double matching_initial_free = -1.0;
+    double matching_paused_passes = -1.0;
     double factor_ms = 0.0;
     // warm_sequence only (negative = not measured, left out of the record):
     // the first factorization after analyse, and the median of the warm

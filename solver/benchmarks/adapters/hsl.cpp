@@ -56,6 +56,14 @@ double ms_since(Clock::time_point t0, Clock::time_point t1) noexcept {
     return std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
+// AdapterStats' matching trial fields from an analyse's Info.
+void set_matching_trial(AdapterStats &st, const Info &info) noexcept {
+    st.matching_trial = static_cast<int>(info.matching_trial);
+    st.matching_decide_first = info.matching_decide_first;
+    st.matching_initial_free = info.matching_initial_free;
+    st.matching_paused_passes = info.matching_paused_passes;
+}
+
 #if defined(SMF_HAS_MA27_IMPL) && SMF_HAS_MA27_IMPL
 /// Real CoinHSL MA27 baseline adapter.
 ///
@@ -327,6 +335,7 @@ public:
         stats_.analyse_ms = ms_since(t0, t1);
         stats_.has_analyse_phases = true;
         stats_.analyse_phases = info.analyse_phases;
+        set_matching_trial(stats_, info);
         if (!ak_ || info.status != ErrorCode::Success) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "smf::Solver::analyse failed";
@@ -575,6 +584,7 @@ public:
         if (analyse_ms > 0.0) {
             stats_.has_analyse_phases = true;
             stats_.analyse_phases = info.analyse_phases;
+            set_matching_trial(stats_, info);
         }
         stats_.factor_ms = ms - analyse_ms;
         const InertiaCounts in = session_.inertia();

@@ -37,6 +37,13 @@ struct AdapterStats {
     double analyse_ms = 0.0;
     bool has_analyse_phases = false;  // smf adapters: Info::analyse_phases of the last analyse
     AnalysePhaseSeconds analyse_phases;
+    // smf adapters, with the phases: the auto matching trial of that analyse
+    // (Info::matching_trial as an int, matching_decide_first,
+    // matching_initial_free, matching_paused_passes); trial -1 = not reported.
+    int matching_trial = -1;
+    int matching_decide_first = 0;
+    double matching_initial_free = -1.0;
+    double matching_paused_passes = -1.0;
     double factor_ms = 0.0;
     double solve_ms = 0.0;
     int inertia_pos = 0;
