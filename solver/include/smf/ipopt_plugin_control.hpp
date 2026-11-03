@@ -39,11 +39,11 @@ struct Ma97Options {
 };
 
 /// Where the plugin's thread count came from (plugin_threads_resolve()).
-enum class PluginThreadsSource { SmfNumThreads, OmpNumThreads, PhysicalCores };
+enum class PluginThreadsSource { SmfNumThreads, OmpNumThreads, PerformanceCores };
 
 struct PluginThreads {
     int threads = 1;
-    PluginThreadsSource source = PluginThreadsSource::PhysicalCores;
+    PluginThreadsSource source = PluginThreadsSource::PerformanceCores;
 };
 
 /// The largest thread count the plugin takes from the environment; larger
@@ -82,16 +82,24 @@ inline int plugin_threads_parse(const char *v)
 ///  2. (no IPOPT option: IPOPT has no ma97 thread option, and the plugin
 ///     sees only MA97's control block, which has no thread field either);
 ///  3. OMP_NUM_THREADS, a positive int (a list "a,b": its first entry);
-///  4. `physical_cores`.
+///  4. `performance_cores`.
 /// Why OpenMP's setting: real MA97 has no thread knob and factors on
 /// OpenMP's default team (omp_get_max_threads(), from OMP_NUM_THREADS), so
 /// a drop-in MA97 replacement inside IPOPT takes the same count. Without
 /// OMP_NUM_THREADS the OpenMP runtimes default to every logical processor;
-/// smf takes the physical cores instead (SMT siblings add nothing to dense
-/// front kernels, and auto_threads trims the count to what the tree repays
-/// anyway). Invalid values (0, negative, text) are skipped as unset.
-/// physical_cores (smf::physical_core_count()) counts only the cores the
-/// process' affinity allows (cpusets, taskset, job objects).
+/// smf takes the performance cores instead: the physical cores (SMT
+/// siblings add nothing to dense front kernels, and auto_threads trims the
+/// count to what the tree repays anyway), and on a hybrid CPU only its
+/// P-cores (smf::performance_core_count()): on an i9-12900K (8 P + 8
+/// E-cores) 16 threads were slower than 8 on 51 of the 72 plugin-track
+/// cases (geomean time vs serial 0.832 at 8 threads, 0.844 at 16; cont-300
+/// and pde_control_250 1.16x, TSOPF_FS_b39_c30 1.12x, thermal1 1.10x slower
+/// at 16; none more than 10% faster). On non-hybrid CPUs that is every
+/// physical core. Only cores the process' affinity allows count (cpusets,
+/// taskset, job objects; with the P-cores excluded, the allowed E-cores).
+/// The explicit variables above are taken as given, also above the
+/// performance core count. Invalid values (0, negative, text) are skipped
+/// as unset.
 /// Note: with num_threads > 1 the analysis changes too, not only the
 /// factorization's speed: AutoParallel orders large matrices with parallel
 /// nested dissection instead of serial METIS and the matching trial runs
@@ -100,22 +108,22 @@ inline int plugin_threads_parse(const char *v)
 /// SMF_NUM_THREADS=1 restores the serial plugin; Control::deterministic
 /// makes the results independent of the thread count.
 inline PluginThreads plugin_threads_resolve(const char *smf_num_threads, const char *omp_num_threads,
-                                            int physical_cores)
+                                            int performance_cores)
 {
     if (const int t = plugin_threads_parse(smf_num_threads))
         return {t, PluginThreadsSource::SmfNumThreads};
     if (const int t = plugin_threads_parse(omp_num_threads))
         return {t, PluginThreadsSource::OmpNumThreads};
-    return {std::max(1, physical_cores), PluginThreadsSource::PhysicalCores};
+    return {std::max(1, performance_cores), PluginThreadsSource::PerformanceCores};
 }
 
 /// plugin_threads_resolve() of the current environment and
-/// smf::physical_core_count(), read now (tests); the plugin uses
+/// smf::performance_core_count(), read now (tests); the plugin uses
 /// plugin_num_threads().
 inline PluginThreads plugin_threads_from_env()
 {
     return plugin_threads_resolve(std::getenv("SMF_NUM_THREADS"), std::getenv("OMP_NUM_THREADS"),
-                                  physical_core_count());
+                                  performance_core_count());
 }
 
 /// The plugin's thread count: plugin_threads_from_env(), read once per
@@ -138,9 +146,9 @@ inline const char *plugin_threads_source_name(PluginThreadsSource s)
         return "SMF_NUM_THREADS";
     case PluginThreadsSource::OmpNumThreads:
         return "OMP_NUM_THREADS";
-    case PluginThreadsSource::PhysicalCores:
+    case PluginThreadsSource::PerformanceCores:
     default:
-        return "physical cores";
+        return "performance cores";
     }
 }
 

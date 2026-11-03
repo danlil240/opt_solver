@@ -382,7 +382,7 @@ int main(int argc, char **argv) {
 
     // "ipopt-plugin" track: the thread count is the plugin's own,
     // smf::plugin_num_threads() (SMF_NUM_THREADS, else OMP_NUM_THREADS, else
-    // the physical cores; ipopt_plugin_control.hpp), as inside IPOPT. run.py
+    // the performance cores; ipopt_plugin_control.hpp), as inside IPOPT. run.py
     // exports OMP_NUM_THREADS = --threads, so the two agree unless
     // SMF_NUM_THREADS is set (or bench_replay runs without run.py): the run
     // then uses the plugin's count, and its record says so.

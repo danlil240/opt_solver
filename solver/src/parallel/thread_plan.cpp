@@ -47,11 +47,40 @@ int count_allowed_cores(const std::vector<std::vector<int>> &core_cpus,
   return cores;
 }
 
+int count_allowed_performance_cores(const std::vector<std::vector<int>> &core_cpus,
+                                    const std::vector<int> &core_class,
+                                    const std::vector<int> &allowed_cpus) {
+  if (core_class.size() != core_cpus.size()) return count_allowed_cores(core_cpus, allowed_cpus);
+  std::vector<int> allowed(allowed_cpus);
+  std::sort(allowed.begin(), allowed.end());
+  const auto is_allowed = [&](const std::vector<int> &cpus) {
+    if (allowed.empty()) return true;
+    for (const int c : cpus)
+      if (std::binary_search(allowed.begin(), allowed.end(), c)) return true;
+    return false;
+  };
+  // The top class among the allowed cores, then the allowed cores of that
+  // class (every allowed core when they all share one class).
+  bool any = false;
+  int top = 0;
+  for (std::size_t i = 0; i < core_cpus.size(); ++i)
+    if (is_allowed(core_cpus[i])) {
+      top = any ? std::max(top, core_class[i]) : core_class[i];
+      any = true;
+    }
+  int cores = 0;
+  for (std::size_t i = 0; i < core_cpus.size(); ++i)
+    if (any && core_class[i] == top && is_allowed(core_cpus[i])) ++cores;
+  return cores;
+}
+
 namespace {
-// The physical cores (each as its logical CPU ids) and the logical CPUs
-// this process may run on (empty: unknown, every CPU).
+// The physical cores (each as its logical CPU ids), their performance
+// classes (one per core, higher: faster; empty: unknown) and the logical
+// CPUs this process may run on (empty: unknown, every CPU).
 struct CpuTopology {
   std::vector<std::vector<int>> core_cpus;
+  std::vector<int> core_class;
   std::vector<int> allowed;
 };
 
@@ -79,6 +108,9 @@ CpuTopology read_topology() {
               if (ga.Mask & (KAFFINITY{1} << b)) cpus.push_back(win_cpu_id(ga.Group, b));
           }
           t.core_cpus.push_back(std::move(cpus));
+          // EfficiencyClass: the same (0) on every core of a non-hybrid
+          // CPU; on a hybrid one (Alder Lake and later) higher on P-cores.
+          t.core_class.push_back(static_cast<int>(rec->Processor.EfficiencyClass));
         }
         if (rec->Size == 0) break;
         off += rec->Size;
@@ -114,6 +146,40 @@ CpuTopology read_topology() {
   return t;
 }
 #else
+// A sysfs CPU list ("0-7,16,18-19\n"), sorted; empty when unreadable or
+// malformed.
+std::vector<int> read_cpulist(const char *path) {
+  std::ifstream in(path);
+  std::string text;
+  if (!in || !std::getline(in, text)) return {};
+  std::vector<int> cpus;
+  std::size_t i = 0;
+  const auto number = [&](int &v) {
+    if (i >= text.size() || text[i] < '0' || text[i] > '9') return false;
+    v = 0;
+    while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
+      v = v * 10 + (text[i] - '0');
+      if (v > (1 << 20)) return false;
+      ++i;
+    }
+    return true;
+  };
+  while (i < text.size()) {
+    int lo = 0, hi = 0;
+    if (!number(lo)) return {};
+    hi = lo;
+    if (i < text.size() && text[i] == '-') {
+      ++i;
+      if (!number(hi) || hi < lo) return {};
+    }
+    for (int c = lo; c <= hi; ++c) cpus.push_back(c);
+    if (i < text.size() && text[i] == ',') ++i;
+    else break;
+  }
+  std::sort(cpus.begin(), cpus.end());
+  return cpus;
+}
+
 CpuTopology read_topology() {
   CpuTopology t;
   // /proc/cpuinfo: processor, physical id and core id per logical CPU.
@@ -130,6 +196,21 @@ CpuTopology read_topology() {
     else if (line.rfind("core id", 0) == 0 && proc >= 0) cores[{phys, v}].push_back(proc);
   }
   for (auto &kv : cores) t.core_cpus.push_back(std::move(kv.second));
+  // Hybrid Intel CPUs: the perf PMUs cpu_core (P-cores) and cpu_atom
+  // (E-cores) list their logical CPUs; a core is class 1 when one of its
+  // CPUs is a P-core CPU, else 0. Without both lists (non-hybrid CPUs,
+  // other vendors, old kernels, no sysfs) the classes stay unknown and
+  // every core counts.
+  const std::vector<int> p_cpus = read_cpulist("/sys/devices/cpu_core/cpus");
+  const std::vector<int> e_cpus = read_cpulist("/sys/devices/cpu_atom/cpus");
+  if (!p_cpus.empty() && !e_cpus.empty()) {
+    for (const std::vector<int> &cpus : t.core_cpus) {
+      int cls = 0;
+      for (const int c : cpus)
+        if (std::binary_search(p_cpus.begin(), p_cpus.end(), c)) cls = 1;
+      t.core_class.push_back(cls);
+    }
+  }
 #  if defined(__linux__)
   // cpusets (Docker --cpuset-cpus, Slurm, taskset) restrict the affinity.
   cpu_set_t set;
@@ -142,7 +223,9 @@ CpuTopology read_topology() {
 }
 #endif
 
-int count_physical_cores() noexcept {
+// physical_core_count() (performance: false) or performance_core_count()
+// (true).
+int count_cores(bool performance) noexcept {
   const unsigned hw = std::thread::hardware_concurrency();
   const int fallback = hw > 0 ? static_cast<int>(hw) : 1;
   try {
@@ -150,8 +233,11 @@ int count_physical_cores() noexcept {
     const int allowed_cpus = t.allowed.empty() ? fallback : static_cast<int>(t.allowed.size());
     if (t.core_cpus.empty()) return std::max(1, std::min(fallback, allowed_cpus));
     // Cores with at least one CPU the process may run on (never more than
-    // those CPUs).
-    const int cores = count_allowed_cores(t.core_cpus, t.allowed);
+    // those CPUs); for performance cores only those of the top class among
+    // them.
+    const int cores = performance
+                          ? count_allowed_performance_cores(t.core_cpus, t.core_class, t.allowed)
+                          : count_allowed_cores(t.core_cpus, t.allowed);
     if (cores == 0) return std::max(1, std::min(fallback, allowed_cpus));  // ids did not match
     return std::max(1, std::min(cores, allowed_cpus));
   } catch (...) {
@@ -161,7 +247,12 @@ int count_physical_cores() noexcept {
 } // namespace
 
 int physical_core_count() noexcept {
-  static const int cores = count_physical_cores();
+  static const int cores = count_cores(false);
+  return cores;
+}
+
+int performance_core_count() noexcept {
+  static const int cores = count_cores(true);
   return cores;
 }
 

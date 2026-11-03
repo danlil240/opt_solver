@@ -108,8 +108,11 @@ struct SmfFkeep
 // Threads: Control::num_threads is smf::plugin_num_threads()
 // (smf/ipopt_plugin_control.hpp, read once per process at the first call:
 // later environment changes or omp_set_num_threads() have no effect):
-// SMF_NUM_THREADS, else OMP_NUM_THREADS (its first entry), else the physical
-// cores the process affinity allows.
+// SMF_NUM_THREADS, else OMP_NUM_THREADS (its first entry), else the
+// performance cores the process affinity allows (smf::performance_core_count():
+// every physical core on a non-hybrid CPU, only the P-cores on a hybrid one;
+// on an i9-12900K 16 threads were slower than 8 on 51 of 72 plugin-track
+// cases, see ipopt_plugin_control.hpp). The variables are taken as given.
 // Real MA97 has no thread option (nor has IPOPT one for it): it factors on
 // OpenMP's default team, i.e. OMP_NUM_THREADS. Every analyse, factor and
 // solve call runs under a BlasThreadGuard of that count (the calling
@@ -126,7 +129,8 @@ struct SmfFkeep
 // gives the serial plugin back (also the reproducible choice; deterministic
 // mode, Control::deterministic, is the other one). Concurrent IPOPT
 // instances in one machine (multistart, parallel batches) now get P threads
-// each: set SMF_NUM_THREADS (or OMP_NUM_THREADS) to share the cores.
+// each (P: the performance cores): set SMF_NUM_THREADS (or OMP_NUM_THREADS)
+// to share the cores.
 //
 // The IPM features are opt-in through the environment (the MA97 interface
 // has no slots for them). Their defaults were decided on the held-out IPOPT
