@@ -367,9 +367,11 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
             cv.notify_all();
         }
     };
+    // At most 2^levels tasks are ever ready at once (the leaves).
+    const int nthreads = std::min(num_threads, 1 << std::clamp(options.levels, 0, 16));
     std::vector<std::thread> pool;
     try {
-        for (int k = 1; k < num_threads; ++k) pool.emplace_back(worker);
+        for (int k = 1; k < nthreads; ++k) pool.emplace_back(worker);
     } catch (...) {
         // Thread creation failed: the threads already running finish the work.
     }

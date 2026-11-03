@@ -614,6 +614,18 @@ install(TARGETS ${_smf_install_targets} EXPORT smfTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+if(TARGET smf_metis)
+    # The vendored METIS/GKlib are in the installed libraries: ship their
+    # licences and notices (third_party/README.md).
+    install(FILES
+        third_party/README.md
+        third_party/LICENSE-Apache-2.0.txt
+        third_party/LICENSE-LGPL-2.1.txt
+        third_party/metis/LICENSE
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party)
+    install(FILES third_party/gklib/LICENSE.txt
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party/gklib)
+endif()
 install(EXPORT smfTargets
     FILE smfTargets.cmake
     NAMESPACE smf::

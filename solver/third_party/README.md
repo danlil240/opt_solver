@@ -30,19 +30,34 @@ serial orderings are bitwise those of the conda-forge DLL
 These are the versions and tarballs conda-forge's `metis` 5.2.1 recipe builds
 (its MSVC DLL links GKlib statically). Copied: `metis/include/metis.h`,
 `metis/libmetis/*.{c,h}`, `gklib/*.{c,h}`, `gklib/win32/adapt.{c,h}` and the
-licence files; upstream's programs, tests, graphs, manuals and build files are
-left out. The unmodified copy is commit `third_party: METIS 5.2.1 and GKlib
+licence files, except `gklib/getopt.c` (glibc's getopt, LGPL-2.1, used only
+by GKlib's programs); upstream's programs, tests, graphs, manuals and build
+files are left out too. The unmodified copy is commit `third_party: METIS 5.2.1 and GKlib
 8bd6bad7 sources, unmodified` in smf's history.
 
 ## Licences
 
-Both are under the Apache License 2.0 (`LICENSE-Apache-2.0.txt`):
+smf itself is MIT. The vendored code is linked statically into smf's
+libraries (`smf_metis`, `libsmf`, `libsmf_ma97`); `install` copies these
+notices to `share/doc/smf/third_party`.
 
-- METIS: Copyright 1995-2013, Regents of the University of Minnesota (`metis/LICENSE`).
-- GKlib: Copyright 1995-2018, Regents of the University of Minnesota (`gklib/LICENSE.txt`).
-
-Each file smf changed says so where it changed (`smf patch N` comments), as
-section 4(b) of the licence asks.
+- **Apache License 2.0** (`LICENSE-Apache-2.0.txt`), the bulk of both:
+  - METIS: Copyright 1995-2013, Regents of the University of Minnesota (`metis/LICENSE`).
+  - GKlib: Copyright 1995-2018, Regents of the University of Minnesota (`gklib/LICENSE.txt`).
+  - Each file smf changed says so where it changed (`smf patch N` comments),
+    as section 4(b) asks.
+- **GNU LGPL 2.1 or later** (`LICENSE-LGPL-2.1.txt`), code GKlib took from the
+  GNU C Library (Free Software Foundation), notices in the files:
+  - `gklib/gk_mksort.h` (glibc qsort; METIS's own sorts use it);
+  - `gklib/gkregex.c`, `gklib/gkregex.h` (glibc regex; compiled on MSVC,
+    where `USE_GKREGEX` replaces the missing POSIX regex; METIS never calls it).
+  smf's complete source, including these files and smf's build, is public, so
+  the library can be modified and relinked (LGPL-2.1 section 6). Before this
+  vendoring the same code reached smf inside conda-forge's `metis.dll`.
+- **BSD-style**, notices in the files: `gklib/gk_ms_stdint.h`,
+  `gklib/gk_ms_inttypes.h` (Alexander Chemeris; MSVC headers) and the
+  MT19937-64 generator in `gklib/random.c` (Matsumoto and Nishimura; only with
+  `USE_GKRAND`, which smf does not define).
 
 ## smf's patches
 
@@ -73,6 +88,13 @@ sources above):
    `gk_sigtrap` / `gk_siguntrap` only push and pop the thread's jump-buffer
    level, and `gk_errexit()` jumps straight to that buffer when a METIS call is
    active on the thread (METIS then returns its error code, as before).
+
+Known gaps, unchanged from upstream and not reached by smf in normal use:
+`METIS_ComputeVertexSeparator` sets no trap (`libmetis/parmetis.c`), so an
+out-of-memory error inside it raises `SIGABRT` and ends the process, as it
+did with conda-forge's DLL; `METIS_PartMeshNodal/Dual` (`meshpart.c`, unused
+by smf) call `raise(SIGERR)` directly, which now terminates instead of being
+caught.
 
 ## Build flags (`CMakeLists.txt`)
 

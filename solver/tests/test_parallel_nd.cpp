@@ -330,6 +330,9 @@ TEST(ParallelNd, ConcurrentMetisIsSafe)
 
 #if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
 #include <metis.h>
+#ifndef SMF_VENDORED_METIS_H
+#error "these tests need the vendored metis.h (third_party/metis/include) first on the include path"
+#endif
 
 namespace {
 

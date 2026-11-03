@@ -16,7 +16,7 @@ set_property(DIRECTORY PROPERTY COMPILE_OPTIONS "")
 
 file(GLOB _smf_gklib_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/gklib/*.c")
 file(GLOB _smf_metis_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/metis/libmetis/*.c")
-if(WIN32)
+if(MSVC)
     list(APPEND _smf_gklib_sources "${CMAKE_CURRENT_SOURCE_DIR}/gklib/win32/adapt.c")
 endif()
 
@@ -55,6 +55,14 @@ else()
         $<$<BOOL:${SMF_METIS_HAVE_EXECINFO_H}>:HAVE_EXECINFO_H>
         $<$<BOOL:${SMF_METIS_HAVE_GETLINE}>:HAVE_GETLINE>)
     target_compile_options(smf_metis PRIVATE -fno-strict-aliasing -w)
+    # The directory reset above also drops smf's -O3; without a build type
+    # (single-config generators, no CMAKE_BUILD_TYPE) METIS would be built
+    # at -O0. Optimisation does not change the orderings here (ISO C99:
+    # -ffp-contract=off; no -march).
+    if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+        target_compile_options(smf_metis PRIVATE -O2)
+    endif()
+    target_link_libraries(smf_metis PUBLIC m)
     # Keep METIS_* and gk_* out of the dynamic symbol table of any shared
     # library smf is linked into (libsmf_ma97): a process that also loads a
     # system libmetis must not have its calls bound to this copy, or ours to
