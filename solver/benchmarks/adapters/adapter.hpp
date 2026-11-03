@@ -45,7 +45,8 @@ struct AdapterStats {
     int delayed_pivots = 0;
     int64_t factor_entries = 0;
     double flops = 0.0;
-    // smf adapters: FNV-1a over the fill-reducing perm (AnalysisKeep::perm)
+    // smf adapters: an FNV-style hash (FNV-1a's prime; truncated offset
+    // basis) over the fill-reducing perm (AnalysisKeep::perm)
     // of every distinct analysis the factorizations since analyse() used, in
     // order of first use; 0 = no factorization. Compares orderings across
     // builds (e.g. two METIS builds) without dumping them.

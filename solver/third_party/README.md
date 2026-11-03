@@ -31,8 +31,8 @@ These are the versions and tarballs conda-forge's `metis` 5.2.1 recipe builds
 (its MSVC DLL links GKlib statically). Copied: `metis/include/metis.h`,
 `metis/libmetis/*.{c,h}`, `gklib/*.{c,h}`, `gklib/win32/adapt.{c,h}` and the
 licence files; upstream's programs, tests, graphs, manuals and build files are
-left out. The unmodified copy is commit `third_party: METIS 5.2.1 and GKlib
-8bd6bad7 sources, unmodified` in smf's history.
+left out. The unmodified copy is the upstream tarballs (SHA-256 above), minus
+the files in the table below.
 
 Removed from that copy since, so that nothing under LGPL is built or shipped
 (see patches 4 and 5):

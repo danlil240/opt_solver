@@ -450,7 +450,7 @@ TEST(ParallelNd, VendoredMetisMatchesCondaOrdering)
 #endif
 
 #if defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
-#include <cstddef>
+#include <cstddef>  // size_t, ptrdiff_t for gk_mksort.h
 #include "../third_party/gklib/gk_mksort.h"
 
 namespace {
@@ -467,7 +467,8 @@ void gk_sort_gt(SortKv* a, std::size_t n) { GK_MKQSORT(SortKv, a, n, SMF_SORTKV_
 // GK_MKQSORT (third_party/gklib/gk_mksort.h, smf patch 4) replaces GKlib's
 // glibc-derived (LGPL) sort. METIS sorts key-value pairs by key only
 // (ikvsorti in compress.c and coarsen.c), so the order of equal keys feeds
-// the orderings: it must be the original's exactly. Pinned: FNV-1a of the
+// the orderings: it must be the original's exactly. Pinned: an FNV-style
+// hash (FNV-1a's prime, a truncated offset basis) of the
 // tag sequence the ORIGINAL macro produced on random keys with many
 // duplicates (one xorshift stream across the cases), ascending and
 // descending. A scratch harness matched the two on 38,928 arrays.

@@ -2,8 +2,9 @@
 \file  sort.c
 \brief This file contains GKlib's various sorting routines
 
-These routines are implemented using the GKSORT macro that is defined
-in gk_qsort.h and is based on GNU's GLIBC qsort() implementation.
+These routines are implemented using the GK_MKQSORT macro of gk_mksort.h.
+(smf patch 4: that macro is now smf's own implementation, Apache-2.0; it
+replaced GKlib's copy derived from glibc's qsort().)
 
 Additional sorting routines can be created using the same way that
 these routines where defined.

@@ -76,7 +76,7 @@ deleted file mode 100644
 index 597c080..0000000
 diff --git a/solver/third_party/gklib/gk_mksort.h b/solver/third_party/gklib/gk_mksort.h
 dissimilarity index 98%
-index 48674db..39fc2cd 100644
+index 48674db..f851bf6 100644
 --- a/solver/third_party/gklib/gk_mksort.h
 +++ b/solver/third_party/gklib/gk_mksort.h
 @@ -?,? +1,158 @@
@@ -174,8 +174,8 @@ index 48674db..39fc2cd 100644
 +                                                                              \
 +      /* [first, r] and [l, last] remain; small ones are left as they are. */ \
 +      {                                                                       \
-+        const int gkqs_lo_big = (size_t)(gkqs_r - gkqs_first) > GK_QSORT_SMALL; \
-+        const int gkqs_hi_big = (size_t)(gkqs_last - gkqs_l) > GK_QSORT_SMALL;  \
++        const int gkqs_lo_big = (gkqs_r - gkqs_first) > (ptrdiff_t)GK_QSORT_SMALL; \
++        const int gkqs_hi_big = (gkqs_last - gkqs_l) > (ptrdiff_t)GK_QSORT_SMALL;  \
 +        if (gkqs_lo_big && gkqs_hi_big) {                                     \
 +          if (gkqs_r - gkqs_first > gkqs_last - gkqs_l) {                     \
 +            gkqs_stack[gkqs_depth].first = gkqs_first;                        \
@@ -311,6 +311,22 @@ index 3698614..359c897 100644
  #endif
  }
  
+diff --git a/solver/third_party/gklib/sort.c b/solver/third_party/gklib/sort.c
+index f0144ae..277cc15 100644
+--- a/solver/third_party/gklib/sort.c
++++ b/solver/third_party/gklib/sort.c
+@@ -2,8 +2,9 @@
+ \file  sort.c
+ \brief This file contains GKlib's various sorting routines
+ 
+-These routines are implemented using the GKSORT macro that is defined
+-in gk_qsort.h and is based on GNU's GLIBC qsort() implementation.
++These routines are implemented using the GK_MKQSORT macro of gk_mksort.h.
++(smf patch 4: that macro is now smf's own implementation, Apache-2.0; it
++replaced GKlib's copy derived from glibc's qsort().)
+ 
+ Additional sorting routines can be created using the same way that
+ these routines where defined.
 diff --git a/solver/third_party/gklib/string.c b/solver/third_party/gklib/string.c
 index 4a3fb14..98140db 100644
 --- a/solver/third_party/gklib/string.c

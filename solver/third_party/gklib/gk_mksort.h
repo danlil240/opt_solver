@@ -92,8 +92,8 @@ do {                                                                          \
                                                                               \
       /* [first, r] and [l, last] remain; small ones are left as they are. */ \
       {                                                                       \
-        const int gkqs_lo_big = (size_t)(gkqs_r - gkqs_first) > GK_QSORT_SMALL; \
-        const int gkqs_hi_big = (size_t)(gkqs_last - gkqs_l) > GK_QSORT_SMALL;  \
+        const int gkqs_lo_big = (gkqs_r - gkqs_first) > (ptrdiff_t)GK_QSORT_SMALL; \
+        const int gkqs_hi_big = (gkqs_last - gkqs_l) > (ptrdiff_t)GK_QSORT_SMALL;  \
         if (gkqs_lo_big && gkqs_hi_big) {                                     \
           if (gkqs_r - gkqs_first > gkqs_last - gkqs_l) {                     \
             gkqs_stack[gkqs_depth].first = gkqs_first;                        \
