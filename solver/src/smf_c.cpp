@@ -200,9 +200,10 @@ int smf_factor(smf_analysis_t analysis,
         }
 
         /* Fast mode: keep the factored matrix for smf_solve()'s refinement
-         * (the backward-error trigger of a static-path factor). */
+         * (the backward-error trigger of a static-path factor that forced a
+         * pivot, smf::refinement_advised). */
         std::unique_ptr<smf::RefineMatrix> refine;
-        if (fkeep->static_path) {
+        if (fkeep->static_path && smf::refinement_advised(*fkeep)) {
             refine = std::make_unique<smf::RefineMatrix>();
             if (smf::prepare_refine_matrix(analysis->pattern, *refine) != smf::ErrorCode::Success) {
                 return SMF_ERR_INTERNAL;

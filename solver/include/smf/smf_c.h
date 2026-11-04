@@ -114,11 +114,14 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  * no pivot is delayed, and a pivot below 1e-8 * max|A| is raised to that
  * value (perturbed). It disables the delay / scale-on-delay rescue.
  * Accuracy is NOT guaranteed on hard indefinite systems, and when a pivot
- * was perturbed smf_inertia() reports the inertia of the PERTURBED matrix,
- * which can mislead an interior-point method's inertia correction. Every
- * SMF_SOLVE_FULL smf_solve() with such a factor is iteratively refined
- * against the factored values, to a componentwise backward error of 1e-10
- * where refinement reaches it (smf::Control::refine_omega_target).
+ * was perturbed smf_inertia() reports the inertia of the PERTURBED matrix
+ * (each raised pivot by its perturbed sign, one raised from an exact zero
+ * as positive, as PARDISO counts it), which can mislead an interior-point
+ * method's inertia correction. Every SMF_SOLVE_FULL smf_solve() with a
+ * factor that forced or perturbed a pivot is iteratively refined against
+ * the factored values, to a componentwise backward error of 1e-10 where
+ * refinement reaches it (smf::Control::refine_omega_target); a factor that
+ * forced none is a threshold factorization and is not refined.
  *
  * Affects the smf_factor() calls made after it; existing factors keep the
  * policy they were made with. SMF_POSDEF factorizations ignore it. Like
@@ -178,8 +181,9 @@ int smf_factor(smf_analysis_t analysis,
  * @return SMF_OK, SMF_ERR_INVALID_ARG (also when the factor's order is not
  *         the analysis'), or SMF_ERR_INTERNAL.
  *
- * A factor made with SMF_PIVOTING_STATIC is refined on SMF_SOLVE_FULL
- * (see smf_set_pivoting()); a partial solve is not. A refinement that
+ * A factor made with SMF_PIVOTING_STATIC that forced or perturbed a pivot
+ * is refined on SMF_SOLVE_FULL (see smf_set_pivoting()); a partial solve is
+ * not. A refinement that
  * misses the target still returns SMF_OK with the best iterate.
  */
 int smf_solve(smf_analysis_t analysis,

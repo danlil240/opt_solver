@@ -566,11 +566,21 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
                                           Run &&run) {
   info.matching_reanalyses = 0;
   info.skip_trial_rescues = 0;
-  // Control::pivoting = Static (experimental): every factorization on the
-  // static path, no rescue.
+  // Control::pivoting = Static (the fast mode): every factorization on the
+  // static path, no rescue. Unlike the cascade fallback's static path, a
+  // pivot raised from an exact zero counts by the sign of its perturbed
+  // value (+), as PARDISO counts it: a zero-diagonal KKT (PGLib, COPS,
+  // stokes) raises one per zero diagonal block entry it meets first, and
+  // static_zero_stays_zero would report every such factor Singular. Only the
+  // inertia accounting differs; the factor's values are the same. The
+  // caller's own static_zero_stays_zero is kept (false by default; IpmSession's
+  // regularized mode sets it, and its accounting stays its own), and so are
+  // fallback fronts' hybrid accounting (fallback_static_pivot_tol > 0).
   if (ctrl.pivoting == Pivoting::Static) {
     const AnalysisKeep &k = ak.matching_reanalysis ? *ak.matching_reanalysis : ak;
-    const FactorStatus st = run(k, static_path_control(ctrl), -1.0);
+    Control sc = static_path_control(ctrl);
+    sc.static_zero_stays_zero = ctrl.static_zero_stays_zero;
+    const FactorStatus st = run(k, sc, -1.0);
     if (ak.matching_reanalysis) info.ordering_used = static_cast<int>(OrderingMethod::Matching);
     // No rescue state survives a static factorization.
     fkeep.delay_analysis = 0;

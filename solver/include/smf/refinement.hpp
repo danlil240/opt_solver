@@ -25,10 +25,13 @@ struct RefinementResult {
 
 /// Whether a solve with fkeep should be refined: its factor perturbed pivots
 /// (static_pivots > 0), or came from the static path (FactorKeep::
-/// static_path), whose growth threshold pivoting does not bound. refine()
-/// stops a static-path factor's refinement at Control::refine_omega_target.
+/// static_path) and forced a pivot there (pivot_growth > 0), so that its
+/// growth is not bounded by threshold pivoting. A static-path factor that
+/// forced no pivot took only pivots that pass pivot_u: a threshold
+/// factorization, with nothing for refinement to do. refine() stops a
+/// static-path factor's refinement at Control::refine_omega_target.
 inline bool refinement_advised(const FactorKeep &fkeep) noexcept {
-    return fkeep.static_pivots > 0 || fkeep.static_path;
+    return fkeep.static_pivots > 0 || (fkeep.static_path && fkeep.pivot_growth > 0.0);
 }
 
 /// Refine x (n x nrhs, column-major) towards A x = b, A the original

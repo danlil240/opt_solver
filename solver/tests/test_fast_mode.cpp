@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -67,7 +68,7 @@ TEST(FastMode, DefaultIsThreshold) {
     EXPECT_EQ(c.pivoting, Pivoting::Threshold);
     EXPECT_FALSE(c.static_fallback_after_cascade);
     EXPECT_EQ(c.refine_omega_target, 1e-10);
-    EXPECT_EQ(c.refine_growth_threshold, 1e8);
+    EXPECT_EQ(c.refine_growth_threshold, std::numeric_limits<double>::infinity());
 }
 
 TEST(FastMode, ParsePivoting) {
@@ -510,6 +511,130 @@ TEST(FastMode, StaticUnderTreeParallelIsRouted) {
     EXPECT_TRUE(sess.factor_keep().static_path);
     EXPECT_EQ(sess.info().delayed_pivots, 0);
     EXPECT_EQ(sess.inertia().negative, ir.num_negative);
+}
+
+// --- Raised exact zeros, refinement only after a forced pivot ---
+
+// A zero-diagonal KKT (the PGLib / COPS shape: opf_like_kkt, unscaled, the
+// constraint rows ordered first with nemin 1, so that each zero diagonal is
+// a front's only eligible column) raises exact-zero pivots in fast mode. They count by the sign
+// of the perturbed value (+), as PARDISO counts them: the factor is Success
+// with no zero eigenvalue instead of Singular, its inertia is that of the
+// perturbed matrix (inexact), and the refined solve meets the omega target.
+// Threshold pivoting of the same matrix is the reference inertia.
+TEST(FastMode, RaisedExactZerosCountBySign) {
+    const CscLower A = opf_like_kkt(300, 120, 7u);
+    const int n = static_cast<int>(A.n);
+    const int n_x = 300;
+    std::vector<Int> perm;
+    for (int k = n_x; k < n; ++k) perm.push_back(k);
+    for (int k = 0; k < n_x; ++k) perm.push_back(k);
+    Control base = indef_control();
+    base.ordering = OrderingMethod::UserSupplied;
+    base.user_perm = perm.data();
+    base.nemin = 1;
+    base.scaling = ScalingMethod::None;
+    Solver s;
+
+    Info it;
+    {
+        Info ia;
+        auto ak = s.analyse(A, base, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        FactorKeep fk;
+        ASSERT_EQ(s.factor(*ak, base, it, fk), FactorStatus::Success);
+        ASSERT_EQ(it.num_zero, 0);
+    }
+
+    Control ctrl = base;
+    ctrl.pivoting = Pivoting::Static;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+    std::printf("[FastMode] zero-diagonal KKT: %d perturbed, growth %.3g, inertia (%d, %d, %d) vs "
+                "threshold (%d, %d, %d)\n",
+                i.static_pivots, i.pivot_growth, i.num_positive, i.num_negative, i.num_zero,
+                it.num_positive, it.num_negative, it.num_zero);
+    ASSERT_GT(i.static_pivots, 0) << "premise: exact zeros raised";
+    EXPECT_EQ(i.num_zero, 0);
+    EXPECT_FALSE(i.inertia_exact);
+    EXPECT_EQ(i.num_positive + i.num_negative, n);
+    EXPECT_TRUE(fk.static_path);
+    EXPECT_TRUE(refinement_advised(fk));
+
+    const std::vector<double> b = rhs_of(n);
+    std::vector<double> x = b;
+    Info si;
+    ASSERT_EQ(s.solve(fk, ctrl, si, x.data(), n, 1), 0);
+    SolveWorkspace ws;
+    const RefinementResult rr = refine(A, fk, ctrl, b, x, 1, ws);
+    std::printf("[FastMode] zero-diagonal KKT refine: omega %.3g -> %.3g in %d steps\n",
+                rr.omega_start, rr.omega, rr.iterations);
+    EXPECT_EQ(rr.status, ErrorCode::Success);
+    EXPECT_LE(rr.omega, ctrl.refine_omega_target);
+
+    // The plugin's path: IpmSession reports Ok (not Singular), with the
+    // inexact inertia that the plugin turns into MA97 flag 7.
+    IpmSession sess;
+    ASSERT_EQ(sess.analyse(A, A.values, ctrl, IpmControl{}), ErrorCode::Success);
+    ASSERT_EQ(sess.factor(A.values), IpmFactorStatus::Ok);
+    EXPECT_EQ(sess.inertia().zero, 0);
+    std::vector<double> y = b;
+    ASSERT_EQ(sess.solve(y.data(), n, 1), 0);
+    const auto val = smf::bench::validate(A, b, y, 1);
+    EXPECT_LE(val.omega, 10.0 * ctrl.refine_omega_target);
+}
+
+// A static factor that forced no pivot (every pivot passed pivot_u: a
+// diagonally dominant indefinite matrix) is a threshold factorization:
+// static_path, growth 0, nothing perturbed, and no refinement advised. An
+// IpmSession full solve with it is the plain solve of its factor, bitwise.
+TEST(FastMode, NoForcedPivotNoRefinement) {
+    const int n = 60;
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (int j = 0; j < n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(j % 2 == 0 ? 4.0 : -4.0);
+        if (j + 1 < n) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(1.0);
+        }
+        A.col_ptr[static_cast<std::size_t>(j) + 1] = static_cast<Int>(A.row_idx.size());
+    }
+    Control ctrl = indef_control();
+    ctrl.pivoting = Pivoting::Static;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+    EXPECT_TRUE(fk.static_path);
+    EXPECT_EQ(i.static_pivots, 0);
+    EXPECT_EQ(fk.pivot_growth, 0.0);
+    EXPECT_TRUE(i.inertia_exact);
+    EXPECT_FALSE(refinement_advised(fk));
+
+    const std::vector<double> b = rhs_of(n);
+    IpmSession sess;
+    ASSERT_EQ(sess.analyse(A, A.values, ctrl, IpmControl{}), ErrorCode::Success);
+    ASSERT_EQ(sess.factor(A.values), IpmFactorStatus::Ok);
+    EXPECT_TRUE(sess.factor_keep().static_path);
+    EXPECT_FALSE(refinement_advised(sess.factor_keep()));
+    // The session's own factor, solved plainly: what an unrefined full
+    // solve gives.
+    std::vector<double> x = b;
+    Info si;
+    ASSERT_EQ(s.solve(sess.factor_keep(), ctrl, si, x.data(), n, 1), 0);
+    std::vector<double> y = b;
+    ASSERT_EQ(sess.solve(y.data(), n, 1), 0);
+    EXPECT_EQ(x, y) << "not refined";
 }
 
 // --- The default path ---

@@ -385,10 +385,11 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
   // (Pivoting::Static, the fast mode: FactorKeep::static_path) is refined
   // the same way: its growth is unbounded and it may be of a perturbed
   // matrix, so refine() aims at Control::refine_omega_target (the
-  // backward-error trigger). static_path is set only by Pivoting::Static or
+  // backward-error trigger), when it forced a pivot (refinement_advised).
+  // static_path is set only by Pivoting::Static or
   // Control::static_fallback_after_cascade, both off by default: otherwise
   // the solve is as before.
-  const bool static_refine = fk_.static_path && !regularized();
+  const bool static_refine = fk_.static_path && refinement_advised(fk_) && !regularized();
   bool refine_solve = (regularized() || static_refine) && job == SolveJob::Full && b != nullptr &&
                       n == mat_.n && nrhs > 0 && fk_.analysis != nullptr && !fk_.is_posdef;
   if (refine_solve && static_refine) {

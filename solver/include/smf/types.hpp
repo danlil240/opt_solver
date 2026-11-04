@@ -179,7 +179,8 @@ enum class RefineMethod {
 //             on the static path: no delays; the best available pivot, |d|
 //             below 1e-8 * max|A| raised. Accuracy is not guaranteed on hard
 //             indefinite systems, and when a pivot is perturbed the reported
-//             inertia is that of the perturbed matrix.
+//             inertia is that of the perturbed matrix (raised pivots by
+//             their perturbed sign, exact zeros as +).
 enum class Pivoting {
     Threshold = 0,
     Static    = 1
