@@ -13,7 +13,11 @@
 // Usage for a large front (parallel BLAS):
 //   smf::BlasThreadGuard _g(control.num_threads);
 
+#include <optional>
+
 namespace smf {
+
+struct Control;
 
 /// Intel OpenMP runtime blocktime (KMP_BLOCKTIME) control, for the threads
 /// that drive MKL's thread teams (the MKL "intel" threading layer). The
@@ -127,6 +131,29 @@ int blas_max_threads() noexcept;
 /// tasks.
 struct BlasSerialGuard : BlasThreadGuard {
     BlasSerialGuard() noexcept : BlasThreadGuard(1) {}
+};
+
+/// The BLAS thread count a public factor or solve call holds on its calling
+/// thread for the whole call (CallBlasGuard): 1 in deterministic mode, else
+/// Control::num_threads when it is >= 1, else 0: num_threads <= 0 holds no
+/// guard, so the call runs on the caller's own BLAS setting (one tree
+/// thread; with threaded MKL every core by default).
+int call_blas_threads(const Control &ctrl) noexcept;
+
+/// RAII: BlasThreadGuard(call_blas_threads(ctrl)) for the lifetime of a
+/// public factor or solve call (nothing at 0), so num_threads = 1 means one
+/// BLAS thread on every path, the caller's BLAS setting (e.g. MKL's global
+/// count, all cores by default) restored on return. At more than one thread
+/// it also applies Control::mkl_blocktime_ms. Nested guards (per-front
+/// shares, serial BLAS in subtrees and tiles) work inside it as before.
+class CallBlasGuard {
+public:
+    explicit CallBlasGuard(const Control &ctrl) noexcept;
+    CallBlasGuard(const CallBlasGuard&)            = delete;
+    CallBlasGuard& operator=(const CallBlasGuard&) = delete;
+
+private:
+    std::optional<BlasThreadGuard> guard_;
 };
 
 } // namespace smf

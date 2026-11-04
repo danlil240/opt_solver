@@ -1,4 +1,6 @@
 #include "smf/blas_thread_guard.hpp"
+#include "smf/control.hpp"
+#include "smf/determinism.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -206,6 +208,16 @@ BlasIdleScope::~BlasIdleScope() noexcept
 }
 
 int blas_max_threads() noexcept { return blas_get_num_threads(); }
+
+int call_blas_threads(const Control &ctrl) noexcept {
+    if (deterministic_mode(ctrl)) return 1;
+    return ctrl.num_threads >= 1 ? ctrl.num_threads : 0;
+}
+
+CallBlasGuard::CallBlasGuard(const Control &ctrl) noexcept {
+    const int n = call_blas_threads(ctrl);
+    if (n > 0) guard_.emplace(n, n > 1 ? ctrl.mkl_blocktime_ms : -1);
+}
 
 bool mkl_blocktime_supported() noexcept { return static_cast<bool>(blocktime_api()); }
 

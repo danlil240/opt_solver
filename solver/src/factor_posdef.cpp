@@ -333,13 +333,13 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.inertia_exact = true;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
-  // Deterministic mode: BLAS on one thread for the whole factorization, at
-  // every num_threads (1 included) and on every path (the banded one too).
-  // With threaded MKL the calling thread otherwise runs the caller's MKL
-  // thread count (by default every core), whose results differ bitwise
-  // from serial BLAS's.
-  std::optional<BlasThreadGuard> det_blas;
-  if (deterministic_mode(ctrl)) det_blas.emplace(1);
+  // BLAS on num_threads threads for the whole factorization, on every path
+  // (the banded one too): num_threads = 1 is one BLAS thread, not the
+  // caller's MKL thread count (by default every core); deterministic mode:
+  // one at every num_threads (serial BLAS's bits). Per-front shares and the
+  // serial BLAS of subtrees and tiles nest inside. num_threads <= 0: the
+  // caller's setting (CallBlasGuard).
+  const CallBlasGuard call_blas(ctrl);
 
   auto fail = [&](FactorStatus fs, ErrorCode ec) {
     fkeep.factor_values.clear();
@@ -443,15 +443,12 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   }
 #endif // SMF_PARALLEL
 
-  // Threads go to BLAS inside the fronts (deterministic mode: one).
-  std::optional<BlasThreadGuard> blas_threads;
-  if (ctrl.num_threads > 1)
-    blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads, ctrl.mkl_blocktime_ms);
+  // Threads go to BLAS inside the fronts (call_blas above: num_threads,
+  // deterministic mode one).
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
       0.0, 0.0, 0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
-  blas_threads.reset();
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);
 

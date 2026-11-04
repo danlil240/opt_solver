@@ -726,7 +726,19 @@ int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
   char uplo = 'L';
   char diag = unit ? 'U' : 'N';
   int info = 0;
+#if defined(SMF_USE_MKL) && (SMF_USE_MKL)
+  // Threaded MKL's DTRTRI (seen at m >= 512, MKL 2026.2, Windows) drops the
+  // calling thread's MKL_Set_Num_Threads_Local setting: afterwards the
+  // thread runs MKL's global count (every core), so a 1-thread call
+  // (BlasThreadGuard(1)) would go on with threaded BLAS. Pin the current
+  // count as this thread's local setting for the call and put the previous
+  // local setting (0: none) back after it. Same thread count, same bits.
+  const int prev_local = MKL_Set_Num_Threads_Local(MKL_Get_Max_Threads());
   dtrtri_(&uplo, &diag, &m, A, &lda, &info);
+  MKL_Set_Num_Threads_Local(prev_local);
+#else
+  dtrtri_(&uplo, &diag, &m, A, &lda, &info);
+#endif
   return info;
 }
 

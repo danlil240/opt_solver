@@ -9,14 +9,17 @@
 //   solve, MKL CNR. BitwiseAcrossThreadCounts checks it bit for bit.
 
 #include "smf/blas_thread_guard.hpp"
+#include "smf/dense_kernel.hpp"
 #include "smf/determinism.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
 #include "smf/matrix_market.hpp"
 #include "smf/multifrontal_serial.hpp"
+#include "smf/solve_sparse_fwd.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -24,6 +27,7 @@
 #include <filesystem>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <gtest/gtest.h>
@@ -662,6 +666,256 @@ TEST(ParallelDeterminism, CallerBlasThreadsDoNotChangeBits) {
     EXPECT_EQ(blas_reproducibility_status(), 0)
         << "mkl_cbwr_set returned " << blas_reproducibility_status();
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// num_threads = 1 outside deterministic mode is one BLAS thread too (bug:
+// with threaded MKL the 1-thread factor and solve ran their fronts on the
+// caller's MKL thread count, by default every core). Every public entry runs
+// here under a caller whose BLAS runs several threads: Solver::factor (the
+// banded SPD path included), refactorization with new values, the solve at
+// nrhs = 1 and nrhs > 1, IpmSession (the plugin's path) and
+// solve_sparse_forward. Its bits must be a serial-BLAS caller's, and the
+// caller's setting must come back. num_threads <= 0 keeps the caller's BLAS
+// (no guard): reported, as evidence the threaded BLAS changes bits at all.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct OneThreadRun {
+    std::vector<double> l;    // factor values: factorization, then refactorization
+    std::vector<double> x;    // solutions: nrhs 1 and 5, after each factorization
+    std::vector<double> y;    // solve_sparse_forward
+    std::vector<double> ipm;  // IpmSession: factor values and solutions
+    int neg = 0;
+    bool banded = false;
+    bool ipm_ok = false;
+};
+
+OneThreadRun one_thread_run(const DetCase &c, int num_threads) {
+    Control ctrl;
+    ctrl.matrix_type = c.type;
+    ctrl.num_threads = num_threads;
+    ctrl.ordering = c.ordering;
+    ctrl.cache_inverse_diag = true;
+    if (c.ordering == OrderingMethod::AutoParallel) ctrl.expected_refactors = 100;
+    OneThreadRun r;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(c.A, ctrl, info);
+    EXPECT_NE(ak.get(), nullptr);
+    if (!ak) return r;
+    NumericWorkspace nws;
+    SolveWorkspace sws;
+    FactorKeep fk;
+    const int n = static_cast<int>(c.A.n);
+    std::vector<double> v = c.A.values;
+    for (int it = 0; it < 2; ++it) {
+        if (it == 0) {
+            EXPECT_EQ(solver.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
+        } else {
+            // Refactorization: new values in the analysed matrix's entry order.
+            for (std::size_t p = 0; p < v.size(); ++p)
+                v[p] *= 1.0 + 1e-3 * std::sin(0.37 * static_cast<double>(p));
+            EXPECT_EQ(solver.factor(*ak, std::span<const double>(v), ctrl, info, fk, nws),
+                      FactorStatus::Success);
+        }
+        r.l.insert(r.l.end(), fk.factor_values.begin(), fk.factor_values.end());
+        r.l.insert(r.l.end(), fk.band_factor.begin(), fk.band_factor.end());
+        r.neg += info.num_negative;
+        r.banded = fk.use_banded_spd;
+        constexpr int kNrhs = 5;
+        std::vector<double> b(static_cast<std::size_t>(n) * (1 + kNrhs));
+        for (std::size_t i = 0; i < b.size(); ++i)
+            b[i] = std::sin(0.013 * static_cast<double>(i) + it) + 0.5;
+        EXPECT_EQ(solver.solve(fk, ctrl, info, b.data(), n, 1, sws), 0);
+        EXPECT_EQ(solver.solve(fk, ctrl, info, std::span<double>(b.data() + n, b.size() - n),
+                               kNrhs, n, sws),
+                  0);
+        r.x.insert(r.x.end(), b.begin(), b.end());
+    }
+    if (!fk.use_banded_spd) {
+        std::vector<double> b(static_cast<std::size_t>(n), 0.0);
+        for (int i = 0; i < n; i += 97) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * i;
+        std::vector<int> reach;
+        solve_sparse_forward(*ak, fk, b, reach, r.y);
+    }
+    // IpmSession, as the plugin drives it (indefinite only).
+    if (c.type == MatrixType::RealSymmetricIndefinite) {
+        std::optional<Control> pc =
+            ipopt_plugin_control(Ma97Options{}, -1, std::max(1, num_threads));
+        EXPECT_TRUE(pc.has_value());
+        if (!pc) return r;
+        pc->num_threads = num_threads;
+        IpmSession s;
+        EXPECT_EQ(s.analyse(c.A, {}, *pc, ipopt_plugin_ipm_control()), ErrorCode::Success);
+        r.ipm_ok = s.factor(c.A.values) == IpmFactorStatus::Ok;
+        EXPECT_TRUE(r.ipm_ok);
+        if (!r.ipm_ok) return r;
+        const FactorKeep &ipk = s.factor_keep();
+        r.ipm.assign(ipk.factor_values.begin(), ipk.factor_values.end());
+        std::vector<double> b(static_cast<std::size_t>(n) * 4);
+        for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.011 * static_cast<double>(i));
+        EXPECT_EQ(s.solve(b.data(), n, 1), 0);
+        EXPECT_EQ(s.solve(b.data() + n, n, 3), 0);
+        r.ipm.insert(r.ipm.end(), b.begin(), b.end());
+    }
+    return r;
+}
+
+std::vector<DetCase> one_thread_cases() {
+    std::vector<DetCase> cases;
+    {
+        const fs::path mtx = fixture_root() / "optim20" / "kkt_pde_opt.mtx";
+        auto mm = read_matrix_market(mtx.string());
+        EXPECT_TRUE(mm.ok) << mtx.string() << ": " << mm.error_message;
+        if (mm.ok)
+            cases.push_back({"kkt_pde_opt", std::move(mm.matrix),
+                             MatrixType::RealSymmetricIndefinite, false, false});
+    }
+    cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                     false, false});
+    cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9), MatrixType::RealSymmetricIndefinite,
+                     false, false});
+    // Banded SPD (half-bandwidth 64: DPBTRF / DPBTRS take their blocked
+    // BLAS-3 path), AutoParallel's banded fast path.
+    CscLower band;
+    const int n = 20000;
+    constexpr int kd = 64;
+    band.n = n;
+    band.col_ptr.push_back(0);
+    for (int j = 0; j < n; ++j) {
+        band.row_idx.push_back(j);
+        band.values.push_back(2.0 * kd + 2.0);
+        for (int k = 1; k <= kd && j + k < n; ++k) {
+            band.row_idx.push_back(j + k);
+            band.values.push_back(-1.0);
+        }
+        band.col_ptr.push_back(static_cast<Int>(band.row_idx.size()));
+    }
+    cases.push_back({"band_spd/AutoParallel", std::move(band),
+                     MatrixType::RealSymmetricPositiveDefinite, false, false,
+                     OrderingMethod::AutoParallel});
+    return cases;
+}
+
+bool caller_blas_honoured(int threads) {
+    BlasThreadGuard g(threads);
+    return blas_max_threads() == threads;
+}
+
+} // namespace
+
+TEST(ParallelDeterminism, OneThreadIsOneBlasThread) {
+    constexpr int kCallerBlas = 4;
+    const bool threaded = caller_blas_honoured(kCallerBlas);
+#if defined(SMF_EXPECT_THREADED_BLAS)
+    ASSERT_TRUE(threaded) << "threaded-MKL build, but the BLAS ignores a thread count";
+#endif
+    std::printf("[OneThreadIsOneBlasThread] caller BLAS threads %s\n",
+                threaded ? "honoured (exercised)" : "ignored (sequential BLAS: not exercised)");
+    for (const DetCase &c : one_thread_cases()) {
+        SCOPED_TRACE(c.name);
+        OneThreadRun ref;
+        {
+            BlasThreadGuard serial(1);
+            ref = one_thread_run(c, 1);
+        }
+        ASSERT_FALSE(ref.x.empty());
+        if (c.ordering == OrderingMethod::AutoParallel)
+            ASSERT_TRUE(ref.banded) << "the banded path is not exercised";
+        OneThreadRun r, inherit;
+        {
+            BlasThreadGuard caller(kCallerBlas);
+            r = one_thread_run(c, 1);
+            EXPECT_EQ(blas_max_threads(), threaded ? kCallerBlas : 1)
+                << "the caller's BLAS thread count was not restored";
+            inherit = one_thread_run(c, 0);  // no guard: the caller's threads
+            EXPECT_EQ(blas_max_threads(), threaded ? kCallerBlas : 1);
+        }
+        EXPECT_EQ(r.banded, ref.banded);
+        EXPECT_EQ(r.neg, ref.neg);
+        const auto [dl, ml] = bit_diff(r.l, ref.l);
+        const auto [dx, mx] = bit_diff(r.x, ref.x);
+        EXPECT_EQ(dl, 0u) << dl << " of " << ref.l.size() << " factor entries differ (max " << ml
+                          << ")";
+        EXPECT_EQ(dx, 0u) << dx << " of " << ref.x.size() << " solution entries differ (max "
+                          << mx << ")";
+        EXPECT_EQ(bit_diff(r.y, ref.y).first, 0u) << "solve_sparse_forward";
+        EXPECT_EQ(r.ipm_ok, ref.ipm_ok);
+        EXPECT_EQ(bit_diff(r.ipm, ref.ipm).first, 0u) << "IpmSession";
+        const std::size_t inherit_diff = bit_diff(inherit.l, ref.l).first +
+                                         bit_diff(inherit.x, ref.x).first +
+                                         bit_diff(inherit.ipm, ref.ipm).first;
+        std::printf("[OneThreadIsOneBlasThread] %s n=%d%s: num_threads = 0 on the caller's %d "
+                    "BLAS threads: %zu entries differ from serial BLAS\n",
+                    c.name.c_str(), static_cast<int>(c.A.n), ref.banded ? " (banded path)" : "",
+                    threaded ? kCallerBlas : 1, inherit_diff);
+    }
+}
+
+// Threaded MKL's DTRTRI (m >= 512) dropped the calling thread's local MKL
+// thread setting, so a 1-thread call went on with every core after it
+// (build_inverse_diag), and num_threads = 0 changed the caller's setting.
+// smf_dtrtri_lower keeps it.
+TEST(ParallelDeterminism, TrtriKeepsLocalBlasSetting) {
+    const bool threaded = caller_blas_honoured(4);
+#if defined(SMF_EXPECT_THREADED_BLAS)
+    ASSERT_TRUE(threaded) << "threaded-MKL build, but the BLAS ignores a thread count";
+#endif
+    for (const int local : {1, 4}) {
+        BlasThreadGuard g(local);
+        for (const int n : {64, 512, 1024}) {
+            std::vector<double> A(static_cast<std::size_t>(n) * n, 0.0);
+            for (int j = 0; j < n; ++j)
+                for (int i = j; i < n; ++i)
+                    A[static_cast<std::size_t>(j) * n + i] = i == j ? 2.0 : 0.01 / (1 + i - j);
+            EXPECT_EQ(smf_dtrtri_lower(A.data(), n, n, false), 0);
+            EXPECT_EQ(blas_max_threads(), threaded ? local : 1) << "n = " << n;
+        }
+    }
+}
+
+// num_threads = N: the call sets the caller's BLAS to N for its duration and
+// gives the caller its own setting back, from above and from below N.
+TEST(ParallelDeterminism, ExplicitThreadsRestoreCallerBlas) {
+    const bool threaded = caller_blas_honoured(4);
+#if defined(SMF_EXPECT_THREADED_BLAS)
+    ASSERT_TRUE(threaded) << "threaded-MKL build, but the BLAS ignores a thread count";
+#endif
+    for (const DetCase &c : one_thread_cases()) {
+        SCOPED_TRACE(c.name);
+        for (const int caller : {1, 2, 8}) {
+            BlasThreadGuard g(caller);
+            const OneThreadRun r = one_thread_run(c, 4);
+            EXPECT_FALSE(r.x.empty());
+            EXPECT_EQ(blas_max_threads(), threaded ? caller : 1)
+                << "caller on " << caller << " BLAS threads, num_threads = 4";
+        }
+    }
+    // The rule itself: N inside the call, deterministic mode 1, <= 0 none.
+    Control ctrl;
+    EXPECT_EQ(call_blas_threads(ctrl), 1);
+    ctrl.num_threads = 3;
+    EXPECT_EQ(call_blas_threads(ctrl), deterministic_mode(ctrl) ? 1 : 3);
+    {
+        BlasThreadGuard g(2);
+        {
+            const CallBlasGuard call(ctrl);
+            EXPECT_EQ(blas_max_threads(), !threaded ? 1 : deterministic_mode(ctrl) ? 1 : 3);
+        }
+        EXPECT_EQ(blas_max_threads(), threaded ? 2 : 1);
+        ctrl.num_threads = 0;
+        EXPECT_EQ(call_blas_threads(ctrl), deterministic_mode(ctrl) ? 1 : 0);
+        ctrl.num_threads = -1;
+        EXPECT_EQ(call_blas_threads(ctrl), deterministic_mode(ctrl) ? 1 : 0);
+        {
+            const CallBlasGuard call(ctrl);
+            EXPECT_EQ(blas_max_threads(), !threaded ? 1 : deterministic_mode(ctrl) ? 1 : 2);
+        }
+    }
+    ctrl.deterministic = true;
+    ctrl.num_threads = 8;
+    EXPECT_EQ(call_blas_threads(ctrl), 1);
 }
 
 // ---------------------------------------------------------------------------

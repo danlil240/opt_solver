@@ -118,6 +118,11 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  * past Control::scale_on_delay_early_proj). Each call starts from a
  * new factor, so a sequence of calls on such a matrix pays that stopped try
  * every time.
+ *
+ * Threads: one (Control::num_threads = 1), BLAS included: the calling
+ * thread's BLAS runs one thread for the call, whatever the application set
+ * (e.g. threaded MKL's default, every core), and its setting is restored on
+ * return. The same holds for smf_solve().
  */
 int smf_factor(smf_analysis_t analysis,
                const double*  values,

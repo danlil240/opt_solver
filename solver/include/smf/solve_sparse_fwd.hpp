@@ -32,6 +32,11 @@ namespace smf {
 ///   exact arithmetic; floating-point result is bit-identical to the dense
 ///   path when non-reach supernodes truly do not contribute).
 ///
+/// BLAS threads: one, whatever the caller's BLAS setting (which is restored
+/// on return); the call takes no Control, and its single right-hand side
+/// over the reach (TRSV / GEMV per front) is what the solve runs at the
+/// default Control::num_threads = 1.
+///
 /// @param akeep  Symbolic analysis (elimination tree, supernode list, fronts).
 /// @param fkeep  Numeric factor data (L blocks, permutation, is_posdef flag).
 /// @param b      RHS vector in original ordering (length akeep.n). Read-only.
