@@ -1516,7 +1516,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           {
             // Deterministic mode: BLAS on one thread whatever the front's
             // share (its tile tasks still recruit blas_threads - 1 helpers).
-            BlasThreadGuard blas(det ? 1 : blas_threads);
+            BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }

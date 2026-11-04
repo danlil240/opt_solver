@@ -548,7 +548,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     // Threads go to BLAS inside the fronts (deterministic mode: one).
     std::optional<BlasThreadGuard> blas_threads;
     if (ctrl.num_threads > 1)
-      blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
+      blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads, ctrl.mkl_blocktime_ms);
     SerialFactorStats st;
     const double static_pivot =
         ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;

@@ -23,6 +23,9 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <gtest/gtest.h>
 #include <string>
 #include <span>
@@ -368,13 +371,14 @@ struct DetRun {
 };
 
 // caller_blas > 0: the BLAS threads of the caller of the nrhs > 1 solve
-// (default: `threads`).
-DetRun det_run(const DetCase &c, int threads, int caller_blas = 0) {
+// (default: `threads`). blocktime_ms: Control::mkl_blocktime_ms.
+DetRun det_run(const DetCase &c, int threads, int caller_blas = 0, int blocktime_ms = -1) {
     Control ctrl;
     ctrl.matrix_type = c.type;
     ctrl.num_threads = threads;
     ctrl.auto_threads = false;  // small test trees
     ctrl.deterministic = true;
+    ctrl.mkl_blocktime_ms = blocktime_ms;
     ctrl.ordering = c.ordering;
     // Cached L11^-1 (built at factor time) is part of what must reproduce.
     ctrl.cache_inverse_diag = true;
@@ -796,4 +800,63 @@ TEST(ParallelDeterminism, IpoptPluginControlBitwiseAcrossThreads) {
                         r.threads_used, r.subtrees, ref.l.size());
         }
     }
+}
+
+// Control::mkl_blocktime_ms never changes a result. With the knob off, on
+// (0 and 1 ms) at 1 and 4 threads, the factor, the D values and both solves
+// are bit for bit the same, and (with a fake Intel runtime installed, so it
+// runs on every build) the pool workers that ran top fronts set the
+// blocktime on their own threads and put it back.
+namespace {
+thread_local int tl_bt = 7;
+std::mutex g_bt_mutex;
+std::set<std::thread::id> g_bt_setters;       // threads that set the knob's value
+int g_bt_knob_sets = 0, g_bt_restores = 0;
+void bt_set(int ms) {
+    std::lock_guard<std::mutex> lk(g_bt_mutex);
+    tl_bt = ms;
+    if (ms == 1) { ++g_bt_knob_sets; g_bt_setters.insert(std::this_thread::get_id()); }
+    else if (ms == 7) ++g_bt_restores;
+}
+int bt_get() { return tl_bt; }
+} // namespace
+
+TEST(ParallelDeterminism, MklBlocktimeKnobBitwise) {
+    std::vector<DetCase> cases;
+    cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                     true, false});
+    cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9), MatrixType::RealSymmetricIndefinite,
+                     true, true});
+    for (const DetCase &c : cases) {
+        SCOPED_TRACE(c.name);
+        for (const int threads : {1, 4}) {
+            const DetRun ref = det_run(c, threads, 0, -1);
+            ASSERT_FALSE(ref.x.empty());
+            for (const int bt : {0, 1}) {
+                const DetRun r = det_run(c, threads, 0, bt);
+                EXPECT_EQ(bit_diff(r.x, ref.x).first, 0u) << threads << " threads, blocktime " << bt;
+                EXPECT_EQ(bit_diff(r.xm, ref.xm).first, 0u) << threads << " threads, blocktime " << bt;
+                EXPECT_EQ(bit_diff(r.d, ref.d).first, 0u) << threads << " threads, blocktime " << bt;
+                EXPECT_EQ(r.pos, ref.pos);
+                EXPECT_EQ(r.neg, ref.neg);
+                EXPECT_EQ(r.zero, ref.zero);
+            }
+        }
+    }
+
+    // The knob reaches the pool workers, and is undone.
+    struct HookReset {
+        ~HookReset() { mkl_blocktime_reset_hooks_for_test(); }
+    } reset;
+    tl_bt = 7;
+    g_bt_setters.clear();
+    g_bt_knob_sets = g_bt_restores = 0;
+    mkl_blocktime_set_hooks_for_test(bt_set, bt_get);
+    (void)det_run(cases[0], 4, 0, 1);
+    EXPECT_GT(g_bt_knob_sets, 0) << "no front applied the blocktime";
+    EXPECT_EQ(g_bt_knob_sets, g_bt_restores) << "a blocktime was not restored";
+    EXPECT_EQ(tl_bt, 7) << "the caller's blocktime was not restored";
+    std::printf("[MklBlocktimeKnobBitwise] %d applications on %zu thread(s), all restored\n",
+                g_bt_knob_sets, g_bt_setters.size());
+    EXPECT_GE(g_bt_setters.size(), 1u);
 }

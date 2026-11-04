@@ -446,7 +446,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   // Threads go to BLAS inside the fronts (deterministic mode: one).
   std::optional<BlasThreadGuard> blas_threads;
   if (ctrl.num_threads > 1)
-    blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
+    blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads, ctrl.mkl_blocktime_ms);
   SerialFactorStats st;
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,

@@ -16,6 +16,9 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+
 // --------------------------------------------------------------------------
 // Helper: query current BLAS thread count using the same backend used by
 // BlasThreadGuard.  We obtain it by constructing a guard and reading
@@ -111,4 +114,108 @@ TEST(BlasThreadGuard, ClampZero) {
     const int after = get_blas_threads();
     EXPECT_EQ(original, after)
         << "ClampZero: thread count not restored after clamped guards";
+}
+
+// --------------------------------------------------------------------------
+// Intel runtime blocktime (Control::mkl_blocktime_ms)
+// --------------------------------------------------------------------------
+namespace {
+// A fake runtime: a per-thread blocktime (initial 7).
+thread_local int tl_fake_bt = 7;
+std::atomic<int> g_fake_sets{0};
+void fake_set(int ms) { tl_fake_bt = ms; g_fake_sets.fetch_add(1); }
+int fake_get() { return tl_fake_bt; }
+
+struct HookReset {
+    ~HookReset() { smf::mkl_blocktime_reset_hooks_for_test(); }
+};
+} // namespace
+
+// Runtime absent (the symbol is not found): every call is a quiet no-op.
+TEST(BlasThreadGuardBlocktime, AbsentRuntimeIsNoop) {
+    HookReset reset;
+    smf::mkl_blocktime_set_hooks_for_test(nullptr, nullptr);
+    EXPECT_FALSE(smf::mkl_blocktime_supported());
+    EXPECT_EQ(smf::mkl_blocktime_get(), -1);
+    EXPECT_EQ(smf::mkl_blocktime_set(1), -1);
+    const long long applied0 = smf::mkl_blocktime_apply_count();
+    {
+        smf::BlasThreadGuard g(2, 1);
+        EXPECT_EQ(smf::mkl_blocktime_get(), -1);
+    }
+    EXPECT_EQ(smf::mkl_blocktime_apply_count(), applied0);
+}
+
+// A negative blocktime leaves the setting alone; a non-negative one holds for
+// the guard's lifetime and is restored, nested guards included.
+TEST(BlasThreadGuardBlocktime, SetAndRestore) {
+    HookReset reset;
+    tl_fake_bt = 7;
+    g_fake_sets = 0;
+    smf::mkl_blocktime_set_hooks_for_test(fake_set, fake_get);
+    {
+        smf::BlasThreadGuard none(2);
+        smf::BlasThreadGuard neg(2, -1);
+        EXPECT_EQ(tl_fake_bt, 7);
+        EXPECT_EQ(g_fake_sets.load(), 0);
+    }
+    {
+        smf::BlasThreadGuard outer(2, 1);
+        EXPECT_EQ(tl_fake_bt, 1);
+        {
+            smf::BlasThreadGuard inner(1, 5);
+            EXPECT_EQ(tl_fake_bt, 5);
+        }
+        EXPECT_EQ(tl_fake_bt, 1);
+        {
+            smf::BlasThreadGuard same(1, 1);  // already 1: not touched
+            EXPECT_EQ(tl_fake_bt, 1);
+        }
+    }
+    EXPECT_EQ(tl_fake_bt, 7);
+    // Another thread has its own value: set inside the guard, restored after.
+    int inside = -1, after = -1;
+    std::thread t([&] {
+        {
+            smf::BlasThreadGuard g(2, 1);
+            inside = tl_fake_bt;
+        }
+        after = tl_fake_bt;
+    });
+    t.join();
+    EXPECT_EQ(inside, 1);
+    EXPECT_EQ(after, 7);
+    EXPECT_EQ(tl_fake_bt, 7);
+}
+
+// The real runtime (an MKL "intel" threading build with libiomp5 loaded);
+// elsewhere it is absent and the knob must still be harmless.
+TEST(BlasThreadGuardBlocktime, RealRuntimeWorkerAndCaller) {
+    smf::BlasThreadGuard warm(2);  // first MKL call: the runtime is loaded
+    if (!smf::mkl_blocktime_supported()) {
+        smf::BlasThreadGuard g(2, 1);
+        EXPECT_EQ(smf::mkl_blocktime_get(), -1);
+        GTEST_SKIP() << "no Intel OpenMP runtime in this process: the knob is a no-op here";
+    }
+    const int caller0 = smf::mkl_blocktime_get();
+    ASSERT_GE(caller0, 0);
+    const int target = caller0 == 1 ? 2 : 1;
+    int caller_in = -1, worker_in = -1, worker_before = -1, worker_after = -1;
+    {
+        smf::BlasThreadGuard g(2, target);
+        caller_in = smf::mkl_blocktime_get();
+        std::thread t([&] {
+            worker_before = smf::mkl_blocktime_get();
+            {
+                smf::BlasThreadGuard wg(2, target);
+                worker_in = smf::mkl_blocktime_get();
+            }
+            worker_after = smf::mkl_blocktime_get();
+        });
+        t.join();
+    }
+    EXPECT_EQ(caller_in, target);
+    EXPECT_EQ(worker_in, target);
+    EXPECT_EQ(worker_after, worker_before);
+    EXPECT_EQ(smf::mkl_blocktime_get(), caller0) << "caller's blocktime not restored";
 }
