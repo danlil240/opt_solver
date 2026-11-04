@@ -76,15 +76,17 @@ BlocktimeApi resolve_blocktime_api() noexcept {
 std::atomic<void (*)(int)> g_bt_set{nullptr};   // the real runtime, once found
 std::atomic<int (*)()> g_bt_get{nullptr};
 std::atomic<bool> g_bt_final{false};            // lookup found, or gave up
-std::atomic<int> g_bt_misses{0};
 std::atomic<bool> g_bt_hooked{false};           // test seam
 std::atomic<void (*)(int)> g_hook_set{nullptr};
 std::atomic<int (*)()> g_hook_get{nullptr};
 std::atomic<long long> g_bt_applied{0};
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
 // A miss can mean "MKL has not loaded its threading layer yet", so it is
 // retried for a while (the guard runs once per front) before it is cached as
 // final. A hit is cached at once.
 constexpr int kBlocktimeMaxMisses = 256;
+std::atomic<int> g_bt_misses{0};
+#endif
 
 BlocktimeApi blocktime_api() noexcept {
     if (g_bt_hooked.load(std::memory_order_acquire))
