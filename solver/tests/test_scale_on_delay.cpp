@@ -1591,6 +1591,41 @@ TEST(StaticFallback, OffIsTheRescue) {
     EXPECT_EQ(ra.iterations, rb.iterations);
 }
 
+// The knob is off by default, and a default Control then factors a cascading
+// sequence bitwise like one with the knob set off explicitly (the pre-fallback
+// path: the rescue, no static path).
+TEST(StaticFallback, DefaultIsOffAndBitwiseTheRescue) {
+    Control def;
+    def.matrix_type = MatrixType::RealSymmetricIndefinite;
+    def.amalgamation = Amalgamation::Smf;
+    ASSERT_FALSE(def.static_fallback_after_cascade);
+    ASSERT_EQ(def.pivoting, Pivoting::Threshold);
+    Control off = def;
+    off.static_fallback_after_cascade = false;
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    std::vector<std::vector<double>> ref;
+    for (const Control &ctrl : {off, def}) {
+        Solver s;
+        Info info;
+        auto ak = s.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        std::vector<std::vector<double>> got;
+        for (const CscLower *M : {&A, &A1, &A1}) {
+            Info i;
+            ASSERT_EQ(s.factor(*ak, *M, ctrl, i, fk, ws), FactorStatus::Success);
+            EXPECT_EQ(i.static_fallback, 0);
+            EXPECT_EQ(i.static_rejects, 0);
+            EXPECT_FALSE(fk.static_path);
+            got.push_back(fk.factor_values);
+        }
+        if (ref.empty()) ref = got;
+        else EXPECT_EQ(got, ref);
+    }
+}
+
 // The ipopt track (pivot_u = 1e-8, where the rescue is never armed) is
 // untouched by the fallback: bitwise the same factors over a sequence.
 TEST(StaticFallback, IpoptTrackUntouched) {

@@ -280,7 +280,14 @@ struct Control {
     // Info::static_fallback reports a static-path factor. The switch reads
     // the same work counts as the rescue's own decisions, so it is identical
     // at every num_threads in deterministic mode. False: the rescue as is.
-    bool           static_fallback_after_cascade = true;
+    // OFF by default: over 33 warm rec sequences the net cost was 1.003 (1T)
+    // / 1.014 (8T); only pde_control-like matrices gain, and every other
+    // cascading sequence pays one rejected static try (+2-9%). With it off
+    // the factorization path is bitwise the one before the fallback existed
+    // (1T, 33/33 sequences). The guard and the backward-error refinement
+    // trigger (FactorKeep::static_path) stay as machinery for an opt-in
+    // fast mode.
+    bool           static_fallback_after_cascade = false;
     // Experimental (no public contract yet): Pivoting::Static puts every
     // indefinite factorization on the static path above (FactorKeep::
     // static_path set, scale-on-delay disarmed). Threshold: as documented
