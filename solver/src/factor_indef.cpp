@@ -370,12 +370,13 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.front_work = 0.0;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
-  // Deterministic mode: BLAS on one thread for the whole factorization, at
-  // every num_threads (1 included). With threaded MKL the calling thread
-  // otherwise runs the caller's MKL thread count (by default every core),
-  // whose results differ bitwise from serial BLAS's.
-  std::optional<BlasThreadGuard> det_blas;
-  if (deterministic_mode(ctrl)) det_blas.emplace(1);
+  // BLAS on num_threads threads for the whole factorization: num_threads =
+  // 1 is one BLAS thread, not the caller's MKL thread count (by default
+  // every core); deterministic mode: one at every num_threads (serial
+  // BLAS's bits). Per-front shares and the serial BLAS of subtrees and
+  // tiles nest inside. num_threads <= 0: the caller's setting
+  // (CallBlasGuard).
+  const CallBlasGuard call_blas(ctrl);
 
   if (!check_analysis_storage_bounds(keep)) {
     fkeep.factor_values.clear();
@@ -545,10 +546,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
           : ctrl.small_pivot;
 
   if (!use_parallel_path) {
-    // Threads go to BLAS inside the fronts (deterministic mode: one).
-    std::optional<BlasThreadGuard> blas_threads;
-    if (ctrl.num_threads > 1)
-      blas_threads.emplace(deterministic_mode(ctrl) ? 1 : ctrl.num_threads, ctrl.mkl_blocktime_ms);
+    // Threads go to BLAS inside the fronts (call_blas above: num_threads,
+    // deterministic mode one).
     SerialFactorStats st;
     const double static_pivot =
         ctrl.static_pivot_tol > 0.0 ? ctrl.static_pivot_tol * matrix_max_abs : 0.0;
@@ -562,7 +561,6 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
         eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
         fkeep, ws, st, work_limit, early);
-    blas_threads.reset();
     if (err == ErrorCode::WorkLimitExceeded) {
       // Stopped at the scale-on-delay threshold: the factor is unusable.
       std::fill(ws.row_pos.begin(), ws.row_pos.end(), Int{-1});

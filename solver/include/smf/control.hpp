@@ -368,6 +368,20 @@ struct Control {
     // runs on (at most num_threads; auto_threads below picks how many).
     // tree_parallel opts into the older task-parallel engine instead, which
     // measured slower everywhere.
+    // BLAS: every factor and solve call (Solver, IpmSession, the C API, the
+    // MA97 plugin) holds the calling thread's BLAS at num_threads threads
+    // for the whole call (CallBlasGuard, blas_thread_guard.hpp), the
+    // caller's setting restored on return; per-front shares and serial BLAS
+    // in subtrees and tiles nest inside. So num_threads = 1 is one BLAS
+    // thread in every mode, also with threaded MKL whose global count is
+    // every core (deterministic mode: one at every num_threads).
+    // num_threads <= 0: no guard, one tree thread on the caller's own BLAS
+    // setting (e.g. threaded MKL's global count). Not "auto": the IPOPT
+    // plugin's helpers (ipopt_plugin_control.hpp) read their own
+    // num_threads argument <= 0 as "the plugin default" and always pass a
+    // count >= 1 here. OpenBLAS builds: its thread count is process-wide,
+    // so concurrent calls with different num_threads (or a caller on a
+    // different OpenBLAS count) race on it; MKL's setting is per thread.
     int            num_threads   = 1;
     // auto_threads (num_threads > 1): the factorization runs on as many of
     // the num_threads threads as its assembly tree repays, by a cost model

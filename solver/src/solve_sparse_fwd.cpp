@@ -10,6 +10,7 @@
 #include "smf/solve_sparse_fwd.hpp"
 
 #include "smf/analysis.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"   // smf_dtrsv_lower, smf_dtrsv_lower_unit, smf_dgemv
 #include "smf/factor_posdef.hpp"  // FactorKeep
 #include "smf/supernode.hpp"      // Supernode
@@ -38,6 +39,12 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
 
     if (n == 0)
         return;
+
+    // One BLAS thread, whatever the caller's BLAS runs (no Control here):
+    // a single right-hand side over the reach, TRSV / GEMV per front, as
+    // the solve at the default num_threads = 1. The caller's setting is
+    // restored on return.
+    const BlasThreadGuard blas(1);
 
     const auto &supernodes = akeep.supernodes;
     const auto &iperm      = fkeep.iperm;   // iperm[old] = new (permuted index)

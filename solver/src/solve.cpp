@@ -675,17 +675,16 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
       (!fkeep.scale.empty() &&
        static_cast<int>(fkeep.scale.size()) == n);
 
-  // Deterministic mode pins the solve's BLAS to one thread, whatever the
-  // caller's BLAS runs (the banded solve's DPBTRS included): the nrhs > 1
-  // blocked solve calls GEMM / TRSM per front, and their results must not
-  // depend on the BLAS thread count (as the factor's kernels run serial
-  // BLAS in this mode). Outside it the caller's BLAS threads stay, so a
-  // serial-tree solve of many right-hand sides can still use threaded GEMM
-  // on its large fronts.
+  // The solve's BLAS runs num_threads threads, whatever the caller's BLAS
+  // runs (the banded solve's DPBTRS included): num_threads = 1 is one BLAS
+  // thread, num_threads = N lets a serial-tree solve of many right-hand
+  // sides (GEMM / TRSM per front) use N. Deterministic mode pins it to one,
+  // so the nrhs > 1 blocked solve's results do not depend on the BLAS
+  // thread count (as the factor's kernels run serial BLAS in this mode).
+  // num_threads <= 0: the caller's setting (CallBlasGuard).
   const bool det = deterministic_mode(ctrl);
   if (det) enable_blas_reproducibility();
-  std::optional<BlasThreadGuard> det_blas;
-  if (det) det_blas.emplace(1);
+  const CallBlasGuard call_blas(ctrl);
 
   if (fkeep.use_banded_spd) {
     if (job != SolveJob::Full) {
