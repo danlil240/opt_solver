@@ -176,6 +176,9 @@ std::string RunRecord::to_json_line() const {
     if (delay_early_stops >= 0) oss << "\"delay_early_stops\":" << delay_early_stops << ",";
     if (delay_try_ms >= 0) oss << "\"delay_try_ms\":" << delay_try_ms << ",";
     if (delay_matching_ms >= 0) oss << "\"delay_matching_ms\":" << delay_matching_ms << ",";
+    if (trial_skipped >= 0) oss << "\"trial_skipped\":" << trial_skipped << ",";
+    if (gate_flops_per_row >= 0) oss << "\"gate_flops_per_row\":" << gate_flops_per_row << ",";
+    if (skip_trial_rescues >= 0) oss << "\"skip_trial_rescues\":" << skip_trial_rescues << ",";
     if (refine_iterations >= 0)
         oss << "\"refine_iterations\":" << refine_iterations << ",\"refine_method\":\"" << refine_method
             << "\",";

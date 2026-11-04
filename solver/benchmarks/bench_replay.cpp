@@ -754,6 +754,15 @@ int main(int argc, char **argv) {
     }
     // SMF_BENCH_SCALE_REUSE_TOL (double; negative = recompute): Control::scale_on_delay_reuse_tol.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_REUSE_TOL")) ctrl.scale_on_delay_reuse_tol = std::atof(e);
+    // Skip-trial gate (Control::skip_trial_*): SMF_BENCH_SKIP_TRIAL = 0 | 1,
+    // SMF_BENCH_SKIP_TRIAL_MAX_U, SMF_BENCH_SKIP_TRIAL_FLR_MIN,
+    // SMF_BENCH_SKIP_TRIAL_FLR_MAX, SMF_BENCH_SKIP_TRIAL_RESCUE (the rescue's
+    // ratio; negative = no safety net).
+    if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL")) ctrl.skip_trial_gate = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL_MAX_U")) ctrl.skip_trial_max_pivot_u = std::atof(e);
+    if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL_FLR_MIN")) ctrl.skip_trial_min_flops_per_row = std::atof(e);
+    if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL_FLR_MAX")) ctrl.skip_trial_max_flops_per_row = std::atof(e);
+    if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL_RESCUE")) ctrl.skip_trial_rescue_ratio = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
     if (const char *e = std::getenv("SMF_BENCH_CACHE_INVERSE_DIAG")) ctrl.cache_inverse_diag = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
@@ -841,6 +850,7 @@ int main(int argc, char **argv) {
         int seq_delay_early_stops = 0;
         double seq_delay_try_ms = 0.0;       // summed over the steps, like seq_delay_rescales
         double seq_delay_matching_ms = 0.0;
+        int seq_skip_trial_rescues = 0;
         std::vector<double> step_factor_ms;  // successful factors, in order
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
@@ -863,6 +873,7 @@ int main(int argc, char **argv) {
                 seq_delay_early_stops += adapter->stats().delay_early_stops;
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
+                seq_skip_trial_rescues += adapter->stats().skip_trial_rescues;
                 if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
                 // The IpmSession adapter runs the deferred analysis in factor()
                 // and adds its time to analyse_ms (not to factor_ms).
@@ -952,6 +963,9 @@ int main(int argc, char **argv) {
             rec.delay_early_stops = seq_delay_early_stops;
             rec.delay_try_ms = seq_delay_try_ms;
             rec.delay_matching_ms = seq_delay_matching_ms;
+            rec.trial_skipped = st.trial_skipped;
+            rec.gate_flops_per_row = st.trial_skipped >= 0 ? st.gate_flops_per_row : -1.0;
+            rec.skip_trial_rescues = seq_skip_trial_rescues;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }
@@ -1047,6 +1061,9 @@ int main(int argc, char **argv) {
             rec.delay_early_stops = st.delay_early_stops;
             rec.delay_try_ms = st.delay_try_ms;
             rec.delay_matching_ms = st.delay_matching_ms;
+            rec.trial_skipped = st.trial_skipped;
+            rec.gate_flops_per_row = st.trial_skipped >= 0 ? st.gate_flops_per_row : -1.0;
+            rec.skip_trial_rescues = st.skip_trial_rescues;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }

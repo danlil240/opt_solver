@@ -60,6 +60,18 @@ struct Info {
     /// initial ratio.
     double       matching_initial_ratio = 0.0;
     double       matching_exact_ratio   = 0.0;
+    /// Control::skip_trial_gate: true when analyse() skipped the auto
+    /// matching trial (matching_trial then None, the base AMD ordering kept).
+    bool         matching_trial_skipped = false;
+    /// Control::skip_trial_gate: the base AMD ordering's predicted flops per
+    /// row the gate decided on (sum of squared column counts / n); 0 when
+    /// the gate was not evaluated (off, pivot_u above its bound, no trial,
+    /// or a diagonal one).
+    double       matching_gate_flops_per_row = 0.0;
+    /// 1 when this factor() computed a scale-on-delay matching scaling
+    /// (delay_rescales) under the rescue that only the skip-trial gate armed
+    /// (Control::skip_trial_rescue_ratio), else 0.
+    int          skip_trial_rescues  = 0;
     /// Indefinite factor(): the scaling the returned factor was computed
     /// with (a ScalingMethod value; Auto reports what it resolved to: None,
     /// or Matching for the analysis' or the scale-on-delay matching scale).

@@ -332,6 +332,8 @@ public:
             stats_.reason = "smf::Solver::analyse failed";
             return stats_.outcome;
         }
+        stats_.trial_skipped = ak_->matching_trial_skipped ? 1 : 0;
+        stats_.gate_flops_per_row = ak_->matching_gate_flops_per_row;
         stats_.outcome = Outcome::Success;
         return Outcome::Success;
     }
@@ -362,6 +364,7 @@ public:
         stats_.delay_early_stops = info.delay_early_stops;
         stats_.delay_try_ms = info.delay_try_seconds * 1e3;
         stats_.delay_matching_ms = info.delay_matching_seconds * 1e3;
+        stats_.skip_trial_rescues = info.skip_trial_rescues;
         stats_.threads_used = info.threads_used;
         stats_.parallel_subtrees = info.parallel_subtrees;
         stats_.top_part_fronts = info.top_part_fronts;
@@ -586,6 +589,11 @@ public:
         stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
+        stats_.skip_trial_rescues = info.skip_trial_rescues;
+        if (const AnalysisKeep *gk = session_.analysis_keep()) {
+            stats_.trial_skipped = gk->matching_trial_skipped ? 1 : 0;
+            stats_.gate_flops_per_row = gk->matching_gate_flops_per_row;
+        }
         order_.add(session_.factor_keep().analysis);
         stats_.order_hash = order_.hash;
         switch (st) {

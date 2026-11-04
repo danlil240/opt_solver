@@ -114,13 +114,19 @@ namespace smf
     // thread stops once the initial matching rejects (both would be
     // discarded). Stopping is checked between search slices and before the
     // ordering, never inside them, so it changes no result.
+    // Gated (Control::skip_trial_gate armed): the budgeted searches run in
+    // slices too, so that the gate's skip (stop()) ends the worker without
+    // waiting for them, and wait_initial_phase() reports the matcher's
+    // diagonal verdict as soon as its constructor is done. The budget is
+    // checked between searches, so the slices change no result.
     class ConcurrentTrial
     {
     public:
         ConcurrentTrial(const CscLower &C, long long budget, int expected_refactors, MatchingAlgorithm alg,
-                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work, int nd_threads)
+                        const Int *xadj, const Int *adj, std::vector<Int> &amd_work, int nd_threads,
+                        bool gated = false)
             : C_(C), budget_(budget), refactors_(expected_refactors), alg_(alg), xadj_(xadj), adj_(adj),
-              amd_work_(amd_work), nd_threads_(nd_threads)
+              amd_work_(amd_work), nd_threads_(nd_threads), gated_(gated)
         {
             try
             {
@@ -155,6 +161,15 @@ namespace smf
             return within_;
         }
         const MatchingResult &initial() const { return initial_; }
+        // Gated: waits for the matcher's constructor (its initial phase) and
+        // returns whether it was diagonal (false after an error, which
+        // finish() rethrows).
+        bool wait_initial_phase()
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ready_cv_.wait(lock, [this] { return ctor_ready_ || phase1_ready_; });
+            return ctor_diagonal_;
+        }
         // After within_budget(): the matcher's initial phase was diagonal
         // (SymmetricMatcher::diagonal()), no search ran, and
         // diagonal_scale holds its scaling.
@@ -188,6 +203,15 @@ namespace smf
             try
             {
                 SymmetricMatcher matcher(C_, MatchingSearchOrder::Degree, alg_);
+                if (gated_)
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        ctor_ready_ = true;
+                        ctor_diagonal_ = matcher.diagonal();
+                    }
+                    ready_cv_.notify_all();
+                }
                 if (matcher.diagonal())
                 {
                     MatchingResult mr = matcher.diagonal_result();
@@ -201,7 +225,38 @@ namespace smf
                     ready_cv_.notify_all();
                     return;
                 }
-                const bool within = matcher.advance(budget_);
+                // A slice of about one pass over the cost graph between
+                // stop checks.
+                const long long slice = std::max<long long>(2 * static_cast<long long>(C_.row_idx.size()), 1);
+                bool within = false;
+                if (!gated_)
+                {
+                    within = matcher.advance(budget_);
+                }
+                else
+                {
+                    for (;;)
+                    {
+                        if (stopped())
+                        {
+                            {
+                                std::lock_guard<std::mutex> lock(mutex_);
+                                phase1_ready_ = true;
+                            }
+                            ready_cv_.notify_all();
+                            return;
+                        }
+                        const long long target = budget_ < 0 ? matcher.work() + slice
+                                                             : std::min(budget_, matcher.work() + slice);
+                        if (matcher.advance(target))
+                        {
+                            within = true;
+                            break;
+                        }
+                        if (budget_ >= 0 && matcher.work() >= budget_)
+                            break;
+                    }
+                }
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     within_ = within;
@@ -210,9 +265,6 @@ namespace smf
                     phase1_ready_ = true;
                 }
                 ready_cv_.notify_all();
-                // A slice of about one pass over the cost graph between
-                // stop checks.
-                const long long slice = std::max<long long>(2 * static_cast<long long>(C_.row_idx.size()), 1);
                 while (!stopped() && !matcher.advance(matcher.work() + slice))
                 {
                 }
@@ -255,6 +307,9 @@ namespace smf
         const Int *const adj_;
         std::vector<Int> &amd_work_;
         const int nd_threads_; // 0: serial METIS for the candidate
+        const bool gated_;
+        bool ctor_ready_ = false;
+        bool ctor_diagonal_ = false;
         std::atomic<int> base_state_{-1}; // -1 running, 0 done, 1 done and dear
         std::thread thread_;
         std::mutex mutex_;
@@ -531,6 +586,13 @@ namespace smf
         std::vector<double> diagonal_scale;  // MatchingTrial::Diagonal's
         std::unique_ptr<SymmetricMatcher> paused_matcher;
         std::unique_ptr<ConcurrentTrial> concurrent;
+        // Control::skip_trial_gate: armed at IPOPT-style pivot thresholds.
+        // The trial is then decided after the base ordering's counts (its
+        // AMD flops per row): serially its matcher waits constructed (the
+        // diagonal verdict known) in gated_matcher; with threads the
+        // concurrent trial runs as usual, stoppable in its budgeted phase.
+        const bool gate_armed = control.skip_trial_gate && control.pivot_u <= control.skip_trial_max_pivot_u;
+        std::unique_ptr<SymmetricMatcher> gated_matcher;
         // In edges scanned: budget x 2 x C's lower entries (diagonal
         // included), about `budget` passes over the matcher's symmetric
         // cost graph. Negative, NaN or beyond 1e18 edges: none.
@@ -550,7 +612,8 @@ namespace smf
         {
             concurrent = std::make_unique<ConcurrentTrial>(C, budget, control.expected_refactors,
                                                            control.matching_algorithm, xadj, adj,
-                                                           analyse_scratch_worker_, candidate_nd.threads);
+                                                           analyse_scratch_worker_, candidate_nd.threads,
+                                                           gate_armed);
         }
         else if (auto_matching)
         {
@@ -565,6 +628,10 @@ namespace smf
                     diagonal_scale = std::move(mr.scale);
                     info.matching_trial = MatchingTrial::Diagonal;
                 }
+            }
+            else if (gate_armed)
+            {
+                gated_matcher = std::move(matcher);
             }
             else if (matcher->advance(budget))
             {
@@ -681,6 +748,54 @@ namespace smf
         Int *sym1 = sym_b;
         Int depth0 = symbolic_counts(perm.data(), sym0);
         lap(phases.etree_counts);
+
+        // Control::skip_trial_gate: decide on the base AMD ordering's flops
+        // per row (AMD: the same at every num_threads). A diagonal trial is
+        // kept (its partial scale); otherwise, inside the band the trial is
+        // skipped (the concurrent one stopped), else it runs as it would
+        // have: serially from here (the same results as before the base
+        // ordering), concurrently as already started.
+        if (auto_matching && gate_armed && amd_ordered && (gated_matcher || concurrent))
+        {
+            const bool diagonal = gated_matcher ? false : concurrent->wait_initial_phase();
+            if (!diagonal)
+            {
+                const double flr = factor_flops(sym0) / static_cast<double>(n);
+                info.matching_gate_flops_per_row = flr;
+                if (flr >= control.skip_trial_min_flops_per_row && flr <= control.skip_trial_max_flops_per_row)
+                {
+                    info.matching_trial_skipped = true;
+                    auto_matching = false;
+                    gated_matcher.reset();
+                    if (concurrent)
+                    {
+                        concurrent->stop();
+                        concurrent->finish();
+                        concurrent.reset();
+                    }
+                }
+            }
+        }
+        if (gated_matcher)
+        {
+            if (gated_matcher->advance(budget))
+            {
+                const MatchingResult mr = gated_matcher->current();
+                gated_matcher.reset();
+                auto_matching = mr.status == ErrorCode::Success &&
+                                matching_order_from(C, mr, kMatchingPairTol, matching_perm, analyse_scratch_,
+                                                    &matching_stats, CompressedOrder::Auto,
+                                                    control.expected_refactors, xadj, adj, candidate_nd);
+                if (auto_matching)
+                    info.matching_trial = MatchingTrial::Exact;
+            }
+            else
+            {
+                paused_matcher = std::move(gated_matcher);
+            }
+        }
+        if (gate_armed)
+            lap(phases.matching);
         const bool base_dear = concurrent && factor_flops(sym0) * std::max(1, control.expected_refactors) >=
                                                  kMetisFlopsPerRow * static_cast<double>(n);
 
@@ -1023,6 +1138,13 @@ namespace smf
         // the analysis actually kept.
         keep->matching_rejected =
             auto_matching && info.ordering_used != static_cast<int>(OrderingMethod::Matching);
+        // A skipped trial (Control::skip_trial_gate) keeps AMD as a rejected
+        // one does: no matching scale with it (an MC64 request through the
+        // IPOPT plugin is answered with the unit scale, as after a rejection).
+        keep->matching_trial_skipped = info.matching_trial_skipped;
+        keep->matching_gate_flops_per_row = info.matching_gate_flops_per_row;
+        if (info.matching_trial_skipped)
+            keep->matching_rejected = true;
         if (keep->matching_rejected && (info.matching_trial == MatchingTrial::Exact ||
                                         info.matching_trial == MatchingTrial::ResumedExact))
             keep->rejected_matching_scale = std::move(matching_stats.scale);

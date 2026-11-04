@@ -57,6 +57,13 @@ struct AdapterStats {
     int delay_early_stops = 0;  // Info::delay_early_stops of the last factor (smf adapters)
     double delay_try_ms = 0.0;       // Info::delay_try_seconds of the last factor, in ms (smf adapters)
     double delay_matching_ms = 0.0;  // Info::delay_matching_seconds of the last factor, in ms (smf adapters)
+    // smf adapters, Control::skip_trial_gate: the analysis skipped the trial
+    // (AnalysisKeep::matching_trial_skipped; -1 = not reported), the base AMD
+    // flops per row it decided on (0 = not evaluated), and Info::
+    // skip_trial_rescues of the last factor.
+    int trial_skipped = -1;
+    double gate_flops_per_row = 0.0;
+    int skip_trial_rescues = 0;
     // smf adapters: the subtree engine's shape and phase times (Info) of the
     // last factor; subtree/top/gather are 0 when it ran serially.
     int threads_used = 1;
