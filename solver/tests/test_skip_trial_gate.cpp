@@ -100,6 +100,7 @@ Control ipopt_control(int threads) {
     c.matrix_type = MatrixType::RealSymmetricIndefinite;
     c.ordering = OrderingMethod::AutoSerial;
     c.pivot_u = 1e-8;
+    c.skip_trial_gate = false;  // gate_on() arms it
     c.num_threads = threads;
     c.auto_threads = false;  // small test trees
     // Bitwise comparisons with threads: deterministic mode (multi-threaded
@@ -179,6 +180,18 @@ std::vector<CscLower> trial_matrices() {
 }
 
 } // namespace
+
+// The default Control has the gate on, with the fitted band, at IPOPT's
+// threshold only; the IPOPT plugin's Control inherits it.
+TEST(SkipTrialGate, DefaultIsOn) {
+    const Control c;
+    EXPECT_TRUE(c.skip_trial_gate);
+    EXPECT_EQ(c.skip_trial_max_pivot_u, 1e-6);
+    EXPECT_EQ(c.skip_trial_min_flops_per_row, 20.0);
+    EXPECT_EQ(c.skip_trial_max_flops_per_row, 8e3);
+    EXPECT_EQ(c.skip_trial_rescue_ratio, 16.0);
+    EXPECT_GT(c.pivot_u, c.skip_trial_max_pivot_u) << "default pivot_u: not armed";
+}
 
 // Gate off, gate on but not armed (pivot_u above its bound), and gate armed
 // with a band no matrix falls in (the deferred serial trial, the sliced

@@ -532,6 +532,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.skip_trial_rescues = 0;
   info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
@@ -555,6 +556,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.skip_trial_rescues = 0;
   info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
@@ -584,6 +586,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   const FactorValues fv{values.data(), values.size(), true};
   info.scaling_used = 0;
   info.delay_rescales = 0;
+  info.skip_trial_rescues = 0;
   info.delay_early_stops = 0;
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
