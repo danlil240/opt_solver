@@ -89,6 +89,14 @@ struct Compressed {
     std::vector<Int> wgt;            // weights
     std::vector<Int> mptr, members;  // members of s: members[mptr[s] .. mptr[s+1])
     std::vector<Int> super_of;       // original vertex -> supervariable
+
+    // xadj / adj may point into own_*: moves keep those buffers, copies
+    // would not.
+    Compressed() = default;
+    Compressed(Compressed&&) = default;
+    Compressed& operator=(Compressed&&) = default;
+    Compressed(const Compressed&) = delete;
+    Compressed& operator=(const Compressed&) = delete;
 };
 
 // Whether every adjacency list is strictly increasing without self loops:

@@ -107,18 +107,22 @@ int smf_sep_run(smf_sep_t *s, int i)
   graph_t *cg = s->cgraph, *g;
   ctrl_t c;
   idx_t maxvwgt[1] = {0};
+  real_t pijbm[3];  /* nparts (3) x ncon (1) */
 
   if (cg == NULL || i < 0 || i >= s->nruns)
     return METIS_ERROR_INPUT;
 
   /* A private control: its own workspace and neighbour pools, and the
-     maxvwgt[] that coarsening writes. Everything else in it is read only. */
+     maxvwgt[] that coarsening writes and pijbm[] that InitSeparator's
+     Setup2WayBalMultipliers writes. Everything else in it is read only. */
   c = *s->ctrl;
   c.mcore = NULL;
   c.cnbrpool = NULL;
   c.vnbrpool = NULL;
   c.nbrpoolsize = c.nbrpoolcpos = c.nbrpoolsize_max = c.nbrpoolreallocs = 0;
   c.maxvwgt = maxvwgt;
+  memcpy(pijbm, s->ctrl->pijbm, sizeof(pijbm));
+  c.pijbm = pijbm;
 
   /* A view of the coarse graph: L1 coarsens and partitions the view, which
      owns only what L1 adds to it. */
