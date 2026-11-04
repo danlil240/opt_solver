@@ -370,6 +370,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.front_work = 0.0;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
+  // Deterministic mode: BLAS on one thread for the whole factorization, at
+  // every num_threads (1 included). With threaded MKL the calling thread
+  // otherwise runs the caller's MKL thread count (by default every core),
+  // whose results differ bitwise from serial BLAS's.
+  std::optional<BlasThreadGuard> det_blas;
+  if (deterministic_mode(ctrl)) det_blas.emplace(1);
 
   if (!check_analysis_storage_bounds(keep)) {
     fkeep.factor_values.clear();

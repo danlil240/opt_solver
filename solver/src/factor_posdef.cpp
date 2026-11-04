@@ -333,6 +333,13 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.inertia_exact = true;
   ws.front_heap_allocations_last_call = 0;
   ws.capacity_growths_last_call = 0;
+  // Deterministic mode: BLAS on one thread for the whole factorization, at
+  // every num_threads (1 included) and on every path (the banded one too).
+  // With threaded MKL the calling thread otherwise runs the caller's MKL
+  // thread count (by default every core), whose results differ bitwise
+  // from serial BLAS's.
+  std::optional<BlasThreadGuard> det_blas;
+  if (deterministic_mode(ctrl)) det_blas.emplace(1);
 
   auto fail = [&](FactorStatus fs, ErrorCode ec) {
     fkeep.factor_values.clear();

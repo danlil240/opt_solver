@@ -675,6 +675,18 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
       (!fkeep.scale.empty() &&
        static_cast<int>(fkeep.scale.size()) == n);
 
+  // Deterministic mode pins the solve's BLAS to one thread, whatever the
+  // caller's BLAS runs (the banded solve's DPBTRS included): the nrhs > 1
+  // blocked solve calls GEMM / TRSM per front, and their results must not
+  // depend on the BLAS thread count (as the factor's kernels run serial
+  // BLAS in this mode). Outside it the caller's BLAS threads stay, so a
+  // serial-tree solve of many right-hand sides can still use threaded GEMM
+  // on its large fronts.
+  const bool det = deterministic_mode(ctrl);
+  if (det) enable_blas_reproducibility();
+  std::optional<BlasThreadGuard> det_blas;
+  if (det) det_blas.emplace(1);
+
   if (fkeep.use_banded_spd) {
     if (job != SolveJob::Full) {
       info.status = ErrorCode::FeatureNotAvailable;
@@ -730,16 +742,6 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   // Subtree-parallel triangular solves once the factor is big enough to
   // repay waking the pool (needs a tree-parallel factorization's layout).
   // Deterministic mode: one thread, the factor's steps in order (postorder).
-  const bool det = deterministic_mode(ctrl);
-  if (det) enable_blas_reproducibility();
-  // Deterministic mode pins the solve's BLAS to one thread, whatever the
-  // caller's BLAS runs: the nrhs > 1 blocked solve calls GEMM / TRSM per
-  // front, and their results must not depend on the BLAS thread count (as
-  // the factor's kernels run serial BLAS in this mode). Outside it the
-  // caller's BLAS threads stay, so a serial-tree solve of many right-hand
-  // sides can still use threaded GEMM on its large fronts.
-  std::optional<BlasThreadGuard> det_blas;
-  if (det) det_blas.emplace(1);
   const int threads =
       (ctrl.num_threads > 1 && !det &&
        static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)
