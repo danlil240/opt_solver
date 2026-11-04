@@ -182,7 +182,7 @@ enum class FrontKernel {
 //  Lapack: dpotrf on the fully summed block, dtrsm for the rows below it and
 //          dsyrk for the contribution block (posdef_factor_front_lapack), on
 //          the fronts that would take ldlt_factor_front's blocked path
-//          (f >= LdltKernelParams::blocked_min_front); smaller fronts keep
+//          (f >= Control::posdef_lapack_min_front, default 64); smaller fronts keep
 //          Ldlt. The same factor (L L^T), up to rounding. Deterministic mode
 //          (determinism.hpp) always uses Ldlt.
 enum class PosdefFrontKernel {
