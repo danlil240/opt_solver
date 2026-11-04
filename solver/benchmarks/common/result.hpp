@@ -92,6 +92,14 @@ struct RunRecord {
     // (Info::delay_try_seconds, delay_matching_seconds), ms; -1 = not reported.
     double delay_try_ms = -1.0;
     double delay_matching_ms = -1.0;
+    // smf only, Control::skip_trial_gate: the analysis skipped the auto
+    // matching trial (0/1; -1 = not reported), the base AMD flops per row the
+    // gate decided on (-1 = not reported, 0 = not evaluated), and the
+    // factorizations whose gate-armed rescue fired (Info::skip_trial_rescues,
+    // summed over a warm sequence's steps; -1 = not reported).
+    int trial_skipped = -1;
+    double gate_flops_per_row = -1.0;
+    int skip_trial_rescues = -1;
     // smf only: smf::refine() inside the adapter's solve (static pivots, or
     // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
     int refine_iterations = -1;

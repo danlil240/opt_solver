@@ -479,3 +479,15 @@ if(WIN32)
     target_link_libraries(test_scale_on_delay PRIVATE psapi)
 endif()
 add_test(NAME ScaleOnDelay COMMAND test_scale_on_delay)
+
+# --- Skip-trial gate (Control::skip_trial_gate) ---
+
+add_executable(test_skip_trial_gate
+    test_skip_trial_gate.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_skip_trial_gate PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_skip_trial_gate PRIVATE psapi)
+endif()
+add_test(NAME SkipTrialGate COMMAND test_skip_trial_gate)

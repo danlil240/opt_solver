@@ -98,13 +98,28 @@ std::shared_ptr<AnalysisKeep> matching_reanalysis(const AnalysisKeep &ak, std::v
 // race the work limit's on the subtree engine, so the outcome kept in the
 // FactorKeep would depend on thread timing), and not the legacy
 // tree_parallel engine (it cannot stop early).
-bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
-  return ctrl.scale_on_delay_ratio >= 0.0 && ctrl.scaling == ScalingMethod::Auto &&
+// The conditions of scale_on_delay_armed other than its ratio and pivot
+// threshold.
+bool scale_on_delay_applies(const AnalysisKeep &ak, const Control &ctrl) {
+  return ctrl.scaling == ScalingMethod::Auto &&
          ctrl.matrix_type == MatrixType::RealSymmetricIndefinite && ak.n > 0 &&
-         ctrl.pivot_u >= kWeakPivotRatio && ctrl.static_pivot_tol == 0.0 &&
-         ctrl.fallback_static_pivot_tol == 0.0 && ctrl.delay_budget < 0 &&
-         ctrl.max_negative_pivots < 0 &&
+         ctrl.static_pivot_tol == 0.0 && ctrl.fallback_static_pivot_tol == 0.0 &&
+         ctrl.delay_budget < 0 && ctrl.max_negative_pivots < 0 &&
          !(ctrl.tree_parallel && ctrl.num_threads > 1 && !deterministic_mode(ctrl));
+}
+
+bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
+  return ctrl.scale_on_delay_ratio >= 0.0 && ctrl.pivot_u >= kWeakPivotRatio &&
+         scale_on_delay_applies(ak, ctrl);
+}
+
+// The skip-trial gate's safety net (Control::skip_trial_rescue_ratio): an
+// analysis whose auto matching trial the gate skipped arms the rescue at
+// any pivot threshold (the gate itself only fires below kWeakPivotRatio,
+// where scale_on_delay_armed never holds), under the same other conditions.
+bool skip_trial_rescue_armed(const AnalysisKeep &ak, const Control &ctrl) {
+  return ak.matching_trial_skipped && ctrl.skip_trial_rescue_ratio >= 0.0 &&
+         scale_on_delay_applies(ak, ctrl);
 }
 
 // The scale-on-delay rescue's matching (matching_scale_of) ends its searches
@@ -460,6 +475,7 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
                                           Info &info, FactorKeep &fkeep, Values &&values,
                                           Run &&run) {
   info.matching_reanalyses = 0;
+  info.skip_trial_rescues = 0;
   if (ak.matching_reanalysis) {
     const FactorStatus st = run(*ak.matching_reanalysis, ctrl, -1.0);
     info.ordering_used = static_cast<int>(OrderingMethod::Matching);
@@ -469,6 +485,18 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
                                 ak.matching_trigger_eligible && !ak.matching_reanalysis_tried;
   if (!realized_pending && scale_on_delay_armed(ak, ctrl))
     return factor_scale_on_delay(ak, ctrl, info, fkeep, values, run);
+  // The skip-trial gate's safety net: the rescue under its own work limit,
+  // with no early stop and no tightened next limit (only a delay cascade
+  // past that limit pays for a matching).
+  if (!realized_pending && skip_trial_rescue_armed(ak, ctrl)) {
+    Control c = ctrl;
+    c.scale_on_delay_ratio = ctrl.skip_trial_rescue_ratio;
+    c.scale_on_delay_early_ratio = -1.0;
+    c.scale_on_delay_next_ratio = -1.0;
+    const FactorStatus st = factor_scale_on_delay(ak, c, info, fkeep, values, run);
+    info.skip_trial_rescues = info.delay_rescales;
+    return st;
+  }
   // delayed_pivots is reset at the start of a factorization: an input error
   // returns before that (status != Success), so only a factorization that
   // ran to the end (Success, or Singular reported as SingularMatrix; an

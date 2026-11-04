@@ -91,6 +91,40 @@ struct Control {
     // deterministic mode); at 1 thread outside deterministic mode nothing
     // changes. false: serial METIS_NodeND, no overlap.
     bool candidate_parallel_nd = true;
+    // Skip-trial gate (off by default; prototype). On IPOPT-style
+    // factorizations (pivot_u <= skip_trial_max_pivot_u: IPOPT drives HSL
+    // solvers at u = 1e-8) whose base AMD factor is cheap, the auto matching
+    // trial costs more analysis time than its verdict saves: analyse()
+    // skips it when the base AMD ordering's predicted flops per row (sum of
+    // squared exact column counts / n, not times expected_refactors) lie in
+    // [skip_trial_min_flops_per_row, skip_trial_max_flops_per_row]. The
+    // matcher's initial phase still runs (its diagonal verdict and partial
+    // scale, MatchingTrial::Diagonal, are kept); only a non-diagonal trial
+    // is skipped, and the analysis then keeps AMD with no matching scale
+    // (AnalysisKeep::matching_rejected set, as for a rejected trial).
+    // Info::matching_trial_skipped and Info::matching_gate_flops_per_row
+    // report it. The decision uses AMD's ordering, which does not depend on
+    // num_threads. Fit (skipab probe, 12900K 1T, ipopt track, tuning split
+    // only): band [21.1, 8205] between boyd2 (8.7, 21.7x slower without the
+    // trial) and pde_control_250 (8862, 1.26x); 9 tuning skips, 0 false
+    // positives; held-out 8 skips, 0 false positives. Rounded to [20, 8e3].
+    bool           skip_trial_gate = false;
+    double         skip_trial_max_pivot_u = 1e-6;
+    double         skip_trial_min_flops_per_row = 20.0;
+    double         skip_trial_max_flops_per_row = 8e3;
+    // Safety net of a skipped trial: the scale-on-delay rescue
+    // (scale_on_delay_ratio) is armed on an analysis whose trial the gate
+    // skipped even below kWeakPivotRatio (where it is otherwise never
+    // armed), with skip_trial_rescue_ratio as its work limit and without the
+    // early stop or the tightened next limit: only a factorization whose
+    // delays inflate the front work past that ratio stops and is redone
+    // with the matching scaling of its values (boyd2 at u = 0.01: 0 -> 8652
+    // delays and 1.5e7 -> 2.2e11 flops without the trial; the rescue
+    // restored 1.5e7). Its other conditions (Auto scaling, no static
+    // pivoting, delay budget or max_negative_pivots) still apply, so it
+    // never arms on the IPOPT plugin (MA97 scaling 0 = None).
+    // Info::skip_trial_rescues reports a firing. Negative ratio: off.
+    double         skip_trial_rescue_ratio = 16.0;
 
     // Scaling
     ScalingMethod  scaling       = ScalingMethod::Auto;

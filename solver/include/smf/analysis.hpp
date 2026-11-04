@@ -76,6 +76,13 @@ struct AnalysisKeep {
     /// up with the matching ordering: factor() may re-analyse with it
     /// (Control::matching_trigger = RealizedDelays).
     bool                     matching_trigger_eligible = false;
+    /// Control::skip_trial_gate skipped the auto matching trial
+    /// (Info::matching_trial_skipped): factor() may arm the scale-on-delay
+    /// rescue below kWeakPivotRatio (Control::skip_trial_rescue_ratio).
+    bool                     matching_trial_skipped = false;
+    /// The base AMD flops per row the gate decided on (Info::
+    /// matching_gate_flops_per_row); 0 when it was not evaluated.
+    double                   matching_gate_flops_per_row = 0.0;
     /// RealizedDelays: the matching-ordering analysis of this pattern that
     /// factor() made once a factorization delayed more than 5% of n pivots;
     /// every later factor() of this keep uses it. Set at most once
