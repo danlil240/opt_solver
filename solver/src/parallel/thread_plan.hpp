@@ -6,7 +6,8 @@
 // 1, one thread each) and a top part (phase 2, TopScheduler). The thread
 // count comes from a cost model of those two phases: each takes at least
 // its work / T and its longest serial chain (a subtree in phase 1, the
-// heaviest top path in phase 2, where fronts run as tile tasks count 1/T),
+// heaviest top path in phase 2, where fronts run as tile tasks or untiled
+// fronts of kTopTileMinFront rows and more count 1/T),
 // plus a cost per thread and per top-part front. Work is f^2 p per front,
 // the unit of Info::predicted_flops.
 
@@ -49,8 +50,17 @@ struct TreeView {                       // one entry per supernode
   std::span<const Int> postorder;
   std::span<const Int> parent;          // -1: root
   std::span<const double> work;         // f^2 p
-  std::span<const std::uint8_t> split;  // 1: runs as tile tasks at > 1 thread
+  std::span<const std::uint8_t> split;  // kSplitTiles / kSplitBlas, else 0
 };
+
+// TreeView::split: the front runs as tile tasks at > 1 thread.
+inline constexpr std::uint8_t kSplitTiles = 1;
+// TreeView::split: a front of at least kTopTileMinFront rows that is not
+// tiled (tiles off: weak pivot threshold, static or in-order pivoting,
+// positive definite). It runs as one task with its BLAS share of the
+// threads (TopScheduler), all of them on the heaviest top path, where such
+// fronts follow one another near the root.
+inline constexpr std::uint8_t kSplitBlas = 2;
 
 // The view of keep's assembly tree; fills the buffers it points into.
 // tiles_on: top_tiles_on(...) at more than one thread.
@@ -161,8 +171,8 @@ struct ThreadPlan {
 // with sub_total / max_subtree the work inside the subtrees / of the
 // heaviest task, top_total the top part's work, split_work that of its
 // tile-split fronts (which stop speeding up past split_cap threads),
-// cp_top(T) the heaviest path through top nodes only (split fronts' work /
-// T), top_fronts(T) the number of top nodes and split_fronts(T) of them
+// cp_top(T) the heaviest path through top nodes only (the work of split
+// fronts and of kSplitBlas fronts / T), top_fronts(T) the number of top nodes and split_fronts(T) of them
 // run as tile tasks.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 // The same with u = subtree_sums(t) (its scratch is used).

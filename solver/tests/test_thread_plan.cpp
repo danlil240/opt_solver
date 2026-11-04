@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <iterator>
 #include <span>
 #include <string>
@@ -32,9 +33,12 @@ struct Synth {
     std::vector<Int> post;
 
     Int add(Int par, double w, bool tiles = false) {
+        return add_kind(par, w, tiles ? kSplitTiles : std::uint8_t{0});
+    }
+    Int add_kind(Int par, double w, std::uint8_t kind) {
         parent.push_back(par);
         work.push_back(w);
-        split.push_back(tiles ? 1 : 0);
+        split.push_back(kind);
         return static_cast<Int>(parent.size() - 1);
     }
 
@@ -637,6 +641,38 @@ TEST(ThreadPlan, FactorCostSplitTerms) {
     k.threads = 16;
     k.ok = false;
     EXPECT_DOUBLE_EQ(factor_plan_cost(k, c), -1.0);
+}
+
+// Large untiled top fronts (kSplitBlas: tiles off, e.g. pivot_u 1e-8 on
+// the ipopt track) run with the BLAS threads they get: on the heaviest top
+// path they count work / T as tiled fronts do, but are no split fronts (no
+// per-thread team term, no split cap). The c-big ipopt shape: a chain of 6
+// heavy root fronts over a balanced tree. Priced as serial, cp_top is the
+// whole chain at every T and grows as subtree roots join the top part, so
+// the plan stopped at 4 of 8 threads (the factor then 1.36x slower than at
+// 8); priced as BLAS-parallel the chain shrinks with T and the plan takes 8.
+TEST(ThreadPlan, UntiledBlasFrontsShareThePath) {
+    for (const std::uint8_t kind : {std::uint8_t{0}, kSplitBlas}) {
+        Synth t;
+        Int top = -1;
+        for (int k = 0; k < 6; ++k) top = t.add_kind(top, 1.5e10, kind);
+        binary(t, top, 8, 2e8, 1e8);
+        const TreeView v = t.view();
+        const auto terms = factor_plan_terms(v, 8);
+        ASSERT_EQ(terms.size(), 4u);  // T = 1, 2, 4, 8
+        for (const auto &k : terms) {
+            if (k.threads == 1) continue;
+            EXPECT_EQ(k.split_top_fronts, 0u) << "T " << k.threads;
+            EXPECT_EQ(k.split_top_work, 0.0) << "T " << k.threads;
+            if (kind == kSplitBlas)
+                EXPECT_LE(k.cp_top, 9e10 / k.threads + 1e10) << "T " << k.threads;
+            else
+                EXPECT_GE(k.cp_top, 9e10) << "T " << k.threads;
+        }
+        const ThreadPlan p = plan_threads(v, 8, ThreadCosts{});
+        if (kind == kSplitBlas) EXPECT_EQ(p.threads, 8);
+        std::printf("[ThreadPlan] untiled chain kind %d: %d threads\n", kind, p.threads);
+    }
 }
 
 // A tree whose work is a tile-split root: capped at 8 threads, 16 buys
