@@ -19,11 +19,20 @@
 // thread-safe METIS and serialise them otherwise. The tree depends on the
 // graph only, and each METIS call reseeds, so the order is the same for
 // every thread count and schedule.
+//
+// With the vendored METIS, the separators of the top kSplitSepDepth levels
+// are split into tasks too (smf_sep.h): the separator's coarsening, then its
+// SMF_SEP_NRUNS independent initial-separator runs as separate tasks, then
+// (in the task that completes the last run) the choice and refinement. These
+// separators are a third to two thirds METIS's runs, and at the top the
+// queue has little else to run. Each run is seeded by its index, so the
+// result still depends on the graph only.
 #include "smf/ordering_parallel_nd.hpp"
 #include "smf/ordering.hpp"
 #include "smf/ordering_metis.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -31,6 +40,12 @@
 #include <numeric>
 #include <queue>
 #include <thread>
+#if defined(SMF_HAS_METIS) && SMF_HAS_METIS && defined(SMF_METIS_THREADSAFE) && SMF_METIS_THREADSAFE
+#include "../third_party/metis/libmetis/smf_sep.h"
+#define SMF_ND_SPLIT_SEPARATOR 1
+#else
+#define SMF_ND_SPLIT_SEPARATOR 0
+#endif
 
 namespace smf {
 
@@ -39,6 +54,21 @@ namespace {
 // Parts with fewer supervariables than this are not split further.
 constexpr std::size_t kMinSplit = 64;
 
+// Separators of nodes above this depth run as split tasks (smf_sep.h):
+// depths 0-2, where a few large separators leave most threads idle.
+constexpr int kSplitSepDepth = 3;
+
+#if SMF_ND_SPLIT_SEPARATOR
+// A separator in flight: its graph (smf_sep_begin() keeps pointers into
+// it), the METIS handle, and the runs still to finish.
+struct SepJob {
+    std::vector<Int> sx, sa, sw;
+    smf_sep_t* h = nullptr;
+    std::atomic<int> left{0};
+    ~SepJob() { smf_sep_free(h); }
+};
+#endif
+
 struct Node {
     std::vector<Int> verts;   // supervariables, ascending
     std::vector<Int> sep;     // separator supervariables, ascending
@@ -46,14 +76,30 @@ struct Node {
     int child[2] = {-1, -1};
     int depth = 0;
     bool leaf = true;
+#if SMF_ND_SPLIT_SEPARATOR
+    std::unique_ptr<SepJob> job;  // a split separator in flight
+#endif
 };
 
 struct Compressed {
     Int n = 0;                       // supervariables
-    std::vector<Int> xadj, adj, wgt; // compressed graph, weights
+    const Int* xadj = nullptr;       // compressed graph: own_xadj / own_adj, or
+    const Int* adj = nullptr;        // the input's when nothing merged (no copy)
+    std::vector<Int> own_xadj, own_adj;
+    std::vector<Int> wgt;            // weights
     std::vector<Int> mptr, members;  // members of s: members[mptr[s] .. mptr[s+1])
     std::vector<Int> super_of;       // original vertex -> supervariable
 };
+
+// Whether every adjacency list is strictly increasing without self loops:
+// what compress() would build from it when no vertices merge.
+bool adjacency_is_clean(Int n, const Int* xadj, const Int* adj)
+{
+    for (Int v = 0; v < n; ++v)
+        for (Int p = xadj[v]; p < xadj[v + 1]; ++p)
+            if (adj[p] == v || (p > xadj[v] && adj[p] <= adj[p - 1])) return false;
+    return true;
+}
 
 Compressed compress(Int n, const Int* xadj, const Int* adj, const Int* vwgt)
 {
@@ -73,23 +119,32 @@ Compressed compress(Int n, const Int* xadj, const Int* adj, const Int* vwgt)
             c.wgt[s] += vwgt ? vwgt[v] : 1;
         }
     }
+    // Nothing merged (super_of is the identity) and the input already in
+    // the form built below: the input's adjacency itself.
+    if (c.n == n && adjacency_is_clean(n, xadj, adj)) {
+        c.xadj = xadj;
+        c.adj = adj;
+        return c;
+    }
     // Neighbours of a supervariable: those of its first member, mapped.
     std::vector<Int> mark(sn, -1);
-    c.xadj.assign(sn + 1, 0);
+    c.own_xadj.assign(sn + 1, 0);
     for (Int s = 0; s < c.n; ++s) {
         const Int r = c.members[static_cast<std::size_t>(c.mptr[s])];
         mark[s] = s;
-        const std::size_t start = c.adj.size();
+        const std::size_t start = c.own_adj.size();
         for (Int p = xadj[r]; p < xadj[r + 1]; ++p) {
             const Int t = c.super_of[adj[p]];
             if (mark[t] != s) {
                 mark[t] = s;
-                c.adj.push_back(t);
+                c.own_adj.push_back(t);
             }
         }
-        std::sort(c.adj.begin() + static_cast<std::ptrdiff_t>(start), c.adj.end());
-        c.xadj[static_cast<std::size_t>(s) + 1] = static_cast<Int>(c.adj.size());
+        std::sort(c.own_adj.begin() + static_cast<std::ptrdiff_t>(start), c.own_adj.end());
+        c.own_xadj[static_cast<std::size_t>(s) + 1] = static_cast<Int>(c.own_adj.size());
     }
+    c.xadj = c.own_xadj.data();
+    c.adj = c.own_adj.data();
     return c;
 }
 
@@ -115,16 +170,34 @@ void induced(const Compressed& c, const std::vector<Int>& verts, int id, const s
     }
 }
 
+// side[] of a finished separator (0, 1, 2 per local vertex): whether it
+// splits the node (both halves non-empty).
+bool splits(const std::vector<Int>& side)
+{
+    Int count[3] = {0, 0, 0};
+    for (Int s2 : side) ++count[s2];
+    return count[0] > 0 && count[1] > 0;
+}
+
 // Splits node `id` (children not yet allocated): side[k] in {0, 1, 2} per
 // local vertex. Returns false on a METIS failure; `split` false when the node
-// stays a leaf.
+// stays a leaf. With `nruns` > 0 the separator is in flight instead
+// (node.job, split_sep): its runs are to be queued, and side / split come
+// from the task that completes them.
 bool bisect(const Compressed& c, Node& node, int id, const std::vector<int>& owner,
-            std::vector<Int>& loc, std::vector<Int>& side, bool& split)
+            std::vector<Int>& loc, std::vector<Int>& side, bool& split, int& nruns)
 {
     split = false;
-    std::vector<Int> sx, sa, sw;
-    induced(c, node.verts, id, owner, loc, sx, sa, sw);
+    nruns = 0;
     const auto m = static_cast<Int>(node.verts.size());
+    // The root holds every supervariable in order: its induced graph is the
+    // compressed graph itself.
+    const bool whole = id == 0 && m == c.n;
+    std::vector<Int> sx, sa, sw;
+    if (!whole) induced(c, node.verts, id, owner, loc, sx, sa, sw);
+    const Int* gx = whole ? c.xadj : sx.data();
+    const Int* ga = whole ? c.adj : sa.data();
+    const Int* gw = whole ? c.wgt.data() : sw.data();
     side.assign(static_cast<std::size_t>(m), 0);
 
     // Connected components (labels in order of their smallest vertex).
@@ -139,11 +212,11 @@ bool bisect(const Compressed& c, Node& node, int id, const std::vector<int>& own
         while (!stack.empty()) {
             const Int v = stack.back();
             stack.pop_back();
-            w += sw[v];
-            for (Int p = sx[v]; p < sx[v + 1]; ++p)
-                if (comp[sa[p]] < 0) {
-                    comp[sa[p]] = ncomp;
-                    stack.push_back(sa[p]);
+            w += gw[v];
+            for (Int p = gx[v]; p < gx[v + 1]; ++p)
+                if (comp[ga[p]] < 0) {
+                    comp[ga[p]] = ncomp;
+                    stack.push_back(ga[p]);
                 }
         }
         cw.push_back(w);
@@ -164,14 +237,64 @@ bool bisect(const Compressed& c, Node& node, int id, const std::vector<int>& own
         split = true;
         return true;
     }
+    // METIS reads the graph only (the root's is the compressed graph's).
+    Int* mx = const_cast<Int*>(gx);
+    Int* ma = const_cast<Int*>(ga);
+    Int* mw = const_cast<Int*>(gw);
     Int sepsize = 0;
-    if (!metis_vertex_separator(m, sx.data(), sa.data(), sw.data(), side.data(), &sepsize))
+#if SMF_ND_SPLIT_SEPARATOR
+    if (node.depth < kSplitSepDepth) {
+        auto job = std::make_unique<SepJob>();
+        if (!whole) {
+            // The handle keeps pointers into the graph: move it into the job.
+            job->sx = std::move(sx);
+            job->sa = std::move(sa);
+            job->sw = std::move(sw);
+            mx = job->sx.data();
+            ma = job->sa.data();
+            mw = job->sw.data();
+        }
+        if (smf_sep_begin(m, mx, ma, mw, 0, &job->h, &nruns) != METIS_OK) return false;
+        if (nruns > 0) {
+            job->left.store(nruns);
+            node.job = std::move(job);
+            return true;
+        }
+        smf_sep_t* h = job->h;
+        job->h = nullptr;
+        if (smf_sep_finish(h, side.data(), &sepsize) != METIS_OK) return false;
+        split = splits(side);
+        return true;
+    }
+#endif
+    if (!metis_vertex_separator(m, mx, ma, mw, side.data(), &sepsize))
         return false;
-    Int count[3] = {0, 0, 0};
-    for (Int v = 0; v < m; ++v) ++count[side[v]];
-    split = count[0] > 0 && count[1] > 0;
+    split = splits(side);
     return true;
 }
+
+#if SMF_ND_SPLIT_SEPARATOR
+// Run `i` of node's separator in flight. The task that completes the last
+// run finishes the separator (side, split) and returns `last`.
+bool split_sep(Node& node, int i, std::vector<Int>& side, bool& split, bool& last)
+{
+    split = false;
+    last = false;
+    SepJob& job = *node.job;
+    if (smf_sep_run(job.h, i) != METIS_OK) return false;
+    if (job.left.fetch_sub(1, std::memory_order_acq_rel) != 1) return true;
+    last = true;
+    side.assign(node.verts.size(), 0);
+    Int sepsize = 0;
+    smf_sep_t* h = job.h;
+    job.h = nullptr;
+    const bool ok = smf_sep_finish(h, side.data(), &sepsize) == METIS_OK;
+    node.job.reset();
+    if (!ok) return false;
+    split = splits(side);
+    return true;
+}
+#endif
 
 // Orders a leaf into node.order (original vertices).
 bool order_leaf(const Compressed& c, Node& node, int id, const std::vector<int>& owner,
@@ -291,12 +414,20 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
     std::vector<int> owner(sc, 0);
     std::vector<Int> loc(sc), oloc(static_cast<std::size_t>(n));
 
-    // Pending tasks, largest part first (ties: lower id). The order only
-    // changes the schedule, never the result.
+    // Pending tasks, largest part first (ties: lower id, then a separator's
+    // runs, lowest first, before other tasks). `run` >= 0: run `run` of node
+    // id's separator in flight. The order only changes the schedule, never
+    // the result.
     struct Task {
         std::size_t size;
         int id;
-        bool operator<(const Task& o) const { return size != o.size ? size < o.size : id > o.id; }
+        int run = -1;
+        bool operator<(const Task& o) const
+        {
+            if (size != o.size) return size < o.size;
+            if (id != o.id) return id > o.id;
+            return run < o.run;
+        }
     };
     std::mutex mu;  // guards queue, pending, failed and nodes.push_back
     std::condition_variable cv;
@@ -305,46 +436,67 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
     bool failed = false;
     queue.push({sc, 0});
 
-    // Splits node `id` (or orders it, when it stays a leaf); queues its children.
-    auto process = [&](int id, Node& nd) -> bool {
+    // Splits node `id` along side[] (split) or orders it as a leaf; queues
+    // its children.
+    auto apply = [&](int id, Node& nd, const std::vector<Int>& side, bool split) -> bool {
+        if (!split)
+            return order_leaf(c, nd, id, owner, loc, oloc, options.amd_leaf_max, xadj, adjncy);
+        Node half[2];
+        std::vector<Int> sep;
+        for (std::size_t v = 0; v < nd.verts.size(); ++v) {
+            const Int s2 = side[v];
+            (s2 == 2 ? sep : half[s2].verts).push_back(nd.verts[v]);
+        }
+        Node* child[2];
+        int cid[2];
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            for (int h = 0; h < 2; ++h) {
+                half[h].depth = nd.depth + 1;
+                cid[h] = static_cast<int>(nodes.size());
+                nodes.push_back(std::make_unique<Node>(std::move(half[h])));
+                child[h] = nodes.back().get();
+            }
+        }
+        for (int h = 0; h < 2; ++h) {
+            for (Int v : child[h]->verts) owner[v] = cid[h];
+            nd.child[h] = cid[h];
+        }
+        for (Int v : sep) owner[v] = -1;
+        nd.sep = std::move(sep);
+        nd.leaf = false;
+        nd.verts.clear();
+        nd.verts.shrink_to_fit();
+        std::lock_guard<std::mutex> lk(mu);
+        for (int h = 0; h < 2; ++h) queue.push({child[h]->verts.size(), cid[h]});
+        pending += 2;
+        return true;
+    };
+    // Task (id, run): run < 0 splits node id (or orders it, when it stays a
+    // leaf); a split separator queues its runs instead, and the run that
+    // completes it applies the split.
+    auto process = [&](int id, Node& nd, int run) -> bool {
+        std::vector<Int> side;
+        bool split = false;
+#if SMF_ND_SPLIT_SEPARATOR
+        if (run >= 0) {
+            bool last = false;
+            if (!split_sep(nd, run, side, split, last)) return false;
+            return !last || apply(id, nd, side, split);
+        }
+#endif
+        (void)run;
         if (nd.depth < options.levels && nd.verts.size() >= kMinSplit) {
-            std::vector<Int> side;
-            bool split = false;
-            if (!bisect(c, nd, id, owner, loc, side, split)) return false;
-            if (split) {
-                Node half[2];
-                std::vector<Int> sep;
-                for (std::size_t v = 0; v < nd.verts.size(); ++v) {
-                    const Int s2 = side[v];
-                    (s2 == 2 ? sep : half[s2].verts).push_back(nd.verts[v]);
-                }
-                Node* child[2];
-                int cid[2];
-                {
-                    std::lock_guard<std::mutex> lk(mu);
-                    for (int h = 0; h < 2; ++h) {
-                        half[h].depth = nd.depth + 1;
-                        cid[h] = static_cast<int>(nodes.size());
-                        nodes.push_back(std::make_unique<Node>(std::move(half[h])));
-                        child[h] = nodes.back().get();
-                    }
-                }
-                for (int h = 0; h < 2; ++h) {
-                    for (Int v : child[h]->verts) owner[v] = cid[h];
-                    nd.child[h] = cid[h];
-                }
-                for (Int v : sep) owner[v] = -1;
-                nd.sep = std::move(sep);
-                nd.leaf = false;
-                nd.verts.clear();
-                nd.verts.shrink_to_fit();
+            int nruns = 0;
+            if (!bisect(c, nd, id, owner, loc, side, split, nruns)) return false;
+            if (nruns > 0) {
                 std::lock_guard<std::mutex> lk(mu);
-                for (int h = 0; h < 2; ++h) queue.push({child[h]->verts.size(), cid[h]});
-                pending += 2;
+                for (int i = 0; i < nruns; ++i) queue.push({nd.verts.size(), id, i});
+                pending += static_cast<std::size_t>(nruns);
                 return true;
             }
         }
-        return order_leaf(c, nd, id, owner, loc, oloc, options.amd_leaf_max, xadj, adjncy);
+        return apply(id, nd, side, split);
     };
     auto worker = [&] {
         std::unique_lock<std::mutex> lk(mu);
@@ -352,12 +504,13 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
             cv.wait(lk, [&] { return !queue.empty() || pending == 0 || failed; });
             if (failed || queue.empty()) return;
             const int id = queue.top().id;
+            const int run = queue.top().run;
             queue.pop();
             Node* nd = nodes[static_cast<std::size_t>(id)].get();
             lk.unlock();
             bool ok = false;
             try {
-                ok = process(id, *nd);
+                ok = process(id, *nd, run);
             } catch (...) {
                 ok = false;
             }
@@ -367,7 +520,8 @@ bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwg
             cv.notify_all();
         }
     };
-    // At most 2^levels tasks are ever ready at once (the leaves).
+    // At most 2^levels tasks are ever ready at once (the leaves; a split
+    // separator's runs come before them).
     const int nthreads = std::min(num_threads, 1 << std::clamp(options.levels, 0, 16));
     std::vector<std::thread> pool;
     try {
