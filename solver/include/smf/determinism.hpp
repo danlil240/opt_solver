@@ -3,7 +3,12 @@
 // With Control::deterministic = true, or a build with SMF_DETERMINISTIC=ON
 // (either enables it), analyse + factor + solve give bitwise-identical
 // orderings, factors, inertia and solutions across runs and across every
-// Control::num_threads:
+// Control::num_threads. A factor is identical block by block (each
+// supernode's L block at FactorKeep::factor_col_ptr, and D): the flat
+// FactorKeep::factor_values buffer stores the blocks in an order that
+// follows the tree partition, so its raw layout can differ between thread
+// counts (test_parallel_determinism compares the blocks).
+//
 //   - ordering: AutoParallel's METIS candidate is parallel nested dissection
 //     for every thread count (its permutation does not depend on the thread
 //     count), not serial METIS at 1 thread;
