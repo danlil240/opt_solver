@@ -95,6 +95,17 @@ struct Info {
     /// Seconds inside the rescue's matching scaling (part of
     /// factor_seconds); 0 when no matching ran.
     double       delay_matching_seconds = 0.0;
+    /// 1 when this factor() took the static path (Control::static_fallback_
+    /// after_cascade after an earlier cascade of this analysis, or
+    /// Pivoting::Static), else 0.
+    int          static_fallback     = 0;
+    /// 1 when this factor() tried the static path of Control::static_
+    /// fallback_after_cascade and threw it away (it perturbed pivots, or its
+    /// growth was too large), the rescue's matching scaling following; its
+    /// time is in delay_try_seconds. Else 0.
+    int          static_rejects      = 0;
+    /// FactorKeep::pivot_growth of this factor (0: no forced pivot).
+    double       pivot_growth        = 0.0;
 
     // Inertia
     int          num_negative        = 0;   // negative eigenvalues

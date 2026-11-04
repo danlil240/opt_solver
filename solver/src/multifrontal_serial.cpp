@@ -714,6 +714,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.inertia.negative += kr.inertia.negative;
   st.inertia.zero += kr.inertia.zero;
   st.static_pivots += kr.static_pivots;
+  st.max_growth = std::max(st.max_growth, kr.max_growth);
   st.flops += kr.flops;
   st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
@@ -870,6 +871,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.inertia.zero += from.inertia.zero;
   to.delayed += from.delayed;
   to.static_pivots += from.static_pivots;
+  to.max_growth = std::max(to.max_growth, from.max_growth);
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
   to.top_tile_fronts += from.top_tile_fronts;

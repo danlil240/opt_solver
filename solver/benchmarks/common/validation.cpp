@@ -183,6 +183,11 @@ std::string RunRecord::to_json_line() const {
     if (refine_iterations >= 0)
         oss << "\"refine_iterations\":" << refine_iterations << ",\"refine_method\":\"" << refine_method
             << "\",";
+    if (static_fallbacks >= 0) oss << "\"static_fallbacks\":" << static_fallbacks << ",";
+    if (static_rejects >= 0) oss << "\"static_rejects\":" << static_rejects << ",";
+    if (pivot_growth >= 0 && std::isfinite(pivot_growth)) oss << "\"pivot_growth\":" << pivot_growth << ",";
+    if (refine_steps_total >= 0) oss << "\"refine_steps_total\":" << refine_steps_total << ",";
+    if (omega_unrefined >= 0 && std::isfinite(omega_unrefined)) oss << "\"omega_unrefined\":" << omega_unrefined << ",";
     if (!order_hash.empty()) oss << "\"order_hash\":\"" << order_hash << "\",";
     oss
         << "\"factor_entries\":" << factor_entries << ","

@@ -688,6 +688,22 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SOD_NEXT_EARLY_PROJ")) ctrl.scale_on_delay_next_early_proj = std::atof(e);
     // SMF_BENCH_SOD_CARRY (0/1): Control::scale_on_delay_carry.
     if (const char *e = std::getenv("SMF_BENCH_SOD_CARRY")) ctrl.scale_on_delay_carry = std::atoi(e) != 0;
+    // SMF_BENCH_STATIC_FALLBACK (0/1): Control::static_fallback_after_cascade.
+    if (const char *e = std::getenv("SMF_BENCH_STATIC_FALLBACK")) ctrl.static_fallback_after_cascade = std::atoi(e) != 0;
+    // SMF_BENCH_PIVOTING = threshold | static: Control::pivoting (experimental).
+    if (const char *e = std::getenv("SMF_BENCH_PIVOTING")) {
+        const std::string v = e;
+        if (v == "static") ctrl.pivoting = smf::Pivoting::Static;
+        else if (v == "threshold") ctrl.pivoting = smf::Pivoting::Threshold;
+        else {
+            std::fprintf(stderr, "error: SMF_BENCH_PIVOTING=\"%s\" is not threshold or static\n", e);
+            return 2;
+        }
+    }
+    // SMF_BENCH_REFINE_OMEGA_TARGET, SMF_BENCH_REFINE_GROWTH (double):
+    // Control::refine_omega_target / refine_growth_threshold.
+    if (const char *e = std::getenv("SMF_BENCH_REFINE_OMEGA_TARGET")) ctrl.refine_omega_target = std::atof(e);
+    if (const char *e = std::getenv("SMF_BENCH_REFINE_GROWTH")) ctrl.refine_growth_threshold = std::atof(e);
     // SMF_BENCH_MATCHER = ssp | hybrid: Control::matching_algorithm
     // (ShortestPath, Hybrid; the auto matching trial's matcher). Anything
     // else is an error (exit code 2), not a silent fallback to the default.
@@ -888,6 +904,11 @@ int main(int argc, char **argv) {
         double seq_delay_try_ms = 0.0;       // summed over the steps, like seq_delay_rescales
         double seq_delay_matching_ms = 0.0;
         int seq_skip_trial_rescues = 0;
+        int seq_static_fallbacks = 0;
+        int seq_static_rejects = 0;
+        double seq_pivot_growth = 0.0;
+        int seq_refine_steps = -1;      // smf::refine() steps summed over the solves (-1: none ran)
+        double seq_omega_unrefined = -1.0;
         std::vector<double> step_factor_ms;  // successful factors, in order
         double total_solve_ms = 0.0;
         double total_refine_ms = 0.0;
@@ -911,6 +932,9 @@ int main(int argc, char **argv) {
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
                 seq_skip_trial_rescues += adapter->stats().skip_trial_rescues;
+                seq_static_fallbacks += adapter->stats().static_fallback;
+                seq_static_rejects += adapter->stats().static_rejects;
+                seq_pivot_growth = std::max(seq_pivot_growth, adapter->stats().pivot_growth);
                 if (out_f == smf::bench::Outcome::Success) step_factor_ms.push_back(adapter->stats().factor_ms);
                 // The IpmSession adapter runs the deferred analysis in factor()
                 // and adds its time to analyse_ms (not to factor_ms).
@@ -936,6 +960,10 @@ int main(int argc, char **argv) {
                 }
                 out_s = adapter->solve(step_solutions[step], nrhs);
                 total_solve_ms += adapter->stats().solve_ms;
+                if (adapter->stats().refine_iterations >= 0) {
+                    seq_refine_steps = std::max(seq_refine_steps, 0) + adapter->stats().refine_iterations;
+                    seq_omega_unrefined = std::max(seq_omega_unrefined, adapter->stats().refine_omega_start);
+                }
                 if (out_s != smf::bench::Outcome::Success) break;
                 if (refine) {
                     const auto tr0 = std::chrono::steady_clock::now();
@@ -950,12 +978,13 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f static_fb=%d static_rej=%d growth=%.3g refine=%d omega0=%.3g\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.delay_early_stops, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
                                  fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
-                                 fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms);
+                                 fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms,
+                                 fst.static_fallback, fst.static_rejects, fst.pivot_growth, fst.refine_iterations, fst.refine_omega_start);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {
@@ -1006,6 +1035,11 @@ int main(int argc, char **argv) {
             rec.skip_trial_rescues = seq_skip_trial_rescues;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
+            rec.static_fallbacks = seq_static_fallbacks;
+            rec.static_rejects = seq_static_rejects;
+            rec.pivot_growth = seq_pivot_growth;
+            rec.refine_steps_total = seq_refine_steps;
+            rec.omega_unrefined = seq_omega_unrefined;
         }
         rec.factor_entries = st.factor_entries;
         rec.flops = st.flops;

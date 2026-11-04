@@ -205,6 +205,7 @@ PivotChoice force_static_pivot(double *F, std::size_t ld, int f, int k, int num_
     const std::size_t sf = ld;
     int best = k;
     double best_ratio = -1.0;
+    double best_colmax = 0.0;
     // In-order mode (prm.min_abs_pivot): column k itself, no search.
     const int search_end = prm.min_abs_pivot > 0.0 ? k : num_elig;
     for (int cand = k; cand < search_end; ++cand) {
@@ -218,6 +219,7 @@ PivotChoice force_static_pivot(double *F, std::size_t ld, int f, int k, int num_
         if (ratio > best_ratio) {
             best_ratio = ratio;
             best = cand;
+            best_colmax = colmax;
         }
     }
     double &d = F[static_cast<std::size_t>(best) * sf + best];
@@ -227,6 +229,10 @@ PivotChoice force_static_pivot(double *F, std::size_t ld, int f, int k, int num_
         d = (d < 0.0) ? -prm.static_pivot : prm.static_pivot;
         ++res.static_pivots;
     }
+    // The growth this pivot lets into L (threshold pivoting bounds it by
+    // 1 / u): its column's largest entry over the |d| it is taken with.
+    if (best_colmax > 0.0 && std::abs(d) > 0.0)
+        res.max_growth = std::max(res.max_growth, best_colmax / std::abs(d));
     return {1, best, -1};
 }
 

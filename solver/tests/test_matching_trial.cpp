@@ -167,6 +167,7 @@ TEST(MatchingTrial, PartialScaleKeepsTheNextLimitArmed) {
     c.num_threads = 1;
     c.auto_threads = false;  // small test trees
     c.scale_on_delay_next_ratio = 0.0;  // any factorization is costly
+    c.static_fallback_after_cascade = false;  // else delay_static, not delay_next
     Solver s;
     Info i;
     auto a = s.analyse(A, c, i);

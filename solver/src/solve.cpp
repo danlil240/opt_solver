@@ -113,6 +113,29 @@ bool scale_on_delay_armed(const AnalysisKeep &ak, const Control &ctrl) {
          scale_on_delay_applies(ak, ctrl);
 }
 
+// Control::static_fallback_after_cascade keeps a static-path factor only up
+// to this pivot growth (FactorKeep::pivot_growth): past it eps * growth is
+// above 1e-6, more than refinement reliably recovers. pde_control rec, the
+// cascades it is kept on, measured 1.3e6 and 5.6e6.
+constexpr double kStaticMaxGrowth = 1e10;
+
+// The static path (Control::static_fallback_after_cascade, Pivoting::Static):
+// the delay budget spent from the first front, so every front static-pivots
+// (no delays; a column with no threshold pivot is taken as the best 1x1, |d|
+// raised to kDelayBudgetStaticTol * max|A| if smaller) on the budget's fixed
+// partition. A pivot raised from an exact zero still counts as a zero
+// eigenvalue (hybrid accounting, as on fallback fronts). Never on the legacy
+// tree_parallel engine, which ignores the delay budget (it would threshold-
+// pivot and delay while static_path reports otherwise): the default
+// subtree engine at the same num_threads.
+Control static_path_control(const Control &ctrl) {
+  Control c = ctrl;
+  c.delay_budget = 0;
+  c.static_zero_stays_zero = true;
+  c.tree_parallel = false;
+  return c;
+}
+
 // The skip-trial gate's safety net (Control::skip_trial_rescue_ratio): an
 // analysis whose auto matching trial the gate skipped arms the rescue at
 // any pivot threshold (the gate itself only fires below kWeakPivotRatio,
@@ -301,7 +324,12 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   std::vector<double> kept;
   double kept_omega = std::numeric_limits<double>::infinity();
   std::uint64_t no_matching_signature = 0;
-  const bool no_matching = ours && !next && fkeep.delay_scale.empty();
+  // Control::static_fallback_after_cascade: an earlier factorization of
+  // this analysis into this FactorKeep cascaded, so this one takes the
+  // static path with no try.
+  const bool fallback = ctrl.static_fallback_after_cascade;
+  const bool go_static = ours && fallback && fkeep.delay_static;
+  const bool no_matching = ours && !next && !go_static && fkeep.delay_scale.empty();
   const bool first_try = !ours || no_matching || next;
   if (ours) {
     kept = std::move(fkeep.delay_scale);
@@ -310,6 +338,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   }
   fkeep.delay_analysis = 0;
   fkeep.delay_next = false;
+  fkeep.delay_static = false;
   fkeep.delay_scale.clear();
   // Work outside factor_indef (value copies, the fit test, probes,
   // matchings, stopped tries): added to factor_seconds on every return.
@@ -343,6 +372,44 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   }
   const double free_work = delay_free_front_work(ak);
   const double limit = std::floor(ctrl.scale_on_delay_ratio * free_work);
+  // Control::static_fallback_after_cascade: a static-path factorization of
+  // these values, scaled as Auto resolves it (never with a rescue's matching
+  // scale: on pde_control_120 rec at 8T the tripped factor's scale on the
+  // later values took 627 perturbed pivots and an unrefined omega of 5e-2;
+  // unscaled, none and 7e-11). It is kept only when it perturbed no pivot
+  // and its growth stays within kStaticMaxGrowth: unscaled static pivoting
+  // of a badly scaled KKT perturbs hundreds to tens of thousands of pivots
+  // (PGLib OPF, COPS catmix / glider / pinene / rocket: singular or
+  // inaccurate), which only the matching scaling avoids. A rejected one is
+  // spent work (a stopped try) and the rescue follows; the sequence then
+  // goes on from that rescue's kept scale, never static again.
+  // Returns true when st is final: the static factor kept, or a hard error
+  // (allocation, invalid values) that the rescue would only repeat.
+  const auto try_static = [&](FactorStatus &st) {
+    st = run(ak, static_path_control(ctrl), -1.0);
+    if (!ran(st)) return true;
+    if (st == FactorStatus::Success && info.static_pivots == 0 &&
+        info.pivot_growth <= kStaticMaxGrowth) {
+      fkeep.static_path = true;
+      info.static_fallback = 1;
+      fkeep.delay_analysis = ak.serial;
+      fkeep.delay_static = true;
+      return true;
+    }
+    extra_seconds += info.factor_seconds;
+    info.delay_try_seconds += info.factor_seconds;
+    info.delay_stops = 1;
+    info.static_rejects = 1;
+    // Never again for this analysis and FactorKeep, whatever follows (also
+    // when the rescue finds no matching scaling and re-arms the tries).
+    fkeep.static_rejected_analysis = ak.serial;
+    return false;
+  };
+  if (go_static) {
+    FactorStatus st;
+    if (try_static(st)) return finish(st);
+    goto rescale;
+  }
   if (!first_try && reuse_on) {
     // Start from the kept scale while it still fits the new values.
     get_values();
@@ -421,7 +488,10 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
           }
           if (!own_scale) {
             fkeep.delay_analysis = ak.serial;
-            fkeep.delay_next = true;
+            // Control::static_fallback_after_cascade: the later ones take
+            // the static path instead of a next try or a carried rescale.
+            const bool to_static = fallback && fkeep.static_rejected_analysis != ak.serial;
+            (to_static ? fkeep.delay_static : fkeep.delay_next) = true;
           }
         }
         return finish(st);
@@ -432,6 +502,15 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       // A limit trip counts the front past the limit; within it, the early
       // crossing stopped the try.
       if (early.on() && info.front_work <= try_limit) info.delay_early_stops = 1;
+      // Control::static_fallback_after_cascade: the factor that tripped is
+      // redone on the static path, and so are the later ones, while it
+      // holds (try_static). (Finishing it with the rescue instead cost
+      // pde_control_120 rec at 8T 4 ms of matching and a 10 ms scaled
+      // refactor against a 7 ms static one.)
+      if (fallback && fkeep.static_rejected_analysis != ak.serial) {
+        FactorStatus st;
+        if (try_static(st)) return finish(st);
+      }
     }
   }
 rescale:
@@ -487,6 +566,23 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
                                           Run &&run) {
   info.matching_reanalyses = 0;
   info.skip_trial_rescues = 0;
+  // Control::pivoting = Static (experimental): every factorization on the
+  // static path, no rescue.
+  if (ctrl.pivoting == Pivoting::Static) {
+    const AnalysisKeep &k = ak.matching_reanalysis ? *ak.matching_reanalysis : ak;
+    const FactorStatus st = run(k, static_path_control(ctrl), -1.0);
+    if (ak.matching_reanalysis) info.ordering_used = static_cast<int>(OrderingMethod::Matching);
+    // No rescue state survives a static factorization.
+    fkeep.delay_analysis = 0;
+    fkeep.delay_next = false;
+    fkeep.delay_static = false;
+    fkeep.delay_scale.clear();
+    if (st == FactorStatus::Success || st == FactorStatus::Singular) {
+      fkeep.static_path = true;
+      info.static_fallback = 1;
+    }
+    return st;
+  }
   if (ak.matching_reanalysis) {
     const FactorStatus st = run(*ak.matching_reanalysis, ctrl, -1.0);
     info.ordering_used = static_cast<int>(OrderingMethod::Matching);
@@ -504,6 +600,8 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
     c.scale_on_delay_ratio = ctrl.skip_trial_rescue_ratio;
     c.scale_on_delay_early_ratio = -1.0;
     c.scale_on_delay_next_ratio = -1.0;
+    // Not the recommended track: no static fallback.
+    c.static_fallback_after_cascade = false;
     const FactorStatus st = factor_scale_on_delay(ak, c, info, fkeep, values, run);
     info.skip_trial_rescues = info.delay_rescales;
     return st;
@@ -548,6 +646,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.static_fallback = 0;
+  info.static_rejects = 0;
+  info.pivot_growth = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
@@ -572,6 +673,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.static_fallback = 0;
+  info.static_rejects = 0;
+  info.pivot_growth = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
@@ -602,6 +706,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   info.delay_stops = 0;
   info.delay_try_seconds = 0.0;
   info.delay_matching_seconds = 0.0;
+  info.static_fallback = 0;
+  info.static_rejects = 0;
+  info.pivot_growth = 0.0;
   FactorStatus st;
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);

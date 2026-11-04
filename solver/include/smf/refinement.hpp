@@ -6,6 +6,7 @@
 #include "smf/factor_posdef.hpp"
 #include "smf/workspace.hpp"
 
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -18,7 +19,17 @@ struct RefinementResult {
     double omega = 0.0;
     /// Classical unless FGMRES ran (RefineMethod::Fgmres, or Auto escalated).
     RefineMethod method_used = RefineMethod::Classical;
+    /// omega of x as passed in (before any step); infinity when not computed.
+    double omega_start = std::numeric_limits<double>::infinity();
 };
+
+/// Whether a solve with fkeep should be refined: its factor perturbed pivots
+/// (static_pivots > 0), or came from the static path (FactorKeep::
+/// static_path), whose growth threshold pivoting does not bound. refine()
+/// stops a static-path factor's refinement at Control::refine_omega_target.
+inline bool refinement_advised(const FactorKeep &fkeep) noexcept {
+    return fkeep.static_pivots > 0 || fkeep.static_path;
+}
 
 /// Refine x (n x nrhs, column-major) towards A x = b, A the original
 /// (unscaled) matrix and fkeep its factor (possibly of a perturbed matrix:
