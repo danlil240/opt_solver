@@ -244,9 +244,14 @@ ErrorCode prepare_refine_matrix(const CscLower &A, RefineMatrix &m) {
             items.push_back(i >= j ? Item{i, static_cast<Int>(j), p} : Item{static_cast<Int>(j), i, p});
         }
     }
-    std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &c) {
+    const auto before = [](const Item &a, const Item &c) {
         return a.col != c.col ? a.col < c.col : a.row < c.row;
-    });
+    };
+    // Clean lower CSC input (rows sorted in every column) is already in this
+    // order: the stable sort would leave it as it is, so it is skipped (an
+    // O(nnz) check against an O(nnz log nnz) sort of the whole pattern).
+    if (!std::is_sorted(items.begin(), items.end(), before))
+        std::stable_sort(items.begin(), items.end(), before);
     m.n = A.n;
     m.slot.assign(items.size(), 0);
     m.entries.reserve(items.size());
@@ -281,6 +286,19 @@ double metric_score(double eta, double om) noexcept {
 
 bool meets_gate(double eta, double om) noexcept {
     return eta <= kTargetEtaInf && om <= kTargetOmega;
+}
+
+// Where refinement stops: the gate, with a static-path factor's omega at
+// Control::refine_omega_target instead (FactorKeep::static_path). Whether
+// the result qualifies (Success) is always the gate's.
+double omega_target(const FactorKeep &fkeep, const Control &ctrl) noexcept {
+    return fkeep.static_path && ctrl.refine_omega_target > 0.0
+               ? std::min(kTargetOmega, ctrl.refine_omega_target)
+               : kTargetOmega;
+}
+
+bool reached(double eta, double om, double om_target) noexcept {
+    return eta <= kTargetEtaInf && om <= om_target;
 }
 
 // Classical refinement x += M^-1 (b - A x) with the factor M. `cap` steps at
@@ -353,7 +371,7 @@ ClassicalOutcome classical_refine(int n,
             ws.refine_best_x.assign(
                 x.begin(), x.begin() + static_cast<std::ptrdiff_t>(total_len));
 
-            if (meets_gate(best_eta, best_omega)) {
+            if (reached(best_eta, best_omega, omega_target(fkeep, solve_ctrl))) {
                 out.result = RefinementResult{ErrorCode::Success, iters_done, best_eta, best_omega};
                 return out;
             }
@@ -442,7 +460,7 @@ int fgmres_column(int n,
         omega_out = inf;
         return 0;
     }
-    if (meets_gate(eta_out, omega_out) || budget <= 0) return 0;
+    if (reached(eta_out, omega_out, omega_target(fkeep, solve_ctrl)) || budget <= 0) return 0;
 
     double x_ref = 0.0;
     for (double v : x_col) x_ref = std::max(x_ref, std::abs(v));
@@ -553,7 +571,7 @@ int fgmres_column(int n,
                     std::copy(xc.begin(), xc.end(), x_col.begin());
                     r_best.swap(r_cand);
                     improved = true;
-                    if (meets_gate(eta_out, omega_out)) {
+                    if (reached(eta_out, omega_out, omega_target(fkeep, solve_ctrl))) {
                         done = true;
                         break;
                     }
@@ -620,22 +638,37 @@ RefinementResult refine_core(int n,
         return RefinementResult{ErrorCode::IllegalValue, 0, best_eta, best_omega};
     }
 
-    if (meets_gate(best_eta, best_omega)) {
-        return RefinementResult{ErrorCode::Success, 0, best_eta, best_omega};
+    const double omega_start = best_omega;
+    // A static-path factor whose pivot growth passed Control::
+    // refine_growth_threshold takes at least one step.
+    const bool force_step = fkeep.static_path && fkeep.pivot_growth > ctrl.refine_growth_threshold;
+    if (reached(best_eta, best_omega, omega_target(fkeep, ctrl)) && !force_step) {
+        RefinementResult rr{meets_gate(best_eta, best_omega) ? ErrorCode::Success
+                                                             : ErrorCode::MaxIterations,
+                            0, best_eta, best_omega};
+        rr.omega_start = omega_start;
+        return rr;
     }
 
     const int max_iters = std::max(0, ctrl.refinement_max_iters);
     if (max_iters == 0) {
-        return RefinementResult{ErrorCode::MaxIterations, 0, best_eta, best_omega};
+        RefinementResult rr{meets_gate(best_eta, best_omega) ? ErrorCode::Success
+                                                             : ErrorCode::MaxIterations,
+                            0, best_eta, best_omega};
+        rr.omega_start = omega_start;
+        return rr;
     }
 
     Control solve_ctrl = ctrl;
     solve_ctrl.refinement_max_iters = 0;
 
     if (ctrl.refine_method == RefineMethod::Classical) {
-        return classical_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs, ws,
-                                best_eta, best_omega, max_iters, /*escalate=*/false)
-            .result;
+        RefinementResult rr = classical_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x,
+                                               nrhs, ws, best_eta, best_omega, max_iters,
+                                               /*escalate=*/false)
+                                  .result;
+        rr.omega_start = omega_start;
+        return rr;
     }
 
     const int total = std::max(0, ctrl.refine_max_steps);
@@ -644,7 +677,11 @@ RefinementResult refine_core(int n,
         const ClassicalOutcome co =
             classical_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs, ws,
                              best_eta, best_omega, std::min(max_iters, total), /*escalate=*/true);
-        if (!co.escalate || co.result.iterations >= total) return co.result;
+        if (!co.escalate || co.result.iterations >= total) {
+            RefinementResult rr = co.result;
+            rr.omega_start = omega_start;
+            return rr;
+        }
         classical_steps = co.result.iterations;
     }
 
@@ -656,6 +693,7 @@ RefinementResult refine_core(int n,
     RefinementResult rr{qualified ? ErrorCode::Success : ErrorCode::MaxIterations,
                         classical_steps + used, eta, omega};
     rr.method_used = RefineMethod::Fgmres;
+    rr.omega_start = omega_start;
     return rr;
 }
 

@@ -785,6 +785,7 @@ TEST(Matching, AutoPolicyScalesSaddlePointsOnly) {
         std::unique_ptr<AnalysisKeep> ak;
         Control trigger = ctrl;
         trigger.scale_on_delay_ratio = 8.0;
+        trigger.static_fallback_after_cascade = false;  // the rescue itself
         solve_accurately(kkt, trigger, fk, ak);
         EXPECT_TRUE(ak->matching_scale.empty());
         ASSERT_FALSE(ak->rejected_matching_scale.empty());

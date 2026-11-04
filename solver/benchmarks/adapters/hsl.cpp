@@ -320,6 +320,8 @@ public:
         order_ = OrderHash{};
         // The caller keeps A (and each factor()'s values) alive: no copy.
         pattern_ = &A;
+        refine_pattern_ready_ = false;
+        refine_values_set_ = false;
         Info info;
         const auto t0 = Clock::now();
         ak_ = solver_.analyse(A, ctrl_, info);
@@ -350,6 +352,7 @@ public:
             return stats_.outcome;
         }
         values_ = values;
+        refine_values_set_ = false;
 
         Info info;
         const auto t0 = Clock::now();
@@ -375,6 +378,9 @@ public:
         stats_.solve_threads = fk_.solve_threads;
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
+        stats_.static_fallback = info.static_fallback;
+        stats_.static_rejects = info.static_rejects;
+        stats_.pivot_growth = info.pivot_growth;
         stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.posdef_lapack_fronts = info.posdef_lapack_fronts;
         stats_.factor_entries = info.actual_factor_entries;
@@ -420,20 +426,40 @@ public:
         }
         Info info;
         const auto t0 = Clock::now();
-        // A statically pivoted factor is of a perturbed matrix: refine
-        // against the true one, as PARDISO does after perturbations.
-        const bool do_refine = static_pivots_ > 0 || refine_always_;
+        // A statically pivoted factor is of a perturbed matrix, and a
+        // static-path one has unbounded growth: refine against the true
+        // matrix (refinement_advised), as PARDISO does after perturbations.
+        const bool do_refine = refinement_advised(fk_) || refine_always_;
         if (do_refine) rhs_copy_.assign(b_and_x.begin(), b_and_x.begin() + static_cast<std::ptrdiff_t>(n) * nrhs);
         int rc = solver_.solve(fk_, ctrl_, info, b_and_x.data(), n, nrhs, sws_);
         stats_.refine_iterations = -1;
         stats_.refine_fgmres = false;
+        stats_.refine_omega_start = -1.0;
         if (rc == 0 && do_refine) {
-            CscLower current = *pattern_;
-            current.values.assign(values_.begin(), values_.end());
-            const RefinementResult rr = refine(current, fk_, ctrl_, rhs_copy_,
-                                               b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
+            // The refinement matrix is prepared once per pattern and its
+            // values set once per factor (O(nnz)), not rebuilt and sorted
+            // on every solve: the same iteration (refinement.hpp).
+            if (!refine_pattern_ready_) {
+                refine_pattern_ready_ = prepare_refine_matrix(*pattern_, refine_mat_) == ErrorCode::Success;
+                refine_values_set_ = false;
+            }
+            if (refine_pattern_ready_ && !refine_values_set_) {
+                set_refine_values(values_, refine_mat_);
+                refine_values_set_ = true;
+            }
+            CscLower current;
+            if (!refine_pattern_ready_) {
+                current = *pattern_;
+                current.values.assign(values_.begin(), values_.end());
+            }
+            const RefinementResult rr = refine_pattern_ready_
+                ? refine(refine_mat_, fk_, ctrl_, rhs_copy_,
+                         b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_)
+                : refine(current, fk_, ctrl_, rhs_copy_,
+                         b_and_x.first(static_cast<std::size_t>(n) * nrhs), nrhs, sws_);
             stats_.refine_iterations = rr.iterations;
             stats_.refine_fgmres = rr.method_used == RefineMethod::Fgmres;
+            stats_.refine_omega_start = rr.omega_start;
         }
         const auto t1 = Clock::now();
         stats_.solve_ms = ms_since(t0, t1);
@@ -463,6 +489,9 @@ private:
     int static_pivots_ = 0;
     bool refine_always_ = false;
     std::vector<double> rhs_copy_;
+    RefineMatrix refine_mat_;           // refine()'s matrix of pattern_ (prepared on first use)
+    bool refine_pattern_ready_ = false;
+    bool refine_values_set_ = false;    // refine_mat_ holds values_
 };
 
 /// smf through IpmSession (make_smf_ipm_adapter): the MA97 plugin's path
@@ -587,6 +616,9 @@ public:
         stats_.inertia_zero = in.zero;
         stats_.delayed_pivots = info.delayed_pivots;
         stats_.static_pivots = info.static_pivots;
+        stats_.static_fallback = info.static_fallback;
+        stats_.static_rejects = info.static_rejects;
+        stats_.pivot_growth = info.pivot_growth;
         stats_.aptp_failed_columns = info.aptp_failed_columns;
         stats_.posdef_lapack_fronts = info.posdef_lapack_fronts;
         stats_.factor_entries = info.actual_factor_entries;

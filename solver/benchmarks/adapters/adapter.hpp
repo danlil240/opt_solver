@@ -78,6 +78,12 @@ struct AdapterStats {
     // smf adapter: smf::refine() of the last solve, -1 when it did not run.
     int refine_iterations = -1;
     bool refine_fgmres = false;  // RefinementResult::method_used == Fgmres
+    // smf adapter: RefinementResult::omega_start of the last solve (omega
+    // before refinement), -1 when it did not run.
+    double refine_omega_start = -1.0;
+    int static_fallback = 0;   // Info::static_fallback of the last factor (smf adapters)
+    int static_rejects = 0;    // Info::static_rejects of the last factor (smf adapters)
+    double pivot_growth = 0.0; // Info::pivot_growth of the last factor (smf adapters)
 };
 
 class SolverAdapter {

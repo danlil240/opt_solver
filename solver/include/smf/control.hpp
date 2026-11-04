@@ -258,6 +258,34 @@ struct Control {
     // matching scaling is computed anew. Negative: a new matching scaling
     // for every factorization once the trigger has fired (no probes).
     double         scale_on_delay_reuse_tol = 0.1;
+    // Static fallback after a cascade: where the scale-on-delay rescue is
+    // armed (the recommended track: pivot_u >= kWeakPivotRatio, Auto
+    // scaling; never IPOPT's u = 1e-8 or the IPOPT plugin), the first
+    // factorization of an analysis into a FactorKeep that either trips the
+    // work limit (or its early stop) or is let through past
+    // scale_on_delay_next_ratio switches that analysis and FactorKeep to the
+    // static path: the factor that tripped is redone on it instead of with a
+    // matching scaling, and every later factorization runs on it directly
+    // (no tries, fit tests, probes or matchings). The static path: no
+    // delays, the best available pivot taken, |d| below 1e-8 * max|A|
+    // raised (the delay-budget-0 path), scaled as Auto resolves it (never
+    // with a rescue's matching scale, which cost accuracy there). A static
+    // factor is kept only when it perturbed no pivot (and its growth stays
+    // under 1e10): otherwise, as on badly scaled KKTs that only the
+    // matching makes factorable, that work is spent, the rescue follows and
+    // the sequence never returns to the static path (Info::static_rejects).
+    // A factor let through stays as it is. A static-path factor sets
+    // FactorKeep::static_path, which arms the backward-error refinement
+    // trigger (refine_omega_target, refine_growth_threshold).
+    // Info::static_fallback reports a static-path factor. The switch reads
+    // the same work counts as the rescue's own decisions, so it is identical
+    // at every num_threads in deterministic mode. False: the rescue as is.
+    bool           static_fallback_after_cascade = true;
+    // Experimental (no public contract yet): Pivoting::Static puts every
+    // indefinite factorization on the static path above (FactorKeep::
+    // static_path set, scale-on-delay disarmed). Threshold: as documented
+    // everywhere else.
+    Pivoting       pivoting = Pivoting::Threshold;
 
     // Pivoting
     double         pivot_u       = 0.01;    // threshold pivoting parameter
@@ -515,6 +543,18 @@ struct Control {
     RefineMethod   refine_method                 = RefineMethod::Auto;
     int            refine_max_steps              = 10;
     int            fgmres_restart                = 20;
+    // Backward-error refinement trigger of a static-path factor
+    // (FactorKeep::static_path: static_fallback_after_cascade, Pivoting::
+    // Static). Such a factor took pivots that fail the pivot_u test, so its
+    // growth is not bounded by 1/pivot_u: refine() then aims at a
+    // componentwise backward error omega <= refine_omega_target (instead of
+    // the usual 1e-8; the normwise gate is unchanged) within the usual step
+    // caps, and takes at least one step when the factor's pivot growth
+    // (FactorKeep::pivot_growth: the largest |l_ij| below a forced pivot)
+    // exceeds refine_growth_threshold. Callers that refine only after
+    // static pivots should also refine such a factor (refinement_advised()).
+    double         refine_omega_target           = 1e-10;
+    double         refine_growth_threshold       = 1e8;
 
     // Input checking. True (the default): analyse() scans the pattern for
     // unsorted, duplicate and out-of-range entries and cleans them up.

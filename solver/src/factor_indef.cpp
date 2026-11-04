@@ -355,6 +355,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
 
   info.delayed_pivots = 0;
   info.static_pivots = 0;
+  info.pivot_growth = 0.0;
   info.inertia_exact = true;
   info.delay_budget_retries = 0;
   info.aptp_failed_columns = 0;
@@ -497,6 +498,9 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.analysis = &keep;
   fkeep.is_posdef = false;
   fkeep.static_pivots = 0;
+  // Set by the caller that took the static path (solve.cpp).
+  fkeep.static_path = false;
+  fkeep.pivot_growth = 0.0;
   fkeep.status = FactorStatus::Success;
   fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
   fkeep.factor_values.clear();
@@ -627,6 +631,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.delayed_pivots = st.delayed;
     info.static_pivots = st.static_pivots;
     fkeep.static_pivots = st.static_pivots;
+    info.pivot_growth = st.max_growth;
+    fkeep.pivot_growth = st.max_growth;
     info.inertia_exact = st.static_pivots == 0;
     info.delay_budget_retries = st.budget_retries;
     info.aptp_failed_columns = st.aptp_failed;

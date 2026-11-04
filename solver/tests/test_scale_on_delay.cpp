@@ -126,6 +126,9 @@ Control base_control() {
     Control c;
     c.matrix_type = MatrixType::RealSymmetricIndefinite;
     c.amalgamation = Amalgamation::Smf;
+    // These tests are about the rescue itself; the static fallback that
+    // replaces it after a cascade has its own tests (StaticFallback.*).
+    c.static_fallback_after_cascade = false;
     return c;  // Auto scaling, pivot_u = 0.01, default trigger ratio
 }
 
@@ -1303,3 +1306,404 @@ TEST(ScaleOnDelay, EarlyStopDeterministicAcrossThreadCounts) {
         else EXPECT_EQ(x, x_ref) << "threads " << threads;
     }
 }
+
+// --- Control::static_fallback_after_cascade, Pivoting::Static and the
+// backward-error refinement trigger (Control::refine_omega_target,
+// refine_growth_threshold) ---
+
+namespace {
+
+Control fallback_control() {
+    Control c = base_control();
+    c.static_fallback_after_cascade = true;
+    return c;
+}
+
+// x = A^-1 b with fk, refined when refinement_advised(fk); returns the
+// refinement result (iterations -1: not refined).
+RefinementResult solve_refined(const Solver &s, const FactorKeep &fk, const Control &ctrl,
+                               const CscLower &A, std::vector<double> &x) {
+    const int n = static_cast<int>(A.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * (i % 97);
+    x = b;
+    Info si;
+    EXPECT_EQ(s.solve(fk, ctrl, si, x.data(), n, 1), 0);
+    RefinementResult rr;
+    rr.iterations = -1;
+    if (refinement_advised(fk)) {
+        SolveWorkspace ws;
+        rr = refine(A, fk, ctrl, b, x, 1, ws);
+    }
+    const auto val = smf::bench::validate(A, b, x, 1);
+    EXPECT_TRUE(smf::bench::is_qualified_validation(val))
+        << "eta_inf=" << val.eta_inf << " omega=" << val.omega;
+    return rr;
+}
+
+} // namespace
+
+// A moderately scaled KKT whose unscaled delays still cascade (work ratio
+// ~21 against the limit's 16) but whose unscaled static factorization
+// perturbs no pivot: the static fallback holds there.
+CscLower static_ok_kkt(double hdiag = 2.5) { return kkt(90, 300, hdiag, 1.5); }
+
+// A sequence whose first factorization trips the work limit: that factor is
+// redone on the static path (no matching), and every later one of the
+// analysis into that FactorKeep runs on it directly, with no try. The same
+// decisions, factors and solutions at 1, 2 and 4 threads in deterministic
+// mode.
+TEST(StaticFallback, CascadeSwitchesTheSequenceDeterministically) {
+    const CscLower A = static_ok_kkt();  // n < 10000: no auto matching
+    // Later steps with the same values: a nearby H diagonal (2.55) already
+    // perturbs pivots unscaled, which PerturbedStaticFactorFallsBackToTheRescue covers.
+    const CscLower A1 = A;
+    std::pair<int, int> ref_inertia;
+    {
+        const Control t = base_control();
+        Solver s;
+        Info ia, i;
+        auto ak = s.analyse(A, t, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        FactorKeep fk;
+        ASSERT_EQ(s.factor(*ak, t, i, fk), FactorStatus::Success);
+        ASSERT_EQ(i.num_zero, 0);
+        ref_inertia = {i.num_positive, i.num_negative};
+    }
+    std::vector<std::vector<double>> x_ref;
+    std::vector<int> static_ref;
+    for (const int threads : {1, 2, 4}) {
+        Control ctrl = fallback_control();
+        ctrl.deterministic = true;
+        ctrl.num_threads = threads;
+        ctrl.auto_threads = false;  // small test trees
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, ctrl, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        std::vector<std::vector<double>> xs;
+        std::vector<int> statics;
+        int step = 0;
+        for (const CscLower *M : {&A, &A1, &A1}) {
+            Info i;
+            ASSERT_EQ(s.factor(*ak, *M, ctrl, i, fk, ws), FactorStatus::Success);
+            std::printf("[StaticFallback] threads %d step %d: stops %d rescales %d static %d "
+                        "perturbed %d delays %d growth %.3g\n",
+                        threads, step, i.delay_stops, i.delay_rescales, i.static_fallback,
+                        i.static_pivots, i.delayed_pivots, i.pivot_growth);
+            // Step 0 trips (a stopped try), later steps have no try at all.
+            EXPECT_EQ(i.delay_stops, step == 0 ? 1 : 0) << "threads " << threads;
+            EXPECT_EQ(i.delay_rescales, 0);
+            EXPECT_EQ(i.static_fallback, 1);
+            if (step > 0) EXPECT_EQ(i.delay_try_seconds, 0.0);
+            EXPECT_EQ(i.delayed_pivots, 0);
+            EXPECT_EQ(i.scaling_used, static_cast<int>(ScalingMethod::None));
+            EXPECT_TRUE(fk.static_path);
+            EXPECT_TRUE(fk.delay_static);
+            EXPECT_EQ(fk.delay_analysis, ak->serial);
+            EXPECT_TRUE(fk.delay_scale.empty());
+            EXPECT_EQ(i.static_rejects, 0);
+            EXPECT_EQ(i.static_pivots, 0);
+            EXPECT_TRUE(i.inertia_exact);
+            // H (diagonal 2.5) is indefinite: the threshold factor's inertia.
+            EXPECT_EQ(i.num_positive, ref_inertia.first);
+            EXPECT_EQ(i.num_negative, ref_inertia.second);
+            EXPECT_EQ(i.num_zero, 0);
+            std::vector<double> x;
+            const RefinementResult rr = solve_refined(s, fk, ctrl, *M, x);
+            EXPECT_GE(rr.iterations, 0) << "a static-path factor is refined";
+            xs.push_back(x);
+            statics.push_back(i.static_pivots);
+            ++step;
+        }
+        if (x_ref.empty()) {
+            x_ref = xs;
+            static_ref = statics;
+        } else {
+            EXPECT_EQ(xs, x_ref) << "threads " << threads;
+            EXPECT_EQ(statics, static_ref) << "threads " << threads;
+        }
+    }
+}
+
+// A factorization let through past scale_on_delay_next_ratio stays as it is
+// and switches the later ones to the static path (instead of the next try or
+// the carried rescale); cheap sequences never switch.
+TEST(StaticFallback, CostlyLetThroughSwitchesTheNextFactor) {
+    const CscLower A = static_ok_kkt();
+    // Later steps with the same values: a nearby H diagonal (2.55) already
+    // perturbs pivots unscaled, which PerturbedStaticFactorFallsBackToTheRescue covers.
+    const CscLower A1 = A;
+    const CscLower E = kkt(kG, kM, 4.1, 0.0);
+    Control ctrl = fallback_control();
+    const double r = unscaled_ratio(A, ctrl);
+    ASSERT_GT(r, 4.0) << "premise: the delays inflate the work";
+    ctrl.scale_on_delay_ratio = 2.0 * r;  // lets A through
+    ctrl.scale_on_delay_next_ratio = 0.5 * r;
+    ctrl.scale_on_delay_early_ratio = -1.0;
+    Solver s;
+    {
+        Info info;
+        auto ak = s.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+                  FactorStatus::Success);
+        EXPECT_EQ(i1.static_fallback, 0);
+        EXPECT_EQ(i1.delay_stops, 0);
+        EXPECT_GT(i1.delayed_pivots, 0);
+        EXPECT_FALSE(fk.static_path);
+        EXPECT_FALSE(fk.delay_next);
+        EXPECT_TRUE(fk.delay_static);
+        Info i2;
+        ASSERT_EQ(s.factor(*ak, A1, ctrl, i2, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i2.static_fallback, 1);
+        EXPECT_EQ(i2.delay_stops, 0);
+        EXPECT_EQ(i2.delay_rescales, 0);
+        EXPECT_EQ(i2.delayed_pivots, 0);
+        EXPECT_TRUE(fk.static_path);
+        std::vector<double> x;
+        solve_refined(s, fk, ctrl, A1, x);
+        // Later values whose unscaled static factor perturbs pivots: that
+        // static factor is thrown away and the rescue follows; no static
+        // tries after it.
+        const CscLower A2 = static_ok_kkt(2.55);
+        Info i4;
+        ASSERT_EQ(s.factor(*ak, A2, ctrl, i4, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i4.static_rejects, 1);
+        EXPECT_EQ(i4.static_fallback, 0);
+        EXPECT_EQ(i4.delay_rescales, 1);
+        EXPECT_FALSE(fk.static_path);
+        EXPECT_FALSE(fk.delay_static);
+        EXPECT_EQ(fk.static_rejected_analysis, ak->serial);
+        expect_accurate_solve(s, fk, ctrl, A2);
+        Info i5;
+        ASSERT_EQ(s.factor(*ak, A2, ctrl, i5, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i5.static_rejects, 0);
+        EXPECT_EQ(i5.static_fallback, 0);
+        // Another FactorKeep starts over (a plain first try).
+        FactorKeep fk2;
+        Info i3;
+        ASSERT_EQ(s.factor(*ak, A1, ctrl, i3, fk2, ws), FactorStatus::Success);
+        EXPECT_EQ(i3.static_fallback, 0);
+    }
+    {
+        Info info;
+        auto ak = s.analyse(E, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        for (int k = 0; k < 3; ++k) {
+            Info ik;
+            ASSERT_EQ(s.factor(*ak, std::span<const double>(E.values), ctrl, ik, fk, ws),
+                      FactorStatus::Success);
+            EXPECT_EQ(ik.static_fallback, 0);
+            EXPECT_FALSE(fk.delay_static);
+            EXPECT_FALSE(fk.static_path);
+        }
+    }
+}
+
+// A badly scaled KKT: unscaled static pivoting perturbs many pivots, so the
+// static factor of the tripped factorization is thrown away (a spent try,
+// Info::static_rejects) and the rescue's matching scaling follows; the
+// sequence then goes on from the kept scale and never tries static again.
+TEST(StaticFallback, PerturbedStaticFactorFallsBackToTheRescue) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    const Control ctrl = fallback_control();
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+              FactorStatus::Success);
+    EXPECT_EQ(i1.static_rejects, 1);
+    EXPECT_EQ(i1.static_fallback, 0);
+    EXPECT_EQ(i1.delay_stops, 1);
+    EXPECT_EQ(i1.delay_rescales, 1);
+    EXPECT_EQ(i1.static_pivots, 0);
+    EXPECT_EQ(i1.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_FALSE(fk.static_path);
+    EXPECT_FALSE(fk.delay_static);
+    EXPECT_EQ(fk.scale, matching_scale_of(*ak, A));
+    EXPECT_EQ(i1.num_positive, kG * kG);
+    EXPECT_EQ(i1.num_negative, kM);
+    expect_accurate_solve(s, fk, ctrl, A);
+    for (int k = 0; k < 2; ++k) {
+        Info i2;
+        ASSERT_EQ(s.factor(*ak, A1, ctrl, i2, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i2.static_rejects, 0);
+        EXPECT_EQ(i2.static_fallback, 0);
+        EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+        EXPECT_FALSE(fk.static_path);
+        expect_accurate_solve(s, fk, ctrl, A1);
+    }
+}
+
+// Off, a cascading sequence takes the rescue exactly as before the fallback
+// existed (the ScaleOnDelay tests pin its details): a matching scaling of
+// the values, no static path; refine() on such a factor ignores
+// refine_omega_target (bitwise the same refined x).
+TEST(StaticFallback, OffIsTheRescue) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    Control ctrl = base_control();
+    ASSERT_FALSE(ctrl.static_fallback_after_cascade);
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i1.delay_rescales, 1);
+    EXPECT_EQ(i1.static_fallback, 0);
+    EXPECT_FALSE(fk.static_path);
+    EXPECT_FALSE(fk.delay_static);
+    EXPECT_EQ(fk.scale, matching_scale_of(*ak, A));
+    Info i2;
+    ASSERT_EQ(s.factor(*ak, A1, ctrl, i2, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.static_fallback, 0);
+    EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_FALSE(refinement_advised(fk));
+    const int n = static_cast<int>(A1.n);
+    std::vector<double> b(static_cast<std::size_t>(n), 1.0);
+    std::vector<double> x0 = b;
+    Info si;
+    ASSERT_EQ(s.solve(fk, ctrl, si, x0.data(), n, 1), 0);
+    std::vector<double> xa = x0, xb = x0;
+    SolveWorkspace wa, wb;
+    Control tight = ctrl;
+    tight.refine_omega_target = 1e-300;
+    tight.refine_growth_threshold = 0.0;
+    const RefinementResult ra = refine(A1, fk, ctrl, b, xa, 1, wa);
+    const RefinementResult rb = refine(A1, fk, tight, b, xb, 1, wb);
+    EXPECT_EQ(xa, xb);
+    EXPECT_EQ(ra.iterations, rb.iterations);
+}
+
+// The ipopt track (pivot_u = 1e-8, where the rescue is never armed) is
+// untouched by the fallback: bitwise the same factors over a sequence.
+TEST(StaticFallback, IpoptTrackUntouched) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    std::vector<std::vector<double>> ref;
+    for (const bool on : {false, true}) {
+        Control ctrl = base_control();
+        ctrl.pivot_u = 1e-8;
+        ctrl.static_fallback_after_cascade = on;
+        Solver s;
+        Info info;
+        auto ak = s.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        std::vector<std::vector<double>> got;
+        for (const CscLower *M : {&A, &A1, &A1}) {
+            Info i;
+            ASSERT_EQ(s.factor(*ak, *M, ctrl, i, fk, ws), FactorStatus::Success);
+            EXPECT_EQ(i.static_fallback, 0);
+            EXPECT_FALSE(fk.static_path);
+            EXPECT_FALSE(fk.delay_static);
+            got.push_back(fk.factor_values);
+        }
+        if (ref.empty()) ref = got;
+        else EXPECT_EQ(got, ref);
+    }
+}
+
+// The backward-error trigger: a static-path factor (Pivoting::Static) at a
+// high pivot threshold forces pivots that fail it without perturbing any
+// (static_pivots 0, pivot growth above 1 / u). refinement_advised() holds
+// although nothing was perturbed; refine() drives omega to
+// refine_omega_target, and takes a step when the growth passes
+// refine_growth_threshold even if omega already met the target.
+TEST(StaticFallback, BackwardErrorTriggerRefinesGrowthWithoutPerturbation) {
+    const CscLower E = kkt(kG, kM, 4.1, 0.0);
+    Control ctrl = fallback_control();
+    ctrl.pivoting = Pivoting::Static;
+    ctrl.pivot_u = 0.4;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(E, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+    std::printf("[StaticFallback] static u=0.4: perturbed %d growth %.3g delays %d\n", i.static_pivots,
+                i.pivot_growth, i.delayed_pivots);
+    EXPECT_EQ(i.static_fallback, 1);
+    EXPECT_EQ(i.static_pivots, 0);
+    EXPECT_TRUE(i.inertia_exact);
+    EXPECT_EQ(i.delayed_pivots, 0);
+    EXPECT_GT(i.pivot_growth, 1.0 / ctrl.pivot_u);
+    EXPECT_EQ(fk.pivot_growth, i.pivot_growth);
+    EXPECT_TRUE(fk.static_path);
+    EXPECT_TRUE(refinement_advised(fk));
+    EXPECT_EQ(i.num_positive, kG * kG);
+    EXPECT_EQ(i.num_negative, kM);
+
+    const int n = static_cast<int>(E.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int k = 0; k < n; ++k) b[static_cast<std::size_t>(k)] = 1.0 + 0.01 * (k % 97);
+    std::vector<double> x0 = b;
+    Info si;
+    ASSERT_EQ(s.solve(fk, ctrl, si, x0.data(), n, 1), 0);
+    {
+        // Omega target: refined until omega <= refine_omega_target.
+        Control c = ctrl;
+        c.refine_growth_threshold = std::numeric_limits<double>::infinity();
+        c.refine_omega_target = 1e-14;
+        std::vector<double> x = x0;
+        SolveWorkspace ws;
+        const RefinementResult rr = refine(E, fk, c, b, x, 1, ws);
+        std::printf("[StaticFallback] omega %.3g -> %.3g in %d steps\n", rr.omega_start, rr.omega,
+                    rr.iterations);
+        EXPECT_EQ(rr.status, ErrorCode::Success);
+        if (rr.omega_start > c.refine_omega_target) {
+            EXPECT_GE(rr.iterations, 1);
+        }
+        EXPECT_TRUE(rr.omega <= c.refine_omega_target || rr.iterations >= c.refinement_max_iters)
+            << "omega " << rr.omega;
+    }
+    {
+        // Growth past the threshold: at least one step even when omega
+        // already meets the target.
+        Control c = ctrl;
+        c.refine_omega_target = 1.0;
+        c.refine_growth_threshold = 1.0;
+        ASSERT_GT(fk.pivot_growth, c.refine_growth_threshold);
+        std::vector<double> x = x0;
+        SolveWorkspace ws;
+        const RefinementResult rr = refine(E, fk, c, b, x, 1, ws);
+        EXPECT_GE(rr.iterations, 1);
+        EXPECT_EQ(rr.status, ErrorCode::Success);
+        // Below the growth threshold and at a loose target: no step.
+        c.refine_growth_threshold = 2.0 * fk.pivot_growth;
+        std::vector<double> y = x0;
+        const RefinementResult r0 = refine(E, fk, c, b, y, 1, ws);
+        EXPECT_EQ(r0.iterations, 0);
+        EXPECT_EQ(y, x0);
+    }
+    // The default threshold-pivoting factor of the same matrix: no static
+    // path, nothing advised.
+    Control t = base_control();
+    FactorKeep ft;
+    Info it;
+    auto akt = s.analyse(E, t, it);
+    ASSERT_NE(akt.get(), nullptr);
+    ASSERT_EQ(s.factor(*akt, t, it, ft), FactorStatus::Success);
+    EXPECT_FALSE(ft.static_path);
+    EXPECT_EQ(it.static_fallback, 0);
+    EXPECT_FALSE(refinement_advised(ft));
+}
+

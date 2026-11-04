@@ -105,6 +105,16 @@ struct RunRecord {
     // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
     int refine_iterations = -1;
     std::string refine_method;     // "classical" | "fgmres"
+    // smf only, Control::static_fallback_after_cascade / Pivoting::Static:
+    // factorizations on the static path (Info::static_fallback summed over a
+    // warm sequence's steps), the largest Info::pivot_growth, the smf::refine()
+    // steps summed over the solves, and the largest omega before refinement
+    // (RefinementResult::omega_start); -1 = not reported.
+    int static_fallbacks = -1;
+    int static_rejects = -1;  // Info::static_rejects summed over the steps
+    double pivot_growth = -1.0;
+    int refine_steps_total = -1;
+    double omega_unrefined = -1.0;
     int64_t factor_entries = 0;
     double flops = 0.0;
     // smf only: AdapterStats::order_hash as 16 hex digits; empty = left out.

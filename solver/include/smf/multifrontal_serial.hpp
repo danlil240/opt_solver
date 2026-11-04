@@ -15,6 +15,7 @@ struct SerialFactorStats {
   InertiaCounts inertia{};
   int delayed = 0;
   int static_pivots = 0;
+  double max_growth = 0.0;  // largest |l_ij| below a forced (static path) pivot
   int aptp_failed = 0;  // columns the APTP front kernel failed (before the TPP fallback)
   int budget_retries = 0;  // fronts refactored static because they overshot Control::delay_budget
   int parallel_subtrees = 0;

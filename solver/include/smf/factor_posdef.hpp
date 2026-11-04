@@ -84,6 +84,22 @@ struct FactorKeep {
   /// Pivots perturbed by static pivoting (Info::static_pivots of the
   /// factorization that produced this factor): refine() escalates sooner.
   int static_pivots = 0;
+  /// The factor came from the static path (Control::static_fallback_after_
+  /// cascade, Pivoting::Static): refine() aims at Control::refine_omega_target
+  /// (see refinement_advised()).
+  bool static_path = false;
+  /// Largest |l_ij| below a pivot the static path forced (one that failed
+  /// the threshold test; 0 when none was): growth threshold pivoting would
+  /// have bounded by 1/pivot_u.
+  double pivot_growth = 0.0;
+  /// Control::static_fallback_after_cascade: later factorizations of
+  /// delay_analysis into this FactorKeep take the static path (with
+  /// delay_scale when it is not empty).
+  bool delay_static = false;
+  /// The analysis (serial) for which a static-path factor of that fallback
+  /// was thrown away (it perturbed pivots): no further static tries for it
+  /// into this FactorKeep.
+  std::uint64_t static_rejected_analysis = 0;
   /// Indefinite factor whose unit-L fronts keep D in their diagonal slots
   /// (a 2x2 block's off-diagonal at (c, c + 1)): the backward solve applies
   /// D^-1 front by front instead of a separate pass over diag_entries.

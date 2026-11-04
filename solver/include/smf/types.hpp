@@ -169,6 +169,17 @@ enum class RefineMethod {
     Auto      = 2
 };
 
+// Indefinite pivoting policy (Control::pivoting). Experimental: Static is not
+// a documented mode yet.
+//  Threshold: threshold 1x1 / 2x2 pivoting (pivot_u) with delays.
+//  Static:    every front on the static path (no delays; the best available
+//             pivot, |d| below 1e-8 * max|A| raised), as after
+//             Control::static_fallback_after_cascade.
+enum class Pivoting {
+    Threshold = 0,
+    Static    = 1
+};
+
 enum class FrontKernel {
     Tpp  = 0,
     Aptp = 1,

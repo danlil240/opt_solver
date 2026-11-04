@@ -29,6 +29,7 @@ struct LdltKernelParams {
 struct LdltKernelResult {
     int num_accepted = 0;
     int static_pivots = 0;      ///< forced pivots whose |d| was raised
+    double max_growth = 0.0;    ///< largest |l_ij| below a forced (static path) pivot
     InertiaCounts inertia{};
     double flops = 0.0;
 };
