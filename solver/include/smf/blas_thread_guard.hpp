@@ -3,7 +3,7 @@
 // on destruction.
 //
 // Compile-time selection:
-//   SMF_USE_MKL=1      → MKL_Set_Num_Threads / MKL_Get_Max_Threads
+//   SMF_USE_MKL=1      → MKL_Set_Num_Threads_Local (this thread) / MKL_Get_Max_Threads
 //   SMF_HAS_OPENBLAS=1 → openblas_set_num_threads / openblas_get_num_threads
 //   otherwise          → no-op (guard compiles but does nothing)
 //
@@ -66,6 +66,12 @@ int blas_threads_active() noexcept;
 /// Highest blas_threads_active() since the last blas_threads_reset_peak().
 int blas_threads_peak() noexcept;
 void blas_threads_reset_peak() noexcept;
+
+/// The BLAS thread count a BLAS call from this thread would get now (MKL:
+/// mkl_get_max_threads, 1 with sequential MKL; OpenBLAS: its process-wide
+/// count; 1 without a threading API).
+/// For tests and diagnostics.
+int blas_max_threads() noexcept;
 
 /// Convenience alias: construct with 1 to enforce serial BLAS inside OpenMP
 /// tasks.

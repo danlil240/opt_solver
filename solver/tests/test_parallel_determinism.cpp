@@ -316,7 +316,7 @@ TEST(ParallelDeterminism, DeterministicReduceCorrect) {
 // ---------------------------------------------------------------------------
 // Test 6: deterministic mode (Control::deterministic / SMF_DETERMINISTIC):
 // bitwise-identical solutions, D entries and inertia across runs and across
-// 1/2/8/16 threads (analyse, factor and solve each run).
+// 1/2/4/8/16 threads (analyse, factor and solve each run).
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -364,9 +364,12 @@ struct DetRun {
     int subtrees = 0, tiles = 0;
     long long arena_blocks = 0;  // subtree roots' blocks put in the root arenas
     int ordering_used = 0;
+    bool banded = false;  // the banded SPD fast path factored it
 };
 
-DetRun det_run(const DetCase &c, int threads) {
+// caller_blas > 0: the BLAS threads of the caller of the nrhs > 1 solve
+// (default: `threads`).
+DetRun det_run(const DetCase &c, int threads, int caller_blas = 0) {
     Control ctrl;
     ctrl.matrix_type = c.type;
     ctrl.num_threads = threads;
@@ -402,7 +405,7 @@ DetRun det_run(const DetCase &c, int threads) {
         r.xm.resize(static_cast<std::size_t>(n) * kNrhs);
         for (std::size_t i = 0; i < r.xm.size(); ++i)
             r.xm[i] = std::cos(0.007 * static_cast<double>(i)) + 0.25;
-        BlasThreadGuard blas(threads);
+        BlasThreadGuard blas(caller_blas > 0 ? caller_blas : threads);
         EXPECT_EQ(solver.solve(fk, ctrl, info, std::span<double>(r.xm), kNrhs, n, sws), 0);
     }
     for (const DiagSolveEntry &e : fk.diag_entries) {
@@ -416,6 +419,7 @@ DetRun det_run(const DetCase &c, int threads) {
     r.subtrees = info.parallel_subtrees;
     r.tiles = info.top_tile_fronts;
     r.ordering_used = info.ordering_used;
+    r.banded = fk.use_banded_spd;
     return r;
 }
 
@@ -472,7 +476,7 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
             EXPECT_EQ(ref.ordering_used, static_cast<int>(OrderingMethod::METIS))
                 << "METIS candidate not kept: the ordering path is not exercised";
         int mismatches = 0;
-        for (const int threads : {1, 2, 8, 16}) {
+        for (const int threads : {1, 2, 4, 8, 16}) {
             for (int run = 0; run < kRuns; ++run) {
                 const DetRun r = det_run(c, threads);
                 if (threads == 8 && run == 0) {
@@ -506,7 +510,7 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
             }
         }
         std::printf("[BitwiseAcrossThreadCounts] %s n=%d: %d of %d runs differ from 1-thread run 0\n",
-                    c.name.c_str(), static_cast<int>(c.A.n), mismatches, 4 * kRuns);
+                    c.name.c_str(), static_cast<int>(c.A.n), mismatches, 5 * kRuns);
     }
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
     // MKL's conditional numerical reproducibility took effect.
@@ -564,6 +568,96 @@ TEST(ParallelDeterminism, LateThreadsDealtTaskIsTakenOver) {
             EXPECT_EQ(bit_diff(r.xm, ref.xm).first, 0u) << "late thread " << late;
         }
     }
+}
+
+// A caller whose BLAS runs several threads (a threaded-MKL build's default:
+// MKL's global count, every core) gets, in deterministic mode, the bits of
+// a caller on serial BLAS, at num_threads = 1 too (bug: the 1-thread
+// factorization ran its fronts on the caller's MKL threads, so every
+// multi-thread result differed from it), and the caller's BLAS setting is
+// left as it was. Only a BLAS that honours a thread count can tell: in a
+// sequential-MKL build the guard below changes nothing and the test checks
+// only reproducibility (SMF_EXPECT_THREADED_BLAS: the build links threaded
+// MKL, so the test must exercise it).
+TEST(ParallelDeterminism, CallerBlasThreadsDoNotChangeBits) {
+    constexpr int kCallerBlas = 4;
+    bool threaded = false;
+    {
+        BlasThreadGuard g(kCallerBlas);
+        threaded = blas_max_threads() == kCallerBlas;
+    }
+#if defined(SMF_EXPECT_THREADED_BLAS)
+    ASSERT_TRUE(threaded) << "threaded-MKL build, but the BLAS ignores a thread count";
+#endif
+    std::printf("[CallerBlasThreadsDoNotChangeBits] caller BLAS threads %s\n",
+                threaded ? "honoured (exercised)" : "ignored (sequential BLAS: not exercised)");
+
+    // Banded SPD (half-bandwidth 64, so DPBTRF / DPBTRS take their blocked
+    // BLAS-3 path): the banded fast path of AutoParallel.
+    CscLower band;
+    {
+        const int n = 20000;
+        constexpr int kd = 64;
+        band.n = n;
+        band.col_ptr.push_back(0);
+        for (int j = 0; j < n; ++j) {
+            band.row_idx.push_back(j);
+            band.values.push_back(2.0 * kd + 2.0);
+            for (int k = 1; k <= kd && j + k < n; ++k) {
+                band.row_idx.push_back(j + k);
+                band.values.push_back(-1.0);
+            }
+            band.col_ptr.push_back(static_cast<Int>(band.row_idx.size()));
+        }
+    }
+    std::vector<DetCase> cases;
+    {
+        const fs::path mtx = fixture_root() / "optim20" / "kkt_pde_opt.mtx";
+        auto mm = read_matrix_market(mtx.string());
+        ASSERT_TRUE(mm.ok) << mtx.string() << ": " << mm.error_message;
+        cases.push_back({"kkt_pde_opt", std::move(mm.matrix), MatrixType::RealSymmetricIndefinite,
+                         false, false});
+    }
+    cases.push_back({"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                     true, false});
+    cases.push_back({"helmholtz_3d_30", grid_3d(30, 0.9), MatrixType::RealSymmetricIndefinite,
+                     true, true});
+    cases.push_back({"band_spd/AutoParallel", std::move(band),
+                     MatrixType::RealSymmetricPositiveDefinite, false, false,
+                     OrderingMethod::AutoParallel});
+    for (const DetCase &c : cases) {
+        SCOPED_TRACE(c.name);
+        DetRun ref;
+        {
+            BlasThreadGuard serial(1);
+            ref = det_run(c, 1);
+        }
+        ASSERT_FALSE(ref.x.empty());
+        if (c.ordering == OrderingMethod::AutoParallel)
+            ASSERT_TRUE(ref.banded) << "the banded path is not exercised";
+        for (const int threads : {1, 8}) {
+            DetRun r;
+            {
+                BlasThreadGuard caller(kCallerBlas);
+                r = det_run(c, threads, kCallerBlas);
+                EXPECT_EQ(blas_max_threads(), threaded ? kCallerBlas : 1)
+                    << "the caller's BLAS thread count was not restored";
+            }
+            EXPECT_EQ(r.banded, ref.banded) << threads << " threads";
+            EXPECT_EQ(r.pos, ref.pos) << threads << " threads";
+            EXPECT_EQ(r.neg, ref.neg) << threads << " threads";
+            EXPECT_EQ(r.zero, ref.zero) << threads << " threads";
+            EXPECT_EQ(bit_diff(r.x, ref.x).first, 0u) << threads << " threads";
+            EXPECT_EQ(bit_diff(r.d, ref.d).first, 0u) << threads << " threads";
+            EXPECT_EQ(bit_diff(r.xm, ref.xm).first, 0u) << threads << " threads";
+        }
+        std::printf("[CallerBlasThreadsDoNotChangeBits] %s n=%d%s\n", c.name.c_str(),
+                    static_cast<int>(c.A.n), ref.banded ? " (banded path)" : "");
+    }
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    EXPECT_EQ(blas_reproducibility_status(), 0)
+        << "mkl_cbwr_set returned " << blas_reproducibility_status();
+#endif
 }
 
 // ---------------------------------------------------------------------------

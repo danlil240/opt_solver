@@ -86,6 +86,8 @@ BlasIdleScope::~BlasIdleScope() noexcept
     tl_counted = prev_counted_;
 }
 
+int blas_max_threads() noexcept { return blas_get_num_threads(); }
+
 int blas_threads_active() noexcept { return g_active.load(std::memory_order_relaxed); }
 int blas_threads_peak() noexcept { return g_peak.load(std::memory_order_relaxed); }
 void blas_threads_reset_peak() noexcept {

@@ -185,7 +185,14 @@ add_test(NAME BlasThreadGuard COMMAND test_blas_thread_guard)
 
 add_executable(test_parallel_determinism test_parallel_determinism.cpp)
 target_link_libraries(test_parallel_determinism PRIVATE smf GTest::gtest_main)
+# Threaded MKL: the bitwise tests then run against a BLAS that honours its
+# thread count (what deterministic mode must pin), and must say so. The
+# sequential build cannot exercise that; run the suite in both builds.
+if(SMF_USE_MKL AND SMF_MKL_THREADING STREQUAL "intel")
+    target_compile_definitions(test_parallel_determinism PRIVATE SMF_EXPECT_THREADED_BLAS=1)
+endif()
 add_test(NAME ParallelDeterminism COMMAND test_parallel_determinism)
+set_tests_properties(ParallelDeterminism PROPERTIES LABELS "determinism")
 
 # --- M8.S1 IPOPT adapter test (gated) ---
 
