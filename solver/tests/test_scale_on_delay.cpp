@@ -906,6 +906,8 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
         Control c1 = c;
         c1.scale_on_delay_early_ratio = -1.0;
         if (!cs.on) c.scale_on_delay_early_ratio = -1.0;
+        // The next try itself (scale_on_delay_carry skips it).
+        c.scale_on_delay_carry = false;
         Solver s;
         Info info;
         auto ak = s.analyse(A, c, info);
@@ -936,6 +938,104 @@ TEST(ScaleOnDelay, CostlyButLetThroughTightensTheNextLimit) {
         EXPECT_EQ(i2.num_negative, kM);
         expect_accurate_solve(s, fk, c, B);
     }
+}
+
+// Control::scale_on_delay_carry: after a costly let-through the next
+// factorization skips its unscaled try and starts from the matching scaling
+// of its own values (no stopped try, one rescale); later ones go on from
+// that kept scale as after any rescue. A sequence that never let a costly
+// factor through is untouched.
+TEST(ScaleOnDelay, CarryRescalesAfterACostlyLetThrough) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);  // the same bad scaling
+    const CscLower E = kkt(kG, kM, 4.1, 0.0);    // well scaled
+    Control ctrl = base_control();
+    const double r = unscaled_ratio(A, ctrl);
+    ASSERT_GT(r, 4.0) << "premise: the delays inflate the work";
+    ctrl.scale_on_delay_ratio = 2.0 * r;  // lets A through
+    ctrl.scale_on_delay_next_ratio = 0.5 * r;
+    ctrl.scale_on_delay_early_ratio = -1.0;
+    ctrl.scale_on_delay_carry = true;
+    Solver s;
+    {
+        Info info;
+        auto ak = s.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+                  FactorStatus::Success);
+        EXPECT_EQ(i1.delay_rescales, 0);
+        EXPECT_TRUE(fk.delay_next);
+
+        Info i2;
+        ASSERT_EQ(s.factor(*ak, A1, ctrl, i2, fk, ws), FactorStatus::Success);
+        EXPECT_FALSE(fk.delay_next);
+        EXPECT_EQ(i2.delay_stops, 0);
+        EXPECT_EQ(i2.delay_early_stops, 0);
+        EXPECT_EQ(i2.delay_rescales, 1);
+        EXPECT_EQ(i2.delay_try_seconds, 0.0);
+        EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+        EXPECT_EQ(fk.delay_scale, matching_scale_of(*ak, A1));
+        EXPECT_EQ(fk.delay_analysis, ak->serial);
+        EXPECT_EQ(i2.num_positive, kG * kG);
+        EXPECT_EQ(i2.num_negative, kM);
+        expect_accurate_solve(s, fk, ctrl, A1);
+    }
+    {
+        // Cheap factorizations never arm the carry.
+        Info info;
+        auto ak = s.analyse(E, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        for (int k = 0; k < 2; ++k) {
+            Info ik;
+            ASSERT_EQ(s.factor(*ak, std::span<const double>(E.values), ctrl, ik, fk, ws),
+                      FactorStatus::Success);
+            EXPECT_FALSE(fk.delay_next);
+            EXPECT_EQ(ik.delay_rescales, 0);
+            EXPECT_EQ(ik.delay_stops, 0);
+            EXPECT_EQ(ik.scaling_used, static_cast<int>(ScalingMethod::None));
+        }
+    }
+}
+
+// Control::scale_on_delay_next_early_ratio: the next try after a costly
+// let-through may stop at its own early crossing (an early stop, then the
+// matching scaling), well before the next limit.
+TEST(ScaleOnDelay, NextTryEarlyStop) {
+    const CscLower A = kkt(kG, kM, 4.1, 3.0);
+    const CscLower A1 = kkt(kG, kM, 4.15, 3.0);
+    Control ctrl = base_control();
+    const double r = unscaled_ratio(A, ctrl);
+    ASSERT_GT(r, 4.0) << "premise: the delays inflate the work";
+    ctrl.scale_on_delay_ratio = 2.0 * r;
+    ctrl.scale_on_delay_next_ratio = 0.9 * r;
+    ctrl.scale_on_delay_early_ratio = -1.0;
+    ctrl.scale_on_delay_carry = false;
+    ctrl.scale_on_delay_next_early_ratio = 1.5;
+    ctrl.scale_on_delay_next_early_proj = 1.2;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace ws;
+    FactorKeep fk;
+    Info i1;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), ctrl, i1, fk, ws),
+              FactorStatus::Success);
+    ASSERT_TRUE(fk.delay_next);
+    Info i2;
+    ASSERT_EQ(s.factor(*ak, A1, ctrl, i2, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(i2.delay_stops, 1);
+    EXPECT_EQ(i2.delay_early_stops, 1);
+    EXPECT_EQ(i2.delay_rescales, 1);
+    EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::Matching));
+    EXPECT_EQ(i2.num_positive, kG * kG);
+    EXPECT_EQ(i2.num_negative, kM);
+    expect_accurate_solve(s, fk, ctrl, A1);
 }
 
 TEST(ScaleOnDelay, RescuePiecesTimed) {

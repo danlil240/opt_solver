@@ -216,6 +216,17 @@ struct Control {
     // Negative early_ratio: off.
     double         scale_on_delay_early_ratio = 4.0;
     double         scale_on_delay_early_proj = 8.0;
+    // The same conditional early stop on a next try (the one under
+    // scale_on_delay_next_ratio after a costly let-through), at its own
+    // crossing ratio and projection. Negative ratio: a next try runs to its
+    // limit.
+    double         scale_on_delay_next_early_ratio = -1.0;
+    double         scale_on_delay_next_early_proj = 4.0;
+    // Carry the rescale forward: the factorization after a costly
+    // let-through (the one that would run under scale_on_delay_next_ratio)
+    // skips its unscaled try and starts from the matching scaling of its
+    // own values, as after a limit trip. False: the next try as above.
+    bool           scale_on_delay_carry = false;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:

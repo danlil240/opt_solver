@@ -396,6 +396,11 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       if (!next && ctrl.scale_on_delay_early_ratio >= 0.0 &&
           try_limit > std::floor(ctrl.scale_on_delay_early_ratio * free_work))
         early = {free_work, ctrl.scale_on_delay_early_ratio, ctrl.scale_on_delay_early_proj};
+      if (next && ctrl.scale_on_delay_next_early_ratio >= 0.0 &&
+          try_limit > std::floor(ctrl.scale_on_delay_next_early_ratio * free_work))
+        early = {free_work, ctrl.scale_on_delay_next_early_ratio,
+                 ctrl.scale_on_delay_next_early_proj};
+      if (next && ctrl.scale_on_delay_carry) goto rescale;
       const FactorStatus st = run(ak, ctrl, try_limit, early);
       if (st != FactorStatus::MaxPivotDelays) {
         // Let through, but costly: the next one runs under the tighter limit.
@@ -424,6 +429,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       if (early.on() && info.front_work <= try_limit) info.delay_early_stops = 1;
     }
   }
+rescale:
   // A new matching scaling of these values.
   get_values();
   const auto t0 = now();
