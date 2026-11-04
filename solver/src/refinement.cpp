@@ -429,6 +429,9 @@ void sym_matvec(int n, const std::vector<RefineEntry> &entries, const double *z,
 // errors of the true residual are checked: it stops as soon as both meet the
 // gate, after `budget` iterations, on a breakdown with no improvement, a
 // failed solve, or a restart cycle that did not improve the best iterate.
+// force_step (refine_core's growth-triggered safeguard): one iteration even
+// when the starting iterate already meets the target (counted, kept only if
+// it improves on the start).
 // An iterate whose ||x||inf exceeds kMaxGrowth times the reference
 // max(||x_start||inf, ||b||inf / ||A||inf) is never accepted: on a singular,
 // inconsistent system the least-squares iterates run off along the null
@@ -448,6 +451,7 @@ int fgmres_column(int n,
                   std::span<double> x_col,
                   int budget,
                   int restart,
+                  bool force_step,
                   SolveWorkspace &ws,
                   double &eta_out,
                   double &omega_out) {
@@ -460,7 +464,11 @@ int fgmres_column(int n,
         omega_out = inf;
         return 0;
     }
-    if (reached(eta_out, omega_out, omega_target(fkeep, solve_ctrl)) || budget <= 0) return 0;
+    if (budget <= 0) return 0;
+    // Forced from an iterate that already meets the target: one iteration,
+    // kept only if it improves on the start.
+    const bool forced_only = reached(eta_out, omega_out, omega_target(fkeep, solve_ctrl));
+    if (forced_only && !force_step) return 0;
 
     double x_ref = 0.0;
     for (double v : x_col) x_ref = std::max(x_ref, std::abs(v));
@@ -577,6 +585,10 @@ int fgmres_column(int n,
                     }
                 }
             }
+            if (forced_only) {
+                done = true;
+                break;
+            }
             if (hnext <= 0.0) break;  // breakdown: the Krylov space is invariant
             for (int i = 0; i < n; ++i) w[i] /= hnext;
         }
@@ -600,6 +612,7 @@ int fgmres_refine(int n,
                   std::span<double> x,
                   int nrhs,
                   int budget,
+                  bool force_step,
                   SolveWorkspace &ws,
                   double &eta_out,
                   double &omega_out) {
@@ -613,7 +626,7 @@ int fgmres_refine(int n,
         const int used = fgmres_column(n, entries, norm_A_inf, fkeep, solve_ctrl,
                                        b.subspan(off, static_cast<std::size_t>(n)),
                                        x.subspan(off, static_cast<std::size_t>(n)), budget,
-                                       solve_ctrl.fgmres_restart, ws, eta, omega);
+                                       solve_ctrl.fgmres_restart, force_step, ws, eta, omega);
         most = std::max(most, used);
         eta_out = std::max(eta_out, eta);
         omega_out = std::max(omega_out, omega);
@@ -687,8 +700,11 @@ RefinementResult refine_core(int n,
 
     double eta = inf;
     double omega = inf;
+    // The forced step: Auto's classical phase already took it (an escalation
+    // follows at least one step); Fgmres takes it here.
     const int used = fgmres_refine(n, entries, norm_A_inf, fkeep, solve_ctrl, b, x, nrhs,
-                                   total - classical_steps, ws, eta, omega);
+                                   total - classical_steps, force_step && classical_steps == 0,
+                                   ws, eta, omega);
     const bool qualified = std::isfinite(eta) && std::isfinite(omega) && meets_gate(eta, omega);
     RefinementResult rr{qualified ? ErrorCode::Success : ErrorCode::MaxIterations,
                         classical_steps + used, eta, omega};

@@ -124,11 +124,15 @@ constexpr double kStaticMaxGrowth = 1e10;
 // (no delays; a column with no threshold pivot is taken as the best 1x1, |d|
 // raised to kDelayBudgetStaticTol * max|A| if smaller) on the budget's fixed
 // partition. A pivot raised from an exact zero still counts as a zero
-// eigenvalue (hybrid accounting, as on fallback fronts).
+// eigenvalue (hybrid accounting, as on fallback fronts). Never on the legacy
+// tree_parallel engine, which ignores the delay budget (it would threshold-
+// pivot and delay while static_path reports otherwise): the default
+// subtree engine at the same num_threads.
 Control static_path_control(const Control &ctrl) {
   Control c = ctrl;
   c.delay_budget = 0;
   c.static_zero_stays_zero = true;
+  c.tree_parallel = false;
   return c;
 }
 

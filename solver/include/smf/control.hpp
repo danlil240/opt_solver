@@ -291,7 +291,10 @@ struct Control {
     // Experimental (no public contract yet): Pivoting::Static puts every
     // indefinite factorization on the static path above (FactorKeep::
     // static_path set, scale-on-delay disarmed). Threshold: as documented
-    // everywhere else.
+    // everywhere else. The static path (either knob) always runs on the
+    // default subtree engine: tree_parallel is ignored for it (the legacy
+    // engine has no delay budget), and the fallback is never armed there
+    // (scale-on-delay does not apply on it).
     Pivoting       pivoting = Pivoting::Threshold;
 
     // Pivoting

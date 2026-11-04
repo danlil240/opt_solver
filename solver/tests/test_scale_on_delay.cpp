@@ -1742,3 +1742,169 @@ TEST(StaticFallback, BackwardErrorTriggerRefinesGrowthWithoutPerturbation) {
     EXPECT_FALSE(refinement_advised(ft));
 }
 
+
+// The growth-triggered forced step (refine_growth_threshold) under every
+// refine_method: a high-growth static-path factor whose first solve already
+// meets the omega target still takes (and counts) at least one step with
+// Classical, Auto and Fgmres (Fgmres used to return before its first
+// iteration).
+TEST(StaticFallback, ForcedStepUnderEveryRefineMethod) {
+    const CscLower E = kkt(kG, kM, 4.1, 0.0);
+    Control ctrl = fallback_control();
+    ctrl.pivoting = Pivoting::Static;
+    ctrl.pivot_u = 0.4;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(E, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+    ASSERT_TRUE(fk.static_path);
+    const int n = static_cast<int>(E.n);
+    std::vector<double> b(static_cast<std::size_t>(n));
+    for (int k = 0; k < n; ++k) b[static_cast<std::size_t>(k)] = 1.0 + 0.01 * (k % 97);
+    std::vector<double> x0 = b;
+    Info si;
+    ASSERT_EQ(s.solve(fk, ctrl, si, x0.data(), n, 1), 0);
+    for (const RefineMethod m :
+         {RefineMethod::Classical, RefineMethod::Auto, RefineMethod::Fgmres}) {
+        Control c = ctrl;
+        c.refine_method = m;
+        c.refine_omega_target = 1.0;  // met before any step
+        c.refine_growth_threshold = 1.0;
+        ASSERT_GT(fk.pivot_growth, c.refine_growth_threshold);
+        std::vector<double> x = x0;
+        SolveWorkspace ws;
+        const RefinementResult rr = refine(E, fk, c, b, x, 1, ws);
+        std::printf("[StaticFallback] forced step, method %d: %d steps, omega %.3g -> %.3g\n",
+                    static_cast<int>(m), rr.iterations, rr.omega_start, rr.omega);
+        EXPECT_GE(rr.iterations, 1) << "method " << static_cast<int>(m);
+        EXPECT_EQ(rr.status, ErrorCode::Success) << "method " << static_cast<int>(m);
+        EXPECT_LE(rr.omega, rr.omega_start) << "method " << static_cast<int>(m);
+        if (m == RefineMethod::Fgmres) {
+            EXPECT_EQ(rr.method_used, RefineMethod::Fgmres);
+            EXPECT_EQ(rr.iterations, 1) << "one forced iteration from a converged start";
+        }
+        // Below the growth threshold: no step.
+        c.refine_growth_threshold = 2.0 * fk.pivot_growth;
+        std::vector<double> y = x0;
+        const RefinementResult r0 = refine(E, fk, c, b, y, 1, ws);
+        EXPECT_EQ(r0.iterations, 0) << "method " << static_cast<int>(m);
+        EXPECT_EQ(y, x0) << "method " << static_cast<int>(m);
+    }
+}
+
+namespace {
+
+// 3 x 3 tridiagonal [1e-12 1 0; 1 1 1; 0 1 1] (lower CSC): under the
+// identity order with no amalgamation every column is its own front, and the
+// first has a tiny diagonal and no 2x2 partner inside its front, so threshold
+// pivoting delays it and the static path perturbs it instead (raised to
+// 1e-8 * max|A|; an exact zero would stay a zero eigenvalue).
+CscLower tridiag3() {
+    CscLower A;
+    A.n = 3;
+    A.col_ptr = {0, 2, 4, 5};
+    A.row_idx = {0, 1, 1, 2, 2};
+    A.values = {1e-12, 1.0, 1.0, 1.0, 1.0};
+    return A;
+}
+
+Control tridiag3_control(const Int *perm) {
+    Control c = base_control();
+    c.ordering = OrderingMethod::UserSupplied;
+    c.user_perm = perm;
+    c.nemin = 1;
+    c.scaling = ScalingMethod::None;
+    c.num_threads = 2;
+    c.auto_threads = false;
+    return c;
+}
+
+} // namespace
+
+// Pivoting::Static with tree_parallel at num_threads > 1 (outside
+// deterministic mode) used to run the legacy task-parallel engine, which
+// ignores the delay budget: it threshold-pivoted (one delay, no
+// perturbation) while reporting static_fallback = 1 and static_path. The
+// static path now always runs on the default engine: the same factor as
+// without tree_parallel.
+TEST(StaticFallback, StaticPivotingIgnoresTreeParallel) {
+    const CscLower A = tridiag3();
+    const std::vector<Int> perm = {0, 1, 2};
+    Solver s;
+    // Reference: Pivoting::Static on the default engine.
+    Control ref_ctrl = tridiag3_control(perm.data());
+    ref_ctrl.pivoting = Pivoting::Static;
+    Info ia;
+    auto ak = s.analyse(A, ref_ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk_ref;
+    Info ir;
+    ASSERT_EQ(s.factor(*ak, ref_ctrl, ir, fk_ref), FactorStatus::Success);
+    std::printf("[StaticFallback] tridiag static default engine: perturbed %d delays %d\n",
+                ir.static_pivots, ir.delayed_pivots);
+    EXPECT_EQ(ir.delayed_pivots, 0);
+    EXPECT_EQ(ir.static_pivots, 1);
+    EXPECT_EQ(ir.static_fallback, 1);
+    EXPECT_TRUE(fk_ref.static_path);
+
+    // The repro is meaningful: threshold pivoting on the legacy engine delays.
+    Control tp = tridiag3_control(perm.data());
+    tp.tree_parallel = true;
+    if (!deterministic_mode(tp)) {
+        FactorKeep fk_thr;
+        Info it;
+        ASSERT_EQ(s.factor(*ak, tp, it, fk_thr), FactorStatus::Success);
+        std::printf("[StaticFallback] tridiag threshold tree_parallel: perturbed %d delays %d\n",
+                    it.static_pivots, it.delayed_pivots);
+        EXPECT_GE(it.delayed_pivots, 1);
+        EXPECT_EQ(it.static_pivots, 0);
+        EXPECT_FALSE(fk_thr.static_path);
+    }
+
+    // Pivoting::Static with tree_parallel: the static path, really.
+    tp.pivoting = Pivoting::Static;
+    FactorKeep fk;
+    Info i;
+    ASSERT_EQ(s.factor(*ak, tp, i, fk), FactorStatus::Success);
+    std::printf("[StaticFallback] tridiag static tree_parallel: perturbed %d delays %d\n",
+                i.static_pivots, i.delayed_pivots);
+    EXPECT_EQ(i.delayed_pivots, 0);
+    EXPECT_EQ(i.static_pivots, ir.static_pivots);
+    EXPECT_EQ(i.static_fallback, 1);
+    EXPECT_TRUE(fk.static_path);
+    EXPECT_EQ(i.num_positive, ir.num_positive);
+    EXPECT_EQ(i.num_negative, ir.num_negative);
+    EXPECT_EQ(i.num_zero, ir.num_zero);
+    EXPECT_EQ(fk.factor_values, fk_ref.factor_values);
+}
+
+// The static fallback (default off) is never armed on the legacy
+// tree_parallel engine (scale-on-delay does not apply there), so a cascading
+// sequence there reports no static-path factor: threshold pivoting, reported
+// as such.
+TEST(StaticFallback, FallbackNotArmedUnderTreeParallel) {
+    const CscLower A = static_ok_kkt();
+    Control ctrl = fallback_control();
+    ctrl.tree_parallel = true;
+    ctrl.num_threads = 2;
+    ctrl.auto_threads = false;  // small test trees
+    if (deterministic_mode(ctrl)) GTEST_SKIP() << "deterministic mode ignores tree_parallel";
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    for (int step = 0; step < 3; ++step) {
+        Info i;
+        ASSERT_EQ(s.factor(*ak, ctrl, i, fk), FactorStatus::Success);
+        EXPECT_EQ(i.static_fallback, 0) << "step " << step;
+        EXPECT_EQ(i.static_rejects, 0) << "step " << step;
+        EXPECT_EQ(i.delay_stops, 0) << "step " << step;
+        EXPECT_FALSE(fk.static_path) << "step " << step;
+        EXPECT_FALSE(fk.delay_static) << "step " << step;
+        EXPECT_GT(i.delayed_pivots, 0) << "the cascade, threshold-pivoted";
+    }
+}
