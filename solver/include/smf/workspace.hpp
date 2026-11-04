@@ -80,6 +80,7 @@ struct NumericWorkspace {
         double per_split_front_thread = 0.0;  ///< Control::thread_cost_per_split_front_thread
         int split_cap = 0;            ///< Control::thread_split_scaling_cap
         bool tiles_on = false;        ///< top_tiles_on(): which fronts are split
+        bool blas_parallel = false;   ///< plan_blas_parallel(): untiled fronts' BLAS threads
         int threads = 1;              ///< the plan
     };
     ThreadPlanCache thread_plan;

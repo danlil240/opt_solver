@@ -2,6 +2,7 @@
 
 #include "thread_plan.hpp"
 
+#include "smf/blas_thread_guard.hpp"
 #include "smf/ldlt_kernel.hpp"
 
 #include "smf/threading.hpp"
@@ -262,8 +263,13 @@ bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double 
          min_abs_pivot == 0.0 && ctrl.pivot_u >= kWeakPivotRatio;
 }
 
-TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &parent,
-                   std::vector<double> &work, std::vector<std::uint8_t> &split) {
+bool plan_blas_parallel(bool deterministic) {
+  return !deterministic && blas_max_threads() > 1;
+}
+
+TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
+                   std::vector<Int> &parent, std::vector<double> &work,
+                   std::vector<std::uint8_t> &split) {
   const std::size_t ns = keep.supernodes.size();
   parent.resize(ns);
   work.resize(ns);
@@ -274,7 +280,7 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
     parent[s] = keep.supernodes[s].parent;
     work[s] = fd * fd * static_cast<double>(keep.supernodes[s].width());
     split[s] = tiles_front(tiles_on, static_cast<int>(f)) ? kSplitTiles
-               : f >= kTopBlasMinFront                    ? kSplitBlas
+               : blas_parallel && f >= kTopBlasMinFront   ? kSplitBlas
                                                           : 0;
   }
   return TreeView{keep.postorder, parent, work, split};

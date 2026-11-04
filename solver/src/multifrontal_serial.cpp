@@ -1008,6 +1008,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
+  // The plan prices large untiled top fronts as BLAS-parallel only when
+  // their BLAS gets the threads (thread_plan.hpp kSplitBlas).
+  const bool blas_parallel = plan_blas_parallel(det);
   // Deterministic mode: the tile context of the fronts outside the top
   // phase (one thread, no helpers).
   const TileCtx serial_tc{};
@@ -1133,7 +1136,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // the tree (else num_threads); below 2, the serial engine. Deterministic
   // mode's results do not depend on it: every thread count tiles the same
   // fronts there. The plan depends on the tree, num_threads, the costs and
-  // the split fronts (tiles_on) alone: ws.thread_plan keeps it for the
+  // the split fronts (tiles_on, blas_parallel) alone: ws.thread_plan keeps it for the
   // refactorizations of this analysis.
   //
   // Without a delay budget the subtrees run as partition_tasks' tasks
@@ -1155,7 +1158,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const auto view = [&]() -> const TreeView & {
     if (!have_tv) {
       TreeParallelBuffers &b = buffers();
-      tv = tree_view(keep, tiles_on, b.view_parent, b.view_work, b.view_split);
+      tv = tree_view(keep, tiles_on, blas_parallel, b.view_parent, b.view_work, b.view_split);
     }
     have_tv = true;
     return tv;
@@ -1180,7 +1183,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.per_thread != thread_costs.per_thread ||
         pc.per_top_front != thread_costs.per_top_front ||
         pc.per_split_front_thread != thread_costs.per_split_front_thread ||
-        pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on) {
+        pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on ||
+        pc.blas_parallel != blas_parallel) {
       pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
@@ -1189,6 +1193,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pc.per_split_front_thread = thread_costs.per_split_front_thread;
       pc.split_cap = thread_costs.split_cap;
       pc.tiles_on = tiles_on;
+      pc.blas_parallel = blas_parallel;
     }
     want_threads = pc.threads;
   } else if (want_threads > 1 && plan_trace_enabled()) {

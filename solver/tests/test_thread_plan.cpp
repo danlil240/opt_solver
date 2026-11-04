@@ -4,8 +4,10 @@
 
 #include "parallel/thread_plan.hpp"
 #include "smf/analysis.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/determinism.hpp"
 #include "smf/info.hpp"
 #include "smf/solver.hpp"
 
@@ -201,7 +203,7 @@ TEST(ThreadPlan, PartitionCoversTree) {
     std::vector<Int> parent;
     std::vector<double> work;
     std::vector<std::uint8_t> split;
-    const TreeView t = tree_view(keep, /*tiles_on=*/true, parent, work, split);
+    const TreeView t = tree_view(keep, /*tiles_on=*/true, /*blas_parallel=*/true, parent, work, split);
     ASSERT_EQ(t.postorder.size(), ns);
     ASSERT_EQ(t.parent.size(), ns);
     double total = 0.0;
@@ -385,7 +387,7 @@ TEST(ThreadPlan, PartitionCountMatchesPartition) {
     std::vector<std::uint8_t> split;
 
     const TreeView views[] = {bal.view(), cat.view(), rooty.view(),
-                              tree_view(*ak, false, parent, work, split)};
+                              tree_view(*ak, false, true, parent, work, split)};
     for (std::size_t v = 0; v < std::size(views); ++v) {
         for (const int T : {1, 2, 3, 4, 8, 12, 16, 64}) {
             std::vector<std::uint8_t> top, ttop;
@@ -672,6 +674,99 @@ TEST(ThreadPlan, UntiledBlasFrontsShareThePath) {
         const ThreadPlan p = plan_threads(v, 8, ThreadCosts{});
         if (kind == kSplitBlas) EXPECT_EQ(p.threads, 8);
         std::printf("[ThreadPlan] untiled chain kind %d: %d threads\n", kind, p.threads);
+    }
+}
+
+// A root-heavy indefinite matrix: 64 independent 2D Laplacian blocks (20 x
+// 20 grid each), every block coupled to a dense 1100 x 1100 block that the
+// ordering puts last, so the tree is many light subtrees under one root
+// front of 1100+ rows. At pivot_u 1e-8 the top is not tiled.
+CscLower root_heavy_kkt()
+{
+    constexpr int kBlocks = 64, kG = 20, kDense = 1100;
+    const int nb = kG * kG, n = kBlocks * nb + kDense;
+    std::vector<std::vector<std::pair<Int, double>>> cols(static_cast<std::size_t>(n));
+    for (int b = 0; b < kBlocks; ++b) {
+        const int base = b * nb;
+        for (int y = 0; y < kG; ++y)
+            for (int x = 0; x < kG; ++x) {
+                const int j = base + y * kG + x;
+                auto &c = cols[static_cast<std::size_t>(j)];
+                c.push_back({j, 4.0});
+                if (x + 1 < kG) c.push_back({j + 1, -1.0});
+                if (y + 1 < kG) c.push_back({j + kG, -1.0});
+            }
+        // The block's last vertex couples to dense row b.
+        cols[static_cast<std::size_t>(base + nb - 1)].push_back({kBlocks * nb + b, -1.0});
+    }
+    for (int j = 0; j < kDense; ++j) {
+        auto &c = cols[static_cast<std::size_t>(kBlocks * nb + j)];
+        c.push_back({kBlocks * nb + j, j % 2 == 0 ? 2000.0 : -2000.0});
+        for (int i = j + 1; i < kDense; ++i) c.push_back({kBlocks * nb + i, 0.1});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (int j = 0; j < n; ++j) {
+        for (const auto &e : cols[static_cast<std::size_t>(j)]) {
+            A.row_idx.push_back(e.first);
+            A.values.push_back(e.second);
+        }
+        A.col_ptr[static_cast<std::size_t>(j) + 1] = static_cast<Int>(A.row_idx.size());
+    }
+    return A;
+}
+
+// Large untiled fronts are priced as BLAS-parallel only when their BLAS gets
+// the threads. In deterministic mode BLAS runs on one thread
+// (multifrontal_serial.cpp), so the plan keeps serial pricing: the thread
+// count of the view without kSplitBlas, as before kSplitBlas existed. Outside
+// it the pick follows the build's BLAS (plan_blas_parallel): BLAS-parallel
+// pricing with threaded MKL, serial pricing with sequential MKL (the plan
+// unchanged from main there).
+TEST(ThreadPlan, BlasPricingFollowsBlasThreads)
+{
+    const CscLower A = root_heavy_kkt();
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.ordering = OrderingMethod::AMD;
+    ctrl.pivot_u = 1e-8;
+    ctrl.num_threads = 8;
+    Solver solver;
+    Info ia;
+    auto ak = solver.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+
+    std::vector<Int> parent;
+    std::vector<double> work;
+    std::vector<std::uint8_t> split;
+    const ThreadCosts costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
+                            ctrl.thread_cost_per_split_front_thread, ctrl.thread_split_scaling_cap};
+    const int serial_pick =
+        plan_threads(tree_view(*ak, false, false, parent, work, split), 8, costs).threads;
+    std::size_t marked = 0;
+    const TreeView bv = tree_view(*ak, false, true, parent, work, split);
+    for (const auto x : bv.split) marked += x == kSplitBlas;
+    const int blas_pick = plan_threads(bv, 8, costs).threads;
+    std::printf("[ThreadPlan] root-heavy: %zu BLAS fronts, serial pricing %d threads, BLAS pricing %d\n",
+                marked, serial_pick, blas_pick);
+    ASSERT_GE(marked, 1u) << "premise: an untiled front of 1024+ rows";
+    ASSERT_NE(serial_pick, blas_pick) << "premise: the pricing decides the pick";
+
+    for (const bool det : {true, false}) {
+        Control c = ctrl;
+        c.deterministic = det;
+        Info i;
+        FactorKeep fk;
+        ASSERT_EQ(solver.factor(*ak, c, i, fk), FactorStatus::Success);
+        bool blas_threads = false;
+        {
+            BlasThreadGuard g(8);  // what the factor call holds
+            blas_threads = !deterministic_mode(c) && blas_max_threads() > 1;
+        }
+        EXPECT_EQ(plan_blas_parallel(deterministic_mode(c)), blas_threads);
+        const int want = blas_threads ? blas_pick : serial_pick;
+        EXPECT_EQ(i.threads_used, want) << "deterministic " << det;
     }
 }
 
