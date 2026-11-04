@@ -64,6 +64,28 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
                                    double *work, int first = 0);
 
+/// SPD front by LAPACK-style blocks (Control::posdef_front_kernel = Lapack):
+/// dpotrf on the leading num_elig x num_elig block, dtrsm for the rows below
+/// it, dsyrk for the Schur complement. BLAS / LAPACK run on the calling
+/// thread's BLAS thread count (the front's share).
+///
+/// F as ldlt_factor_front (f x f, leading dimension f, lower triangle). On
+/// return, with p = num_accepted:
+///  - p == num_elig: columns [0, p) hold the Cholesky factor L (A = L L^T;
+///    sqrt(d) on the diagonal, the rows below scaled by it), i.e. what
+///    ldlt_factor_front(prm.posdef) leaves after its D is folded into L
+///    (multifrontal_serial's SPD store), and the lower triangle of
+///    F[p:f, p:f] is the Schur complement;
+///  - p < num_elig: column p is the first one ldlt_factor_front(prm.posdef)
+///    would reject as well, up to rounding (its pivot not > 0 or not
+///    finite: dpotrf info = p + 1, or an infinite diagonal dpotrf took); the
+///    front is then left part-factored, as the caller fails with
+///    NotPositiveDefinite.
+/// tags[c] = 1 for c < p; inertia = (p, 0, 0) and flops count the pivots as
+/// ldlt_factor_front does. The strict upper triangle of F[0:p, 0:p] is not
+/// referenced.
+LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8_t *tags);
+
 /// A 1x1 pivot that passes the threshold test with |d| below this fraction
 /// of its column's largest off-diagonal entry is "weak": it puts entries
 /// above 1 / kWeakPivotRatio into L. The TPP and small-front kernels reject

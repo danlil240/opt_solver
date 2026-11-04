@@ -326,6 +326,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.parallel_subtrees = 0;
   info.top_part_fronts = 0;
   info.top_part_queue_pops = 0;
+  info.posdef_lapack_fronts = 0;
   info.threads_used = 1;
   info.subtree_seconds = 0.0;
   info.top_seconds = 0.0;
@@ -449,6 +450,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   const ErrorCode serr = multifrontal_factor_serial(
       keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
       0.0, 0.0, 0.0, 0.0, /*posdef=*/true, fkeep, ws, st);
+  info.posdef_lapack_fronts = st.posdef_lapack_fronts;
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);
 

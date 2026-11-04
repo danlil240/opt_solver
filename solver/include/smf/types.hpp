@@ -175,6 +175,21 @@ enum class FrontKernel {
     Auto = 2
 };
 
+// Front kernel of SPD fronts (Control::posdef_front_kernel), lean engine.
+//  Ldlt:   ldlt_factor_front with prm.posdef (in-order LDL^T, panel width
+//          Control::indef_panel_size, rank-nb updates), D folded into L
+//          afterwards (L = L_unit sqrt(D)).
+//  Lapack: dpotrf on the fully summed block, dtrsm for the rows below it and
+//          dsyrk for the contribution block (posdef_factor_front_lapack), on
+//          the fronts that would take ldlt_factor_front's blocked path
+//          (f >= LdltKernelParams::blocked_min_front); smaller fronts keep
+//          Ldlt. The same factor (L L^T), up to rounding. Deterministic mode
+//          (determinism.hpp) always uses Ldlt.
+enum class PosdefFrontKernel {
+    Ldlt   = 0,
+    Lapack = 1
+};
+
 enum class ScalingMethod {
     None         = 0,
     Equilibration = 1,

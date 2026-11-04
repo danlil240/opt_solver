@@ -700,6 +700,17 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // SMF_BENCH_POSDEF_FRONT_KERNEL = ldlt | lapack: Control::posdef_front_kernel
+    // (SPD fronts; Ldlt, Lapack). Anything else is an error (exit code 2).
+    if (const char *e = std::getenv("SMF_BENCH_POSDEF_FRONT_KERNEL")) {
+        const std::string k = e;
+        if (k == "ldlt") ctrl.posdef_front_kernel = smf::PosdefFrontKernel::Ldlt;
+        else if (k == "lapack") ctrl.posdef_front_kernel = smf::PosdefFrontKernel::Lapack;
+        else {
+            std::fprintf(stderr, "error: SMF_BENCH_POSDEF_FRONT_KERNEL=\"%s\" is not ldlt or lapack\n", e);
+            return 2;
+        }
+    }
     // SMF_BENCH_CANDIDATE_PARALLEL_ND = 0 | 1 (Control::candidate_parallel_nd).
     if (const char *e = std::getenv("SMF_BENCH_CANDIDATE_PARALLEL_ND")) ctrl.candidate_parallel_nd = std::atoi(e) != 0;
     // SMF_BENCH_MKL_BLOCKTIME = ms (Control::mkl_blocktime_ms; default 1, a

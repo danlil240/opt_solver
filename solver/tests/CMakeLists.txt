@@ -475,6 +475,10 @@ add_executable(test_ldlt_aptp test_ldlt_aptp.cpp)
 target_link_libraries(test_ldlt_aptp PRIVATE smf GTest::gtest_main)
 add_test(NAME LdltAptp COMMAND test_ldlt_aptp)
 
+add_executable(test_posdef_front_kernel test_posdef_front_kernel.cpp)
+target_link_libraries(test_posdef_front_kernel PRIVATE smf GTest::gtest_main)
+add_test(NAME PosdefFrontKernel COMMAND test_posdef_front_kernel)
+
 # --- Scale on delay (Control::scale_on_delay_ratio) ---
 
 add_executable(test_scale_on_delay

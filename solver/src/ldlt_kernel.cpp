@@ -701,4 +701,38 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
     return res;
 }
 
+LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8_t *tags) {
+    LdltKernelResult res;
+    const int p = num_elig;
+    if (p <= 0) return res;
+    const std::size_t sf = static_cast<std::size_t>(f);
+    // dpotrf stops at the first leading minor whose pivot is not > 0 (or is
+    // NaN); info = that column + 1. The columns before it are factored.
+    const int info = smf_dpotrf_lower(F, p, f);
+    int ok = info == 0 ? p : (info > 0 ? info - 1 : 0);
+    // ldlt_factor_front also rejects an infinite pivot, which dpotrf takes
+    // (sqrt(inf) = inf); the pivots before it are finite and positive.
+    for (int c = 0; c < ok; ++c) {
+        if (!is_finite_fast(F[static_cast<std::size_t>(c) * sf + c])) {
+            ok = c;
+            break;
+        }
+    }
+    for (int c = 0; c < ok; ++c) {
+        tags[c] = 1;
+        const double rem = static_cast<double>(f - (c + 1));
+        res.flops += rem + rem * (rem + 1.0);
+    }
+    res.inertia.positive = ok;
+    res.num_accepted = ok;
+    if (ok < p) return res;
+    const int q = f - p;
+    if (q > 0) {
+        // L21 = A21 L11^-T, then S = A22 - L21 L21^T (lower).
+        smf_dtrsm_right_lower_transpose(F + p, q, p, F, f, f);
+        smf_dsyrk_lower(F + static_cast<std::size_t>(p) * sf + p, q, F + p, p, f, f);
+    }
+    return res;
+}
+
 } // namespace smf
