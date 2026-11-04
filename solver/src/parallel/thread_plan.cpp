@@ -2,6 +2,7 @@
 
 #include "thread_plan.hpp"
 
+#include "smf/blas_thread_guard.hpp"
 #include "smf/ldlt_kernel.hpp"
 
 #include "smf/threading.hpp"
@@ -262,8 +263,13 @@ bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double 
          min_abs_pivot == 0.0 && ctrl.pivot_u >= kWeakPivotRatio;
 }
 
-TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &parent,
-                   std::vector<double> &work, std::vector<std::uint8_t> &split) {
+bool plan_blas_parallel(bool deterministic) {
+  return !deterministic && blas_max_threads() > 1;
+}
+
+TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
+                   std::vector<Int> &parent, std::vector<double> &work,
+                   std::vector<std::uint8_t> &split) {
   const std::size_t ns = keep.supernodes.size();
   parent.resize(ns);
   work.resize(ns);
@@ -273,7 +279,9 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
     const double fd = static_cast<double>(f);
     parent[s] = keep.supernodes[s].parent;
     work[s] = fd * fd * static_cast<double>(keep.supernodes[s].width());
-    split[s] = tiles_front(tiles_on, static_cast<int>(f)) ? 1 : 0;
+    split[s] = tiles_front(tiles_on, static_cast<int>(f)) ? kSplitTiles
+               : blas_parallel && f >= kTopBlasMinFront   ? kSplitBlas
+                                                          : 0;
   }
   return TreeView{keep.postorder, parent, work, split};
 }
@@ -373,10 +381,15 @@ void phase_terms(const TreeView &t, const SubtreeSums &u, double target, int thr
     if (sub[si] > target) {
       ++pt.pc.top;
       pt.top_total += t.work[si];
-      if (t.split[si] != 0) {
+      if (t.split[si] == kSplitTiles) {
         ++pt.split_top;
         pt.split_top_work += t.work[si];
       }
+      // On the heaviest path a tiled front and a large untiled one (its
+      // BLAS calls on every thread) both count work / T. Pricing the
+      // untiled ones as serial made cp_top grow with T as more of them moved
+      // into the top part: c-big ipopt (pivot_u 1e-8, no tiles) then picked
+      // 4 threads at 8, factor 1.36x slower than at 8.
       const double w = t.split[si] != 0 ? t.work[si] / threads : t.work[si];
       const double path = w + below[si];
       if (p >= 0) {

@@ -6,7 +6,8 @@
 // 1, one thread each) and a top part (phase 2, TopScheduler). The thread
 // count comes from a cost model of those two phases: each takes at least
 // its work / T and its longest serial chain (a subtree in phase 1, the
-// heaviest top path in phase 2, where fronts run as tile tasks count 1/T),
+// heaviest top path in phase 2, where fronts run as tile tasks or untiled
+// fronts of kTopBlasMinFront rows and more count 1/T),
 // plus a cost per thread and per top-part front. Work is f^2 p per front,
 // the unit of Info::predicted_flops.
 
@@ -49,13 +50,40 @@ struct TreeView {                       // one entry per supernode
   std::span<const Int> postorder;
   std::span<const Int> parent;          // -1: root
   std::span<const double> work;         // f^2 p
-  std::span<const std::uint8_t> split;  // 1: runs as tile tasks at > 1 thread
+  std::span<const std::uint8_t> split;  // kSplitTiles / kSplitBlas, else 0
 };
 
+// TreeView::split: the front runs as tile tasks at > 1 thread.
+inline constexpr std::uint8_t kSplitTiles = 1;
+// TreeView::split: a front of at least kTopBlasMinFront rows that is not
+// tiled (tiles off: weak pivot threshold, static or in-order pivoting,
+// positive definite), when BLAS runs on several threads (tree_view's
+// blas_parallel). It runs as one task with its BLAS share of the threads
+// (TopScheduler), all of them on the heaviest top path, where such fronts
+// follow one another near the root.
+inline constexpr std::uint8_t kSplitBlas = 2;
+// Untiled fronts from this many rows count as BLAS-parallel (kSplitBlas).
+// Smaller ones do not repay the threads: cops_elec_200 ipopt, one 600-row
+// root front, factors in 25 ms on 1 thread and 29 ms on 8 (12900K). From
+// 1024 rows: c-big, ncvxqp1/3, TSOPF_FS_b300_c2 ipopt move to 8 threads,
+// 0.91-0.98x wall at 8T; at 512 cops_elec_200 also moved, 1.17x.
+inline constexpr int kTopBlasMinFront = 1024;
+
 // The view of keep's assembly tree; fills the buffers it points into.
-// tiles_on: top_tiles_on(...) at more than one thread.
-TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &parent,
-                   std::vector<double> &work, std::vector<std::uint8_t> &split);
+// tiles_on: top_tiles_on(...) at more than one thread. blas_parallel: a top
+// front's BLAS calls run on its share of the threads (plan_blas_parallel);
+// false (deterministic mode, sequential MKL, a BLAS without threads) marks
+// no front kSplitBlas, so untiled fronts are priced serial.
+TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
+                   std::vector<Int> &parent, std::vector<double> &work,
+                   std::vector<std::uint8_t> &split);
+
+// Whether a factorization's top fronts get parallel BLAS: not in
+// deterministic mode (BLAS on one thread there, multifrontal_serial.cpp),
+// and only when the calling thread's BLAS has more than one thread
+// (blas_max_threads(): 1 with sequential MKL or without a threading API;
+// the call's CallBlasGuard sets it to num_threads otherwise).
+bool plan_blas_parallel(bool deterministic);
 
 // Subtree work of every node of a tree view, with each subtree's [first,
 // at] postorder range and the children lists: what the partitions and the
@@ -161,8 +189,8 @@ struct ThreadPlan {
 // with sub_total / max_subtree the work inside the subtrees / of the
 // heaviest task, top_total the top part's work, split_work that of its
 // tile-split fronts (which stop speeding up past split_cap threads),
-// cp_top(T) the heaviest path through top nodes only (split fronts' work /
-// T), top_fronts(T) the number of top nodes and split_fronts(T) of them
+// cp_top(T) the heaviest path through top nodes only (the work of split
+// fronts and of kSplitBlas fronts / T), top_fronts(T) the number of top nodes and split_fronts(T) of them
 // run as tile tasks.
 ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c);
 // The same with u = subtree_sums(t) (its scratch is used).
