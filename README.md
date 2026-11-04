@@ -60,25 +60,29 @@ To use smf from IPOPT, build the plugin and point IPOPT's `hsllib` option at `li
 
 ## Where it stands
 
-The reference board is the front-tier manifest: 140 case-tracks of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8).
+The reference board is the front-tier manifest: 144 case-tracks (78 matrices) of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8), so the headline geomeans below cover fewer than 144 case-tracks: per thread count, the 5 that smf fails and the cases where no rival is accurate drop out.
 
-Against the fastest accurate other solver on each case, smf scores **0.72 at 1 thread and 0.61 at 8 threads** (0.718 over 132 case-tracks and 0.611 over 125). That is the November 3-4 board on an i9-12900K, main with PR #36 (parallel nested dissection candidates). All four rivals (MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS) were rerun fresh in the same session as smf, with smf interleaved per case, threaded MKL, and 3 trials plus 1 warmup. SSIDS does not run on that machine. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
+Against the fastest accurate other solver on each case, smf scores **0.72 at 1 thread and 0.61 at 8 threads** (0.718 over 132 of the 144 case-tracks at 1 thread and 0.611 over 125 at 8 threads; the rest are the 5 smf fails plus 7 at 1 thread and 14 at 8 threads where no rival is accurate). That is the November 3-4 board on an i9-12900K, main with PR #36 (parallel nested dissection candidates). All four rivals (MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS) were rerun fresh in the same session as smf, with smf interleaved per case, threaded MKL, and 3 trials plus 1 warmup. SSIDS does not run on that machine. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
 
 **The earlier boards flattered smf.** The previous 12900K board (0.63 at 1 thread, 0.45 at 8 threads) ran MKL PARDISO in 1x1-only pivoting mode and MA57 with automatic scaling on the ipopt track. PR #34 fixed both. PARDISO now uses Bunch-Kaufman pivoting, perturbation 1e-8 and MKL's default parallel METIS ordering, and MA57 on the ipopt track uses IPOPT's own defaults (no automatic scaling). The scores of 0.63 and 0.45 should not be compared with the 0.72 and 0.61 above as a regression; the rivals are simply measured correctly now.
 
 Head to head at 1 thread (October 30 board, Ryzen), smf against each solver: MA57 0.60, MA97 0.62, MKL PARDISO 0.58, SSIDS 0.37, MUMPS 0.26. smf also solves more case-tracks accurately than any of them. The one pairing it still loses is MA27 on small KKT systems, where MA27's low overhead wins.
 
-smf fails only d_pretok (both tracks), turon_m (both tracks) and robot_arm_8k (recommended), and no other solver solves those accurately either. Accuracy on the board, as cells where every trial passed the gate (140 case-tracks per thread count in the score file):
+smf fails 5 of the 144 case-tracks at each thread count: d_pretok (both tracks), turon_m (both tracks) and robot_arm_8k (recommended). No other solver solves those 5 accurately either.
 
-| solver | accurate cells |
-|---|---:|
-| smf | 139 |
-| MA57 (1 thread only) | 117 |
-| MUMPS | 105 |
-| MA97 | 103 at 1 thread, 105 at 8 |
-| MKL PARDISO | 88 |
+Accuracy per thread count, counted on all 144 case-tracks of the board. A case-track counts as accurate for a solver when every measured trial (warmup excluded) passes the accuracy gate; a case-track a solver did not finish (timeout, out of memory, singular) counts as not accurate:
 
-21 cells are solved accurately only by smf, and 10 cells are solved by no solver. Inertia against the reference factorisation: smf 0 wrong and MUMPS 0, MA57 4 (1 thread), MA97 5 at 1 thread and 4 at 8, PARDISO 10 at each thread count. All the wrong ones were on inaccurate runs.
+| solver | accurate at 1 thread | accurate at 8 threads |
+|---|---:|---:|
+| smf | 139 / 144 | 139 / 144 |
+| MA57 (1 thread only) | 117 / 144 | not run |
+| MUMPS | 105 / 144 | 105 / 144 |
+| MA97 | 103 / 144 | 105 / 144 |
+| MKL PARDISO | 88 / 144 | 88 / 144 |
+
+Case-tracks that only smf solves accurately: 7 at 1 thread and 14 at 8 threads (21 in total over both thread counts; at 8 threads MA57 is not run, so more cases have no accurate rival). Case-tracks no solver solves accurately: 5 at each thread count (the 5 above).
+
+Inertia against the reference factorisation, as wrong counts per thread count: smf 0 and MUMPS 0 at both; MA57 4 (1 thread); MA97 5 at 1 thread and 4 at 8; PARDISO 10 at each. Every wrong inertia was on an inaccurate run.
 
 What changed since the November 3 board: PR #36 moves the 8-thread analysis of the matching-heavy cases (ncvxqp5 rec 8T 2.30x to 1.78x against PARDISO, c-big ipopt 8T wall 2807 to 1764 ms) and leaves the 1-thread numbers within 0.3%. Fill and accuracy are unchanged.
 
