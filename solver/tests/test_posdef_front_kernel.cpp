@@ -320,8 +320,10 @@ struct E2E {
     int pos = 0, neg = 0, zero = 0;
 };
 
-E2E run_e2e(const CscLower &A, MatrixType type, PosdefFrontKernel kernel, int threads) {
+E2E run_e2e(const CscLower &A, MatrixType type, PosdefFrontKernel kernel, int threads,
+            int lapack_min_front = 0) {
     Control ctrl;
+    if (lapack_min_front > 0) ctrl.posdef_lapack_min_front = lapack_min_front;
     ctrl.matrix_type = type;
     ctrl.num_threads = threads;
     ctrl.auto_threads = false;  // small test trees
@@ -462,5 +464,54 @@ TEST(PosdefFrontKernel, NotPositiveDefiniteAndIndefiniteFallback) {
             EXPECT_TRUE(il.factor == ip.factor);
             EXPECT_TRUE(il.x == ip.x);
         }
+    }
+}
+
+// Control::posdef_lapack_min_front: lower thresholds send smaller fronts
+// (including small-front-kernel sizes, p < f) to the Lapack kernel; the
+// solution matches the Ldlt kernel's, and a matrix that is not positive
+// definite fails the same way.
+TEST(PosdefFrontKernel, LapackMinFrontThreshold) {
+    const CscLower A = grid_3d(16, 0.0);
+    const CscLower B = grid_3d(20, 0.5);
+    for (const int threads : {1, 8}) {
+        const E2E ld = run_e2e(A, MatrixType::RealSymmetricPositiveDefinite,
+                               PosdefFrontKernel::Ldlt, threads);
+        ASSERT_EQ(ld.status, FactorStatus::Success);
+        int prev = -1;
+        for (const int thr : {96, 64, 48, 33, 32, 8, 1}) {
+            SCOPED_TRACE(std::string("threads=") + std::to_string(threads) +
+                         std::string(" min_front=") + std::to_string(thr));
+            const E2E lp = run_e2e(A, MatrixType::RealSymmetricPositiveDefinite,
+                                   PosdefFrontKernel::Lapack, threads, thr);
+            ASSERT_EQ(lp.status, FactorStatus::Success);
+            // Info's inertia as the Ldlt kernel reports it (the SPD engine's
+            // own convention; IpmSessionInertia checks (n, 0, 0)).
+            EXPECT_EQ(lp.pos, ld.pos);
+            EXPECT_EQ(lp.neg, ld.neg);
+            EXPECT_EQ(lp.zero, ld.zero);
+            EXPECT_LT(lp.resid, 1e-14);
+            if (threads == 1) EXPECT_GE(lp.lapack_fronts, prev);
+            prev = lp.lapack_fronts;
+            double xd = 0.0;
+            for (std::size_t i = 0; i < ld.x.size(); ++i)
+                xd = std::max(xd, std::abs(ld.x[i] - lp.x[i]) / std::max(1.0, std::abs(ld.x[i])));
+            EXPECT_LT(xd, 1e-11);
+            if (threads == 1) {
+                ASSERT_EQ(ld.factor.size(), lp.factor.size());
+                double fmax = 0.0, dmax = 0.0;
+                for (std::size_t i = 0; i < ld.factor.size(); ++i) {
+                    fmax = std::max(fmax, std::abs(ld.factor[i]));
+                    dmax = std::max(dmax, std::abs(ld.factor[i] - lp.factor[i]));
+                }
+                EXPECT_LT(dmax, 1e-12 * fmax);
+            }
+            const E2E bf = run_e2e(B, MatrixType::RealSymmetricPositiveDefinite,
+                                   PosdefFrontKernel::Lapack, threads, thr);
+            EXPECT_EQ(bf.status, FactorStatus::NotPositiveDefinite);
+            EXPECT_EQ(bf.info_status, ErrorCode::NotPositiveDefinite);
+        }
+        // Every front of the 1-thread run on the Lapack kernel at threshold 1.
+        if (threads == 1) EXPECT_GT(prev, 0);
     }
 }

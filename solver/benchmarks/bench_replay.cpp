@@ -700,6 +700,17 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // SMF_BENCH_POSDEF_LAPACK_MIN_F: Control::posdef_lapack_min_front.
+    // A positive integer; anything else is an error (exit code 2).
+    if (const char *e = std::getenv("SMF_BENCH_POSDEF_LAPACK_MIN_F")) {
+        char *end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end == e || *end != '\0' || v < 1 || v > 1000000) {
+            std::fprintf(stderr, "error: SMF_BENCH_POSDEF_LAPACK_MIN_F=\"%s\" is not a positive integer\n", e);
+            return 2;
+        }
+        ctrl.posdef_lapack_min_front = static_cast<int>(v);
+    }
     // SMF_BENCH_POSDEF_FRONT_KERNEL = ldlt | lapack: Control::posdef_front_kernel
     // (SPD fronts; Ldlt, Lapack). Anything else is an error (exit code 2).
     if (const char *e = std::getenv("SMF_BENCH_POSDEF_FRONT_KERNEL")) {

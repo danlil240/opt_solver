@@ -301,9 +301,9 @@ struct FactorContext {
   // The conditional early stop under the work limit (null: off).
   EarlyGate *early = nullptr;
   // Control::posdef_front_kernel = Lapack (SPD, not deterministic): fronts
-  // that would take ldlt_factor_front's blocked path go to
-  // posdef_factor_front_lapack instead.
-  bool posdef_lapack = false;
+  // of at least this many rows (Control::posdef_lapack_min_front) go to
+  // posdef_factor_front_lapack instead; 0 = off.
+  int posdef_lapack = 0;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -485,12 +485,14 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // child's block, Fa with leading dimension lda; otherwise Fa = F, lda = f.
   // Only where ldlt_factor_front would take its unblocked path, whose factor
   // ldlt_factor_small_front reproduces bit for bit.
-  const bool small = cx.small_fronts && f <= kSmallFrontMax && f < cx.prm.blocked_min_front &&
-                     cx.prm.nb > 1 && aprm == nullptr;
-  // SPD front on dpotrf + dtrsm + dsyrk (Control::posdef_front_kernel):
-  // where ldlt_factor_front would block; it leaves L L^T, not L and D.
-  const bool lapack_front = cx.posdef_lapack && !small && aprm == nullptr &&
-                            f >= cx.prm.blocked_min_front && cx.prm.nb > 1;
+  // SPD front on dpotrf + dtrsm + dsyrk (Control::posdef_front_kernel) on
+  // fronts of f >= Control::posdef_lapack_min_front (default 64; 96 is
+  // where ldlt_factor_front would block); it leaves L L^T, not L and D. It takes
+  // precedence over the small-front kernel.
+  const bool lapack_front = cx.posdef_lapack > 0 && aprm == nullptr &&
+                            f >= cx.posdef_lapack && cx.prm.nb > 1;
+  const bool small = !lapack_front && cx.small_fronts && f <= kSmallFrontMax &&
+                     f < cx.prm.blocked_min_front && cx.prm.nb > 1 && aprm == nullptr;
   int sb = -1;
   double *Fa = F;
   std::size_t lda = sf;
@@ -997,8 +999,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (det) enable_blas_reproducibility();
   // Control::posdef_front_kernel: deterministic mode keeps the Ldlt kernel,
   // so its factor stays the one every thread count reproduces.
-  const bool posdef_lapack =
-      posdef && !det && ctrl.posdef_front_kernel == PosdefFrontKernel::Lapack;
+  const int posdef_lapack =
+      posdef && !det && ctrl.posdef_front_kernel == PosdefFrontKernel::Lapack
+          ? std::max(1, ctrl.posdef_lapack_min_front)
+          : 0;
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
