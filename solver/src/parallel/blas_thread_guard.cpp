@@ -1,6 +1,8 @@
 #include "smf/blas_thread_guard.hpp"
 
 #include <atomic>
+#include <chrono>
+#include <limits>
 #include <mutex>
 
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
@@ -75,39 +77,63 @@ BlocktimeApi resolve_blocktime_api() noexcept {
 
 std::atomic<void (*)(int)> g_bt_set{nullptr};   // the real runtime, once found
 std::atomic<int (*)()> g_bt_get{nullptr};
-std::atomic<bool> g_bt_final{false};            // lookup found, or gave up
-std::atomic<bool> g_bt_hooked{false};           // test seam
+std::atomic<bool> g_bt_found{false};            // a hit is cached for good
+std::atomic<bool> g_bt_hooked{false};           // test seam: fake runtime
 std::atomic<void (*)(int)> g_hook_set{nullptr};
 std::atomic<int (*)()> g_hook_get{nullptr};
 std::atomic<long long> g_bt_applied{0};
+
+// A miss can mean "the threading layer is not loaded yet" (mkl_rt loads it
+// lazily; the plugin may probe early), so a miss is never final: the lookup
+// is retried, throttled to one attempt per interval per process. A hit is
+// cached forever. Time is a steady_clock tick count in an atomic; the thread
+// that wins the compare-exchange does the lookup, the others report "absent"
+// for this call.
+using Resolver = bool (*)(void (**set_fn)(int), int (**get_fn)());
+constexpr long long kRetryIntervalNs = 100LL * 1000 * 1000;   // ~100 ms
+std::atomic<Resolver> g_resolver{nullptr};                    // test seam: fake lookup
+std::atomic<long long> g_retry_ns{kRetryIntervalNs};
+std::atomic<long long> g_next_try_ns{std::numeric_limits<long long>::min()};   // never tried
+
+long long steady_now_ns() noexcept {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+BlocktimeApi run_lookup() noexcept {
+    if (const Resolver r = g_resolver.load(std::memory_order_acquire)) {
+        BlocktimeApi api;
+        if (r(&api.set_fn, &api.get_fn) && api) return api;
+        return {};
+    }
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
-// A miss can mean "MKL has not loaded its threading layer yet", so it is
-// retried for a while (the guard runs once per front) before it is cached as
-// final. A hit is cached at once.
-constexpr int kBlocktimeMaxMisses = 256;
-std::atomic<int> g_bt_misses{0};
+    return resolve_blocktime_api();
+#else
+    return {};
 #endif
+}
 
 BlocktimeApi blocktime_api() noexcept {
     if (g_bt_hooked.load(std::memory_order_acquire))
         return {g_hook_set.load(std::memory_order_relaxed), g_hook_get.load(std::memory_order_relaxed)};
-    if (g_bt_final.load(std::memory_order_acquire))
+    if (g_bt_found.load(std::memory_order_acquire))
         return {g_bt_set.load(std::memory_order_relaxed), g_bt_get.load(std::memory_order_relaxed)};
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
-    const BlocktimeApi api = resolve_blocktime_api();
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+    if (!g_resolver.load(std::memory_order_acquire)) return {};   // no MKL: nothing to find
+#endif
+    const long long now = steady_now_ns();
+    long long next = g_next_try_ns.load(std::memory_order_relaxed);
+    if (now < next) return {};   // throttled
+    if (!g_next_try_ns.compare_exchange_strong(next, now + g_retry_ns.load(std::memory_order_relaxed),
+                                               std::memory_order_relaxed))
+        return {};               // another thread is probing
+    const BlocktimeApi api = run_lookup();
     if (api) {
         g_bt_set.store(api.set_fn, std::memory_order_relaxed);
         g_bt_get.store(api.get_fn, std::memory_order_relaxed);
-        g_bt_final.store(true, std::memory_order_release);
-        return api;
+        g_bt_found.store(true, std::memory_order_release);
     }
-    if (g_bt_misses.fetch_add(1, std::memory_order_relaxed) + 1 >= kBlocktimeMaxMisses)
-        g_bt_final.store(true, std::memory_order_release);   // final: absent
-    return {};
-#else
-    g_bt_final.store(true, std::memory_order_release);        // final: absent
-    return {};
-#endif
+    return api;
 }
 
 std::mutex &blas_guard_mutex() {
@@ -207,6 +233,22 @@ void mkl_blocktime_set_hooks_for_test(void (*set_fn)(int), int (*get_fn)()) noex
 }
 
 void mkl_blocktime_reset_hooks_for_test() noexcept { g_bt_hooked.store(false, std::memory_order_release); }
+
+void mkl_blocktime_set_resolver_for_test(bool (*resolver)(void (**set_fn)(int), int (**get_fn)()),
+                                         int retry_interval_ms) noexcept {
+    g_resolver.store(resolver, std::memory_order_release);
+    g_retry_ns.store(static_cast<long long>(retry_interval_ms < 0 ? 0 : retry_interval_ms) * 1000000LL,
+                     std::memory_order_relaxed);
+    g_next_try_ns.store(std::numeric_limits<long long>::min(), std::memory_order_relaxed);
+    g_bt_found.store(false, std::memory_order_release);
+}
+
+void mkl_blocktime_reset_resolver_for_test() noexcept {
+    g_resolver.store(nullptr, std::memory_order_release);
+    g_retry_ns.store(kRetryIntervalNs, std::memory_order_relaxed);
+    g_next_try_ns.store(std::numeric_limits<long long>::min(), std::memory_order_relaxed);
+    g_bt_found.store(false, std::memory_order_release);
+}
 
 int blas_threads_active() noexcept { return g_active.load(std::memory_order_relaxed); }
 int blas_threads_peak() noexcept { return g_peak.load(std::memory_order_relaxed); }

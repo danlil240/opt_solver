@@ -50,6 +50,14 @@ long long mkl_blocktime_apply_count() noexcept;
 void mkl_blocktime_set_hooks_for_test(void (*set_fn)(int), int (*get_fn)()) noexcept;
 void mkl_blocktime_reset_hooks_for_test() noexcept;
 
+/// Test seam for the runtime lookup itself: replaces the "is libiomp5 loaded"
+/// probe with `resolver` (fills set_fn/get_fn, returns true on a hit) and sets
+/// the miss-retry throttle (default ~100 ms). Clears the cached result. A miss
+/// is never final: the lookup is retried, throttled; a hit is cached forever.
+void mkl_blocktime_set_resolver_for_test(bool (*resolver)(void (**set_fn)(int), int (**get_fn)()),
+                                         int retry_interval_ms) noexcept;
+void mkl_blocktime_reset_resolver_for_test() noexcept;
+
 /// RAII guard: sets BLAS thread count on construct, restores previous value on
 /// destruct.  Non-copyable. MKL: the calling thread's local setting
 /// (MKL_Set_Num_Threads_Local), restored to the previous local setting, so

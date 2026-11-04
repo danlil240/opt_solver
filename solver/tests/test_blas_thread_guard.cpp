@@ -17,7 +17,9 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <thread>
+#include <vector>
 
 // --------------------------------------------------------------------------
 // Helper: query current BLAS thread count using the same backend used by
@@ -186,6 +188,109 @@ TEST(BlasThreadGuardBlocktime, SetAndRestore) {
     EXPECT_EQ(inside, 1);
     EXPECT_EQ(after, 7);
     EXPECT_EQ(tl_fake_bt, 7);
+}
+
+// ---- Late-appearing runtime (the lookup is retried, a hit is cached) -------
+namespace {
+std::atomic<bool> g_rt_present{false};
+std::atomic<int> g_rt_lookups{0};
+bool fake_resolver(void (**set_fn)(int), int (**get_fn)()) {
+    g_rt_lookups.fetch_add(1);
+    if (!g_rt_present.load()) return false;
+    *set_fn = fake_set;
+    *get_fn = fake_get;
+    return true;
+}
+struct ResolverReset {
+    ~ResolverReset() { smf::mkl_blocktime_reset_resolver_for_test(); }
+};
+} // namespace
+
+// The runtime is missing at first (lazy threading layer, early probe), then
+// appears: the knob must start working without any restart.
+TEST(BlasThreadGuardBlocktime, LateRuntimeIsPickedUp) {
+    ResolverReset reset;
+    tl_fake_bt = 7;
+    g_rt_present = false;
+    g_rt_lookups = 0;
+    smf::mkl_blocktime_set_resolver_for_test(fake_resolver, 0);   // no throttle
+    const long long applied0 = smf::mkl_blocktime_apply_count();
+    EXPECT_FALSE(smf::mkl_blocktime_supported());
+    for (int i = 0; i < 1000; ++i) {                 // far past any fixed probe budget
+        smf::BlasThreadGuard g(2, 1);
+        EXPECT_EQ(tl_fake_bt, 7);
+    }
+    EXPECT_EQ(smf::mkl_blocktime_apply_count(), applied0);
+    EXPECT_GT(g_rt_lookups.load(), 256);
+    g_rt_present = true;                              // the runtime loads now
+    {
+        smf::BlasThreadGuard g(2, 1);
+        EXPECT_TRUE(smf::mkl_blocktime_supported());
+        EXPECT_EQ(tl_fake_bt, 1);
+    }
+    EXPECT_EQ(tl_fake_bt, 7);
+    EXPECT_GT(smf::mkl_blocktime_apply_count(), applied0);
+}
+
+// The miss retry is throttled: a long interval means one lookup, however
+// many calls; once the interval has passed the next call looks again.
+TEST(BlasThreadGuardBlocktime, MissRetryIsThrottled) {
+    ResolverReset reset;
+    tl_fake_bt = 7;
+    g_rt_present = false;
+    g_rt_lookups = 0;
+    smf::mkl_blocktime_set_resolver_for_test(fake_resolver, 60);
+    for (int i = 0; i < 1000; ++i) (void)smf::mkl_blocktime_supported();
+    EXPECT_EQ(g_rt_lookups.load(), 1);
+    g_rt_present = true;
+    EXPECT_FALSE(smf::mkl_blocktime_supported());     // still inside the interval
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    EXPECT_TRUE(smf::mkl_blocktime_supported());
+    EXPECT_EQ(g_rt_lookups.load(), 2);
+}
+
+// A hit is cached for good: no further lookups, even if the resolver would
+// now say "absent".
+TEST(BlasThreadGuardBlocktime, HitStaysCached) {
+    ResolverReset reset;
+    g_rt_present = true;
+    g_rt_lookups = 0;
+    smf::mkl_blocktime_set_resolver_for_test(fake_resolver, 0);
+    EXPECT_TRUE(smf::mkl_blocktime_supported());
+    EXPECT_EQ(g_rt_lookups.load(), 1);
+    g_rt_present = false;
+    for (int i = 0; i < 1000; ++i) EXPECT_TRUE(smf::mkl_blocktime_supported());
+    EXPECT_EQ(g_rt_lookups.load(), 1);
+}
+
+// Many threads missing at once: no crash or race, no knob applied; then all
+// of them see the hit once the runtime appears.
+TEST(BlasThreadGuardBlocktime, ConcurrentMissesAreSafe) {
+    ResolverReset reset;
+    g_rt_present = false;
+    g_rt_lookups = 0;
+    smf::mkl_blocktime_set_resolver_for_test(fake_resolver, 0);
+    const long long applied0 = smf::mkl_blocktime_apply_count();
+    std::atomic<bool> go{false}, appear{false};
+    std::atomic<int> bad{0};
+    std::vector<std::thread> ts;
+    for (int t = 0; t < 8; ++t)
+        ts.emplace_back([&] {
+            while (!go.load()) std::this_thread::yield();
+            for (int i = 0; i < 20000; ++i) {
+                if (smf::mkl_blocktime_get() != -1 && !appear.load()) ++bad;
+                if (smf::mkl_blocktime_supported() && !appear.load()) ++bad;
+            }
+        });
+    go = true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(smf::mkl_blocktime_apply_count(), applied0);
+    appear = true;
+    g_rt_present = true;
+    for (auto &th : ts) th.join();
+    EXPECT_EQ(bad.load(), 0);
+    EXPECT_GT(g_rt_lookups.load(), 0);
+    EXPECT_TRUE(smf::mkl_blocktime_supported());
 }
 
 // The real runtime (an MKL "intel" threading build with libiomp5 loaded);
