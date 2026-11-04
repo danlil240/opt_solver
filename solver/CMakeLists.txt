@@ -521,6 +521,7 @@ endif()
 # Required for linking smf into shared libraries (e.g. libsmf_ma97.so)
 set_property(TARGET smf PROPERTY POSITION_INDEPENDENT_CODE ON)
 
+target_link_libraries(smf PUBLIC ${CMAKE_DL_LIBS})  # dlopen(RTLD_NOLOAD) in blas_thread_guard
 target_link_libraries(smf PUBLIC
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}

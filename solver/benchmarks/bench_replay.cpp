@@ -702,6 +702,15 @@ int main(int argc, char **argv) {
     }
     // SMF_BENCH_CANDIDATE_PARALLEL_ND = 0 | 1 (Control::candidate_parallel_nd).
     if (const char *e = std::getenv("SMF_BENCH_CANDIDATE_PARALLEL_ND")) ctrl.candidate_parallel_nd = std::atoi(e) != 0;
+    // SMF_BENCH_MKL_BLOCKTIME = ms (Control::mkl_blocktime_ms; default 1, a
+    // negative value leaves the Intel runtime's own setting, which then
+    // follows KMP_BLOCKTIME: clear that variable in every A/B variant, a
+    // warning is printed when both are set).
+    if (const char *e = std::getenv("SMF_BENCH_MKL_BLOCKTIME")) {
+        ctrl.mkl_blocktime_ms = std::atoi(e);
+        if (std::getenv("KMP_BLOCKTIME"))
+            std::fprintf(stderr, "warning: SMF_BENCH_MKL_BLOCKTIME and KMP_BLOCKTIME are both set\n");
+    }
     // SMF_BENCH_AUTO_THREADS = 0 | 1 (Control::auto_threads).
     if (const char *e = std::getenv("SMF_BENCH_AUTO_THREADS")) ctrl.auto_threads = std::atoi(e) != 0;
     // SMF_BENCH_THREAD_COSTS = "per_thread,per_top_front" or "per_thread,

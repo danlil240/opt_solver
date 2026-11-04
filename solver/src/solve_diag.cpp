@@ -84,7 +84,8 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   fkeep.inv_diag_offset.resize(ns);
   fkeep.inv_diag.resize(static_cast<std::size_t>(total));
   const bool unit = !fkeep.is_posdef;
-  const BlasThreadGuard blas(deterministic_mode(ctrl) ? 1 : std::max(1, ctrl.num_threads));
+  const BlasThreadGuard blas(deterministic_mode(ctrl) ? 1 : std::max(1, ctrl.num_threads),
+                             ctrl.mkl_blocktime_ms);
   LongInt off = 0;
   for (std::size_t k = 0; k < ns; ++k) {
     const SolveStep &st = fkeep.solve_steps[k];

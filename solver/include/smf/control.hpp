@@ -500,6 +500,20 @@ struct Control {
     // out-of-range rows lead to out-of-bounds writes and may corrupt memory.
     bool           check_input   = true;
 
+    // Intel OpenMP runtime blocktime (KMP_BLOCKTIME) in ms for the threads
+    // that drive MKL's thread teams: set on every thread that runs a front
+    // under a BlasThreadGuard (pool workers, the calling thread) for the
+    // guard's lifetime, the previous value restored after. Negative: leave
+    // the runtime's own setting (KMP_BLOCKTIME or its default, 0 on the
+    // 12900K) alone. Default 1 ms: libiomp5's team sleeps between the
+    // hundreds of short MKL calls of a big front at 0 and wastes cores
+    // spinning at 200; 1 ms keeps it hot within a front only (8T front tier,
+    // 3 rounds: factor 0.98, wall 0.99 against unset; 1T unchanged). A no-op
+    // unless the Intel runtime (libiomp5md.dll / libiomp5.so, MKL "intel"
+    // threading) is already loaded; see blas_thread_guard.hpp. Never changes
+    // results, only wake-up latency.
+    int            mkl_blocktime_ms = 1;
+
     // Diagnostics / logging
     int            print_level   = 0;
 };
