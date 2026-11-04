@@ -69,6 +69,8 @@ smf also has an opt-in fast mode, `smf::Pivoting::Static`. It does PARDISO-like 
 - **The delay and scale-on-delay rescue is disabled.** There are no delays to rescue.
 - **Solves are refined when a pivot was forced.** Each static factor sets `FactorKeep::static_path`. If it forced or perturbed any pivot (`pivot_growth > 0` or `static_pivots > 0`), full solves through `Solver::factor_solve`, `IpmSession`, the C API and the plugin are refined to a componentwise backward error of 1e-10 (`Control::refine_omega_target`). A static factor that forced no pivot is a plain threshold factorization and is solved without refinement. After a plain `Solver::factor` and `Solver::solve`, call `smf::refine()` when `smf::refinement_advised(fkeep)` is true. (A forced step on high pivot growth, `Control::refine_growth_threshold`, is opt-in and off by default.)
 
+**Where to use it:** fast mode helps on systems where threshold pivoting cascades delays but static pivoting perturbs few or no pivots, such as pde_control-like PDE-constrained KKT systems. It does not help on PGLib OPF, COPS and other KKT systems with zero diagonal blocks: there it often comes out inaccurate or reports the wrong inertia. Use the default threshold mode for those.
+
 How to turn it on:
 
 | Interface | Setting |
