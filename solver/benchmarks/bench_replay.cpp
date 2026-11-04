@@ -984,6 +984,7 @@ int main(int argc, char **argv) {
         rec.delayed_pivots = st.delayed_pivots;
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.posdef_lapack_fronts = st.posdef_lapack_fronts;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = seq_delay_rescales;
             rec.delay_early_stops = seq_delay_early_stops;
@@ -1082,6 +1083,7 @@ int main(int argc, char **argv) {
         rec.delayed_pivots = st.delayed_pivots;
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.posdef_lapack_fronts = st.posdef_lapack_fronts;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = st.delay_rescales;
             rec.delay_early_stops = st.delay_early_stops;

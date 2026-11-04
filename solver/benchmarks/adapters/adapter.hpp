@@ -53,6 +53,7 @@ struct AdapterStats {
     std::uint64_t order_hash = 0;
     int static_pivots = 0;  // Info::static_pivots of the last factor (smf adapters)
     int aptp_failed_columns = 0;  // Info::aptp_failed_columns of the last factor (smf adapters)
+    int posdef_lapack_fronts = 0;  // Info::posdef_lapack_fronts of the last factor (smf adapters)
     int delay_rescales = 0;  // Info::delay_rescales of the last factor (smf adapters)
     int delay_early_stops = 0;  // Info::delay_early_stops of the last factor (smf adapters)
     double delay_try_ms = 0.0;       // Info::delay_try_seconds of the last factor, in ms (smf adapters)

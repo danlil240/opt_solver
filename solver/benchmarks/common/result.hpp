@@ -80,6 +80,7 @@ struct RunRecord {
     int inertia_zero = 0;
     int delayed_pivots = 0;
     int aptp_failed_columns = -1;  // smf only (Info::aptp_failed_columns); -1 = not reported
+    int posdef_lapack_fronts = -1; // smf only (Info::posdef_lapack_fronts); -1 = not reported
     int static_pivots = -1;        // smf only (Info::static_pivots); -1 = not reported
     // smf only: factorizations of the run whose scale-on-delay trigger
     // computed a matching scaling (Info::delay_rescales, summed over a

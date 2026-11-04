@@ -171,6 +171,7 @@ std::string RunRecord::to_json_line() const {
         << ",\"zero\":" << inertia_zero << "},"
         << "\"delayed_pivots\":" << delayed_pivots << ",";
     if (aptp_failed_columns >= 0) oss << "\"aptp_failed_columns\":" << aptp_failed_columns << ",";
+    if (posdef_lapack_fronts >= 0) oss << "\"posdef_lapack_fronts\":" << posdef_lapack_fronts << ",";
     if (static_pivots >= 0) oss << "\"static_pivots\":" << static_pivots << ",";
     if (delay_rescales >= 0) oss << "\"delay_rescales\":" << delay_rescales << ",";
     if (delay_early_stops >= 0) oss << "\"delay_early_stops\":" << delay_early_stops << ",";

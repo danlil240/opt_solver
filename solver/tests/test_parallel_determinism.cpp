@@ -536,9 +536,11 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
 }
 
 // Control::posdef_front_kernel = Lapack in deterministic mode: ignored (the
-// Ldlt kernel runs, no Lapack-path front), so the SPD factor and solutions at
-// every thread count are bit for bit the Ldlt kernel's 1-thread ones, as
-// BitwiseAcrossThreadCounts requires of the default.
+// Ldlt kernel runs, no Lapack-path front). The solutions at every thread
+// count are bit for bit the Ldlt kernel's 1-thread ones, as
+// BitwiseAcrossThreadCounts requires of the default. At one thread the
+// factor values are the Ldlt kernel's too (above, their storage order
+// depends on which thread gathered which subtree).
 TEST(ParallelDeterminism, PosdefLapackKnobKeepsDeterministicFactor) {
     DetCase ldlt{"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
                  true, false};
@@ -555,7 +557,8 @@ TEST(ParallelDeterminism, PosdefLapackKnobKeepsDeterministicFactor) {
             EXPECT_EQ(r.posdef_lapack_fronts, 0);
             const auto [dx, mx] = bit_diff(r.x, ref.x);
             const auto [dm, mm] = bit_diff(r.xm, ref.xm);
-            const auto [df, mf] = bit_diff(r.factor, ref.factor);
+            const auto [df, mf] =
+                threads == 1 ? bit_diff(r.factor, ref.factor) : std::pair<std::size_t, double>{0, 0.0};
             EXPECT_EQ(dx, 0u) << "max " << mx;
             EXPECT_EQ(dm, 0u) << "max " << mm;
             EXPECT_EQ(df, 0u) << "max " << mf;
