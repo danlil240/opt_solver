@@ -7,7 +7,7 @@ What it adds on top of that design:
 - An analysis that chooses between AMD and METIS nested dissection per matrix, with a parallel nested dissection for large SPD cases.
 - A matching trial during analysis that decides whether max-product matching scaling is worth its cost, and a scale-on-delay rescue that applies the scaling only when an unscaled factor delays too many pivots.
 - A cost-model amalgamation of the assembly tree.
-- Tree-level parallelism on a persistent worker pool, with tile tasks inside the largest fronts, and a deterministic mode that gives bitwise-identical factors at every thread count.
+- Tree-level parallelism on a persistent worker pool, with tile tasks inside the largest fronts, and a deterministic mode that gives bitwise-identical orderings, inertia, factors and solutions at every thread count. "Identical factors" means each supernode's block of L and D: the flat `FactorKeep::factor_values` buffer stores the blocks in an order that follows the tree partition, so its raw layout can differ between thread counts.
 - An interior-point mode (`smf::IpmSession`) that can reuse pivot sequences and the symbolic analysis across IPOPT iterations. Its features are built and gated but stay off by default.
 - A drop-in `libsmf_ma97` plugin that IPOPT loads in place of HSL MA97, an IPOPT `TSymLinearSolver` adapter and a C API.
 
@@ -86,9 +86,11 @@ The library itself reads no environment variables. Only the plugin and the harne
 
 The reference board is the front-tier manifest: 144 case-tracks (78 matrices) of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8), so the headline geomeans below cover fewer than 144 case-tracks: per thread count, the 5 that smf fails and the cases where no rival is accurate drop out.
 
-Against the fastest accurate other solver on each case, smf scores **0.72 at 1 thread and 0.61 at 8 threads** (0.718 over 132 of the 144 case-tracks at 1 thread and 0.611 over 125 at 8 threads; the rest are the 5 smf fails plus 7 at 1 thread and 14 at 8 threads where no rival is accurate). That is the November 3-4 board on an i9-12900K, main with PR #36 (parallel nested dissection candidates). All four rivals (MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS) were rerun fresh in the same session as smf, with smf interleaved per case, threaded MKL, and 3 trials plus 1 warmup. SSIDS does not run on that machine. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
+Against the fastest accurate other solver on each case, smf scores **0.68 at 1 thread and 0.56 at 8 threads**: 0.682 over 132 of the 144 case-tracks at 1 thread and 0.561 over 125 at 8 threads. The other case-tracks are the 5 smf fails, plus 7 at 1 thread and 14 at 8 threads where no rival is accurate.
 
-**The earlier boards flattered smf.** The previous 12900K board (0.63 at 1 thread, 0.45 at 8 threads) ran MKL PARDISO in 1x1-only pivoting mode and MA57 with automatic scaling on the ipopt track. PR #34 fixed both. PARDISO now uses Bunch-Kaufman pivoting, perturbation 1e-8 and MKL's default parallel METIS ordering, and MA57 on the ipopt track uses IPOPT's own defaults (no automatic scaling). The scores of 0.63 and 0.45 should not be compared with the 0.72 and 0.61 above as a regression; the rivals are simply measured correctly now.
+That is the November 5 board on an i9-12900K, main 8af054e. smf was measured fresh (3 trials plus 1 warmup, threaded MKL) against the rival records of the November 3-4 fair board, where all four rivals were rerun: MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS. SSIDS does not run on that machine. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
+
+**The earlier boards flattered smf.** The previous 12900K board (0.63 at 1 thread, 0.45 at 8 threads) ran MKL PARDISO in 1x1-only pivoting mode and MA57 with automatic scaling on the ipopt track. PR #34 fixed both. PARDISO now uses Bunch-Kaufman pivoting, perturbation 1e-8 and MKL's default parallel METIS ordering, and MA57 on the ipopt track uses IPOPT's own defaults (no automatic scaling). The scores of 0.63 and 0.45 should not be compared with the fair-board numbers (0.72 and 0.61 with PR #36, 0.68 and 0.56 now) as a regression; the rivals are simply measured correctly now.
 
 Head to head at 1 thread (October 30 board, Ryzen), smf against each solver: MA57 0.60, MA97 0.62, MKL PARDISO 0.58, SSIDS 0.37, MUMPS 0.26. smf also solves more case-tracks accurately than any of them. The one pairing it still loses is MA27 on small KKT systems, where MA27's low overhead wins.
 
@@ -108,12 +110,26 @@ Case-tracks that only smf solves accurately: 7 at 1 thread and 14 at 8 threads (
 
 Inertia against the reference factorisation, as wrong counts per thread count: smf 0 and MUMPS 0 at both; MA57 4 (1 thread); MA97 5 at 1 thread and 4 at 8; PARDISO 10 at each. Every wrong inertia was on an inaccurate run.
 
-What changed since the November 3 board: PR #36 moves the 8-thread analysis of the matching-heavy cases (ncvxqp5 rec 8T 2.30x to 1.78x against PARDISO, c-big ipopt 8T wall 2807 to 1764 ms) and leaves the 1-thread numbers within 0.3%. Fill and accuracy are unchanged.
+What changed since the November 3-4 fair board (PR #36, 0.718 / 0.611), measured against the same rival records:
 
-What still loses by more than 1.1x (fair board with PR #36):
+- PRs #37-#46 bring smf to 0.681 / 0.566: the skip-trial gate, SPD fronts on dpotrf, and the hybrid matcher switching to the auction after 4 passes.
+- Then three more PRs bring it to 0.682 / 0.561:
+  - #48 runs the top nested-dissection separators' METIS runs in parallel (8 threads: ncvxqp1/5 0.83-0.90x, nd24k 0.87x, cfd2 and bmwcra_1 0.93x wall).
+  - #49 makes the thread-count model price large untiled fronts with their BLAS threads.
+  - #47 adds the opt-in fast mode, which is off by default and not in these numbers.
+- smf's accuracy (139 of 144 per thread count) and inertia (0 wrong) are unchanged throughout.
 
-- **At 1 thread:** mainly matching overhead in the analysis against MA57 on small IPOPT KKTs: cops_pinene_400 (2.35x), darcy003 and mario002 (1.77-1.79x), blockqp1 (1.63x) and stokes128 (1.52x). Outside matching, pde_control_250 rec (1.64x against PARDISO) and ncvxqp9 rec (1.33x against MA97) lose on factor time.
-- **At 8 threads:** mainly factor speed against PARDISO: pde_control_250 and pde_control_120 rec (2.05x, 1.92x), G3_circuit (1.30x), bratu3d ipopt (1.25x) and acopf_grid_160 (1.19-1.21x). Matching still dominates ncvxqp5 (1.64-1.78x against PARDISO) and cops_pinene_400 ipopt (1.80x against MA97).
+What still loses by more than 1.1x (November 5 board):
+
+- **At 1 thread (8 case-tracks):**
+  - Analysis overhead against MA57 and MA97: blockqp1 (1.46x ipopt, 1.13x rec), cops_polygon_200 ipopt (1.22x), darcy003 and mario002 ipopt (1.13-1.14x).
+  - Factor time: ncvxqp9 rec (1.33x against MA97), pde_control_250 and pde_control_120 rec (1.29x and 1.13x against PARDISO).
+- **At 8 threads (11):** mainly factor speed against PARDISO:
+  - pde_control_120 and pde_control_250 rec (1.86x, 1.67x).
+  - acopf_grid_160 (1.17-1.22x) and acopf_grid_80 ipopt (1.13x).
+  - helm3d01 rec (1.21x), G3_circuit (1.18x), bratu3d ipopt (1.14x).
+  - ncvxqp9 rec (1.25x against MA97).
+  - Outside the factor: cfd2 (ordering, 1.26x) and ncvxqp5 rec (matching, 1.21x; it was 1.78x on the November 3-4 board).
 
 The hybrid matcher write-up is `docs/performance/2026-11-02-auction-matching.md`. The latest results are in `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival is in `docs/performance/2026-10-30-branches-and-scoreboard.md`.
 
