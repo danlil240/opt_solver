@@ -862,8 +862,12 @@ TEST(ParallelDeterminism, OneThreadIsOneBlasThread) {
 #if defined(SMF_EXPECT_THREADED_BLAS)
         // The caller's threaded BLAS does change these bits, so the equality
         // above is the guard's doing (without it, num_threads = 1 ran as
-        // num_threads = 0 does).
-        EXPECT_GT(inherit_diff, 0u) << "threaded BLAS gave serial bits: the test proves nothing";
+        // num_threads = 0 does). Not in deterministic mode (an
+        // SMF_DETERMINISTIC build): there num_threads = 0 also runs on 1 BLAS
+        // thread, so it matches serial and there is nothing to differ.
+        if (!deterministic_mode(Control{}))
+            EXPECT_GT(inherit_diff, 0u)
+                << "threaded BLAS gave serial bits: the test proves nothing";
 #endif
     }
 }
