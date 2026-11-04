@@ -700,6 +700,17 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    // SMF_BENCH_POSDEF_FRONT_KERNEL = ldlt | lapack: Control::posdef_front_kernel
+    // (SPD fronts; Ldlt, Lapack). Anything else is an error (exit code 2).
+    if (const char *e = std::getenv("SMF_BENCH_POSDEF_FRONT_KERNEL")) {
+        const std::string k = e;
+        if (k == "ldlt") ctrl.posdef_front_kernel = smf::PosdefFrontKernel::Ldlt;
+        else if (k == "lapack") ctrl.posdef_front_kernel = smf::PosdefFrontKernel::Lapack;
+        else {
+            std::fprintf(stderr, "error: SMF_BENCH_POSDEF_FRONT_KERNEL=\"%s\" is not ldlt or lapack\n", e);
+            return 2;
+        }
+    }
     // SMF_BENCH_CANDIDATE_PARALLEL_ND = 0 | 1 (Control::candidate_parallel_nd).
     if (const char *e = std::getenv("SMF_BENCH_CANDIDATE_PARALLEL_ND")) ctrl.candidate_parallel_nd = std::atoi(e) != 0;
     // SMF_BENCH_MKL_BLOCKTIME = ms (Control::mkl_blocktime_ms; default 1, a
@@ -973,6 +984,7 @@ int main(int argc, char **argv) {
         rec.delayed_pivots = st.delayed_pivots;
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.posdef_lapack_fronts = st.posdef_lapack_fronts;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = seq_delay_rescales;
             rec.delay_early_stops = seq_delay_early_stops;
@@ -1071,6 +1083,7 @@ int main(int argc, char **argv) {
         rec.delayed_pivots = st.delayed_pivots;
         if (solver_id == "smf") {
             rec.aptp_failed_columns = st.aptp_failed_columns;
+            rec.posdef_lapack_fronts = st.posdef_lapack_fronts;
             rec.static_pivots = st.static_pivots;
             rec.delay_rescales = st.delay_rescales;
             rec.delay_early_stops = st.delay_early_stops;

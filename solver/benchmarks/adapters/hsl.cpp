@@ -376,6 +376,7 @@ public:
         static_pivots_ = info.static_pivots;
         stats_.static_pivots = info.static_pivots;
         stats_.aptp_failed_columns = info.aptp_failed_columns;
+        stats_.posdef_lapack_fronts = info.posdef_lapack_fronts;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
         order_.add(fk_.analysis);
@@ -587,6 +588,7 @@ public:
         stats_.delayed_pivots = info.delayed_pivots;
         stats_.static_pivots = info.static_pivots;
         stats_.aptp_failed_columns = info.aptp_failed_columns;
+        stats_.posdef_lapack_fronts = info.posdef_lapack_fronts;
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
         stats_.skip_trial_rescues = info.skip_trial_rescues;

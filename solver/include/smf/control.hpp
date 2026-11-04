@@ -346,6 +346,12 @@ struct Control {
     int            aptp_nb       = 64;
     int            aptp_ib       = 32;
     int            aptp_min_elig = 0;
+    // Front kernel of SPD fronts (see PosdefFrontKernel): Lapack = dpotrf +
+    // dtrsm + dsyrk on fronts of >= 96 rows. Ignored in deterministic mode
+    // (Ldlt there) and by the legacy tree_parallel engine. Lapack measured
+    // (12900K, fronttier spd class, 2026-11-04) factor 0.896x at 1 thread,
+    // 0.840x at 8 (G3_circuit 0.78x, nd24k 0.56x), every case <= 1.003x.
+    PosdefFrontKernel posdef_front_kernel = PosdefFrontKernel::Lapack;
 
     // Factorization behaviour
     bool           continue_on_singular = false;

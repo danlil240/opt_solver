@@ -300,6 +300,10 @@ struct FactorContext {
   ChunkArena<Int> *root_rows = nullptr;
   // The conditional early stop under the work limit (null: off).
   EarlyGate *early = nullptr;
+  // Control::posdef_front_kernel = Lapack (SPD, not deterministic): fronts
+  // that would take ldlt_factor_front's blocked path go to
+  // posdef_factor_front_lapack instead.
+  bool posdef_lapack = false;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -483,6 +487,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // ldlt_factor_small_front reproduces bit for bit.
   const bool small = cx.small_fronts && f <= kSmallFrontMax && f < cx.prm.blocked_min_front &&
                      cx.prm.nb > 1 && aprm == nullptr;
+  // SPD front on dpotrf + dtrsm + dsyrk (Control::posdef_front_kernel):
+  // where ldlt_factor_front would block; it leaves L L^T, not L and D.
+  const bool lapack_front = cx.posdef_lapack && !small && aprm == nullptr &&
+                            f >= cx.prm.blocked_min_front && cx.prm.nb > 1;
   int sb = -1;
   double *Fa = F;
   std::size_t lda = sf;
@@ -655,6 +663,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       kr.flops += ar.flops;
     } else if (small) {
       kr = ldlt_factor_small_front(Fa, static_cast<int>(lda), f, num_elig, rows, *prm, tags);
+    } else if (lapack_front) {
+      kr = posdef_factor_front_lapack(F, f, num_elig, tags);
     } else {
       kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
     }
@@ -691,6 +701,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   }
   st.aptp_failed += aptp_failed;
   if (tiled) ++st.top_tile_fronts;
+  if (lapack_front) ++st.posdef_lapack_fronts;
   if (P.tiles != nullptr) P.growths += P.tiles->growths - tile_growths0;
   const int p = kr.num_accepted;
   if (budget_on && !is_root) bs->count += num_elig - p;
@@ -728,7 +739,11 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // read out first, then the strict upper part is zeroed and the unit (or,
   // for SPD, sqrt(d)) diagonal written.
   bool finite_d = true;
-  if (cx.posdef) {
+  if (cx.posdef && lapack_front) {
+    // posdef_factor_front_lapack left L L^T, the SPD store already.
+    for (int c = 0; c < p_store; ++c)
+      std::fill_n(F + static_cast<std::size_t>(c) * sf, c, 0.0);
+  } else if (cx.posdef) {
     for (int c = 0; c < p_store; ++c) {
       double *Lc = F + static_cast<std::size_t>(c) * sf;
       const double sd = std::sqrt(Lc[c]);
@@ -856,6 +871,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.aptp_failed += from.aptp_failed;
   to.budget_retries += from.budget_retries;
   to.top_tile_fronts += from.top_tile_fronts;
+  to.posdef_lapack_fronts += from.posdef_lapack_fronts;
   to.top_part_fronts += from.top_part_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
@@ -979,6 +995,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // kernel, the same one the 1-thread run uses (ruling R42).
   const bool det = deterministic_mode(ctrl);
   if (det) enable_blas_reproducibility();
+  // Control::posdef_front_kernel: deterministic mode keeps the Ldlt kernel,
+  // so its factor stays the one every thread count reproduces.
+  const bool posdef_lapack =
+      posdef && !det && ctrl.posdef_front_kernel == PosdefFrontKernel::Lapack;
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
@@ -1248,7 +1268,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
-                           nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr};
+                           nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
+                           posdef_lapack};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1318,7 +1339,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, tiles_on ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
-                           &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr};
+                           &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
+                           posdef_lapack};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

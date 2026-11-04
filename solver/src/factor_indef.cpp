@@ -359,6 +359,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.delay_budget_retries = 0;
   info.aptp_failed_columns = 0;
   info.top_tile_fronts = 0;
+  info.posdef_lapack_fronts = 0;
   info.top_part_fronts = 0;
   info.top_part_queue_pops = 0;
   info.threads_used = 1;

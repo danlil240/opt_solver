@@ -19,6 +19,7 @@ struct SerialFactorStats {
   int budget_retries = 0;  // fronts refactored static because they overshot Control::delay_budget
   int parallel_subtrees = 0;
   int top_tile_fronts = 0;  // fronts factored as 2D tile tasks (Control::top_tiles)
+  int posdef_lapack_fronts = 0;  // SPD fronts on dpotrf + dtrsm + dsyrk (Control::posdef_front_kernel)
   int top_part_fronts = 0;  // subtree engine: fronts of the top part factored (after the subtrees)
   // Subtree engine: top fronts taken from the scheduler's shared ready list;
   // the others were continued by the thread that factored their last child.

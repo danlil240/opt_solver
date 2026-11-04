@@ -133,6 +133,9 @@ struct Info {
     /// Fronts factored as 2D tile tasks at the top of the tree
     /// (Control::top_tiles).
     int          top_tile_fronts        = 0;
+    /// SPD fronts factored with dpotrf + dtrsm + dsyrk
+    /// (Control::posdef_front_kernel = Lapack); 0 with the Ldlt kernel.
+    int          posdef_lapack_fronts   = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0): fronts of the top
     /// of the tree factored, after the subtrees (also after a stop).
     int          top_part_fronts        = 0;

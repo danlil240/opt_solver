@@ -361,6 +361,7 @@ struct DetCase {
     bool expect_parallel;  // 8 threads take the tree-parallel path
     bool expect_tiles;     // 8 threads factor top fronts as tile tasks
     OrderingMethod ordering = OrderingMethod::AutoSerial;
+    PosdefFrontKernel posdef_kernel = PosdefFrontKernel::Ldlt;
 };
 
 struct DetRun {
@@ -372,6 +373,8 @@ struct DetRun {
     long long arena_blocks = 0;  // subtree roots' blocks put in the root arenas
     int ordering_used = 0;
     bool banded = false;  // the banded SPD fast path factored it
+    int posdef_lapack_fronts = 0;
+    std::vector<double> factor;  // FactorKeep::factor_values (postorder layout)
 };
 
 // caller_blas > 0: the BLAS threads of the caller of the nrhs > 1 solve
@@ -384,6 +387,7 @@ DetRun det_run(const DetCase &c, int threads, int caller_blas = 0, int blocktime
     ctrl.deterministic = true;
     ctrl.mkl_blocktime_ms = blocktime_ms;
     ctrl.ordering = c.ordering;
+    ctrl.posdef_front_kernel = c.posdef_kernel;
     // Cached L11^-1 (built at factor time) is part of what must reproduce.
     ctrl.cache_inverse_diag = true;
     // AutoParallel tries METIS only when AMD's flops times the refactors
@@ -428,6 +432,8 @@ DetRun det_run(const DetCase &c, int threads, int caller_blas = 0, int blocktime
     r.tiles = info.top_tile_fronts;
     r.ordering_used = info.ordering_used;
     r.banded = fk.use_banded_spd;
+    r.posdef_lapack_fronts = info.posdef_lapack_fronts;
+    r.factor = fk.factor_values;
     return r;
 }
 
@@ -527,6 +533,37 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
     std::printf("[BitwiseAcrossThreadCounts] MKL CNR branch %d (10 = AVX2, 2 = AUTO)\n",
                 blas_reproducibility_branch());
 #endif
+}
+
+// Control::posdef_front_kernel = Lapack in deterministic mode: ignored (the
+// Ldlt kernel runs, no Lapack-path front). The solutions at every thread
+// count are bit for bit the Ldlt kernel's 1-thread ones, as
+// BitwiseAcrossThreadCounts requires of the default. At one thread the
+// factor values are the Ldlt kernel's too (above, their storage order
+// depends on which thread gathered which subtree).
+TEST(ParallelDeterminism, PosdefLapackKnobKeepsDeterministicFactor) {
+    DetCase ldlt{"poisson_3d_26", grid_3d(26, 0.0), MatrixType::RealSymmetricPositiveDefinite,
+                 true, false};
+    DetCase lapack = ldlt;
+    lapack.name += "/Lapack";
+    lapack.posdef_kernel = PosdefFrontKernel::Lapack;
+    const DetRun ref = det_run(ldlt, 1);
+    ASSERT_FALSE(ref.x.empty());
+    ASSERT_FALSE(ref.factor.empty());
+    for (const int threads : {1, 2, 8, 16}) {
+        for (int run = 0; run < 3; ++run) {
+            SCOPED_TRACE(std::to_string(threads) + " threads, run " + std::to_string(run));
+            const DetRun r = det_run(lapack, threads);
+            EXPECT_EQ(r.posdef_lapack_fronts, 0);
+            const auto [dx, mx] = bit_diff(r.x, ref.x);
+            const auto [dm, mm] = bit_diff(r.xm, ref.xm);
+            const auto [df, mf] =
+                threads == 1 ? bit_diff(r.factor, ref.factor) : std::pair<std::size_t, double>{0, 0.0};
+            EXPECT_EQ(dx, 0u) << "max " << mx;
+            EXPECT_EQ(dm, 0u) << "max " << mm;
+            EXPECT_EQ(df, 0u) << "max " << mf;
+        }
+    }
 }
 
 // A pool thread that wakes late (by a scheduler quantum on a loaded
