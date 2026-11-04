@@ -280,7 +280,8 @@ std::uint64_t zero_signature(const std::vector<double> &cv) {
 // factorization runs as Auto resolves it, to the end, and later ones run
 // unarmed while the values' zero pattern stays the same. A first try let
 // through past Control::scale_on_delay_next_ratio leaves the next one to
-// run under that ratio as its limit. A first try under the full limit may
+// run under that ratio as its limit (Control::scale_on_delay_carry: rescaled
+// without a try, as after a limit trip). A first try under the full limit may
 // stop earlier, at the early ratio's crossing, when its inflation so far
 // projects past Control::scale_on_delay_early_proj (EarlyWorkStop); that
 // stop takes the limit trip's path. Only a factorization that ran to the
@@ -382,6 +383,11 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
     }
   } else if (first_try || !reuse_on) {
     if (first_try) {
+      // Control::scale_on_delay_carry: after a costly let-through (and while
+      // the next limit is on) no next try; the matching scaling of these
+      // values follows directly, as after a limit trip.
+      if (next && ctrl.scale_on_delay_carry && ctrl.scale_on_delay_next_ratio >= 0.0)
+        goto rescale;
       // First try: as Auto resolves it, under the work limit (the tighter
       // one after a costly factorization, Control::scale_on_delay_next_ratio).
       const double try_limit =
@@ -390,12 +396,16 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
               : limit;
       // Control::scale_on_delay_early_ratio: a try whose limit is above
       // the early ratio may stop at its crossing (EarlyWorkStop), as a
-      // limit trip. A next try (FactorKeep::delay_next) never does, whatever
-      // the next ratio.
+      // limit trip. A next try (FactorKeep::delay_next) uses
+      // Control::scale_on_delay_next_early_ratio instead (off by default).
       EarlyWorkStop early;
       if (!next && ctrl.scale_on_delay_early_ratio >= 0.0 &&
           try_limit > std::floor(ctrl.scale_on_delay_early_ratio * free_work))
         early = {free_work, ctrl.scale_on_delay_early_ratio, ctrl.scale_on_delay_early_proj};
+      if (next && ctrl.scale_on_delay_next_early_ratio >= 0.0 &&
+          try_limit > std::floor(ctrl.scale_on_delay_next_early_ratio * free_work))
+        early = {free_work, ctrl.scale_on_delay_next_early_ratio,
+                 ctrl.scale_on_delay_next_early_proj};
       const FactorStatus st = run(ak, ctrl, try_limit, early);
       if (st != FactorStatus::MaxPivotDelays) {
         // Let through, but costly: the next one runs under the tighter limit.
@@ -424,6 +434,7 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
       if (early.on() && info.front_work <= try_limit) info.delay_early_stops = 1;
     }
   }
+rescale:
   // A new matching scaling of these values.
   get_values();
   const auto t0 = now();

@@ -182,7 +182,8 @@ struct Control {
     // the delay-free work before it stops (pde_control_250 on the cost-model
     // tree: 1.4 s, against a 0.1 s factorization). A one-off spike
     // (cops_elec_200: 2.2, 8.5, 2.2) passes the tighter limit unscaled and
-    // pays no matching. Not after a factor with the analysed values' own
+    // pays no matching (with scale_on_delay_carry off; on, the next one is
+    // rescaled without a try). Not after a factor with the analysed values' own
     // matching scale (a new one would be the same). Negative: off.
     double         scale_on_delay_next_ratio = 4.0;
     // Conditional early stop of a first try whose limit is above
@@ -216,6 +217,35 @@ struct Control {
     // Negative early_ratio: off.
     double         scale_on_delay_early_ratio = 4.0;
     double         scale_on_delay_early_proj = 8.0;
+    // The same conditional early stop on a next try (the one under
+    // scale_on_delay_next_ratio after a costly let-through), at its own
+    // crossing ratio and projection; only used with scale_on_delay_carry
+    // off (a carried rescale runs no next try). Negative ratio: a next try
+    // runs to its limit. Gated (2026-11-04, ratio 2, proj 4) and left off:
+    // carry won every cell it changed.
+    double         scale_on_delay_next_early_ratio = -1.0;
+    double         scale_on_delay_next_early_proj = 4.0;
+    // Carry the rescale forward: the factorization after a costly
+    // let-through (the one that would run under scale_on_delay_next_ratio)
+    // skips its unscaled try and starts from the matching scaling of its
+    // own values, as after a limit trip; later ones go on from that kept
+    // scale (scale_on_delay_reuse_tol) and never return to unscaled tries
+    // for that analysis and FactorKeep. A sequence that never lets a factor
+    // through past scale_on_delay_next_ratio is untouched. On the front
+    // tier every next try tripped its limit (pglib case300 at 4.0x, cops
+    // rocket 4.3x, pde_control_250 4.2x at 1T / 5.8x at 8T: a second
+    // cascade before the matching). i9-12900K A/B (warm sequences, 3
+    // rounds): pde_control_250 rec wall 0.78 (1T) / 0.87 (8T), case300 rec
+    // 0.92 / 0.94, rocket 0.96 / 0.98, no outcome, inertia, rescale-count or
+    // delay changes. Caveat: a costly let-through followed by values that
+    // factor cheaply unscaled (cops_elec_200 once measured 2.2, 8.5, 2.2)
+    // now pays a matching and a probe instead of the cheap try; elec_200
+    // no longer lets a factor through past 4x (2.4x). The let-through test
+    // reads the realized front work, which can differ with the thread
+    // count outside deterministic mode, so near the next ratio one thread
+    // count may carry and another not (before, only the next limit
+    // differed). Needs scale_on_delay_next_ratio >= 0. False: the next try.
+    bool           scale_on_delay_carry = true;
     // Fit test of a kept scale s on new values: the 90th percentile over
     // rows of |log10 max_j |s_i a_ij s_j|| (0 for the values' own matching
     // scaling, whose rows all peak at exactly 1) may be at most this:
