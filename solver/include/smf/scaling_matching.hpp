@@ -69,19 +69,24 @@ struct AuctionOptions {
     /// (1 pass = 2 x the lower triangle's entries), past which the auction
     /// takes the free columns left. Checked between searches on the work
     /// alone (work() > switch_passes x pass), so the switch point does not
-    /// depend on how advance() is budgeted. 40 (the hybrid probe, rule w40,
-    /// eps_start 0.1, 50 matrices on the 12900K; write-up "The probe"):
-    /// every matrix <= 1.5x the Degree ShortestPath edges, total 0.74x edges
-    /// and 0.68x ms, ncvxqp3 0.35x, ncvxqp7 0.51x, the same optimum
-    /// everywhere. An earlier switch pays the auction's fixed passes on
-    /// matrices the searches finish quickly (pglib_opf_case300_ieee: 13.4
-    /// passes plain, 17.8 at w5, none at w20+).
-    double switch_passes = 40.0;
+    /// depend on how advance() is budgeted. 4 (2026-11-04 sweep of
+    /// {40, 16, 8, 4} on the front tier, 12900K, 1T and 8T, both tracks,
+    /// after the canonical duals): wall geomean 0.988 (1T) / 0.985 (8T),
+    /// hard_indef 0.976-0.965, no case above 1.10 after rechecks, no
+    /// outcome or inertia change; only cvxqp3 and ncvxqp1/3/7 change their
+    /// ordering, ncvxqp5 switches with the same one (8T 0.75x). The
+    /// earlier 40 came from the hybrid probe (rule w40, before the
+    /// canonical duals; write-up "The probe"), which counted matcher edges
+    /// alone: an early switch pays the auction's fixed passes on matrices
+    /// the searches finish quickly (pglib_opf_case300_ieee: 13.4 passes
+    /// plain, 17.8 at w5), which the front-tier wall geomean does not show.
+    double switch_passes = 4.0;
 };
 /// The Hybrid defaults (SymmetricMatcher with MatchingAlgorithm::Hybrid and
 /// auction == nullptr): eps_factor 10, eps_final 1e-2, eps_start 0.1,
-/// switch_passes 40, bid_cap 50 (the auction settings of the probe's w40
-/// run; docs/performance/2026-11-02-auction-matching.md, "The probe").
+/// switch_passes 4, bid_cap 50 (the auction settings of the probe's w40
+/// run, docs/performance/2026-11-02-auction-matching.md, "The probe", with
+/// the switch moved to 4 passes by the 2026-11-04 sweep).
 AuctionOptions hybrid_auction_options();
 // SymmetricMatcher validates its AuctionOptions under Hybrid: a field that
 // is not finite or outside its domain (eps_factor <= 1, eps_final <= 0,
