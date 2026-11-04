@@ -325,10 +325,9 @@ TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
     // through. The rescued factor is cheaper than the one let through (so
     // are the later factorizations that reuse its scale), but the stopped
     // try makes this factor() cost more work than letting it through. With
-    // the early stop off the 9.96x factor arms the next limit (4x), whose try
-    // stops and rescales the next factor() anyway; with it on the next one
-    // reuses the kept scale: over two factorizations about 19.7 F against
-    // 21.7 F.
+    // the early stop off the 9.96x factor arms the next limit, and the next
+    // factor() is rescaled without a try (Control::scale_on_delay_carry);
+    // with it on the next one reuses the kept scale.
     EXPECT_LT(i_d.front_work, i_off.front_work);
     EXPECT_GT(i_try.front_work + i_d.front_work, i_off.front_work);
     Info i_d2, i_2;
@@ -336,7 +335,9 @@ TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
     EXPECT_EQ(i_d2.delay_stops, 0);
     EXPECT_EQ(i_d2.delay_rescales, 0);
     ASSERT_EQ(s.factor(*ak, ctrl, i_2, fk), FactorStatus::Success);  // early stop off
-    EXPECT_EQ(i_2.delay_stops, 1);
+    ASSERT_TRUE(ctrl.scale_on_delay_carry);
+    EXPECT_EQ(i_2.delay_stops, 0);
+    EXPECT_EQ(i_2.delay_try_seconds, 0.0);
     EXPECT_EQ(i_2.delay_early_stops, 0);
     EXPECT_EQ(i_2.delay_rescales, 1);
     EXPECT_EQ(i_2.front_work, i_d2.front_work);
@@ -982,6 +983,32 @@ TEST(ScaleOnDelay, CarryRescalesAfterACostlyLetThrough) {
         EXPECT_EQ(i2.num_positive, kG * kG);
         EXPECT_EQ(i2.num_negative, kM);
         expect_accurate_solve(s, fk, ctrl, A1);
+
+        // The next one goes on from the kept scale, never an unscaled try.
+        Info i3;
+        ASSERT_EQ(s.factor(*ak, A1, ctrl, i3, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i3.delay_stops, 0);
+        EXPECT_EQ(i3.scaling_used, static_cast<int>(ScalingMethod::Matching));
+        EXPECT_EQ(fk.delay_analysis, ak->serial);
+        expect_accurate_solve(s, fk, ctrl, A1);
+    }
+    {
+        // Without the next limit there is no carry: a plain first try.
+        Control c = ctrl;
+        Info info;
+        auto ak = s.analyse(A, c, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace ws;
+        FactorKeep fk;
+        Info i1;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, i1, fk, ws),
+                  FactorStatus::Success);
+        ASSERT_TRUE(fk.delay_next);
+        c.scale_on_delay_next_ratio = -1.0;
+        Info i2;
+        ASSERT_EQ(s.factor(*ak, A1, c, i2, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(i2.delay_rescales, 0);
+        EXPECT_EQ(i2.scaling_used, static_cast<int>(ScalingMethod::None));
     }
     {
         // Cheap factorizations never arm the carry.
