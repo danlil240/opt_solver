@@ -540,7 +540,7 @@ TEST(AuctionMatching, HybridEmptyAndTiny) {
 
 // Invalid options fall back to the Hybrid defaults (the public boundary
 // validates them): the auction fields under a forced switch give the forced
-// switch's run bitwise, and an invalid switch_passes the default run (40
+// switch's run bitwise, and an invalid switch_passes the default run (4
 // passes). Out of range but valid ones are clamped and still reach the
 // optimum.
 TEST(AuctionMatching, HybridInvalidOptionsFallBackToDefaults) {
@@ -563,7 +563,7 @@ TEST(AuctionMatching, HybridInvalidOptionsFallBackToDefaults) {
         SCOPED_TRACE("bad " + std::to_string(b));
         expect_bitwise(run_hybrid(A, &bad[b]), ref);
     }
-    // switch_passes falls back to 40: the default run (no switch here).
+    // switch_passes falls back to 4: the default run (no switch here).
     SymmetricMatcher def(A, MatchingSearchOrder::Degree, MatchingAlgorithm::Hybrid);
     ASSERT_TRUE(def.advance());
     ASSERT_FALSE(def.switched());
@@ -596,7 +596,7 @@ TEST(AuctionMatching, HybridDefaults) {
     EXPECT_EQ(h.eps_factor, 10.0);
     EXPECT_EQ(h.eps_final, 1e-2);
     EXPECT_EQ(h.eps_start, 0.1);
-    EXPECT_EQ(h.switch_passes, 40.0);
+    EXPECT_EQ(h.switch_passes, 4.0);
     // Hybrid is the library default (analyse()'s matching trial).
     EXPECT_EQ(Control{}.matching_algorithm, MatchingAlgorithm::Hybrid);
     // The struct's own defaults are the kernel's (eps_start 0: max cost /
@@ -699,7 +699,7 @@ TEST(AuctionMatching, HybridCanonicalDualsMatchShortestPathScale) {
 }
 
 // Below the switch point Hybrid is the Degree ShortestPath matcher bitwise:
-// the default 40 passes is never reached on these KKTs (each finishes in
+// the default 4 passes is never reached on these KKTs (each finishes in
 // under a pass), nor is a switch point just above the run's own work.
 TEST(AuctionMatching, HybridBitwiseWhenTheSwitchDoesNotFire) {
     std::vector<CscLower> cases;

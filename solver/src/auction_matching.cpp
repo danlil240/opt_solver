@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <vector>
 
 namespace smf::detail {
@@ -191,12 +192,35 @@ namespace smf {
 
 // The hybrid probe's auction settings (the w40 run; docs/performance/
 // 2026-11-02-auction-matching.md, "The probe"), the Hybrid defaults;
-// switch_passes keeps the struct's 40 and bid_cap its 50.
+// switch_passes keeps the struct's 4 and bid_cap its 50.
 AuctionOptions hybrid_auction_options() {
     AuctionOptions o;
     o.eps_factor = 10.0;
     o.eps_final = 1e-2;
     o.eps_start = 0.1;
+    // SMF_BENCH_HYBRID_SWITCH_PASSES = <passes>: benchmark sweeps of the
+    // switch point from one binary (read once per process; a value that is
+    // not a whole finite number >= 0 is ignored). It changes the matching in
+    // every consumer of the library, so it must not be set outside
+    // benchmarks (AuctionMatching.HybridDefaults fails under it).
+    static const double env_switch = [] {
+        const auto parse = [](const char *e) {
+            if (e == nullptr || *e == '\0') return -1.0;
+            char *end = nullptr;
+            const double v = std::strtod(e, &end);
+            return end != nullptr && *end == '\0' ? v : -1.0;
+        };
+#if defined(_MSC_VER)
+        char *e = nullptr;
+        std::size_t len = 0;
+        const double v = _dupenv_s(&e, &len, "SMF_BENCH_HYBRID_SWITCH_PASSES") == 0 ? parse(e) : -1.0;
+        std::free(e);
+        return v;
+#else
+        return parse(std::getenv("SMF_BENCH_HYBRID_SWITCH_PASSES"));
+#endif
+    }();
+    if (std::isfinite(env_switch) && env_switch >= 0.0) o.switch_passes = env_switch;
     return o;
 }
 

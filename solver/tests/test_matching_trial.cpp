@@ -564,13 +564,14 @@ void expect_same_verdict(const AnalysisKeep &a, const Info &ia, const AnalysisKe
 } // namespace
 
 // Control::matching_algorithm = Hybrid runs the trial's searches under the
-// hybrid engine. It switches to the auction only past 40 passes of search
+// hybrid engine. It switches to the auction only past 4 passes of search
 // work (AuctionOptions::switch_passes) and is ShortestPath bitwise before
-// that; the default budget (2 passes) pauses far earlier, so no verdict can
-// move. On matrices whose searches stay below 40 passes the whole analysis
-// is bitwise ShortestPath's. On two that switch inside analyse()
+// that; the default budget (2 passes) pauses earlier, so no verdict can
+// move. On matrices whose searches stay below 4 passes the whole analysis
+// is bitwise ShortestPath's. On three that switch inside analyse()
 // (opf_like_kkt(20000, 18000, 1): 43.9 passes, full rank; opf_like_kkt(10000,
-// 9200, 3): 44.7 passes, structurally singular) the verdict is the same and
+// 9200, 3): 44.7 passes, structurally singular; opf_like_kkt(6000, 5000, 7):
+// past 4 passes, quiet under the earlier 40-pass default) the verdict is the same and
 // the matching is again a maximum-product one (same status, same log
 // product); when the standalone matchers also give the same matching and
 // scale, the analysis is bitwise ShortestPath's (otherwise the max-product
@@ -578,7 +579,7 @@ void expect_same_verdict(const AnalysisKeep &a, const Info &ia, const AnalysisKe
 TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
     const double budgets[] = {-1.0, 0.0, Control{}.matching_search_budget};
     const CscLower quiet[] = {scaled_opf_kkt(3000, 1200, 1, 4.0), opf_like_kkt(10000, 1000, 7),
-                              opf_like_kkt(6000, 5000, 7), diagonal_kkt(10000, 3)};
+                              diagonal_kkt(10000, 3)};
     int k = 0;
     for (const CscLower &A : quiet) {
         for (double budget : budgets) {
@@ -600,7 +601,8 @@ TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
         ++k;
     }
 
-    const CscLower switching[] = {opf_like_kkt(20000, 18000, 1), opf_like_kkt(10000, 9200, 3)};
+    const CscLower switching[] = {opf_like_kkt(20000, 18000, 1), opf_like_kkt(10000, 9200, 3),
+                                  opf_like_kkt(6000, 5000, 7)};
     int switched = 0, success = 0, same = 0;
     k = 0;
     for (const CscLower &A : switching) {
@@ -663,8 +665,8 @@ TEST(MatchingTrial, HybridTrialKeepsVerdicts) {
         }
         ++k;
     }
-    EXPECT_EQ(switched, 2);
-    EXPECT_EQ(success, 1);
+    EXPECT_EQ(switched, 3);
+    EXPECT_EQ(success, 2);
     std::printf("[ hybrid ] switching matrices with the ShortestPath matching and scale: %d of %d\n", same, success);
 }
 

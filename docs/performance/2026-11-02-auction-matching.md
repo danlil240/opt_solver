@@ -1,7 +1,7 @@
 # Hybrid matching for the analysis trial: auction on the search tail (2026-11-02)
 
 **Outcome.**
-- Hybrid (shortest-path searches, then a warm auction on the tail past 40 passes, with canonical duals) is the default `Control::matching_algorithm`.
+- Hybrid (shortest-path searches, then a warm auction on the tail past 40 passes, with canonical duals) is the default `Control::matching_algorithm`. (2026-11-04: the switch moved to 4 passes after a front-tier sweep of 40/16/8/4; see `AuctionOptions::switch_passes`.)
 - ncvxqp3 analysis 2.34x (1T) / 2.49x (8T) faster, ncvxqp7 1.76x / 1.83-1.85x (the 1T miss of the 1.8x bar was accepted); no accuracy loss, 0 verdict changes.
 - The pure auction (Task 4) was killed at G2; its engine and the hybrid probe tooling were removed afterwards (see Code state).
 

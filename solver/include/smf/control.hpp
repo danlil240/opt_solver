@@ -60,7 +60,7 @@ struct Control {
     // when the rescue reuses the analysis' matching scale (unchanged values)
     // it gets the trial's own scale (by default Hybrid's: ShortestPath's to
     // about 1e-14 thanks to the canonical duals). Hybrid runs the
-    // shortest-path searches and, past 40 passes of search work, a warm
+    // shortest-path searches and, past 4 passes of search work, a warm
     // auction on the remaining tail (scaling_matching.hpp); up to that point
     // it is ShortestPath bitwise, so within the 2-pass budget above no
     // verdict moves. Hybrid by default. Re-gate (12900K, interleaved A/B,
