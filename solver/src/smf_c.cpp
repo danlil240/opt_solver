@@ -13,6 +13,7 @@
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
+#include "smf/refinement.hpp"
 #include "smf/solver.hpp"
 #include "smf/types.hpp"
 #include "smf/workspace.hpp"
@@ -20,6 +21,7 @@
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <vector>
 
 /* -------------------------------------------------------------------------
  * Internal concrete structs for opaque handles
@@ -34,6 +36,12 @@ struct smf_analysis_s {
     std::unique_ptr<smf::AnalysisKeep> keep;   ///< symbolic analysis result
     int                                n;      ///< matrix order (cached)
     std::size_t                        nnz;    ///< entries of the analysed matrix
+    /// The analysed pattern (values zeroed, kept only so the shape checks
+    /// pass): a static-pivoting factor's refinement matrix is built from it
+    /// (smf_set_pivoting).
+    smf::CscLower                      pattern;
+    /// smf_set_pivoting(): Control::pivoting of the SMF_INDEF factors.
+    smf::Pivoting                      pivoting = smf::Pivoting::Threshold;
 };
 
 /**
@@ -45,6 +53,9 @@ struct smf_factor_s {
     int                              pos;      ///< positive eigenvalue count
     int                              neg;      ///< negative eigenvalue count
     int                              zero;     ///< zero     eigenvalue count
+    /// A static-path factor (SMF_PIVOTING_STATIC): the factored matrix that
+    /// smf_solve() refines SMF_SOLVE_FULL solves against. Null otherwise.
+    std::unique_ptr<smf::RefineMatrix> refine;
 };
 
 /* -------------------------------------------------------------------------
@@ -106,12 +117,35 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out) {
         h->keep  = std::move(keep);
         h->n     = csc->n;
         h->nnz   = static_cast<std::size_t>(nnz);
+        A.values.assign(A.row_idx.size(), 0.0);  /* the pattern only (shape-valid) */
+        A.values.shrink_to_fit();
+        h->pattern = std::move(A);
 
         *out = h;
         return SMF_OK;
 
     } catch (...) {
         return SMF_ERR_INTERNAL;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * smf_set_pivoting
+ * ------------------------------------------------------------------------- */
+
+int smf_set_pivoting(smf_analysis_t analysis, int pivoting) {
+    if (!analysis) {
+        return SMF_ERR_INVALID_ARG;
+    }
+    switch (pivoting) {
+    case SMF_PIVOTING_THRESHOLD:
+        analysis->pivoting = smf::Pivoting::Threshold;
+        return SMF_OK;
+    case SMF_PIVOTING_STATIC:
+        analysis->pivoting = smf::Pivoting::Static;
+        return SMF_OK;
+    default:
+        return SMF_ERR_INVALID_ARG;
     }
 }
 
@@ -137,6 +171,7 @@ int smf_factor(smf_analysis_t analysis,
             ctrl.matrix_type = smf::MatrixType::RealSymmetricPositiveDefinite;
         } else {
             ctrl.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
+            ctrl.pivoting = analysis->pivoting;
         }
 
         smf::Info info;
@@ -164,11 +199,23 @@ int smf_factor(smf_analysis_t analysis,
             return SMF_ERR_INTERNAL;
         }
 
+        /* Fast mode: keep the factored matrix for smf_solve()'s refinement
+         * (the backward-error trigger of a static-path factor). */
+        std::unique_ptr<smf::RefineMatrix> refine;
+        if (fkeep->static_path) {
+            refine = std::make_unique<smf::RefineMatrix>();
+            if (smf::prepare_refine_matrix(analysis->pattern, *refine) != smf::ErrorCode::Success) {
+                return SMF_ERR_INTERNAL;
+            }
+            smf::set_refine_values(std::span<const double>(values, analysis->nnz), *refine);
+        }
+
         auto* h  = new smf_factor_s;
         h->keep  = std::move(fkeep);
         h->pos   = info.num_positive;
         h->neg   = info.num_negative;
         h->zero  = info.num_zero;
+        h->refine = std::move(refine);
 
         *out = h;
         return SMF_OK;
@@ -205,12 +252,26 @@ int smf_solve(smf_analysis_t analysis,
         smf::Info    info;
         smf::Solver  solver;
 
+        /* A static-path factor (SMF_PIVOTING_STATIC): refine a full solve
+         * against the factored matrix (Control::refine_omega_target). */
+        const bool refine = factor->refine != nullptr && sjob == smf::SolveJob::Full &&
+                            factor->refine->n == analysis->n;
+        const std::size_t len = static_cast<std::size_t>(analysis->n > 0 ? analysis->n : 0) *
+                                static_cast<std::size_t>(nrhs);
+        std::vector<double> b;
+        if (refine) b.assign(rhs, rhs + len);
+
         int rc = solver.solve(*factor->keep, ctrl, info,
                               rhs, analysis->n, nrhs, sjob);
         if (rc != 0) {
             return info.status == smf::ErrorCode::IllegalValue
                        ? SMF_ERR_INVALID_ARG
                        : SMF_ERR_INTERNAL;
+        }
+        if (refine) {
+            smf::SolveWorkspace ws;
+            smf::refine(*factor->refine, *factor->keep, ctrl, b,
+                        std::span<double>(rhs, len), nrhs, ws);
         }
         return SMF_OK;
 

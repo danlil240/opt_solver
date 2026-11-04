@@ -113,6 +113,11 @@ struct IpmStats {
 ///    Control::refinement_max_iters classical steps (RefineMethod::Classical
 ///    whatever Control::refine_method says: the plugin's semantics stay
 ///    those of the refinement before FGMRES).
+///
+/// Control::pivoting = Pivoting::Static (the opt-in fast mode, any static
+/// mode): every full solve with a static-path factor (FactorKeep::
+/// static_path) is refined the same way, against the factored values, to
+/// Control::refine_omega_target (the backward-error trigger).
 class IpmSession {
  public:
   /// Store the pattern (lower CSC; its own values are ignored) and start a
@@ -255,6 +260,10 @@ class IpmSession {
   IpmStats stats_;
   std::optional<int> expected_neg_;
   std::uint64_t factor_generation_ = 0;
+  // factor_generation_ whose values refine_mat_ holds for a static-path
+  // factor's refinement (the fast mode; the regularized mode sets them in
+  // factor()).
+  std::uint64_t refine_values_generation_ = ~std::uint64_t{0};
   bool user_scale_once_ = false;
   bool solvable_ = false;        // last factor Ok or Singular
   bool aborted_ = false;         // last factor WrongInertia: complete it before solving

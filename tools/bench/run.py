@@ -39,6 +39,13 @@ def inventory_environment(build_dir: pathlib.Path) -> Dict[str, Any]:
             for k in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS")
             if k in os.environ
         },
+        # smf's pivoting policy (SMF_PIVOTING=static: the opt-in fast mode,
+        # reported apart from the headline numbers).
+        "smf_pivoting_env": {
+            k: os.environ.get(k)
+            for k in ("SMF_PIVOTING", "SMF_BENCH_PIVOTING")
+            if k in os.environ
+        },
         "cmake_cache": {},
     }
     cache_file = build_dir / "CMakeCache.txt"

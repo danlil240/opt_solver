@@ -491,6 +491,18 @@ if(WIN32)
 endif()
 add_test(NAME ScaleOnDelay COMMAND test_scale_on_delay)
 
+# --- Fast mode (Control::pivoting = Pivoting::Static) ---
+
+add_executable(test_fast_mode
+    test_fast_mode.cpp
+    ../benchmarks/common/validation.cpp
+)
+target_link_libraries(test_fast_mode PRIVATE smf GTest::gtest_main)
+if(WIN32)
+    target_link_libraries(test_fast_mode PRIVATE psapi)
+endif()
+add_test(NAME FastMode COMMAND test_fast_mode)
+
 # --- Skip-trial gate (Control::skip_trial_gate) ---
 
 add_executable(test_skip_trial_gate

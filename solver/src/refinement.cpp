@@ -391,7 +391,13 @@ ClassicalOutcome classical_refine(int n,
         } else {
             // Candidate was worse than best_x: restore best_x and stop on stagnation
             std::copy(ws.refine_best_x.begin(), ws.refine_best_x.end(), x.begin());
-            out.escalate = escalate;
+            // Auto escalates to FGMRES only when the best iterate still
+            // misses the stopping target. It already meets it here only on
+            // a static-path factor's forced growth step (refine_core returns
+            // before any step otherwise): that step found nothing to improve
+            // on an already-good solution, and FGMRES would only spend
+            // solves confirming it.
+            out.escalate = escalate && !reached(best_eta, best_omega, omega_target(fkeep, solve_ctrl));
             break;
         }
     }

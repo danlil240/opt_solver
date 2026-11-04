@@ -50,6 +50,13 @@ typedef struct smf_factor_s*   smf_factor_t;
 #define SMF_SOLVE_BACKWARD 3   /**< Backward sweep only  ((PL)^T S^{-1}X=B) */
 
 /* -------------------------------------------------------------------------
+ * Pivoting policy  (passed to smf_set_pivoting)
+ * ------------------------------------------------------------------------- */
+
+#define SMF_PIVOTING_THRESHOLD 0   /**< Default: accurate threshold pivoting   */
+#define SMF_PIVOTING_STATIC    1   /**< Opt-in fast mode: static pivoting       */
+
+/* -------------------------------------------------------------------------
  * Inertia descriptor
  * ------------------------------------------------------------------------- */
 
@@ -92,6 +99,35 @@ typedef struct {
 int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
 
 /**
+ * @brief Choose the pivoting policy of the SMF_INDEF factorizations made
+ *        from this analysis (smf::Control::pivoting).
+ *
+ * @param analysis  Handle from smf_analyse().  Must not be NULL.
+ * @param pivoting  SMF_PIVOTING_THRESHOLD (the default) or
+ *                  SMF_PIVOTING_STATIC.
+ * @return SMF_OK or SMF_ERR_INVALID_ARG.
+ *
+ * SMF_PIVOTING_THRESHOLD is the default and the accurate mode: threshold
+ * pivoting with delayed pivots and the scale-on-delay rescue, exact inertia.
+ *
+ * SMF_PIVOTING_STATIC is an opt-in FAST MODE, PARDISO-like static pivoting:
+ * no pivot is delayed, and a pivot below 1e-8 * max|A| is raised to that
+ * value (perturbed). It disables the delay / scale-on-delay rescue.
+ * Accuracy is NOT guaranteed on hard indefinite systems, and when a pivot
+ * was perturbed smf_inertia() reports the inertia of the PERTURBED matrix,
+ * which can mislead an interior-point method's inertia correction. Every
+ * SMF_SOLVE_FULL smf_solve() with such a factor is iteratively refined
+ * against the factored values, to a componentwise backward error of 1e-10
+ * where refinement reaches it (smf::Control::refine_omega_target).
+ *
+ * Affects the smf_factor() calls made after it; existing factors keep the
+ * policy they were made with. SMF_POSDEF factorizations ignore it. Like
+ * smf_factor(), it must not run concurrently with another call that uses
+ * the same analysis handle.
+ */
+int smf_set_pivoting(smf_analysis_t analysis, int pivoting);
+
+/**
  * @brief Perform numerical factorisation of A.
  *
  * @param analysis  Handle obtained from smf_analyse().  Must not be NULL.
@@ -111,7 +147,8 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
  * refers to it), and one analysis handle must not be factored from two
  * threads at once (a factorization may attach a re-analysis to it).
  *
- * Uses the default smf::Control: an SMF_INDEF factorization whose delayed
+ * Uses the default smf::Control (with the pivoting policy of
+ * smf_set_pivoting(), threshold by default): an SMF_INDEF factorization whose delayed
  * pivots inflate its work past Control::scale_on_delay_ratio stops and is
  * redone with the matching scaling of its values (the try may stop sooner,
  * at Control::scale_on_delay_early_ratio, when its inflation so far projects
@@ -140,6 +177,10 @@ int smf_factor(smf_analysis_t analysis,
  * @param job       SMF_SOLVE_FULL, SMF_SOLVE_FORWARD, or SMF_SOLVE_BACKWARD.
  * @return SMF_OK, SMF_ERR_INVALID_ARG (also when the factor's order is not
  *         the analysis'), or SMF_ERR_INTERNAL.
+ *
+ * A factor made with SMF_PIVOTING_STATIC is refined on SMF_SOLVE_FULL
+ * (see smf_set_pivoting()); a partial solve is not. A refinement that
+ * misses the target still returns SMF_OK with the best iterate.
  */
 int smf_solve(smf_analysis_t analysis,
               smf_factor_t   factor,

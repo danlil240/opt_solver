@@ -58,6 +58,28 @@ solver.solve(fkeep, ctrl, info, b.data(), n);    // b is overwritten with x
 
 To use smf from IPOPT, build the plugin and point IPOPT's `hsllib` option at `libsmf_ma97` (`smf_ma97.dll` on Windows) with `linear_solver ma97`.
 
+### Fast mode (opt-in static pivoting)
+
+The default is threshold pivoting (`smf::Pivoting::Threshold`): delayed pivots, the scale-on-delay rescue and exact inertia. That default is the accurate mode, and every number under "Where it stands" is measured with it.
+
+smf also has an opt-in fast mode, `smf::Pivoting::Static`. It does PARDISO-like static pivoting: no pivot is ever delayed, and a pivot smaller than 1e-8 × max|A| is raised to that value (a perturbed pivot). It can be much faster where threshold pivoting cascades delays. On the pde_control KKT systems at 8 threads it takes 0.82-0.89 of PARDISO's time. It gives up guarantees to get there:
+
+- **Accuracy is not guaranteed on hard indefinite systems.** With perturbed pivots the factor is of a perturbed matrix, and pivot growth is not bounded, so a solve can miss the accuracy gate even after refinement. Badly scaled KKT systems (OPF, COPS-like) can fail as singular or inaccurate where the default succeeds.
+- **The reported inertia is that of the perturbed matrix** when any pivot was perturbed (`Info::inertia_exact` is then false). That can mislead an interior-point method's inertia correction. The IPOPT plugin keeps its guard in fast mode: a factor with a perturbed pivot is reported to IPOPT as singular (MA97 flag 7), so IPOPT regularizes and refactors. On a KKT system that static pivoting keeps perturbing whatever the regularization, IPOPT can then raise the regularization until it gives up, so in fast mode an inaccurate factor can become a failed IPOPT solve.
+- **The delay and scale-on-delay rescue is disabled.** There are no delays to rescue.
+- **Solves are always refined.** Each static factor sets `FactorKeep::static_path`. Full solves through `Solver::factor_solve`, `IpmSession`, the C API and the plugin are then refined to a componentwise backward error of 1e-10 (`Control::refine_omega_target`), with at least one step when the pivot growth passes 1e8. After a plain `Solver::factor` and `Solver::solve`, call `smf::refine()` when `smf::refinement_advised(fkeep)` is true.
+
+How to turn it on:
+
+| Interface | Setting |
+|---|---|
+| C++ | `ctrl.pivoting = smf::Pivoting::Static;` |
+| C API | `smf_set_pivoting(analysis, SMF_PIVOTING_STATIC);` before `smf_factor()` |
+| IPOPT plugin | environment `SMF_PIVOTING=static`, read once per process (`threshold` or unset: the default) |
+| Benchmark harness | `SMF_PIVOTING=static` (or `SMF_BENCH_PIVOTING`) on every track |
+
+The library itself reads no environment variables. Only the plugin and the harness do. Fast-mode benchmark results are reported apart from the headline numbers.
+
 ## Where it stands
 
 The reference board is the front-tier manifest: 144 case-tracks (78 matrices) of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8), so the headline geomeans below cover fewer than 144 case-tracks: per thread count, the 5 that smf fails and the cases where no rival is accurate drop out.

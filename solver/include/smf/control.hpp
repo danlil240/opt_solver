@@ -288,13 +288,51 @@ struct Control {
     // trigger (FactorKeep::static_path) stay as machinery for an opt-in
     // fast mode.
     bool           static_fallback_after_cascade = false;
-    // Experimental (no public contract yet): Pivoting::Static puts every
-    // indefinite factorization on the static path above (FactorKeep::
-    // static_path set, scale-on-delay disarmed). Threshold: as documented
-    // everywhere else. The static path (either knob) always runs on the
-    // default subtree engine: tree_parallel is ignored for it (the legacy
-    // engine has no delay budget), and the fallback is never armed there
-    // (scale-on-delay does not apply on it).
+    // Pivoting policy of indefinite factorizations. Threshold (the default)
+    // is the accurate mode documented everywhere else in this struct:
+    // threshold pivoting with delays, the scale-on-delay rescue, exact
+    // inertia.
+    //
+    // Pivoting::Static is an opt-in FAST MODE: PARDISO-like static
+    // pivoting. Every indefinite factorization runs on the static path
+    // described above: no pivot is ever delayed; a column with no pivot
+    // that passes pivot_u is taken as the best available 1x1 pivot, and a
+    // |d| below 1e-8 * max|A| (after scaling) is raised to that value (a
+    // perturbed pivot, Info::static_pivots). It is faster where threshold
+    // pivoting cascades delays (pde_control_250 / 120 rec at 8 threads:
+    // 0.82 / 0.89 of PARDISO's time), at the cost of the guarantees:
+    //  - Accuracy is NOT guaranteed on hard indefinite systems. The factor
+    //    is of a perturbed matrix (perturbed pivots) and its growth is not
+    //    bounded by 1 / pivot_u, so a solve may miss the backward-error gate
+    //    even after refinement. Badly scaled KKT systems (OPF, COPS-like)
+    //    may go Singular or Inaccurate where threshold pivoting succeeds.
+    //  - The reported inertia (Info::num_positive / num_negative / num_zero)
+    //    is that of the PERTURBED matrix when a pivot was perturbed
+    //    (Info::inertia_exact = false); a pivot raised from an exact zero
+    //    counts as a zero eigenvalue. An interior-point method's inertia
+    //    correction can be misled by it. (The IPOPT plugin keeps its honest-
+    //    inertia guard in this mode: a factor with a perturbed pivot is
+    //    reported to IPOPT as singular, MA97 flag 7, so IPOPT regularizes;
+    //    on a KKT that stays perturbed whatever the regularization, IPOPT
+    //    may then give up where threshold pivoting succeeds.)
+    //  - The delay machinery and the scale-on-delay rescue (scale_on_delay_*,
+    //    static_fallback_after_cascade, skip_trial_rescue_ratio) are
+    //    disabled: there are no delays to rescue. A matching re-analysis the
+    //    analysis already holds is still used.
+    //  - tree_parallel is ignored (the legacy task-parallel engine has no
+    //    static path): the default subtree engine at the same num_threads.
+    //  - The backward-error refinement trigger is always on: every static
+    //    factor sets FactorKeep::static_path, so refinement_advised() holds
+    //    and refine() refines to omega <= refine_omega_target (1e-10), with
+    //    at least one step when the pivot growth passes
+    //    refine_growth_threshold (1e8). Solver::factor_solve, IpmSession
+    //    (full solves), the C API's smf_solve (SMF_SOLVE_FULL) and the IPOPT
+    //    plugin refine such a factor; after Solver::factor + Solver::solve,
+    //    call refine() when refinement_advised(fkeep).
+    // Positive definite factorizations ignore it. Set it from a string with
+    // parse_pivoting(); the IPOPT plugin reads SMF_PIVOTING=threshold|static
+    // and the C API has smf_set_pivoting(). Fast mode is reported apart from
+    // the headline benchmark numbers.
     Pivoting       pivoting = Pivoting::Threshold;
 
     // Pivoting

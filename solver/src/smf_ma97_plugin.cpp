@@ -387,9 +387,10 @@ static smf::Ma97Options ma97_options(const ma97_control_d& c)
 // that bench_replay's ipopt-plugin track builds from too.
 static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl)
 {
-    // No control block: the MA97 defaults stay, but the thread count is
-    // the plugin's all the same.
+    // No control block: the MA97 defaults stay, but the thread count and
+    // the pivoting policy (SMF_PIVOTING) are the plugin's all the same.
     out_ctrl.num_threads = smf::plugin_num_threads();
+    out_ctrl.pivoting = smf::plugin_pivoting();
     if (!ctrl)
         return true;
     return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), test_delay_budget());
