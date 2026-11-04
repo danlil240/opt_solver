@@ -376,7 +376,12 @@ struct Control {
     // thread in every mode, also with threaded MKL whose global count is
     // every core (deterministic mode: one at every num_threads).
     // num_threads <= 0: no guard, one tree thread on the caller's own BLAS
-    // setting (what num_threads = 1 did before 2026-11-04).
+    // setting (e.g. threaded MKL's global count). Not "auto": the IPOPT
+    // plugin's helpers (ipopt_plugin_control.hpp) read their own
+    // num_threads argument <= 0 as "the plugin default" and always pass a
+    // count >= 1 here. OpenBLAS builds: its thread count is process-wide,
+    // so concurrent calls with different num_threads (or a caller on a
+    // different OpenBLAS count) race on it; MKL's setting is per thread.
     int            num_threads   = 1;
     // auto_threads (num_threads > 1): the factorization runs on as many of
     // the num_threads threads as its assembly tree repays, by a cost model

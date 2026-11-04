@@ -824,14 +824,23 @@ TEST(ParallelDeterminism, OneThreadIsOneBlasThread) {
         if (c.ordering == OrderingMethod::AutoParallel)
             ASSERT_TRUE(ref.banded) << "the banded path is not exercised";
         OneThreadRun r, inherit;
+        int peak = -1;
         {
             BlasThreadGuard caller(kCallerBlas);
-            r = one_thread_run(c, 1);
+            {
+                // Accounting only (the caller's BLAS setting stays): count
+                // the BLAS threads the call itself sets.
+                BlasIdleScope idle;
+                blas_threads_reset_peak();
+                r = one_thread_run(c, 1);
+                peak = blas_threads_peak();
+            }
             EXPECT_EQ(blas_max_threads(), threaded ? kCallerBlas : 1)
                 << "the caller's BLAS thread count was not restored";
             inherit = one_thread_run(c, 0);  // no guard: the caller's threads
             EXPECT_EQ(blas_max_threads(), threaded ? kCallerBlas : 1);
         }
+        EXPECT_EQ(peak, 1) << "num_threads = 1: BLAS threads set by the call";
         EXPECT_EQ(r.banded, ref.banded);
         EXPECT_EQ(r.neg, ref.neg);
         const auto [dl, ml] = bit_diff(r.l, ref.l);
@@ -850,6 +859,12 @@ TEST(ParallelDeterminism, OneThreadIsOneBlasThread) {
                     "BLAS threads: %zu entries differ from serial BLAS\n",
                     c.name.c_str(), static_cast<int>(c.A.n), ref.banded ? " (banded path)" : "",
                     threaded ? kCallerBlas : 1, inherit_diff);
+#if defined(SMF_EXPECT_THREADED_BLAS)
+        // The caller's threaded BLAS does change these bits, so the equality
+        // above is the guard's doing (without it, num_threads = 1 ran as
+        // num_threads = 0 does).
+        EXPECT_GT(inherit_diff, 0u) << "threaded BLAS gave serial bits: the test proves nothing";
+#endif
     }
 }
 
@@ -886,9 +901,12 @@ TEST(ParallelDeterminism, ExplicitThreadsRestoreCallerBlas) {
         SCOPED_TRACE(c.name);
         for (const int caller : {1, 2, 8}) {
             BlasThreadGuard g(caller);
+            // What the BLAS reports for this caller (a BLAS may cap or
+            // ignore the count).
+            const int before = blas_max_threads();
             const OneThreadRun r = one_thread_run(c, 4);
             EXPECT_FALSE(r.x.empty());
-            EXPECT_EQ(blas_max_threads(), threaded ? caller : 1)
+            EXPECT_EQ(blas_max_threads(), before)
                 << "caller on " << caller << " BLAS threads, num_threads = 4";
         }
     }

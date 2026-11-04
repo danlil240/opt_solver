@@ -21,8 +21,13 @@ static void blas_restore(int prev)        { MKL_Set_Num_Threads_Local(prev); }
 #  include <cblas.h>
 static int  blas_get_num_threads()        { return openblas_get_num_threads(); }
 // Process-wide (OpenBLAS has no per-thread setting): restores the count.
-static int  blas_set_num_threads(int n)   { const int prev = openblas_get_num_threads(); openblas_set_num_threads(n); return prev; }
-static void blas_restore(int prev)        { openblas_set_num_threads(prev > 0 ? prev : 1); }
+// Written only when it changes, so guards of the count already in effect
+// (e.g. num_threads = 1 calls in an application on one OpenBLAS thread)
+// never touch the shared setting. Guards of different counts from
+// concurrent callers still race on it: OpenBLAS builds are not safe for
+// concurrent smf calls that need different BLAS thread counts.
+static int  blas_set_num_threads(int n)   { const int prev = openblas_get_num_threads(); if (prev != n) openblas_set_num_threads(n); return prev; }
+static void blas_restore(int prev)        { const int want = prev > 0 ? prev : 1; if (openblas_get_num_threads() != want) openblas_set_num_threads(want); }
 #  define SMF_BLAS_THREAD_API 1
 
 #else
