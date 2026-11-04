@@ -13,6 +13,7 @@
 #include "smf/threading.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -152,20 +153,69 @@ inline const char *plugin_threads_source_name(PluginThreadsSource s)
     }
 }
 
+/// The plugin's pivoting policy (Control::pivoting) from SMF_PIVOTING:
+/// unset or empty: Threshold (the default, accurate mode); "threshold" or
+/// "static" (parse_pivoting()): that policy. Pivoting::Static is the opt-in
+/// fast mode (PARDISO-like static pivoting, see Control::pivoting): not
+/// guaranteed accurate on hard indefinite systems. In it the plugin keeps
+/// its honest-inertia guard: a factor with a perturbed pivot (inexact
+/// inertia) is reported to IPOPT as MA97's singular warning (flag 7), so
+/// IPOPT regularizes instead of trusting the perturbed matrix's inertia.
+/// Any other value is invalid: Threshold, with `valid` false (the plugin
+/// warns once on stderr).
+struct PluginPivoting {
+    Pivoting pivoting = Pivoting::Threshold;
+    bool valid = true;
+};
+
+inline PluginPivoting plugin_pivoting_resolve(const char *smf_pivoting)
+{
+    PluginPivoting r;
+    if (smf_pivoting == nullptr || *smf_pivoting == '\0')
+        return r;
+    r.valid = parse_pivoting(smf_pivoting, r.pivoting);
+    if (!r.valid)
+        r.pivoting = Pivoting::Threshold;
+    return r;
+}
+
+/// plugin_pivoting_resolve() of the current environment, read now (tests);
+/// the plugin uses plugin_pivoting().
+inline PluginPivoting plugin_pivoting_from_env()
+{
+    return plugin_pivoting_resolve(std::getenv("SMF_PIVOTING"));
+}
+
+/// The plugin's pivoting policy: plugin_pivoting_from_env(), read once per
+/// process at its first use (as the plugin's other environment knobs).
+inline Pivoting plugin_pivoting()
+{
+    static const Pivoting p = [] {
+        const PluginPivoting r = plugin_pivoting_from_env();
+        if (!r.valid)
+            std::fprintf(stderr, "[smf_ma97] SMF_PIVOTING=\"%s\" is not threshold or static: threshold pivoting\n",
+                         std::getenv("SMF_PIVOTING"));
+        return r.pivoting;
+    }();
+    return p;
+}
+
 /// Apply one MA97 control block to `ctrl`, as the plugin does at every
 /// analyse, factor and solve call: the mapped fields above plus the plugin's
 /// fixed settings (expected_refactors = 10, Control::delay_budget =
 /// `delay_budget`; the plugin passes -1 except through its test seam;
 /// Control::num_threads = `num_threads`, or plugin_num_threads() when it is
-/// <= 0, as the plugin passes). The rest of the parallel configuration stays
+/// <= 0, as the plugin passes; Control::pivoting = `pivoting`, or
+/// plugin_pivoting() (SMF_PIVOTING) when unset). The rest of the parallel configuration stays
 /// at Control's defaults (auto_threads, top_tiles), as on the board's
 /// multi-thread runs.
 /// Returns false for an unsupported scaling value (MA97 flag -6); `ctrl` is
 /// then partially updated, as before.
 inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int delay_budget = -1,
-                               int num_threads = 0)
+                               int num_threads = 0, std::optional<Pivoting> pivoting = std::nullopt)
 {
     out_ctrl.num_threads = num_threads > 0 ? num_threads : plugin_num_threads();
+    out_ctrl.pivoting = pivoting ? *pivoting : plugin_pivoting();
     if (opt.nemin > 0)
         out_ctrl.nemin = opt.nemin;
     if (opt.u >= 0.0 && opt.u <= 0.5)
@@ -226,14 +276,16 @@ inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int de
 /// The Control of the plugin's analysis and factorizations for the MA97
 /// control block `opt`: a default Control, matrix_type = indefinite (IPOPT's
 /// KKT systems), then apply_ma97_options() (num_threads: `num_threads`, or
-/// plugin_num_threads() when <= 0). std::nullopt for an invalid scaling
+/// plugin_num_threads() when <= 0; pivoting: `pivoting`, or
+/// plugin_pivoting() when unset). std::nullopt for an invalid scaling
 /// value. Everything else stays at Control's defaults, as in the plugin.
 inline std::optional<Control> ipopt_plugin_control(const Ma97Options &opt = Ma97Options{}, int delay_budget = -1,
-                                                   int num_threads = 0)
+                                                   int num_threads = 0,
+                                                   std::optional<Pivoting> pivoting = std::nullopt)
 {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
-    if (!apply_ma97_options(ctrl, opt, delay_budget, num_threads))
+    if (!apply_ma97_options(ctrl, opt, delay_budget, num_threads, pivoting))
         return std::nullopt;
     return ctrl;
 }

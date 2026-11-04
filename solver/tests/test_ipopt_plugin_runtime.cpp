@@ -2,6 +2,7 @@
 
 #include "smf/csc_matrix.hpp"
 #include "smf/matrix_market.hpp"
+#include "kkt_test_matrices.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -476,6 +477,75 @@ TEST(Ma97PluginRuntime, EarlyAbortOnWrongInertia) {
     for (double xi : x) EXPECT_NEAR(xi, 1.0, 1e-9);
 
     sym.finalise(&akeep, &fkeep);
+}
+
+// SMF_PIVOTING=static (the opt-in fast mode), read once per plugin load: on
+// a KKT whose threshold-pivoting delays cascade (u = 0.01, unscaled) the
+// plugin factors with no delay, keeps the exact inertia (no perturbed pivot,
+// so its honest-inertia guard does not fire: flag 0) and its full solves are
+// refined (IpmSession, static_path) to the accuracy gate. Unset: threshold
+// pivoting, delays as before.
+TEST(Ma97PluginRuntime, FastModeFromSmfPivoting) {
+    const smf::CscLower A = smf::cascade_kkt(90, 300, 2.5, 1.5);
+    const int n = static_cast<int>(A.n);
+    std::vector<int> ptr(A.col_ptr.begin(), A.col_ptr.end());
+    std::vector<int> row(A.row_idx.begin(), A.row_idx.end());
+    std::vector<double> b(static_cast<std::size_t>(n), 0.0);  // A * ones
+    for (int j = 0; j < n; ++j)
+        for (int p = ptr[j]; p < ptr[j + 1]; ++p) {
+            b[row[p]] += A.values[p];
+            if (row[p] != j) b[j] += A.values[p];
+        }
+    int threshold_delays = -1, threshold_neg = -1;
+    for (const char *mode : {"", "static"}) {
+#ifndef _WIN32
+        // SMF_PIVOTING is read once per load: a plugin dlclose did not
+        // unload (glibc keeps STB_GNU_UNIQUE statics) still has the earlier
+        // value.
+#ifdef SMF_MA97_PLUGIN_PATH
+        if (void *still = dlopen(SMF_MA97_PLUGIN_PATH, RTLD_NOW | RTLD_NOLOAD)) {
+#else
+        if (void *still = dlopen("./libsmf_ma97.so", RTLD_NOW | RTLD_NOLOAD)) {
+#endif
+            dlclose(still);
+            GTEST_SKIP() << "the plugin stays loaded after dlclose: its SMF_PIVOTING cannot be re-read";
+        }
+#endif
+        set_env("SMF_PIVOTING", mode);
+        PluginSymbols sym;
+        ASSERT_TRUE(sym.load());
+        ma97_control_d ctrl{};
+        sym.default_control(&ctrl);
+        ctrl.f_arrays = 0;
+        ctrl.u = 0.01;
+        ctrl.scaling = 0;
+        void *akeep = nullptr;
+        void *fkeep = nullptr;
+        ma97_info_d info{};
+        sym.analyse(1, n, ptr.data(), row.data(), nullptr, &akeep, &ctrl, &info, nullptr);
+        ASSERT_EQ(info.flag, 0);
+        sym.factor(4, ptr.data(), row.data(), A.values.data(), &akeep, &fkeep, &ctrl, &info, nullptr);
+        set_env("SMF_PIVOTING", "");
+        std::printf("[FastMode plugin] SMF_PIVOTING=\"%s\": flag %d, %d delays, %d negative\n", mode, info.flag,
+                    info.num_delay, info.num_neg);
+        ASSERT_EQ(info.flag, 0);
+        if (*mode == '\0') {
+            threshold_delays = info.num_delay;
+            threshold_neg = info.num_neg;
+            EXPECT_GT(info.num_delay, 0);
+        } else {
+            EXPECT_EQ(info.num_delay, 0);
+            EXPECT_EQ(info.num_neg, threshold_neg) << "exact inertia: no perturbed pivot";
+        }
+        std::vector<double> x = b;
+        sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &info);
+        ASSERT_EQ(info.flag, 0);
+        double err = 0.0;
+        for (double xi : x) err = std::max(err, std::abs(xi - 1.0));
+        EXPECT_LT(err, 1e-8) << mode;
+        sym.finalise(&akeep, &fkeep);
+    }
+    EXPECT_GT(threshold_delays, 0);
 }
 
 // Two fkeeps factored from one akeep share the session's factor: a solve

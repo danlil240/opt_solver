@@ -16,6 +16,17 @@ plugin-side analysis cost (e.g. stokes128: matching phase ~180 ms against
 experiments. With `SMF_IPM_REANALYSE=1` a re-analysis runs inside a
 factorization and its time is counted in `factor_ms`, not `analyse_ms`.
 
+**Fast mode.** `SMF_PIVOTING=static` (the IPOPT plugin's variable; the older
+`SMF_BENCH_PIVOTING` wins when both are set) runs smf with
+`Pivoting::Static` on every track: PARDISO-like static pivoting, opt-in, not
+guaranteed accurate on hard indefinite systems, and with the inertia of the
+perturbed matrix when a pivot is perturbed. It disables the delay and
+scale-on-delay rescue. `environment.json` records it as `smf_pivoting_env`
+(the reliable marker: records' `static_fallbacks` > 0 also comes from
+`SMF_BENCH_STATIC_FALLBACK=1`). A fast-mode board is a separate
+column, never a headline number. The default (unset or `threshold`) is the
+accurate threshold pivoting.
+
 **IPOPT's dynamic scaling is emulated** over the replayed steps of a
 sequence, by the rule of IPOPT 3.14's Ma97SolverInterface under its defaults
 (`ma97_scaling = dynamic`, `ma97_switch1 = od_hd_reuse`, `ma97_switch2/3 =

@@ -690,13 +690,16 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SOD_CARRY")) ctrl.scale_on_delay_carry = std::atoi(e) != 0;
     // SMF_BENCH_STATIC_FALLBACK (0/1): Control::static_fallback_after_cascade.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_FALLBACK")) ctrl.static_fallback_after_cascade = std::atoi(e) != 0;
-    // SMF_BENCH_PIVOTING = threshold | static: Control::pivoting (experimental).
-    if (const char *e = std::getenv("SMF_BENCH_PIVOTING")) {
-        const std::string v = e;
-        if (v == "static") ctrl.pivoting = smf::Pivoting::Static;
-        else if (v == "threshold") ctrl.pivoting = smf::Pivoting::Threshold;
-        else {
-            std::fprintf(stderr, "error: SMF_BENCH_PIVOTING=\"%s\" is not threshold or static\n", e);
+    // SMF_PIVOTING = threshold | static: Control::pivoting (static: the
+    // opt-in fast mode), the IPOPT plugin's variable, honoured on every
+    // track (the ipopt-plugin track's Control already has it from
+    // smf::ipopt_plugin_control()). SMF_BENCH_PIVOTING, the older harness
+    // name, wins when both are set. Unset or empty: the track's default.
+    for (const char *name : {"SMF_PIVOTING", "SMF_BENCH_PIVOTING"}) {
+        const char *e = std::getenv(name);
+        if (e == nullptr || *e == '\0') continue;
+        if (!smf::parse_pivoting(e, ctrl.pivoting)) {
+            std::fprintf(stderr, "error: %s=\"%s\" is not threshold or static\n", name, e);
             return 2;
         }
     }

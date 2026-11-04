@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <random>
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,65 @@ inline CscLower scaled_opf_kkt(int n_x, int m, unsigned seed, double spread) {
             const double u = static_cast<double>(st >> 11) / 9007199254740992.0;
             A.values[q] *= std::pow(10.0, spread * (u - 0.5));
         }
+    }
+    return A;
+}
+
+// Regularized KKT [H B^T; B creg I] (H: 5-point Laplacian of a g x g grid,
+// diagonal hdiag; m constraint rows, row k coupling three pseudo-random
+// variables; the pattern is fixed) as D A D, D_i = 10^U(-spread, spread)
+// drawn from `seed` (spread 0: A itself). With creg < 0 its inertia is exact
+// whatever D when H is positive definite (hdiag > 4): g^2 positive, m
+// negative. With a large spread unscaled threshold pivoting delays most
+// columns, many repeatedly (a cascade, as on pde_control). The generator of
+// test_scale_on_delay.cpp's kkt(), but drawn from raw std::mt19937 output
+// (fully specified) instead of the implementation-defined std::uniform_*
+// distributions: the same matrix with MSVC, libstdc++ and libc++.
+inline CscLower cascade_kkt(int g, int m, double hdiag, double spread, double creg = -0.1,
+                           unsigned seed = 7) {
+    const int nx = g * g, n = nx + m;
+    std::mt19937 rng(7);
+    std::mt19937 drng(seed);
+    const auto var = [&rng, nx] { return static_cast<int>(rng() % static_cast<std::uint32_t>(nx)); };
+    // u in [0, 1) from the top 27 bits of one draw: exact in binary64.
+    const auto expo = [&drng, spread] {
+        const double u = std::ldexp(static_cast<double>(drng() >> 5), -27);
+        return spread * (2.0 * u - 1.0);
+    };
+    std::vector<double> d(static_cast<std::size_t>(n));
+    for (double &v : d) v = std::pow(10.0, expo());
+    std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+    for (int y = 0; y < g; ++y)
+        for (int x = 0; x < g; ++x) {
+            const int j = y * g + x;
+            auto &c = cols[static_cast<std::size_t>(j)];
+            c.push_back({j, hdiag});
+            if (x + 1 < g) c.push_back({j + 1, -1.0});
+            if (y + 1 < g) c.push_back({j + g, -1.0});
+        }
+    const double coef[3] = {1.0, -0.5, 0.25};
+    for (int k = 0; k < m; ++k) {
+        const int row = nx + k;
+        int v[3];
+        v[0] = var();
+        v[1] = var();
+        v[2] = var();
+        while (v[1] == v[0]) v[1] = var();
+        while (v[2] == v[0] || v[2] == v[1]) v[2] = var();
+        for (int t = 0; t < 3; ++t) cols[static_cast<std::size_t>(v[t])].push_back({row, coef[t]});
+        cols[static_cast<std::size_t>(row)].push_back({row, creg});
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(1, 0);
+    for (int j = 0; j < n; ++j) {
+        auto &c = cols[static_cast<std::size_t>(j)];
+        std::sort(c.begin(), c.end());
+        for (auto [i, v] : c) {
+            A.row_idx.push_back(i);
+            A.values.push_back(d[static_cast<std::size_t>(i)] * v * d[static_cast<std::size_t>(j)]);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
     }
     return A;
 }

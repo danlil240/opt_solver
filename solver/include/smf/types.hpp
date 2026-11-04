@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <string_view>
 
 namespace smf {
 
@@ -169,16 +170,33 @@ enum class RefineMethod {
     Auto      = 2
 };
 
-// Indefinite pivoting policy (Control::pivoting). Experimental: Static is not
-// a documented mode yet.
-//  Threshold: threshold 1x1 / 2x2 pivoting (pivot_u) with delays.
-//  Static:    every front on the static path (no delays; the best available
-//             pivot, |d| below 1e-8 * max|A| raised), as after
-//             Control::static_fallback_after_cascade.
+// Indefinite pivoting policy (Control::pivoting; see there for the full
+// contract).
+//  Threshold: the default and the accurate mode. Threshold 1x1 / 2x2
+//             pivoting (pivot_u) with delayed pivots and the scale-on-delay
+//             rescue.
+//  Static:    the opt-in fast mode, PARDISO-like static pivoting. Every front
+//             on the static path: no delays; the best available pivot, |d|
+//             below 1e-8 * max|A| raised. Accuracy is not guaranteed on hard
+//             indefinite systems, and when a pivot is perturbed the reported
+//             inertia is that of the perturbed matrix (raised pivots by
+//             their perturbed sign, exact zeros as +).
 enum class Pivoting {
     Threshold = 0,
     Static    = 1
 };
+
+// "threshold" / "static" (exact, lower case) to a Pivoting; false (and `out`
+// untouched) for anything else, null included. The library reads no
+// environment: the IPOPT plugin (SMF_PIVOTING) and the benchmark harness
+// parse with this.
+inline bool parse_pivoting(const char *s, Pivoting &out) noexcept {
+    if (s == nullptr) return false;
+    const std::string_view v(s);
+    if (v == "threshold") { out = Pivoting::Threshold; return true; }
+    if (v == "static") { out = Pivoting::Static; return true; }
+    return false;
+}
 
 enum class FrontKernel {
     Tpp  = 0,

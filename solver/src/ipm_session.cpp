@@ -381,9 +381,33 @@ int IpmSession::solve(double* b, int n, int nrhs, SolveJob job) {
     return static_cast<int>(ErrorCode::NotInitialised);
   }
   // Feature 3b: the factor is of the regularized matrix; refine a full
-  // solve against mat_, the unregularized one.
-  const bool refine_solve = regularized() && job == SolveJob::Full && b != nullptr && n == mat_.n &&
-                            nrhs > 0 && fk_.analysis != nullptr && !fk_.is_posdef;
+  // solve against mat_, the unregularized one. A static-path factor
+  // (Pivoting::Static, the fast mode: FactorKeep::static_path) is refined
+  // the same way: its growth is unbounded and it may be of a perturbed
+  // matrix, so refine() aims at Control::refine_omega_target (the
+  // backward-error trigger), when it forced a pivot (refinement_advised).
+  // static_path is set only by Pivoting::Static or
+  // Control::static_fallback_after_cascade, both off by default: otherwise
+  // the solve is as before.
+  const bool static_refine = fk_.static_path && refinement_advised(fk_) && !regularized();
+  bool refine_solve = (regularized() || static_refine) && job == SolveJob::Full && b != nullptr &&
+                      n == mat_.n && nrhs > 0 && fk_.analysis != nullptr && !fk_.is_posdef;
+  if (refine_solve && static_refine) {
+    // The refinement matrix outside the regularized mode: its pattern
+    // prepared once per analyse() (mat_ is the input pattern there), its
+    // values once per factor (mat_ holds the last factor()'s values, also
+    // of a completed aborted one).
+    if (refine_mat_.n != mat_.n) {
+      refine_values_generation_ = ~std::uint64_t{0};
+      if (prepare_refine_matrix(mat_, refine_mat_) != ErrorCode::Success) refine_mat_ = RefineMatrix{};
+    }
+    if (refine_mat_.n != mat_.n) {
+      refine_solve = false;  // cannot happen for a pattern analyse() accepted
+    } else if (refine_values_generation_ != factor_generation_) {
+      set_refine_values(mat_.values, refine_mat_);
+      refine_values_generation_ = factor_generation_;
+    }
+  }
   const std::size_t len = static_cast<std::size_t>(n > 0 ? n : 0) * static_cast<std::size_t>(nrhs > 0 ? nrhs : 0);
   if (refine_solve) refine_rhs_.assign(b, b + len);
   const int rc = solver_.solve(fk_, ctrl_, solve_info_, b, n, nrhs, sws_, job);
