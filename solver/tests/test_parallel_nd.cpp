@@ -276,6 +276,25 @@ TEST(ParallelNd, DeterministicAcrossThreads)
         }
 }
 
+// Large enough for the split separator tasks (smf_sep.h, vendored METIS):
+// the root and depth-1 parts are past MlevelNodeBisectionL2's 5000-vertex
+// single-run threshold, so their 5 runs are separate tasks. A grid has no
+// identical vertices (the identity compression, its adjacency used as it
+// is). The order is the same at every thread count and on every repeat.
+TEST(ParallelNd, SplitSeparatorDeterministicAcrossThreads)
+{
+    const Graph g = grid(24, 24, 24);
+    std::vector<Int> ref;
+    ASSERT_TRUE(smf::parallel_nd_order(g.n, g.xadj, g.adj, nullptr, 1, ref));
+    ASSERT_TRUE(is_permutation(ref, g.n));
+    for (int rep = 0; rep < 5; ++rep)
+        for (int threads : {2, 3, 8, 16}) {
+            std::vector<Int> p;
+            ASSERT_TRUE(smf::parallel_nd_order(g.n, g.xadj, g.adj, nullptr, threads, p));
+            ASSERT_EQ(p, ref) << "rep " << rep << " threads " << threads;
+        }
+}
+
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
 // Gate for running METIS from several std::threads. The raw conda-forge
 // METIS 5.2.1 aborts the process when called concurrently (GKlib's memory
