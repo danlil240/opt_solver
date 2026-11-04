@@ -7,7 +7,7 @@
 // count comes from a cost model of those two phases: each takes at least
 // its work / T and its longest serial chain (a subtree in phase 1, the
 // heaviest top path in phase 2, where fronts run as tile tasks or untiled
-// fronts of kTopTileMinFront rows and more count 1/T),
+// fronts of kTopBlasMinFront rows and more count 1/T),
 // plus a cost per thread and per top-part front. Work is f^2 p per front,
 // the unit of Info::predicted_flops.
 
@@ -55,12 +55,18 @@ struct TreeView {                       // one entry per supernode
 
 // TreeView::split: the front runs as tile tasks at > 1 thread.
 inline constexpr std::uint8_t kSplitTiles = 1;
-// TreeView::split: a front of at least kTopTileMinFront rows that is not
+// TreeView::split: a front of at least kTopBlasMinFront rows that is not
 // tiled (tiles off: weak pivot threshold, static or in-order pivoting,
 // positive definite). It runs as one task with its BLAS share of the
 // threads (TopScheduler), all of them on the heaviest top path, where such
 // fronts follow one another near the root.
 inline constexpr std::uint8_t kSplitBlas = 2;
+// Untiled fronts from this many rows count as BLAS-parallel (kSplitBlas).
+// Smaller ones do not repay the threads: cops_elec_200 ipopt, one 600-row
+// root front, factors in 25 ms on 1 thread and 29 ms on 8 (12900K). From
+// 1024 rows: c-big, ncvxqp1/3, TSOPF_FS_b300_c2 ipopt move to 8 threads,
+// 0.91-0.98x wall at 8T; at 512 cops_elec_200 also moved, 1.17x.
+inline constexpr int kTopBlasMinFront = 1024;
 
 // The view of keep's assembly tree; fills the buffers it points into.
 // tiles_on: top_tiles_on(...) at more than one thread.

@@ -490,7 +490,7 @@ struct Control {
     // flops plus a per-thread and per-front term. The factor model: the
     // subtrees (the larger of the heaviest subtree and their work / T), then
     // the top part (the larger of its heaviest path, fronts run as tile
-    // tasks and untiled fronts of 512 rows and more (their BLAS on the
+    // tasks and untiled fronts of 1024 rows and more (their BLAS on the
     // threads) counting 1/T, and its work, whose tile-split share speeds up to
     // thread_split_scaling_cap threads only), plus thread_cost_per_thread per
     // thread, thread_cost_per_top_front per top-part front and

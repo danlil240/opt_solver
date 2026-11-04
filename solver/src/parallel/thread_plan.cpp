@@ -274,7 +274,7 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, std::vector<Int> &pa
     parent[s] = keep.supernodes[s].parent;
     work[s] = fd * fd * static_cast<double>(keep.supernodes[s].width());
     split[s] = tiles_front(tiles_on, static_cast<int>(f)) ? kSplitTiles
-               : f >= kTopTileMinFront                    ? kSplitBlas
+               : f >= kTopBlasMinFront                    ? kSplitBlas
                                                           : 0;
   }
   return TreeView{keep.postorder, parent, work, split};
