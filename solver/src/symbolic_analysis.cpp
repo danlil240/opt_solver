@@ -119,6 +119,9 @@ namespace smf
     // waiting for them, and wait_initial_phase() reports the matcher's
     // diagonal verdict as soon as its constructor is done. The budget is
     // checked between searches, so the slices change no result.
+    // Stop-check slices per pass of the concurrent trial's gated searches.
+    constexpr long long kTrialSlicesPerPass = 16;
+
     class ConcurrentTrial
     {
     public:
@@ -225,9 +228,15 @@ namespace smf
                     ready_cv_.notify_all();
                     return;
                 }
-                // A slice of about one pass over the cost graph between
-                // stop checks.
-                const long long slice = std::max<long long>(2 * static_cast<long long>(C_.row_idx.size()), 1);
+                // A slice of about 1/16 pass over the cost graph between
+                // stop checks: a stop waits for the rest of the slice it
+                // lands in. A whole pass took ~5 ms on pglib2000 ipopt, so
+                // the gate's skip waited 0-5 ms by chance (the analyse
+                // matching phase bimodal trial by trial, ~1.5 or ~8 ms at
+                // 8T). advance() stops between searches only, so the slice
+                // size changes no result.
+                const long long slice =
+                    std::max<long long>(2 * static_cast<long long>(C_.row_idx.size()) / kTrialSlicesPerPass, 1);
                 bool within = false;
                 if (!gated_)
                 {
