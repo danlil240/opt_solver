@@ -761,10 +761,12 @@ TEST(ThreadPlan, BlasPricingFollowsBlasThreads)
         ASSERT_EQ(solver.factor(*ak, c, i, fk), FactorStatus::Success);
         bool blas_threads = false;
         {
-            BlasThreadGuard g(8);  // what the factor call holds
+            // What the factor call holds; plan_blas_parallel reads the
+            // calling thread's BLAS setting, so it is checked under it.
+            BlasThreadGuard g(8);
             blas_threads = !deterministic_mode(c) && blas_max_threads() > 1;
+            EXPECT_EQ(plan_blas_parallel(deterministic_mode(c)), blas_threads);
         }
-        EXPECT_EQ(plan_blas_parallel(deterministic_mode(c)), blas_threads);
         const int want = blas_threads ? blas_pick : serial_pick;
         EXPECT_EQ(i.threads_used, want) << "deterministic " << det;
     }
