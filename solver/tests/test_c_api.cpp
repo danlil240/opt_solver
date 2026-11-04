@@ -524,3 +524,75 @@ TEST(CApiFastMode, StaticFactorIsRefinedOnFullSolve) {
         smf_free_analysis(&ah);
     }
 }
+
+/* SMF_PIVOTING_STATIC on an unclean pattern (duplicates, an upper-triangle
+ * and an out-of-range entry, as CApiFactorUsesNewValuesUncleanPattern) with
+ * a forced pivot: column 0 is exactly zero once its duplicates are summed,
+ * so the static path raises it (refinement advised). The refinement matrix
+ * is the factored one, the cleaned matrix of the caller's values: the full
+ * solve is the C++ factor's solve refined by smf::refine() against it,
+ * bitwise (it used to be SMF_ERR_INTERNAL: the refinement matrix was built
+ * from the unclean pattern, which validate_shape() rejects). */
+TEST(CApiFastMode, StaticForcedPivotOnUncleanPattern) {
+    static const int col_ptr[] = {0, 4, 7, 8};
+    static const int row_idx[] = {0, 1, 1, 3, 0, 1, 2, 2};
+    /* cleaned: [[0 0 0] [0 4 1] [0 1 4]] ((1,0) = .25 - .25) */
+    static const double vals[] = {0., .25, -.25, 1e6, 1e6, 4., 1., 4.};
+    smf_csc_t csc;
+    csc.n = 3;
+    csc.col_ptr = col_ptr;
+    csc.row_idx = row_idx;
+    csc.values = vals;
+
+    /* C++ reference: the same analysis and Pivoting::Static factor, refined
+     * against the cleaned matrix. */
+    smf::CscLower U;
+    U.n = 3;
+    U.col_ptr.assign(col_ptr, col_ptr + 4);
+    U.row_idx.assign(row_idx, row_idx + 8);
+    U.values.assign(vals, vals + 8);
+    smf::Control c;
+    c.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
+    smf::Solver s;
+    smf::Info ia;
+    auto ak = s.analyse(U, c, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    smf::Control fc = c;
+    fc.pivoting = smf::Pivoting::Static;
+    smf::NumericWorkspace nws;
+    smf::FactorKeep fk;
+    smf::Info fi;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(vals, 8), fc, fi, fk, nws),
+              smf::FactorStatus::Success);
+    ASSERT_GT(fi.static_pivots, 0) << "premise: a forced, raised pivot";
+    ASSERT_TRUE(smf::refinement_advised(fk));
+    smf::CscLower C;
+    C.n = 3;
+    C.col_ptr = {0, 2, 4, 5};
+    C.row_idx = {0, 1, 1, 2, 2};
+    C.values = {0., 0., 4., 1., 4.};
+    const std::vector<double> b = {0., 6., 9.};  /* A * (0, 1, 2) */
+    std::vector<double> x_ref = b;
+    smf::Info si;
+    ASSERT_EQ(s.solve(fk, smf::Control{}, si, x_ref.data(), 3, 1), 0);
+    smf::SolveWorkspace ws;
+    smf::refine(C, fk, smf::Control{}, b, x_ref, 1, ws);
+
+    smf_analysis_t ah = nullptr;
+    ASSERT_EQ(smf_analyse(&csc, &ah), SMF_OK);
+    ASSERT_EQ(smf_set_pivoting(ah, SMF_PIVOTING_STATIC), SMF_OK);
+    smf_factor_t fh = nullptr;
+    ASSERT_EQ(smf_factor(ah, vals, SMF_INDEF, &fh), SMF_OK);
+    smf_inertia_t in;
+    ASSERT_EQ(smf_inertia(fh, &in), SMF_OK);
+    EXPECT_EQ(in.pos, fi.num_positive);
+    EXPECT_EQ(in.neg, fi.num_negative);
+    EXPECT_EQ(in.zero, fi.num_zero);
+    std::vector<double> x = b;
+    ASSERT_EQ(smf_solve(ah, fh, 1, x.data(), SMF_SOLVE_FULL), SMF_OK);
+    EXPECT_EQ(x, x_ref);
+    EXPECT_NEAR(x[1], 1.0, 1e-13);
+    EXPECT_NEAR(x[2], 2.0, 1e-13);
+    smf_free_factor(&fh);
+    smf_free_analysis(&ah);
+}

@@ -36,10 +36,6 @@ struct smf_analysis_s {
     std::unique_ptr<smf::AnalysisKeep> keep;   ///< symbolic analysis result
     int                                n;      ///< matrix order (cached)
     std::size_t                        nnz;    ///< entries of the analysed matrix
-    /// The analysed pattern (values zeroed, kept only so the shape checks
-    /// pass): a static-pivoting factor's refinement matrix is built from it
-    /// (smf_set_pivoting).
-    smf::CscLower                      pattern;
     /// smf_set_pivoting(): Control::pivoting of the SMF_INDEF factors.
     smf::Pivoting                      pivoting = smf::Pivoting::Threshold;
 };
@@ -117,9 +113,6 @@ int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out) {
         h->keep  = std::move(keep);
         h->n     = csc->n;
         h->nnz   = static_cast<std::size_t>(nnz);
-        A.values.assign(A.row_idx.size(), 0.0);  /* the pattern only (shape-valid) */
-        A.values.shrink_to_fit();
-        h->pattern = std::move(A);
 
         *out = h;
         return SMF_OK;
@@ -204,11 +197,30 @@ int smf_factor(smf_analysis_t analysis,
          * pivot, smf::refinement_advised). */
         std::unique_ptr<smf::RefineMatrix> refine;
         if (fkeep->static_path && smf::refinement_advised(*fkeep)) {
+            /* The factored matrix: the analysis' cleaned pattern (duplicates
+             * merged, upper-triangle and out-of-range entries dropped), with
+             * the caller's values summed into it through the original-to-
+             * clean map in entry order, as factor() sums them. */
+            const smf::AnalysisKeep& ak = *analysis->keep;
+            std::vector<double> cv;
+            if (ak.orig_to_clean_idx.empty()) {
+                cv.assign(values, values + analysis->nnz);
+            } else {
+                if (ak.orig_to_clean_idx.size() != analysis->nnz) {
+                    return SMF_ERR_INTERNAL;
+                }
+                cv.assign(ak.cleaned.row_idx.size(), 0.0);
+                for (std::size_t k = 0; k < analysis->nnz; ++k) {
+                    const smf::Int c = ak.orig_to_clean_idx[k];
+                    if (c >= 0) cv[static_cast<std::size_t>(c)] += values[k];
+                }
+            }
             refine = std::make_unique<smf::RefineMatrix>();
-            if (smf::prepare_refine_matrix(analysis->pattern, *refine) != smf::ErrorCode::Success) {
+            if (smf::prepare_refine_matrix(ak.cleaned, *refine) != smf::ErrorCode::Success ||
+                cv.size() != refine->slot.size()) {
                 return SMF_ERR_INTERNAL;
             }
-            smf::set_refine_values(std::span<const double>(values, analysis->nnz), *refine);
+            smf::set_refine_values(cv, *refine);
         }
 
         auto* h  = new smf_factor_s;
