@@ -1,4 +1,5 @@
 #include "smf/factor_indef.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/blocked_indef.hpp"
@@ -329,6 +330,7 @@ bool finalize_factor_from_front_results(
     }
   }
 
+  finish_solve_layout(fkeep);
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.actual_flops = total_flops;
   if (max_realized_front > info.max_front_size) {

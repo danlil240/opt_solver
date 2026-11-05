@@ -1,4 +1,5 @@
 #include "smf/multifrontal_serial.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/ldlt_aptp.hpp"
@@ -1800,6 +1801,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     fkeep.solve_threads =
         std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
   }
+  finish_solve_layout(fkeep);
   return ErrorCode::Success;
 }
 

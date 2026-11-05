@@ -114,6 +114,15 @@ void build_inline_dinv(FactorKeep &fkeep, bool usable) {
 
 } // namespace
 
+void finish_solve_layout(FactorKeep &fkeep) {
+  build_inline_dinv(fkeep, true);
+  // No step reaches kInvDiagMinPivots: none can have a cached L11^-1 either.
+  fkeep.solve_small_fronts =
+      !fkeep.solve_steps.empty() &&
+      std::all_of(fkeep.solve_steps.begin(), fkeep.solve_steps.end(),
+                  [](const SolveStep &st) { return st.p < kInvDiagMinPivots; });
+}
+
 void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   info.inverse_diag_fronts = 0;
   info.inverse_diag_seconds = 0.0;
@@ -126,12 +135,12 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
       (fkeep.status == FactorStatus::Success && info.status == ErrorCode::Success) ||
       (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular &&
        info.status == ErrorCode::SingularMatrix);
-  build_inline_dinv(fkeep, usable);
-  // No step reaches kInvDiagMinPivots: none can have a cached L11^-1 either.
-  fkeep.solve_small_fronts =
-      usable && !fkeep.solve_steps.empty() &&
-      std::all_of(fkeep.solve_steps.begin(), fkeep.solve_steps.end(),
-                  [](const SolveStep &st) { return st.p < kInvDiagMinPivots; });
+  // finish_solve_layout built D^-1 with the solve steps; a factor the
+  // solve refuses keeps neither.
+  if (!usable) {
+    build_inline_dinv(fkeep, false);
+    fkeep.solve_small_fronts = false;
+  }
   if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd ||
       !usable || fkeep.factor_values.empty()) {
     fkeep.inv_diag.clear();

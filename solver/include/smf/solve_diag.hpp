@@ -22,6 +22,13 @@ inline constexpr int kInvDiagMinPivots = 16;
 /// 3e-14 with TRSV); 1e4 keeps every acopf / obstacle_surface front.
 inline constexpr double kInvDiagMaxCond = 1e4;
 
+/// Called by each factorization once its solve steps are complete: builds
+/// FactorKeep::dinv (an indefinite factor with D inline) and sets
+/// solve_small_fronts, so a solve inside the factorization (the
+/// scale-on-delay probe) takes the same path as every later one.
+/// build_inverse_diag clears both for a factor the solve refuses.
+void finish_solve_layout(FactorKeep &fkeep);
+
 /// Fill fkeep.inv_diag / inv_diag_offset with L11^-1 of every solve step of
 /// at least kInvDiagMinPivots pivots (ctrl.cache_inverse_diag), or clear
 /// them (cache off, no solve steps, or a factor the solve refuses). The

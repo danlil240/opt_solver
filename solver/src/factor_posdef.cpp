@@ -1,4 +1,5 @@
 #include "smf/factor_posdef.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
@@ -111,6 +112,7 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
   fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
   fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
+  finish_solve_layout(fkeep);
 }
 
 #endif // SMF_PARALLEL
