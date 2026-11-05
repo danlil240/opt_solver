@@ -4,9 +4,9 @@
 // the next one. Every factorization of a V1, V2, V1 sequence on one analysis,
 // FactorKeep and workspace is bitwise-identical (each supernode's factor
 // and D, inertia, solution) to a fresh factorization of the same values,
-// also with the
-// buffer poisoned with NaN in between, under threshold and static pivoting,
-// at 1 thread and at 8 threads in deterministic mode (tiled top fronts).
+// also with the buffer poisoned with NaN in between, under threshold and
+// static pivoting, at 1 thread and at 8 threads in deterministic mode (tiled
+// top fronts).
 #include "kkt_test_matrices.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
