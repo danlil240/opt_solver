@@ -283,7 +283,7 @@ struct FactorContext {
   int delay_budget = -1;
   double budget_static = 0.0;
   // Control::top_tiles: APTP parameters of the 2D tile tasks (null = off),
-  // used on plain threshold fronts of >= kTopTileMinFront rows processed
+  // used on plain threshold fronts of >= tile_min rows processed
   // with a TileCtx (the top of the tree).
   const AptpParams *tile_aprm = nullptr;
   // Control::small_front_kernels: FrontPass::sbuf path for small fronts.
@@ -305,6 +305,8 @@ struct FactorContext {
   // of at least this many rows (Control::posdef_lapack_min_front) go to
   // posdef_factor_front_lapack instead; 0 = off.
   int posdef_lapack = 0;
+  // Tiled fronts' minimum rows (top_tile_min_front).
+  int tile_min = kTopTileMinFront;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -472,7 +474,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   const bool fallback_front = cx.fallback_static > 0.0 && (sn.parent == -1 || nd > p_sym);
   // 2D tile tasks (top of the tree): APTP block structure whatever the
   // front kernel, on the same plain threshold fronts.
-  bool tiled = tc != nullptr && P.tiles != nullptr && tiles_front(cx.tile_aprm != nullptr, f) &&
+  bool tiled = tc != nullptr && P.tiles != nullptr && tiles_front(cx.tile_aprm != nullptr, f, cx.tile_min) &&
                !fallback_front && !budget_front;
   const AptpParams *aprm = tiled ? cx.tile_aprm
                            : (cx.aprm != nullptr && !fallback_front && !budget_front &&
@@ -1009,6 +1011,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
+  const int tile_min = ctrl.top_tile_min_rows > 0 ? ctrl.top_tile_min_rows : top_tile_min_front(det);
   // The plan prices large untiled top fronts as BLAS-parallel only when
   // their BLAS gets the threads (thread_plan.hpp kSplitBlas).
   const bool blas_parallel = plan_blas_parallel(det);
@@ -1161,7 +1164,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const auto view = [&]() -> const TreeView & {
     if (!have_tv) {
       TreeParallelBuffers &b = buffers();
-      tv = tree_view(keep, tiles_on, blas_parallel, b.view_parent, b.view_work, b.view_split);
+      tv = tree_view(keep, tiles_on, blas_parallel, b.view_parent, b.view_work, b.view_split,
+                     tile_min);
     }
     have_tv = true;
     return tv;
@@ -1187,7 +1191,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.per_top_front != thread_costs.per_top_front ||
         pc.per_split_front_thread != thread_costs.per_split_front_thread ||
         pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on ||
-        pc.blas_parallel != blas_parallel) {
+        pc.blas_parallel != blas_parallel || pc.tile_min != tile_min) {
       pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
@@ -1197,6 +1201,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pc.split_cap = thread_costs.split_cap;
       pc.tiles_on = tiles_on;
       pc.blas_parallel = blas_parallel;
+      pc.tile_min = tile_min;
     }
     want_threads = pc.threads;
   } else if (want_threads > 1 && plan_trace_enabled()) {
@@ -1283,7 +1288,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack};
+                           posdef_lapack, tile_min};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1354,7 +1359,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack};
+                           posdef_lapack, tile_min};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

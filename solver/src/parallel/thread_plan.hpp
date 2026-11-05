@@ -29,8 +29,17 @@ namespace smf {
 inline constexpr double kTreeParallelMinWork = 2e7;
 
 // Fronts at least this large are factored as 2D tile tasks at the top of the
-// tree (Control::top_tiles).
+// tree (Control::top_tiles): kTopTileMinFront in deterministic mode (whose
+// reproducibility rests on tiling every such front at every thread count;
+// unchanged), kTopTileMinFrontParallel otherwise. On the 12900K at 8 threads
+// the tile kernel lost to the TPP kernel with the front's BLAS share on
+// fronts of 512 to ~2000 rows (front-tier rec track, wall 0.984 with 2048,
+// cops_elec_200 0.57, TSOPF_FS_b300_c2 0.87; the IPOPT track has no tiles).
 inline constexpr int kTopTileMinFront = 512;
+inline constexpr int kTopTileMinFrontParallel = 2048;
+inline constexpr int top_tile_min_front(bool deterministic) {
+  return deterministic ? kTopTileMinFront : kTopTileMinFrontParallel;
+}
 
 // Control::top_tiles for a factorization: the plain threshold-pivoting
 // fronts (indefinite, no static or in-order pivoting, pivot_u >=
@@ -41,9 +50,9 @@ bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double 
 
 // Per front, with top_tiles_on: a front of front_rows rows is tiled (unless
 // it turns into a fallback or delay-budget static front, decided while
-// factoring).
-inline bool tiles_front(bool tiles_on, int front_rows) {
-  return tiles_on && front_rows >= kTopTileMinFront;
+// factoring). min_rows: top_tile_min_front(deterministic).
+inline bool tiles_front(bool tiles_on, int front_rows, int min_rows) {
+  return tiles_on && front_rows >= min_rows;
 }
 
 struct TreeView {                       // one entry per supernode
@@ -70,13 +79,14 @@ inline constexpr std::uint8_t kSplitBlas = 2;
 inline constexpr int kTopBlasMinFront = 1024;
 
 // The view of keep's assembly tree; fills the buffers it points into.
-// tiles_on: top_tiles_on(...) at more than one thread. blas_parallel: a top
+// tiles_on: top_tiles_on(...) at more than one thread; tile_min: the tile
+// threshold (top_tile_min_front). blas_parallel: a top
 // front's BLAS calls run on its share of the threads (plan_blas_parallel);
 // false (deterministic mode, sequential MKL, a BLAS without threads) marks
 // no front kSplitBlas, so untiled fronts are priced serial.
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
                    std::vector<Int> &parent, std::vector<double> &work,
-                   std::vector<std::uint8_t> &split);
+                   std::vector<std::uint8_t> &split, int tile_min = kTopTileMinFront);
 
 // Whether a factorization's top fronts get parallel BLAS: not in
 // deterministic mode (BLAS on one thread there, multifrontal_serial.cpp),
