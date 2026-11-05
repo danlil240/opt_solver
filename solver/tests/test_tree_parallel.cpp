@@ -262,7 +262,11 @@ CscLower helmholtz_3d(int m, double shift) {
 }
 
 // helm3d01 if the fixture is present, otherwise a generated 3D Helmholtz
-// 30^3; `name` says which.
+// 30^3; `name` says which. The tile tests set Control::top_tile_min_rows =
+// kTileTestMinRows: the generated grid's largest fronts (~1700 rows) are
+// below the default threshold (2048 outside deterministic mode).
+constexpr int kTileTestMinRows = 512;
+
 CscLower helmholtz_case(std::string &name) {
     namespace fs = std::filesystem;
     const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" /
@@ -320,8 +324,8 @@ RefinedRun factor_refined(const CscLower &A, Control ctrl, int threads) {
 
 } // namespace
 
-// Fronts of >= 512 rows at the top of the tree are factored as 2D tile
-// tasks (Control::top_tiles) with 8 threads: same inertia as the serial
+// Fronts of >= 512 rows (top_tile_min_rows here) at the top of the tree
+// are factored as 2D tile tasks (Control::top_tiles) with 8 threads: same inertia as the serial
 // factorization and the same backward error class.
 TEST(TreeParallel, TileTasksMatchSerial) {
     std::string name;
@@ -329,6 +333,7 @@ TEST(TreeParallel, TileTasksMatchSerial) {
     SCOPED_TRACE(name);
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.top_tile_min_rows = kTileTestMinRows;
     const RefinedRun serial = factor_refined(A, ctrl, 1);
     ASSERT_GT(serial.info.num_negative, 0) << "not indefinite";
     // Deterministic mode (Control::deterministic or an SMF_DETERMINISTIC
@@ -363,6 +368,7 @@ TEST(TreeParallel, NoTilesBelowWeakPivotU) {
     SCOPED_TRACE(name);
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.top_tile_min_rows = kTileTestMinRows;
     ctrl.pivot_u = 1e-8;
     const RefinedRun par = factor_refined(A, ctrl, 4);
     ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
@@ -395,6 +401,7 @@ TEST(TreeParallel, TileTasksNoOversubscription) {
     SCOPED_TRACE(name);
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.top_tile_min_rows = kTileTestMinRows;
     for (const int threads : {8, 3}) {
         ctrl.num_threads = threads;
         ctrl.auto_threads = false;  // small test trees

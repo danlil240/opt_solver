@@ -1011,7 +1011,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   AptpParams tile_aprm = aprm;
   tile_aprm.nb = std::max(1, ctrl.top_tile_nb);
   const bool tiles_on = top_tiles_on(ctrl, posdef, prm.static_pivot, prm.min_abs_pivot, det);
-  const int tile_min = top_tile_min_front(det);
+  const int tile_min = ctrl.top_tile_min_rows > 0 ? ctrl.top_tile_min_rows : top_tile_min_front(det);
   // The plan prices large untiled top fronts as BLAS-parallel only when
   // their BLAS gets the threads (thread_plan.hpp kSplitBlas).
   const bool blas_parallel = plan_blas_parallel(det);

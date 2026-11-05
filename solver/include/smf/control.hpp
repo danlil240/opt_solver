@@ -567,6 +567,11 @@ struct Control {
     // block-column / tile width.
     bool           top_tiles     = true;
     int            top_tile_nb   = 256;
+    // > 0: tile fronts of at least this many rows instead of the default
+    // (2048, and 512 in deterministic mode; top_tile_min_front). For tests
+    // and tuning. Deterministic mode stays deterministic with any value
+    // (it applies at every thread count).
+    int            top_tile_min_rows = 0;
     bool           tree_parallel = false;
     // Deterministic mode (determinism.hpp; also always on in an
     // SMF_DETERMINISTIC build): bitwise-identical ordering, factor, inertia
