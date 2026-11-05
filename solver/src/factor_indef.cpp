@@ -506,10 +506,16 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.pivot_growth = 0.0;
   fkeep.status = FactorStatus::Success;
   fkeep.factor_col_ptr.assign(static_cast<std::size_t>(ns) + 1, 0);
-  fkeep.factor_values.clear();
+  // factor_values keeps its size and capacity from the last factorization
+  // (as the SPD path does): every front zeroes its own lower triangle when
+  // it is assembled, so clearing here only made the engine zero-fill the
+  // whole predicted factor again (multifrontal_factor_serial's reserve, one
+  // thread) before the first front: 69 MB, about 4 ms of each pde_control_250
+  // refactorization at 8 threads.
   fkeep.pivot_types.assign(static_cast<std::size_t>(ns), {});
 
   if (ns == 0 || keep.n == 0) {
+    fkeep.factor_values.clear();
     info.num_positive = 0;
     info.num_negative = 0;
     info.num_zero = 0;

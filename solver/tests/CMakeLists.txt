@@ -518,3 +518,9 @@ if(WIN32)
     target_link_libraries(test_skip_trial_gate PRIVATE psapi)
 endif()
 add_test(NAME SkipTrialGate COMMAND test_skip_trial_gate)
+
+# --- factor_values reuse across refactorizations (factor_indef) ---
+
+add_executable(test_factor_values_reuse test_factor_values_reuse.cpp)
+target_link_libraries(test_factor_values_reuse PRIVATE smf GTest::gtest_main)
+add_test(NAME FactorValuesReuse COMMAND test_factor_values_reuse)
