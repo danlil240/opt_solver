@@ -122,6 +122,38 @@ namespace smf
     // Stop-check slices per pass of the concurrent trial's gated searches.
     constexpr long long kTrialSlicesPerPass = 16;
 
+    // Whether SymmetricMatcher(C).diagonal() is false for certain, without
+    // building the matcher: some column has a zero or missing diagonal and
+    // cannot be one of the matcher's dense columns (its pattern, both
+    // triangles, has at most max(16, 10 sqrt(n)) entries, or n <= 50). The
+    // matcher's cost graph has no edge for a zero entry, so its initial
+    // phase never matches that column to itself. C: cleaned lower CSC.
+    // O(nnz), against the cost graph's one log per entry.
+    bool provably_not_diagonal(const CscLower &C)
+    {
+        const Int n = C.n;
+        if (n <= 0)
+            return false;
+        std::vector<Int> deg(static_cast<std::size_t>(n), 0);
+        std::vector<char> zero_diag(static_cast<std::size_t>(n), 1);
+        for (Int j = 0; j < n; ++j)
+            for (Int p = C.col_ptr[j]; p < C.col_ptr[j + 1]; ++p)
+            {
+                const Int i = C.row_idx[static_cast<std::size_t>(p)];
+                ++deg[static_cast<std::size_t>(j)];
+                if (i != j)
+                    ++deg[static_cast<std::size_t>(i)];
+                else if (C.values[static_cast<std::size_t>(p)] != 0.0)
+                    zero_diag[static_cast<std::size_t>(j)] = 0;
+            }
+        const double threshold = std::max(16.0, 10.0 * std::sqrt(static_cast<double>(n)));
+        for (Int j = 0; j < n; ++j)
+            if (zero_diag[static_cast<std::size_t>(j)] &&
+                (n <= 50 || static_cast<double>(deg[static_cast<std::size_t>(j)]) <= threshold))
+                return true;
+        return false;
+    }
+
     class ConcurrentTrial
     {
     public:
@@ -602,6 +634,9 @@ namespace smf
         // concurrent trial runs as usual, stoppable in its budgeted phase.
         const bool gate_armed = control.skip_trial_gate && control.pivot_u <= control.skip_trial_max_pivot_u;
         std::unique_ptr<SymmetricMatcher> gated_matcher;
+        // Serial and gated, and provably not diagonal: the gated matcher is
+        // built after the gate, only when the trial runs.
+        bool deferred_gated = false;
         // In edges scanned: budget x 2 x C's lower entries (diagonal
         // included), about `budget` passes over the matcher's symmetric
         // cost graph. Negative, NaN or beyond 1e18 edges: none.
@@ -623,6 +658,13 @@ namespace smf
                                                            control.matching_algorithm, xadj, adj,
                                                            analyse_scratch_worker_, candidate_nd.threads,
                                                            gate_armed);
+        }
+        else if (auto_matching && gate_armed && provably_not_diagonal(C))
+        {
+            // The gate decides below; its matcher (the cost graph and the
+            // initial phase, most of a skipped trial's cost) is built only
+            // if the trial runs, then exactly as it would be here.
+            deferred_gated = true;
         }
         else if (auto_matching)
         {
@@ -764,9 +806,9 @@ namespace smf
         // skipped (the concurrent one stopped), else it runs as it would
         // have: serially from here (the same results as before the base
         // ordering), concurrently as already started.
-        if (auto_matching && gate_armed && amd_ordered && (gated_matcher || concurrent))
+        if (auto_matching && gate_armed && amd_ordered && (gated_matcher || deferred_gated || concurrent))
         {
-            const bool diagonal = gated_matcher ? false : concurrent->wait_initial_phase();
+            const bool diagonal = (gated_matcher || deferred_gated) ? false : concurrent->wait_initial_phase();
             if (!diagonal)
             {
                 const double flr = factor_flops(sym0) / static_cast<double>(n);
@@ -785,6 +827,9 @@ namespace smf
                 }
             }
         }
+        if (deferred_gated && auto_matching)
+            gated_matcher =
+                std::make_unique<SymmetricMatcher>(C, MatchingSearchOrder::Degree, control.matching_algorithm);
         if (gated_matcher)
         {
             if (gated_matcher->advance(budget))
