@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -201,6 +202,8 @@ struct PluginStats
     std::mutex mutex; // guards the members below
     double factor_s = 0.0;
     double solve_s = 0.0;
+    // Solve calls and their time by right-hand-side count.
+    std::map<int, std::pair<long, double>> solves_by_nrhs;
     // IpmSession statistics of the sessions freed so far (one per analysis).
     long sessions = 0;
     smf::IpmStats ipm;
@@ -218,6 +221,9 @@ struct PluginStats
         rhs.fetch_add(nrhs);
         const std::lock_guard<std::mutex> lock(mutex);
         solve_s += seconds;
+        auto& [calls, s] = solves_by_nrhs[nrhs];
+        ++calls;
+        s += seconds;
     }
     void add_session(const smf::IpmStats& st)
     {
@@ -246,6 +252,9 @@ struct PluginStats
                      smf::plugin_threads().threads, smf::plugin_threads_source_name(smf::plugin_threads().source),
                      n_factors, factor_s, n_solves, n_rhs, solve_s,
                      n_solves > 0 ? 1e6 * solve_s / static_cast<double>(n_solves) : 0.0);
+        for (const auto& [k, v] : solves_by_nrhs)
+            std::fprintf(stderr, "[smf_ma97] solves nrhs=%d: %ld calls, %.3f ms, %.1f us/call\n", k, v.first,
+                         1e3 * v.second, 1e6 * v.second / static_cast<double>(v.first));
         std::fprintf(stderr,
                      "[smf_ma97] ipm: sessions=%ld factorizations=%d accepted=%d aborted=%d "
                      "reanalyses_tried=%d reanalyses_adopted=%d reanalyses_reverted=%d reanalyse_s=%.6f "

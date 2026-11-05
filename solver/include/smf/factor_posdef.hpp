@@ -77,6 +77,22 @@ struct FactorKeep {
   // indefinite factor (D left out), non-unit for SPD.
   std::vector<double> inv_diag;
   std::vector<LongInt> inv_diag_offset;
+  // inline_d: D^-1 of every pivot block, built once per factorization
+  // (build_inverse_diag) so the backward solve multiplies instead of
+  // dividing (a 2x2 block's scaled Cramer solve on every right-hand side).
+  // Three entries per pivot, pivots in solve-step order (step k's first at
+  // 3 * dinv_offset[k]): a 1x1 pivot [1/d, 0, 0] (0 for a zero or
+  // non-finite d); the first pivot of a 2x2 block [e00, e10, e11] of the
+  // block's inverse (all zero for a singular block), its second pivot
+  // unused. dinv_kind: 1, 2 (first of a 2x2), 0 (second of a 2x2). Empty:
+  // apply D from the factor's diagonal slots (apply_inline_d).
+  std::vector<double> dinv;
+  std::vector<std::int8_t> dinv_kind;
+  std::vector<LongInt> dinv_offset;
+  // Every solve step has fewer than kInvDiagMinPivots pivots and no cached
+  // L11^-1 (build_inverse_diag): the solve's front kernels are all scalar
+  // loops, and solve_full_interleaved takes every serial full solve.
+  bool solve_small_fronts = false;
   std::vector<double> solve_tmp; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_loc; ///< legacy scratch (not mutated by const solve)
   std::vector<double> solve_ext; ///< legacy scratch (not mutated by const solve)

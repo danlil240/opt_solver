@@ -40,6 +40,78 @@ bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X
   return nl * nx <= kInvDiagMaxCond;
 }
 
+// FactorKeep::dinv from the D blocks in the fronts' diagonal slots, with
+// apply_inline_d's semantics: a nonzero (c, c + 1) slot starts a 2x2 block;
+// a zero or non-finite 1x1 pivot and a singular 2x2 block give 0. The 2x2
+// inverse is solve_2x2_scaled's scaled Cramer rule with the right-hand
+// side left out: [c, -b; -b, a] / det_s / s.
+void build_inline_dinv(FactorKeep &fkeep, bool usable) {
+  if (!usable || fkeep.is_posdef || !fkeep.inline_d || fkeep.solve_steps.empty() ||
+      fkeep.use_banded_spd || fkeep.factor_values.empty()) {
+    fkeep.dinv.clear();
+    fkeep.dinv_kind.clear();
+    fkeep.dinv_offset.clear();
+    return;
+  }
+  const std::size_t ns = fkeep.solve_steps.size();
+  const auto nvals = static_cast<LongInt>(fkeep.factor_values.size());
+  LongInt total = 0;
+  for (const SolveStep &st : fkeep.solve_steps) {
+    if (st.p < 0 || st.f < st.p || st.factor_offset < 0 ||
+        st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals) {
+      fkeep.dinv.clear();
+      fkeep.dinv_kind.clear();
+      fkeep.dinv_offset.clear();
+      return;
+    }
+    total += st.p;
+  }
+  // resize() keeps the capacity: same structure, no allocation.
+  fkeep.dinv.resize(3 * static_cast<std::size_t>(total));
+  fkeep.dinv_kind.resize(static_cast<std::size_t>(total));
+  fkeep.dinv_offset.resize(ns);
+  LongInt off = 0;
+  for (std::size_t k = 0; k < ns; ++k) {
+    const SolveStep &st = fkeep.solve_steps[k];
+    fkeep.dinv_offset[k] = off;
+    const int p = st.p;
+    const std::ptrdiff_t f = st.f;
+    const double *L = fkeep.factor_values.data() + st.factor_offset;
+    double *d = fkeep.dinv.data() + 3 * off;
+    std::int8_t *kind = fkeep.dinv_kind.data() + off;
+    for (int c = 0; c < p;) {
+      const double d00 = L[c * f + c];
+      if (c + 1 < p) {
+        const double d10 = L[(c + 1) * f + c];
+        if (d10 != 0.0) {
+          const double d11 = L[(c + 1) * f + c + 1];
+          double sc = 0.0;
+          const double det_s = scaled_det_2x2(d00, d10, d11, sc);
+          double *e = d + 3 * c;
+          if (sc == 0.0 || !std::isfinite(det_s) || det_s == 0.0) {
+            e[0] = e[1] = e[2] = 0.0;
+          } else {
+            e[0] = (d11 / sc) / det_s / sc;
+            e[1] = -(d10 / sc) / det_s / sc;
+            e[2] = (d00 / sc) / det_s / sc;
+          }
+          e[3] = e[4] = e[5] = 0.0;
+          kind[c] = 2;
+          kind[c + 1] = 0;
+          c += 2;
+          continue;
+        }
+      }
+      double *e = d + 3 * c;
+      e[0] = (d00 == 0.0 || !is_finite_fast(d00)) ? 0.0 : 1.0 / d00;
+      e[1] = e[2] = 0.0;
+      kind[c] = 1;
+      ++c;
+    }
+    off += p;
+  }
+}
+
 } // namespace
 
 void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
@@ -54,6 +126,12 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
       (fkeep.status == FactorStatus::Success && info.status == ErrorCode::Success) ||
       (fkeep.status == FactorStatus::Singular && ctrl.continue_on_singular &&
        info.status == ErrorCode::SingularMatrix);
+  build_inline_dinv(fkeep, usable);
+  // No step reaches kInvDiagMinPivots: none can have a cached L11^-1 either.
+  fkeep.solve_small_fronts =
+      usable && !fkeep.solve_steps.empty() &&
+      std::all_of(fkeep.solve_steps.begin(), fkeep.solve_steps.end(),
+                  [](const SolveStep &st) { return st.p < kInvDiagMinPivots; });
   if (!ctrl.cache_inverse_diag || fkeep.solve_steps.empty() || fkeep.use_banded_spd ||
       !usable || fkeep.factor_values.empty()) {
     fkeep.inv_diag.clear();

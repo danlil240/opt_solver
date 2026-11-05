@@ -1096,6 +1096,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
+  fkeep.dinv_offset.clear();      // nor a D^-1 (build_inverse_diag)
+  fkeep.solve_small_fronts = false;
   fkeep.solve_steps.reserve(ns);
   fkeep.solve_subtrees.clear();
   fkeep.solve_threads = 1;

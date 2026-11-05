@@ -73,6 +73,8 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
 static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_steps.clear();
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
+  fkeep.dinv_offset.clear();      // nor a D^-1 (build_inverse_diag)
+  fkeep.solve_small_fronts = false;
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
   fkeep.solve_threads = 1;

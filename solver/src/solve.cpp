@@ -1,4 +1,5 @@
 #include "smf/solve_backward.hpp"
+#include "smf/solve_interleaved.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/determinism.hpp"
@@ -875,6 +876,15 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 
   switch (job) {
   case SolveJob::Full: {
+    // Serial solves of up to kInterleavedMaxRhs right-hand sides, and any
+    // serial solve of a factor of small fronts only (one right-hand side
+    // there runs in place, without gathering each front): interleaved, each
+    // factor entry loaded once for all of them.
+    if (threads == 1 && interleaved_solve_supported(fkeep) &&
+        (fkeep.solve_small_fronts ? true : (nrhs > 1 && nrhs <= kInterleavedMaxRhs))) {
+      solve_full_interleaved(fkeep, b, n, nrhs, ldb, ws);
+      break;
+    }
     // One gather (P^T S b) into the work vector and one scatter (S P y) at
     // the end, instead of a scaling pass, a permute-and-copy pass in each
     // triangular solve and a scaling pass again.

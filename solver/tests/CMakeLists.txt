@@ -137,6 +137,10 @@ add_executable(test_solve_end_to_end test_solve_end_to_end.cpp)
 target_link_libraries(test_solve_end_to_end PRIVATE smf GTest::gtest_main)
 add_test(NAME SolveEndToEnd COMMAND test_solve_end_to_end)
 
+add_executable(test_solve_interleaved test_solve_interleaved.cpp)
+target_link_libraries(test_solve_interleaved PRIVATE smf GTest::gtest_main)
+add_test(NAME SolveInterleaved COMMAND test_solve_interleaved)
+
 # --- M4.S2 test target ---
 
 add_executable(test_factor_solve test_factor_solve.cpp)
