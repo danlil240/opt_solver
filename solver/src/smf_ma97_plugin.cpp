@@ -1,3 +1,15 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include "smf/analysis.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
@@ -264,6 +276,31 @@ struct PluginStats
     }
 };
 static PluginStats g_stats;
+
+// IPOPT loads the hsllib for every solve and frees it afterwards, so an
+// application that optimizes over and over (a replanning robot) loaded smf
+// and its dependencies (MKL, the OpenMP runtimes) again and re-ran their
+// initialisation every time: about 2 ms of each 9-11 ms trajectory replan.
+// The module pins itself on its first load; later loads only count a
+// reference, and the statistics above print once, at process exit. The
+// SMF_* settings the plugin reads once per load are then read once per
+// process: SMF_PLUGIN_UNLOAD=1 keeps the old unload per free (the plugin
+// tests change those settings between loads).
+static void pin_this_module()
+{
+    if (const char* v = std::getenv("SMF_PLUGIN_UNLOAD"); v != nullptr && std::atoi(v) != 0)
+        return;
+#if defined(_WIN32)
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       reinterpret_cast<LPCWSTR>(&pin_this_module), &self);
+#else
+    Dl_info di{};
+    if (dladdr(reinterpret_cast<void*>(&pin_this_module), &di) != 0 && di.dli_fname != nullptr)
+        dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
+#endif
+}
+static const bool g_pinned = (pin_this_module(), true);
 
 static std::shared_ptr<smf::IpmSession> make_session()
 {
