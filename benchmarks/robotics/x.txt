@@ -1,0 +1,6 @@
+Exception of type: DYNAMIC_LIBRARY_FAILURE in file "Common/IpLibraryLoader.cpp" at line 83:
+ Exception message: Error 126 while loading DLL C:\Users\daniel\projects\opt_solver-wt\robotics\build-deps\coinhsl-2024.5.15\CoinHSL.v2024.5.15.x86_64-w64-mingw32-libgfortran5\bin\libhsl.dll via LoadLibraryA: The specified module could not be found.
+Error 126 while loading DLL C:\Users\daniel\projects\opt_solver-wt\robotics\build-deps\coinhsl-2024.5.15\CoinHSL.v2024.5.15.x86_64-w64-mingw32-libgfortran5\bin\libhsl.dll via LoadLibraryExA: The specified module could not be found.
+
+
+EXIT: Library loading failure.
