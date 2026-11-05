@@ -557,7 +557,8 @@ struct Control {
     double         solve_cost_per_top_row  = 1.0;
     // num_threads > 1 and pivot_u >= 1e-6 (kWeakPivotRatio; below it the
     // tile kernel would lack TPP's weak-1x1 rule, so IPOPT's u = 1e-8 keeps
-    // TPP at every thread count): fronts of at least 512 rows at the top of
+    // TPP at every thread count): fronts of at least 2048 rows (512 in
+    // deterministic mode, which tiles them at every thread count) at the top of
     // the tree that pivot with plain threshold pivoting (indefinite, no static or
     // in-order pivoting, not a fallback / delay-budget static front) are
     // factored as 2D tile tasks on the tree-parallel thread pool, serial

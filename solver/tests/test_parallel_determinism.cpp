@@ -8,6 +8,7 @@
 //   independent ordering, a postorder factor layout and a serial postorder
 //   solve, MKL CNR. BitwiseAcrossThreadCounts checks it bit for bit.
 
+#include "../src/parallel/thread_plan.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/determinism.hpp"
@@ -533,6 +534,48 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
     std::printf("[BitwiseAcrossThreadCounts] MKL CNR branch %d (10 = AVX2, 2 = AUTO)\n",
                 blas_reproducibility_branch());
 #endif
+}
+
+// The tile threshold (top_tile_min_front): outside deterministic mode only
+// fronts of at least kTopTileMinFrontParallel (2048) rows are tiled; in
+// deterministic mode every front of at least kTopTileMinFront (512) rows
+// still is, at every thread count, and the solution, D and inertia stay
+// bitwise across thread counts. The 3D Helmholtz grid's top separators are
+// 900-ish rows: tiled in deterministic mode, not otherwise.
+TEST(ParallelDeterminism, DeterministicModeTilesFrom512) {
+    static_assert(kTopTileMinFront == 512 && kTopTileMinFrontParallel == 2048);
+    DetCase c{"helmholtz_3d_30", grid_3d(30, 0.9), MatrixType::RealSymmetricIndefinite, true, true};
+    const DetRun ref = det_run(c, 1);
+    ASSERT_FALSE(ref.x.empty());
+    EXPECT_GT(ref.tiles, 0) << "deterministic mode tiles at 1 thread too";
+    for (const int threads : {2, 8}) {
+        const DetRun r = det_run(c, threads);
+        EXPECT_EQ(r.tiles, ref.tiles) << threads << " threads";
+        EXPECT_EQ(bit_diff(r.x, ref.x).first, 0u) << threads << " threads: solution";
+        EXPECT_EQ(bit_diff(r.d, ref.d).first, 0u) << threads << " threads: D";
+        EXPECT_EQ(r.neg, ref.neg) << threads << " threads";
+    }
+    // Outside deterministic mode at 8 threads: none of these fronts reaches
+    // 2048 rows, so none is tiled.
+    Control ctrl;
+    ctrl.matrix_type = c.type;
+    ctrl.num_threads = 8;
+    ctrl.auto_threads = false;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(c.A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    Int max_front = 0;
+    for (std::size_t s = 0; s < ak->supernodes.size(); ++s)
+        max_front = std::max(max_front, ak->front_size(static_cast<Int>(s)));
+    ASSERT_GE(max_front, kTopTileMinFront) << "premise: a front deterministic mode tiles";
+    ASSERT_LT(max_front, kTopTileMinFrontParallel) << "premise: no front of 2048+ rows";
+    NumericWorkspace nws;
+    FactorKeep fk;
+    ASSERT_EQ(solver.factor(*ak, c.A, ctrl, info, fk, nws), FactorStatus::Success);
+    EXPECT_EQ(info.top_tile_fronts, 0);
+    std::printf("[DeterministicModeTilesFrom512] max front %d: %d tiled fronts in deterministic mode, "
+                "%d otherwise\n", static_cast<int>(max_front), ref.tiles, info.top_tile_fronts);
 }
 
 // Control::posdef_front_kernel = Lapack in deterministic mode: ignored (the

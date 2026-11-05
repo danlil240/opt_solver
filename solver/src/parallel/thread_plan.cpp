@@ -269,7 +269,7 @@ bool plan_blas_parallel(bool deterministic) {
 
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
                    std::vector<Int> &parent, std::vector<double> &work,
-                   std::vector<std::uint8_t> &split) {
+                   std::vector<std::uint8_t> &split, int tile_min) {
   const std::size_t ns = keep.supernodes.size();
   parent.resize(ns);
   work.resize(ns);
@@ -279,7 +279,7 @@ TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
     const double fd = static_cast<double>(f);
     parent[s] = keep.supernodes[s].parent;
     work[s] = fd * fd * static_cast<double>(keep.supernodes[s].width());
-    split[s] = tiles_front(tiles_on, static_cast<int>(f)) ? kSplitTiles
+    split[s] = tiles_front(tiles_on, static_cast<int>(f), tile_min) ? kSplitTiles
                : blas_parallel && f >= kTopBlasMinFront   ? kSplitBlas
                                                           : 0;
   }
