@@ -387,8 +387,12 @@ FactorStatus factor_scale_on_delay(const AnalysisKeep &ak, const Control &ctrl, 
   // Returns true when st is final: the static factor kept, or a hard error
   // (allocation, invalid values) that the rescue would only repeat.
   const auto try_static = [&](FactorStatus &st) {
-    st = run(ak, static_path_control(ctrl), -1.0);
-    if (!ran(st)) return true;
+    Control sc = static_path_control(ctrl);
+    sc.stop_on_static_pivot = ctrl.static_try_fail_fast;
+    st = run(ak, sc, -1.0);
+    // A fail-fast stop (a perturbed pivot): rejected as below.
+    const bool stopped = ctrl.static_try_fail_fast && st == FactorStatus::MaxPivotDelays;
+    if (!stopped && !ran(st)) return true;
     if (st == FactorStatus::Success && info.static_pivots == 0 &&
         info.pivot_growth <= kStaticMaxGrowth) {
       fkeep.static_path = true;

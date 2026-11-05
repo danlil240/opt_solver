@@ -289,6 +289,13 @@ struct Control {
     // trigger (FactorKeep::static_path) stay as machinery for an opt-in
     // fast mode.
     bool           static_fallback_after_cascade = false;
+    // PROTOTYPE (probe): the cascade fallback's static try stops at the
+    // first front that perturbs a pivot (such a try is rejected anyway), so
+    // a rejected try costs the work up to that front, not a whole factor.
+    bool           static_try_fail_fast = false;
+    // Internal (set by the static try): stop the factorization at the first
+    // perturbed pivot, reported as a work-limit stop.
+    bool           stop_on_static_pivot = false;
     // Pivoting policy of indefinite factorizations. Threshold (the default)
     // is the accurate mode documented everywhere else in this struct:
     // threshold pivoting with delays, the scale-on-delay rescue, exact

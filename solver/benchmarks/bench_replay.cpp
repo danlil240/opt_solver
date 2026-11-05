@@ -690,6 +690,8 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SOD_CARRY")) ctrl.scale_on_delay_carry = std::atoi(e) != 0;
     // SMF_BENCH_STATIC_FALLBACK (0/1): Control::static_fallback_after_cascade.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_FALLBACK")) ctrl.static_fallback_after_cascade = std::atoi(e) != 0;
+    // SMF_BENCH_STATIC_FAIL_FAST (0/1, probe): Control::static_try_fail_fast.
+    if (const char *e = std::getenv("SMF_BENCH_STATIC_FAIL_FAST")) ctrl.static_try_fail_fast = std::atoi(e) != 0;
     // SMF_PIVOTING = threshold | static: Control::pivoting (static: the
     // opt-in fast mode), the IPOPT plugin's variable, honoured on every
     // track (the ipopt-plugin track's Control already has it from

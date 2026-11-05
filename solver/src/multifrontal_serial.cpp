@@ -305,6 +305,9 @@ struct FactorContext {
   // of at least this many rows (Control::posdef_lapack_min_front) go to
   // posdef_factor_front_lapack instead; 0 = off.
   int posdef_lapack = 0;
+  // Control::stop_on_static_pivot: a front that perturbs a pivot stops the
+  // factorization (WorkLimitExceeded).
+  bool stop_on_static = false;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -719,6 +722,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.flops += kr.flops;
   st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
+  if (cx.stop_on_static && kr.static_pivots > 0) {
+    for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+    return ErrorCode::WorkLimitExceeded;
+  }
 
   if (cx.posdef && p < num_elig) {
     for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
@@ -1283,7 +1290,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack};
+                           posdef_lapack, ctrl.stop_on_static_pivot};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1354,7 +1361,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack};
+                           posdef_lapack, ctrl.stop_on_static_pivot};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
