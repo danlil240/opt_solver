@@ -1,4 +1,5 @@
 #include "smf/factor_posdef.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/dense_kernel.hpp"
 #include "smf/factor_stack.hpp"
 #include "smf/frontal_matrix.hpp"
@@ -70,9 +71,11 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
 }
 
 #ifdef SMF_PARALLEL
-static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
+static void build_solve_steps(const AnalysisKeep &keep, const Control &ctrl, FactorKeep &fkeep) {
   fkeep.solve_steps.clear();
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
+  fkeep.dinv_offset.clear();      // nor a D^-1 (build_inverse_diag)
+  fkeep.solve_small_fronts = false;
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
   fkeep.solve_threads = 1;
@@ -109,6 +112,7 @@ static void build_solve_steps(const AnalysisKeep &keep, FactorKeep &fkeep) {
   fkeep.solve_tmp.resize(static_cast<std::size_t>(keep.n));
   fkeep.solve_loc.resize(static_cast<std::size_t>(max_p));
   fkeep.solve_ext.resize(static_cast<std::size_t>(max_q));
+  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
 }
 
 #endif // SMF_PARALLEL
@@ -439,7 +443,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
       return fail(ps, ErrorCode::NotPositiveDefinite);
     info.actual_factor_entries =
         static_cast<LongInt>(fkeep.factor_values.size());
-    build_solve_steps(keep, fkeep);
+    build_solve_steps(keep, ctrl, fkeep);
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
     return FactorStatus::Success;

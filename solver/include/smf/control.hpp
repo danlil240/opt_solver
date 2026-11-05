@@ -590,6 +590,14 @@ struct Control {
     // no solve time (the blocks with p >= 16 are few and small; GEMV on the
     // full p x p inverse does twice TRSV's flops) and cost 1-8% factor time.
     bool           cache_inverse_diag            = false;
+    // The small-system solve (solve_interleaved.hpp): D^-1 precomputed per
+    // factorization (FactorKeep::dinv), up to kInterleavedMaxRhs right-hand
+    // sides of a serial solve interleaved row by row, and every serial solve
+    // of a factor of small fronts only (FactorKeep::solve_small_fronts) on
+    // those kernels, one right-hand side in place. Off: the front kernels of
+    // solve_forward / solve_backward as before. On the trajectory KKTs (949
+    // fronts of 2-4 pivots) IPOPT's solve time drops 12 -> 4 ms.
+    bool           small_solve_kernels           = true;
     bool           solve_use_blas3_single_rhs    = false;
     bool           solve_multifrontal_forward     = false;
     // Classical refinement steps (refine(), factor_solve); 0 disables

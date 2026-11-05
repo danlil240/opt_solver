@@ -1,3 +1,15 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 #include "smf/analysis.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
@@ -17,6 +29,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <iomanip>
 #include <memory>
@@ -201,6 +214,8 @@ struct PluginStats
     std::mutex mutex; // guards the members below
     double factor_s = 0.0;
     double solve_s = 0.0;
+    // Solve calls and their time by right-hand-side count.
+    std::map<int, std::pair<long, double>> solves_by_nrhs;
     // IpmSession statistics of the sessions freed so far (one per analysis).
     long sessions = 0;
     smf::IpmStats ipm;
@@ -218,6 +233,9 @@ struct PluginStats
         rhs.fetch_add(nrhs);
         const std::lock_guard<std::mutex> lock(mutex);
         solve_s += seconds;
+        auto& [calls, s] = solves_by_nrhs[nrhs];
+        ++calls;
+        s += seconds;
     }
     void add_session(const smf::IpmStats& st)
     {
@@ -246,6 +264,9 @@ struct PluginStats
                      smf::plugin_threads().threads, smf::plugin_threads_source_name(smf::plugin_threads().source),
                      n_factors, factor_s, n_solves, n_rhs, solve_s,
                      n_solves > 0 ? 1e6 * solve_s / static_cast<double>(n_solves) : 0.0);
+        for (const auto& [k, v] : solves_by_nrhs)
+            std::fprintf(stderr, "[smf_ma97] solves nrhs=%d: %ld calls, %.3f ms, %.1f us/call\n", k, v.first,
+                         1e3 * v.second, 1e6 * v.second / static_cast<double>(v.first));
         std::fprintf(stderr,
                      "[smf_ma97] ipm: sessions=%ld factorizations=%d accepted=%d aborted=%d "
                      "reanalyses_tried=%d reanalyses_adopted=%d reanalyses_reverted=%d reanalyse_s=%.6f "
@@ -255,6 +276,31 @@ struct PluginStats
     }
 };
 static PluginStats g_stats;
+
+// IPOPT loads the hsllib for every solve and frees it afterwards, so an
+// application that optimizes over and over (a replanning robot) loaded smf
+// and its dependencies (MKL, the OpenMP runtimes) again and re-ran their
+// initialisation every time: about 2 ms of each 9-11 ms trajectory replan.
+// The module pins itself on its first load; later loads only count a
+// reference, and the statistics above print once, at process exit. The
+// SMF_* settings the plugin reads once per load are then read once per
+// process: SMF_PLUGIN_UNLOAD=1 keeps the old unload per free (the plugin
+// tests change those settings between loads).
+static void pin_this_module()
+{
+    if (const char* v = std::getenv("SMF_PLUGIN_UNLOAD"); v != nullptr && std::atoi(v) != 0)
+        return;
+#if defined(_WIN32)
+    HMODULE self = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                       reinterpret_cast<LPCWSTR>(&pin_this_module), &self);
+#else
+    Dl_info di{};
+    if (dladdr(reinterpret_cast<void*>(&pin_this_module), &di) != 0 && di.dli_fname != nullptr)
+        dlopen(di.dli_fname, RTLD_NOW | RTLD_NOLOAD | RTLD_NODELETE);
+#endif
+}
+static const bool g_pinned = (pin_this_module(), true);
 
 static std::shared_ptr<smf::IpmSession> make_session()
 {

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 #include <vector>
 #if defined(__AVX2__)
@@ -150,14 +151,42 @@ void apply_inline_d(double *v, int p, const double *L, std::ptrdiff_t f) {
   }
 }
 
+// v[0, p) = D^-1 v from FactorKeep::dinv (the front's pivots' entries d,
+// their kinds kind): apply_inline_d's result with multiplications only.
+void apply_dinv(double *v, int p, const double *d, const std::int8_t *kind) {
+  for (int c = 0; c < p;) {
+    const double *e = d + 3 * c;
+    if (kind[c] == 2) {
+      const double v0 = v[c], v1 = v[c + 1];
+      v[c] = e[0] * v0 + e[1] * v1;
+      v[c + 1] = e[1] * v0 + e[2] * v1;
+      c += 2;
+    } else {
+      v[c] *= e[0];
+      ++c;
+    }
+  }
+}
+
+// D^-1 for a front: from dinv when the factorization built it, else from
+// the diagonal slots.
+inline void apply_front_d(double *v, int p, const double *L, std::ptrdiff_t f,
+                          const double *dinv, const std::int8_t *dkind) {
+  if (dinv)
+    apply_dinv(v, p, dinv, dkind);
+  else
+    apply_inline_d(v, p, L, f);
+}
+
 // One front of L^{-T}: reads the extended rows rows[p, f) (already
 // solved: they belong to ancestors) and writes only the pivot rows
 // rows[0, p), so fronts of disjoint subtrees can run concurrently.
 // With apply_d, the pivot values first take D^-1 (inline D).
 // Linv: the front's cached L11^-1 (p x p, FactorKeep::inv_diag), or null.
 void backward_front(const double *factor_data, const double *Linv, const Int *rows,
-                    int p, int f, bool posdef, bool apply_d, double *xc,
-                    std::vector<double> &b_loc, std::vector<double> &b_ext) {
+                    int p, int f, bool posdef, bool apply_d, const double *dinv,
+                    const std::int8_t *dkind, double *xc, std::vector<double> &b_loc,
+                    std::vector<double> &b_ext) {
   const int q = f - p;
   if (p <= 0)
     return;
@@ -167,7 +196,7 @@ void backward_front(const double *factor_data, const double *Linv, const Int *ro
   if (p == 1) {
     double v0 = xc[rows[0]];
     if (apply_d)
-      apply_inline_d(&v0, 1, factor_data, f);
+      apply_front_d(&v0, 1, factor_data, f, dinv, dkind);
     double s0 = 0.0, s1 = 0.0;
     int i = 1;
     for (; i + 2 <= f; i += 2) {
@@ -188,7 +217,7 @@ void backward_front(const double *factor_data, const double *Linv, const Int *ro
     const double *col1 = factor_data + static_cast<std::ptrdiff_t>(f);
     double v[2] = {xc[rows[0]], xc[rows[1]]};
     if (apply_d)
-      apply_inline_d(v, 2, factor_data, f);
+      apply_front_d(v, 2, factor_data, f, dinv, dkind);
     double s0 = 0.0, s1 = 0.0;
     for (int i = 2; i < f; ++i) {
       const double xi = xc[rows[i]];
@@ -214,7 +243,7 @@ void backward_front(const double *factor_data, const double *Linv, const Int *ro
   for (int i = 0; i < p; ++i)
     b_loc[static_cast<std::size_t>(i)] = xc[rows[i]];
   if (apply_d)
-    apply_inline_d(b_loc.data(), p, factor_data, f);
+    apply_front_d(b_loc.data(), p, factor_data, f, dinv, dkind);
 
   // Update b_loc -= L21^T * b_ext, with b_ext gathered once so the
   // per-column work runs on contiguous data.
@@ -266,7 +295,8 @@ void backward_front(const double *factor_data, const double *Linv, const Int *ro
 // pivots, backward_front's per-column kernels below that. Writes the pivot
 // rows only.
 void backward_front_block(const double *L, const double *Linv, const Int *rows,
-                          int p, int f, bool posdef, bool apply_d, double *x,
+                          int p, int f, bool posdef, bool apply_d, const double *dinv,
+                          const std::int8_t *dkind, double *x,
                           std::ptrdiff_t ldx, int nrhs, std::vector<double> &wbuf,
                           std::vector<double> &tbuf) {
   if (p <= 0)
@@ -282,7 +312,7 @@ void backward_front_block(const double *L, const double *Linv, const Int *rows,
     for (int i = 0; i < f; ++i)
       w[i] = xc[rows[i]];
     if (apply_d)
-      apply_inline_d(w, p, L, f);
+      apply_front_d(w, p, L, f, dinv, dkind);
   }
   if (p < kInvDiagMinPivots && Linv == nullptr) {
     for (int r = 0; r < nrhs; ++r) {
@@ -344,6 +374,7 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   const bool posdef = fkeep.is_posdef;
   const bool apply_d = apply_diag && backward_applies_diag(fkeep);
   const bool has_inv = fkeep.inv_diag_offset.size() == fkeep.solve_steps.size();
+  const bool has_dinv = apply_d && fkeep.dinv_offset.size() == fkeep.solve_steps.size();
   const auto step_front = [&](std::size_t k, const double *&L, const double *&Linv,
                               const Int *&rows, int &p, int &f) {
     const SolveStep &step = fkeep.solve_steps[k];
@@ -354,6 +385,12 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
                : nullptr;
     p = step.p;
     f = step.f;
+  };
+  const auto step_dinv = [&](std::size_t k) -> const double * {
+    return has_dinv ? fkeep.dinv.data() + 3 * fkeep.dinv_offset[k] : nullptr;
+  };
+  const auto step_dkind = [&](std::size_t k) -> const std::int8_t * {
+    return has_dinv ? fkeep.dinv_kind.data() + fkeep.dinv_offset[k] : nullptr;
   };
 
   // Parallel layout (see solve_forward): the top of the tree first, then
@@ -379,7 +416,8 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
       const Int *rows;
       int p, f;
       step_front(k, L, Linv, rows, p, f);
-      backward_front_block(L, Linv, rows, p, f, posdef, apply_d, x, n, nrhs, b_loc, b_ext);
+      backward_front_block(L, Linv, rows, p, f, posdef, apply_d, step_dinv(k), step_dkind(k), x, n,
+                           nrhs, b_loc, b_ext);
     }
     if (permute)
       for (int rhs = 0; rhs < nrhs; ++rhs) {
@@ -427,8 +465,10 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
                 const double *L, *Linv;
                 const Int *rows;
                 int p, f;
-                step_front(top_begin + static_cast<std::size_t>(i), L, Linv, rows, p, f);
-                backward_front(L, Linv, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
+                const std::size_t k = top_begin + static_cast<std::size_t>(i);
+                step_front(k, L, Linv, rows, p, f);
+                backward_front(L, Linv, rows, p, f, posdef, apply_d, step_dinv(k), step_dkind(k), xc,
+                               sc.loc, sc.ext);
                 // Run the first child here, queue the others.
                 const int c0 = child_ptr[static_cast<std::size_t>(i)];
                 const int c1 = child_ptr[static_cast<std::size_t>(i) + 1];
@@ -450,7 +490,8 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
             const Int *rows;
             int p, f;
             step_front(k, L, Linv, rows, p, f);
-            backward_front(L, Linv, rows, p, f, posdef, apply_d, xc, sc.loc, sc.ext);
+            backward_front(L, Linv, rows, p, f, posdef, apply_d, step_dinv(k), step_dkind(k), xc,
+                           sc.loc, sc.ext);
           }
         }
       };
@@ -474,7 +515,10 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
           p = sn.width();
           f = ak->front_size(s);
         }
-        backward_front(factor_data, Linv, rows, p, f, posdef, apply_d, xc, b_loc, b_ext);
+        const auto k = static_cast<std::size_t>(pos);
+        backward_front(factor_data, Linv, rows, p, f, posdef, apply_d,
+                       use_steps ? step_dinv(k) : nullptr, use_steps ? step_dkind(k) : nullptr, xc,
+                       b_loc, b_ext);
       }
     }
 

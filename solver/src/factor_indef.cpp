@@ -1,4 +1,5 @@
 #include "smf/factor_indef.hpp"
+#include "smf/solve_diag.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/determinism.hpp"
 #include "smf/blocked_indef.hpp"
@@ -281,6 +282,8 @@ bool finalize_factor_from_front_results(
 
   fkeep.solve_steps.clear();
   fkeep.inv_diag_offset.clear();  // new steps: no cached L11^-1 yet
+  fkeep.dinv_offset.clear();      // nor a D^-1 (build_inverse_diag)
+  fkeep.solve_small_fronts = false;
   fkeep.solve_row_indices.clear();
   fkeep.solve_subtrees.clear();
   fkeep.solve_threads = 1;
@@ -728,6 +731,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     fkeep.status = FactorStatus::Singular;
     return FactorStatus::Singular;
   }
+  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
 
   info.delayed_pivots = total_delayed;
   // work_limit: this engine has no early stop (nor EarlyWorkStop: the

@@ -484,6 +484,7 @@ add_library(smf STATIC
     src/diagnostics.cpp
     src/solve_forward.cpp
     src/solve_backward.cpp
+    src/solve_interleaved.cpp
     src/solve_diag.cpp
     src/pivot_order.cpp
     src/ipm_session.cpp

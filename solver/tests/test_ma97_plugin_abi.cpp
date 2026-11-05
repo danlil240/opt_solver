@@ -150,6 +150,11 @@ void set_env(const char *name, const char *value) {
 #endif
 }
 
+// These tests change SMF_* settings between plugin loads, which the plugin
+// reads once per load: keep it unloading on every free (it pins itself
+// otherwise). Set before the first load.
+const bool g_plugin_unloads = (set_env("SMF_PLUGIN_UNLOAD", "1"), true);
+
 // KKT [H B^T; B 0], 0-based lower CSC: H the 5-point Laplacian of a g x g
 // grid (diagonal 4), m zero-diagonal constraint rows, row c coupling
 // variables 3c, 3c+1, 3c+2 mod g^2. Nonsingular; with AMD the constraint

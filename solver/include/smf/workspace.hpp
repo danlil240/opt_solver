@@ -24,6 +24,8 @@ struct SolveWorkspace {
     std::vector<double> refine_r;
     std::vector<double> refine_dx;
     std::vector<double> refine_best_x;
+    // solve_full_interleaved: the right-hand sides, row-interleaved.
+    std::vector<double> ilv;
 
     // Parallel solves: the worker pool (kept between solves) and each
     // thread's front scratch plus its buffer of updates to top-part rows.
