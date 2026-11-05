@@ -880,7 +880,7 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
     // serial solve of a factor of small fronts only (one right-hand side
     // there runs in place, without gathering each front): interleaved, each
     // factor entry loaded once for all of them.
-    if (threads == 1 && interleaved_solve_supported(fkeep) &&
+    if (ctrl.small_solve_kernels && threads == 1 && interleaved_solve_supported(fkeep) &&
         (fkeep.solve_small_fronts ? true : (nrhs > 1 && nrhs <= kInterleavedMaxRhs))) {
       solve_full_interleaved(fkeep, b, n, nrhs, ldb, ws);
       break;

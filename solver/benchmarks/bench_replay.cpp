@@ -821,6 +821,8 @@ int main(int argc, char **argv) {
     if (const char *e = std::getenv("SMF_BENCH_SKIP_TRIAL_RESCUE")) ctrl.skip_trial_rescue_ratio = std::atof(e);
     // SMF_BENCH_CACHE_INVERSE_DIAG = 0 | 1 (Control::cache_inverse_diag).
     if (const char *e = std::getenv("SMF_BENCH_CACHE_INVERSE_DIAG")) ctrl.cache_inverse_diag = std::atoi(e) != 0;
+    // SMF_BENCH_SMALL_SOLVE = 0 | 1 (Control::small_solve_kernels).
+    if (const char *e = std::getenv("SMF_BENCH_SMALL_SOLVE")) ctrl.small_solve_kernels = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_REFINE_METHOD")) {
         const std::string k = e;
         if (k == "classical") ctrl.refine_method = smf::RefineMethod::Classical;

@@ -114,11 +114,11 @@ void build_inline_dinv(FactorKeep &fkeep, bool usable) {
 
 } // namespace
 
-void finish_solve_layout(FactorKeep &fkeep) {
-  build_inline_dinv(fkeep, true);
+void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels) {
+  build_inline_dinv(fkeep, small_solve_kernels);
   // No step reaches kInvDiagMinPivots: none can have a cached L11^-1 either.
   fkeep.solve_small_fronts =
-      !fkeep.solve_steps.empty() &&
+      small_solve_kernels && !fkeep.solve_steps.empty() &&
       std::all_of(fkeep.solve_steps.begin(), fkeep.solve_steps.end(),
                   [](const SolveStep &st) { return st.p < kInvDiagMinPivots; });
 }

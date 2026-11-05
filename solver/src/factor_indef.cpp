@@ -330,7 +330,6 @@ bool finalize_factor_from_front_results(
     }
   }
 
-  finish_solve_layout(fkeep);
   info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
   info.actual_flops = total_flops;
   if (max_realized_front > info.max_front_size) {
@@ -732,6 +731,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     fkeep.status = FactorStatus::Singular;
     return FactorStatus::Singular;
   }
+  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
 
   info.delayed_pivots = total_delayed;
   // work_limit: this engine has no early stop (nor EarlyWorkStop: the

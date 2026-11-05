@@ -25,9 +25,10 @@ inline constexpr double kInvDiagMaxCond = 1e4;
 /// Called by each factorization once its solve steps are complete: builds
 /// FactorKeep::dinv (an indefinite factor with D inline) and sets
 /// solve_small_fronts, so a solve inside the factorization (the
-/// scale-on-delay probe) takes the same path as every later one.
-/// build_inverse_diag clears both for a factor the solve refuses.
-void finish_solve_layout(FactorKeep &fkeep);
+/// scale-on-delay probe) takes the same path as every later one. Both stay
+/// clear without Control::small_solve_kernels. build_inverse_diag clears
+/// them for a factor the solve refuses.
+void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels);
 
 /// Fill fkeep.inv_diag / inv_diag_offset with L11^-1 of every solve step of
 /// at least kInvDiagMinPivots pivots (ctrl.cache_inverse_diag), or clear

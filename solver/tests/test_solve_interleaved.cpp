@@ -235,3 +235,26 @@ TEST(SolveInterleaved, RefactorRebuildsDinv) {
   check_solves(F, 1, static_cast<int>(F.A.n), 3u);
   check_solves(F, 6, static_cast<int>(F.A.n), 4u);
 }
+
+TEST(SolveInterleaved, OffKeepsTheFrontKernels) {
+  Factored F;
+  F.A = make_kkt(300, 150, 4, 7u);
+  F.ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+  F.ctrl.small_solve_kernels = false;
+  factor(F);
+  EXPECT_TRUE(F.fk.dinv.empty());
+  EXPECT_TRUE(F.fk.dinv_offset.empty());
+  EXPECT_FALSE(F.fk.solve_small_fronts);
+  // Full and Forward + DiagBack now run the same kernels: identical bits.
+  const int n = static_cast<int>(F.A.n);
+  std::vector<double> b(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) b[static_cast<std::size_t>(i)] = std::sin(1.0 + i);
+  std::vector<double> x = b, y = b;
+  Solver s;
+  Info info;
+  SolveWorkspace ws;
+  ASSERT_EQ(s.solve(F.fk, F.ctrl, info, x.data(), n, 1, ws, SolveJob::Full), 0);
+  ASSERT_EQ(s.solve(F.fk, F.ctrl, info, y.data(), n, 1, ws, SolveJob::Forward), 0);
+  ASSERT_EQ(s.solve(F.fk, F.ctrl, info, y.data(), n, 1, ws, SolveJob::DiagBack), 0);
+  EXPECT_EQ(x, y);
+}

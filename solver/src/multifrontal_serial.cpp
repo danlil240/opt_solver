@@ -1801,7 +1801,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     fkeep.solve_threads =
         std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
   }
-  finish_solve_layout(fkeep);
+  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
   return ErrorCode::Success;
 }
 
