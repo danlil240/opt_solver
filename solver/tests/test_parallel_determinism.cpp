@@ -556,11 +556,17 @@ TEST(ParallelDeterminism, DeterministicModeTilesFrom512) {
         EXPECT_EQ(r.neg, ref.neg) << threads << " threads";
     }
     // Outside deterministic mode at 8 threads: none of these fronts reaches
-    // 2048 rows, so none is tiled.
+    // 2048 rows, so none is tiled. An SMF_DETERMINISTIC build has no such
+    // mode (deterministic_mode() is always true there).
     Control ctrl;
     ctrl.matrix_type = c.type;
     ctrl.num_threads = 8;
     ctrl.auto_threads = false;
+    if (deterministic_mode(ctrl)) {
+        std::printf("[DeterministicModeTilesFrom512] SMF_DETERMINISTIC build: %d tiled fronts; "
+                    "no non-deterministic mode to compare\n", ref.tiles);
+        return;
+    }
     Solver solver;
     Info info;
     auto ak = solver.analyse(c.A, ctrl, info);
