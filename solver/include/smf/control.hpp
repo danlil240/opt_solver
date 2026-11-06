@@ -467,7 +467,11 @@ struct Control {
     // no limit), and the reduction never runs with static pivoting,
     // reg_diag_sign, user-supplied scaling or max_negative_pivots. Above
     // kSlackMaxPivotU, or Off, nothing changes.
-    SlackElimination slack_elimination = SlackElimination::Auto;
+    // Opt-in (default Off): it pays on IPOPT problems with many inequality
+    // slacks over long runs (trajectory optimization: 2x on a truck-trailer
+    // planner), but its analysis costs more on short sequences and on
+    // matrices whose reduced matrix factors no cheaper (PGLib AC-OPF).
+    SlackElimination slack_elimination = SlackElimination::Off;
     double         slack_min_share = 0.2;
     double         slack_update_limit = 1e15;
     double         factor_memory_multiplier = 1.1;

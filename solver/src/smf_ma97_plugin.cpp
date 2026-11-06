@@ -438,6 +438,7 @@ static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctr
     // the pivoting policy (SMF_PIVOTING) are the plugin's all the same.
     out_ctrl.num_threads = smf::plugin_num_threads();
     out_ctrl.pivoting = smf::plugin_pivoting();
+    out_ctrl.slack_elimination = smf::plugin_slack_elimination();
     if (!ctrl)
         return true;
     return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), test_delay_budget());

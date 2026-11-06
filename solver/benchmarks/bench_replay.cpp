@@ -695,6 +695,16 @@ int main(int argc, char **argv) {
     // track (the ipopt-plugin track's Control already has it from
     // smf::ipopt_plugin_control()). SMF_BENCH_PIVOTING, the older harness
     // name, wins when both are set. Unset or empty: the track's default.
+    // SMF_SLACK_ELIM = on | auto | off: Control::slack_elimination (opt-in,
+    // default off), the IPOPT plugin's variable, honoured on every track.
+    if (const char *e = std::getenv("SMF_SLACK_ELIM"); e != nullptr && *e != '\0') {
+        const smf::PluginSlackElimination r = smf::plugin_slack_elimination_resolve(e);
+        if (!r.valid) {
+            std::fprintf(stderr, "error: SMF_SLACK_ELIM=\"%s\" is not on, auto or off\n", e);
+            return 2;
+        }
+        ctrl.slack_elimination = r.mode;
+    }
     for (const char *name : {"SMF_PIVOTING", "SMF_BENCH_PIVOTING"}) {
         const char *e = std::getenv(name);
         if (e == nullptr || *e == '\0') continue;

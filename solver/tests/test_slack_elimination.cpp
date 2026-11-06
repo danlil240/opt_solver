@@ -8,6 +8,7 @@
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
 #include "smf/ipm_session.hpp"
+#include "smf/ipopt_plugin_control.hpp"
 #include "smf/slack_elimination.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -381,4 +382,28 @@ TEST(SlackElimination, IpmSessionPath) {
         EXPECT_LT(backward_error(k.A, x, rhs_of(static_cast<int>(k.A.n))),
                   10.0 * backward_error(k.A, off.x, rhs_of(static_cast<int>(k.A.n))) + 1e-15);
     }
+}
+
+TEST(SlackElimination, DefaultIsOff) {
+    const Kkt k = make_kkt(5, 100, 10, 250);
+    Control c = base(SlackElimination::Off);
+    c.slack_elimination = Control{}.slack_elimination;
+    EXPECT_EQ(c.slack_elimination, SlackElimination::Off);
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(k.A, c, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    EXPECT_EQ(ak->slack, nullptr);
+    EXPECT_EQ(ia.slack_pairs, 0);
+}
+
+TEST(SlackElimination, PluginEnvironmentKnob) {
+    EXPECT_EQ(plugin_slack_elimination_resolve(nullptr).mode, SlackElimination::Off);
+    EXPECT_EQ(plugin_slack_elimination_resolve("").mode, SlackElimination::Off);
+    EXPECT_EQ(plugin_slack_elimination_resolve("off").mode, SlackElimination::Off);
+    EXPECT_EQ(plugin_slack_elimination_resolve("on").mode, SlackElimination::On);
+    EXPECT_EQ(plugin_slack_elimination_resolve("auto").mode, SlackElimination::Auto);
+    const PluginSlackElimination bad = plugin_slack_elimination_resolve("yes");
+    EXPECT_FALSE(bad.valid);
+    EXPECT_EQ(bad.mode, SlackElimination::Off);
 }
