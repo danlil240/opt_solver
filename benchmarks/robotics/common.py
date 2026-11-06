@@ -10,7 +10,7 @@ cleared, goal reached). ``solve()`` runs IPOPT on it with one linear solver:
                build-deps)
   smf          the smf MA97-compatible plugin (``linear_solver ma97`` with
                ``hsllib`` = smf_ma97.dll; SMF_PLUGIN_DLL overrides the path),
-               with its opt-in slack-pair elimination on (SMF_SLACK_ELIM=on
+               with its opt-in slack-pair elimination on (SMF_SLACK_ELIM=auto
                unless the environment sets it: off for the plain plugin)
 
 and returns wall time, iterations, objective, CasADi's function-evaluation
@@ -164,7 +164,7 @@ def solve(prob: Problem, solver: str, threads: int = 1, extra: dict | None = Non
     if solver == "smf":
         # The plugin's slack-pair elimination pays on these planners (many
         # inequality slacks, most inactive); SMF_SLACK_ELIM=off measures without.
-        os.environ.setdefault("SMF_SLACK_ELIM", "on")
+        os.environ.setdefault("SMF_SLACK_ELIM", "auto")
     fd, out_file = tempfile.mkstemp(prefix=f"ipopt_{prob.name}_{solver}_", suffix=".txt")
     os.close(fd)
     opts = ipopt_options(solver, out_file, extra)

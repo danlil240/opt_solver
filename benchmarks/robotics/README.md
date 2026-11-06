@@ -19,7 +19,7 @@ python benchmarks/robotics/diag_suite.py --out diag.jsonl --cells p_truck_traile
 ```
 
 - **HSL library:** `SMF_HSL_LIBRARY` (full CoinHSL `libhsl.dll`). The default is `build-deps/coinhsl-*/bin/libhsl.dll`.
-- **smf plugin:** `SMF_PLUGIN_DLL`. The default is `build-board/Release/smf_ma97.dll`, then `build/Release`. The harness runs it with its opt-in slack-pair elimination on (`SMF_SLACK_ELIM=on`); set `SMF_SLACK_ELIM=off` in the environment to measure the plugin without it.
+- **smf plugin:** `SMF_PLUGIN_DLL`. The default is `build-board/Release/smf_ma97.dll`, then `build/Release`. The harness runs it with its opt-in slack-pair elimination on (`SMF_SLACK_ELIM=auto`: where slack pairs are at least a fifth of the rows); set `SMF_SLACK_ELIM=off` in the environment to measure the plugin without it.
 - **PATH:** must hold the plugin's DLL directory (MKL and friends).
 - **Thread counts:** `run_suite.py` puts them in each child's environment. The mingw HSL and MUMPS read the C runtime's environment, which never sees `os.environ` changes made inside Python.
 - **JIT:** `ROBO_JIT=1` compiles CasADi's NLP functions with `zig cc`. It is off by default, because compiling the full derivatives takes minutes at N >= 100.
