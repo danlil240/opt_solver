@@ -7,6 +7,7 @@
 #include "smf/ldlt_kernel.hpp"
 #include "smf/scaling.hpp"
 #include "smf/scaling_matching.hpp"
+#include "smf/slack_elimination.hpp"
 #include "smf/solve_diag.hpp"
 #include "smf/solve_forward.hpp"
 #include "smf/solver.hpp"
@@ -15,6 +16,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -648,7 +651,42 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
 
 } // namespace
 
-FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
+// Control::slack_elimination: factor through the analysis' slack plan
+// (slack_elimination.hpp), the cleaned values `cv`. False when it does not
+// run (not armed, the plan given up on, or a pair's pivot failing): the
+// caller factors the full matrix as without the plan.
+static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, const std::vector<double> &cv,
+                         const Control &ctrl, Info &info, FactorKeep &fkeep, NumericWorkspace &ws,
+                         FactorStatus &st) {
+  if (!slack_armed(ak, ctrl) || ak.slack_fallbacks_in_row >= kSlackMaxFallbacks) return false;
+  const SlackPlan &plan = *ak.slack;
+  if (cv.size() != ak.cleaned.row_idx.size()) return false;
+  auto sf = std::make_shared<SlackFactor>();
+  sf->plan = ak.slack;
+  int pos = 0, neg = 0;
+  const bool passed = slack_pair_pass(plan, cv.data(), ctrl, ws.slack_values, *sf, pos, neg);
+  if (const char *tr = std::getenv("SMF_SLACK_TRACE"); tr != nullptr)
+    std::fprintf(stderr, "[slack] pairs %zu fails %d max_growth %.3e max_slack %.3e%s\n", plan.pairs.size(),
+                 sf->fails, sf->max_growth, sf->max_slack, passed ? "" : " -> full matrix");
+  if (!passed) {
+    ++ak.slack_fallbacks_in_row;
+    info.slack_fallbacks = 1;
+    return false;
+  }
+  ak.slack_fallbacks_in_row = 0;
+  Control rc = ctrl;
+  rc.slack_elimination = SlackElimination::Off;
+  if (!ws.slack_ws) ws.slack_ws = std::make_shared<NumericWorkspace>();
+  st = solver.factor(*plan.reduced, std::span<const double>(ws.slack_values), rc, info, fkeep, *ws.slack_ws);
+  fkeep.slack = std::move(sf);
+  info.num_positive += pos;
+  info.num_negative += neg;
+  info.numerical_rank += pos + neg;
+  info.slack_pairs = static_cast<int>(plan.pairs.size());
+  return true;
+}
+
+FactorStatus Solver::factor(const AnalysisKeep &ak_in, const Control &ctrl,
                             Info &info, FactorKeep &fkeep) const {
   info.scaling_used = 0;
   info.delay_rescales = 0;
@@ -661,6 +699,15 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   info.static_rejects = 0;
   info.pivot_growth = 0.0;
   FactorStatus st;
+  fkeep.slack.reset();
+  info.slack_pairs = 0;
+  info.slack_fallbacks = 0;
+  if (ak_in.slack) {
+    NumericWorkspace ws;
+    if (factor_slack(*this, ak_in, ak_in.cleaned.values, ctrl, info, fkeep, ws, st)) return st;
+  }
+  // A factorization off the slack plan takes the full matrix's own analysis.
+  const AnalysisKeep &ak = slack_full_analysis(ak_in);
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, ctrl, info, fkeep);
   } else {
@@ -674,7 +721,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const Control &ctrl,
   return st;
 }
 
-FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
+FactorStatus Solver::factor(const AnalysisKeep &ak_in, const CscLower &updated,
                             const Control &ctrl, Info &info,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   info.scaling_used = 0;
@@ -688,6 +735,17 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   info.static_rejects = 0;
   info.pivot_growth = 0.0;
   FactorStatus st;
+  fkeep.slack.reset();
+  info.slack_pairs = 0;
+  info.slack_fallbacks = 0;
+  if (ak_in.slack) {
+    FactorValues fv;
+    if (factor_slack(*this, ak_in, resolve_factor_values(ak_in, updated, fv) ? cleaned_values(ak_in, fv) : std::vector<double>{},
+                     ctrl, info, fkeep, ws, st))
+      return st;
+  }
+  // A factorization off the slack plan takes the full matrix's own analysis.
+  const AnalysisKeep &ak = slack_full_analysis(ak_in);
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, updated, ctrl, info, fkeep, ws);
   } else {
@@ -706,7 +764,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, const CscLower &updated,
   return st;
 }
 
-FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> values,
+FactorStatus Solver::factor(const AnalysisKeep &ak_in, std::span<const double> values,
                             const Control &ctrl, Info &info,
                             FactorKeep &fkeep, NumericWorkspace &ws) const {
   const FactorValues fv{values.data(), values.size(), true};
@@ -721,6 +779,12 @@ FactorStatus Solver::factor(const AnalysisKeep &ak, std::span<const double> valu
   info.static_rejects = 0;
   info.pivot_growth = 0.0;
   FactorStatus st;
+  fkeep.slack.reset();
+  info.slack_pairs = 0;
+  info.slack_fallbacks = 0;
+  if (ak_in.slack && factor_slack(*this, ak_in, cleaned_values(ak_in, fv), ctrl, info, fkeep, ws, st)) return st;
+  // A factorization off the slack plan takes the full matrix's own analysis.
+  const AnalysisKeep &ak = slack_full_analysis(ak_in);
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
     st = factor_posdef(ak, fv, ctrl, info, fkeep, ws);
   } else {
@@ -740,7 +804,7 @@ namespace {
 // The solve with column stride ldb >= n. Only the full non-banded solve
 // reads and writes b with stride ldb (its gather and scatter); the other
 // paths need ldb == n (Solver::solve packs B for them).
-int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
+int solve_core(const FactorKeep &fkeep, const Control &ctrl, Info &info,
                double *b, int n, int nrhs, int ldb, SolveWorkspace &ws,
                SolveJob job) {
   auto t0 = std::chrono::steady_clock::now();
@@ -942,6 +1006,74 @@ int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   return 0;
 }
 
+// A solve through a slack factor (slack_elimination.hpp): b (n x nrhs,
+// column stride ldb, original order) is gathered into the reduced right-hand
+// sides with the pairs' forward elimination, solved with the reduced factor
+// (fkeep's own arrays), and the pairs substituted back. The factorization's
+// first pivots are the pairs: A = L1 diag(P, A_r) L1^T with L1 = [I 0; B P^-1 I],
+// so every SolveJob splits into the pairs' part and the reduced job.
+int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,
+                int ldb, SolveWorkspace &ws, SolveJob job) {
+  const SlackFactor &sf = *fkeep.slack;
+  const SlackPlan &plan = *sf.plan;
+  const int nr = static_cast<int>(plan.nr);
+  if (n != plan.n_full || nrhs <= 0 || b == nullptr || ldb < n) {
+    info.status = ErrorCode::IllegalValue;
+    return static_cast<int>(ErrorCode::IllegalValue);
+  }
+  const bool forward = job == SolveJob::Full || job == SolveJob::Forward;
+  ws.slack_r.resize(static_cast<std::size_t>(nr) * static_cast<std::size_t>(nrhs));
+  const std::size_t np = plan.pairs.size();
+  for (int j = 0; j < nrhs; ++j) {
+    const double *bj = b + static_cast<std::ptrdiff_t>(j) * ldb;
+    double *r = ws.slack_r.data() + static_cast<std::ptrdiff_t>(j) * nr;
+    for (int i = 0; i < nr; ++i) r[i] = bj[plan.red_to_full[static_cast<std::size_t>(i)]];
+    if (!forward) continue;
+    // r_r -= B P^-1 b_p: only the multiplier row of B is nonzero.
+    for (std::size_t q = 0; q < np; ++q) {
+      const SlackPair &pr = plan.pairs[q];
+      const double zy = sf.pinv[3 * q + 1] * bj[pr.s] + sf.pinv[3 * q + 2] * bj[pr.y];
+      if (zy == 0.0) continue;
+      for (Int t = 0; t < pr.nb; ++t)
+        r[plan.b_row[static_cast<std::size_t>(pr.b0 + t)]] -= sf.bval[static_cast<std::size_t>(pr.b0 + t)] * zy;
+    }
+  }
+  const int rc = solve_core(fkeep, ctrl, info, ws.slack_r.data(), nr, nrhs, nr, ws, job);
+  if (rc != 0) return rc;
+  for (int j = 0; j < nrhs; ++j) {
+    double *bj = b + static_cast<std::ptrdiff_t>(j) * ldb;
+    const double *r = ws.slack_r.data() + static_cast<std::ptrdiff_t>(j) * nr;
+    for (int i = 0; i < nr; ++i) bj[plan.red_to_full[static_cast<std::size_t>(i)]] = r[i];
+    if (job == SolveJob::Forward) continue;  // L1^-1 leaves the pairs' rows as they are
+    for (std::size_t q = 0; q < np; ++q) {
+      const SlackPair &pr = plan.pairs[q];
+      const double iss = sf.pinv[3 * q], isy = sf.pinv[3 * q + 1], iyy = sf.pinv[3 * q + 2];
+      double bs = bj[pr.s], by = bj[pr.y];
+      if (job != SolveJob::Backward) {  // P^-1 on the pairs' rows
+        const double ts = iss * bs + isy * by;
+        by = isy * bs + iyy * by;
+        bs = ts;
+      }
+      if (job != SolveJob::DiagOnly) {  // L1^-T: x_p -= P^-1 B^T x_r
+        double t = 0.0;
+        for (Int k = 0; k < pr.nb; ++k)
+          t += sf.bval[static_cast<std::size_t>(pr.b0 + k)] * r[plan.b_row[static_cast<std::size_t>(pr.b0 + k)]];
+        bs -= isy * t;
+        by -= iyy * t;
+      }
+      bj[pr.s] = bs;
+      bj[pr.y] = by;
+    }
+  }
+  return 0;
+}
+
+int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,
+               int ldb, SolveWorkspace &ws, SolveJob job) {
+  if (fkeep.slack) return slack_solve(fkeep, ctrl, info, b, n, nrhs, ldb, ws, job);
+  return solve_core(fkeep, ctrl, info, b, n, nrhs, ldb, ws, job);
+}
+
 } // namespace
 
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
@@ -953,7 +1085,8 @@ int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 int Solver::solve(const FactorKeep &fkeep, const Control &ctrl, Info &info,
                   std::span<double> B, int nrhs, int ldb, SolveWorkspace &ws,
                   SolveJob job) const {
-  const int n = fkeep.use_banded_spd ? fkeep.band_n : static_cast<int>(fkeep.perm.size());
+  const int n = fkeep.slack ? static_cast<int>(fkeep.slack->plan->n_full)
+                : fkeep.use_banded_spd ? fkeep.band_n : static_cast<int>(fkeep.perm.size());
   if (n <= 0 || nrhs <= 0 || ldb < n ||
       B.size() < static_cast<std::size_t>(ldb) * static_cast<std::size_t>(nrhs - 1) +
                      static_cast<std::size_t>(n)) {

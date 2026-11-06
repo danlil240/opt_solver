@@ -1,4 +1,5 @@
 #include "smf/analysis.hpp"
+#include "smf/slack_elimination.hpp"
 #include "smf/assembly_tree.hpp"
 #include "smf/check_matrix.hpp"
 #include "smf/determinism.hpp"
@@ -427,6 +428,10 @@ namespace smf
 
     std::unique_ptr<AnalysisKeep> Solver::analyse(const CscLower &A, const Control &control, Info &info)
     {
+        // Control::slack_elimination: the reduced matrix's analysis, and the
+        // full matrix's in its order, when the plan applies.
+        if (auto keep = analyse_with_slack_plan(*this, A, control, info))
+            return keep;
         const auto t0 = std::chrono::steady_clock::now();
         // Phase timing: lap(slot) charges the time since the previous lap.
         AnalysePhaseSeconds phases;

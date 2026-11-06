@@ -489,6 +489,7 @@ add_library(smf STATIC
     src/pivot_order.cpp
     src/ipm_session.cpp
     src/solve.cpp
+    src/slack_elimination.cpp
     src/scaling.cpp
     src/scaling_matching.cpp
     src/auction_matching.cpp

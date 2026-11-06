@@ -17,6 +17,7 @@
 #include "smf/info.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
+#include "smf/slack_elimination.hpp"
 #include "smf/types.hpp"
 
 #include <algorithm>
@@ -611,8 +612,13 @@ extern "C"
         // (smf/ipopt_plugin_control.hpp), shared with bench_replay's
         // ipopt-plugin track; SMF_PLUGIN_MC64 is smf::plugin_mc64_always().
         const smf::AnalysisKeep* analysed = ak->session->analysis_keep();
-        const smf::Ma97ScalingCall scaling_call =
-            smf::ma97_scaling_call(ak->ctrl, analysed != nullptr && analysed->matching_rejected, scale, ak->n);
+        // Whether the matching was rejected is the full matrix's own analysis'
+        // finding (with a slack plan, made now when a matching is requested).
+        const bool rejected = analysed != nullptr &&
+                              (ak->ctrl.scaling == smf::ScalingMethod::Matching
+                                   ? smf::slack_full_analysis(*analysed).matching_rejected
+                                   : analysed->matching_rejected);
+        const smf::Ma97ScalingCall scaling_call = smf::ma97_scaling_call(ak->ctrl, rejected, scale, ak->n);
         const bool unit_scale = scaling_call.unit_scale;
         bool computed_scaling = scaling_call.computed;
         const bool reuse_scaling = scaling_call.reuse;
@@ -620,7 +626,11 @@ extern "C"
         fill_values(ak, val);
         dump_kkt(ak);
         smf::IpmSession& session = *ak->session;
-        session.set_control(ak->ctrl);
+        // A scale computed here goes back to IPOPT for reuse, so it must be
+        // the full matrix's: such factorizations do not take the slack plan.
+        smf::Control fc = ak->ctrl;
+        if (computed_scaling) fc.slack_elimination = smf::SlackElimination::Off;
+        session.set_control(fc);
         if (reuse_scaling)
             session.set_user_scale(scale);
 
@@ -649,7 +659,9 @@ extern "C"
                              g_stats.factors.load() + 1, session.info().num_zero);
             smf::Control fresh = ak->ctrl;
             fresh.scaling = smf::ScalingMethod::Matching;
-            session.set_control(fresh);
+            smf::Control ffc = fresh;
+            ffc.slack_elimination = smf::SlackElimination::Off;
+            session.set_control(ffc);
             const smf::IpmFactorStatus retried = session.factor(ak->mat.values);
             if (retried == smf::IpmFactorStatus::Ok || retried == smf::IpmFactorStatus::Singular)
             {

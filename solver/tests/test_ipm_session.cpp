@@ -4,6 +4,7 @@
 // pivot order.
 
 #include "../benchmarks/common/validation.hpp"
+#include "smf/slack_elimination.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/dense_indef.hpp"
@@ -270,7 +271,9 @@ TEST(IpmSession, NewPatternResets) {
     ASSERT_EQ(session.factor(rb.steps[0]), IpmFactorStatus::Ok);
     ASSERT_NE(session.analysis_keep(), nullptr);
     EXPECT_EQ(session.analysis_keep()->n, rb.A.n);
-    EXPECT_EQ(session.factor_keep().n, rb.A.n);
+    // (A factor through the slack plan is the reduced matrix's; its plan has the order.)
+    const FactorKeep &fkb = session.factor_keep();
+    EXPECT_EQ(fkb.slack ? fkb.slack->plan->n_full : fkb.n, rb.A.n);
     const InertiaCounts in = session.inertia();
     EXPECT_EQ(in.positive + in.negative + in.zero, n);
 

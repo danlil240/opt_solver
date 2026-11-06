@@ -82,6 +82,12 @@ struct Info {
     /// an earlier one no longer fit (Control::scale_on_delay_reuse_tol);
     /// else 0.
     int          delay_rescales      = 0;
+    /// Slack-pair elimination (Control::slack_elimination): analyse() the
+    /// pairs its plan eliminates (0: none, the full matrix only); factor()
+    /// the pairs this factorization eliminated, and 1 in slack_fallbacks when
+    /// a pair's pivot failed and it took the full matrix.
+    int          slack_pairs         = 0;
+    int          slack_fallbacks     = 0;
     /// 1 when this factor() stopped a factorization at the scale-on-delay
     /// work limit, or threw away a factor whose kept scale failed the
     /// accuracy probe (that work was spent), else 0.

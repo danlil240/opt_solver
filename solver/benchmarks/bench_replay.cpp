@@ -909,6 +909,8 @@ int main(int argc, char **argv) {
         double seq_delay_try_ms = 0.0;       // summed over the steps, like seq_delay_rescales
         double seq_delay_matching_ms = 0.0;
         int seq_skip_trial_rescues = 0;
+        int seq_slack_armed = 0;
+        int seq_slack_fallbacks = 0;
         int seq_static_fallbacks = 0;
         int seq_static_rejects = 0;
         double seq_pivot_growth = 0.0;
@@ -937,6 +939,8 @@ int main(int argc, char **argv) {
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
                 seq_skip_trial_rescues += adapter->stats().skip_trial_rescues;
+                seq_slack_armed += adapter->stats().slack_armed;
+                seq_slack_fallbacks += adapter->stats().slack_fallbacks;
                 seq_static_fallbacks += adapter->stats().static_fallback;
                 seq_static_rejects += adapter->stats().static_rejects;
                 seq_pivot_growth = std::max(seq_pivot_growth, adapter->stats().pivot_growth);
@@ -1038,6 +1042,8 @@ int main(int argc, char **argv) {
             rec.trial_skipped = st.trial_skipped;
             rec.gate_flops_per_row = st.trial_skipped >= 0 ? st.gate_flops_per_row : -1.0;
             rec.skip_trial_rescues = seq_skip_trial_rescues;
+            rec.slack_armed = seq_slack_armed;
+            rec.slack_fallbacks = seq_slack_fallbacks;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
             rec.static_fallbacks = seq_static_fallbacks;
@@ -1142,6 +1148,8 @@ int main(int argc, char **argv) {
             rec.trial_skipped = st.trial_skipped;
             rec.gate_flops_per_row = st.trial_skipped >= 0 ? st.gate_flops_per_row : -1.0;
             rec.skip_trial_rescues = st.skip_trial_rescues;
+            rec.slack_armed = st.slack_armed;
+            rec.slack_fallbacks = st.slack_fallbacks;
             rec.refine_iterations = st.refine_iterations;
             if (st.refine_iterations >= 0) rec.refine_method = st.refine_fgmres ? "fgmres" : "classical";
         }

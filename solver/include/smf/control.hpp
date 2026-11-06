@@ -455,6 +455,21 @@ struct Control {
     // run to run at ~1e-14, armed or not: there only the inertia, delays and
     // factor size are identical.
     int            max_negative_pivots = -1;
+    // Slack-pair elimination (slack_elimination.hpp): at pivot_u <= 1e-6
+    // (kSlackMaxPivotU) and an auto ordering, analyse() finds IPOPT's
+    // inequality slack/multiplier pairs and, when they are at least
+    // slack_min_share of the rows (Auto; On: any), analyses the reduced
+    // matrix, and the full matrix pairs first after it; factor() eliminates
+    // the pairs as 2x2 blocks in one pass (the condensed barrier step) and
+    // factors the reduced matrix, solve() substitutes them back. A
+    // factorization takes the full matrix instead when a pair's update
+    // exceeds slack_update_limit times the state diagonal it lands on (<= 0:
+    // no limit), and the reduction never runs with static pivoting,
+    // reg_diag_sign, user-supplied scaling or max_negative_pivots. Above
+    // kSlackMaxPivotU, or Off, nothing changes.
+    SlackElimination slack_elimination = SlackElimination::Auto;
+    double         slack_min_share = 0.2;
+    double         slack_update_limit = 1e15;
     double         factor_memory_multiplier = 1.1;
     int            expected_refactors = 1;
 

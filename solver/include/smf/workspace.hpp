@@ -18,6 +18,7 @@ class SolvePool;
 
 struct SolveWorkspace {
     std::vector<double> tmp;
+    std::vector<double> slack_r;  ///< slack-pair elimination: the reduced right-hand sides
     std::vector<double> loc;
     std::vector<double> ext;
     std::vector<double> rhs_perm;
@@ -45,6 +46,9 @@ struct SolveWorkspace {
 struct TreeParallelBuffers; // multifrontal_serial.cpp
 
 struct NumericWorkspace {
+    /// Slack-pair elimination: the reduced matrix's workspace, and its values.
+    std::shared_ptr<NumericWorkspace> slack_ws;
+    std::vector<double> slack_values;
     std::vector<double> clean_values;
     std::vector<double> perm_values;
     std::vector<double> front_scratch;

@@ -1,5 +1,6 @@
 #include "adapter.hpp"
 #include "../common/ipopt_dynamic_scaling.hpp"
+#include "smf/slack_elimination.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
 #include "smf/refinement.hpp"
@@ -368,6 +369,8 @@ public:
         stats_.delay_try_ms = info.delay_try_seconds * 1e3;
         stats_.delay_matching_ms = info.delay_matching_seconds * 1e3;
         stats_.skip_trial_rescues = info.skip_trial_rescues;
+        stats_.slack_armed = info.slack_pairs > 0 ? 1 : 0;
+        stats_.slack_fallbacks = info.slack_fallbacks;
         stats_.threads_used = info.threads_used;
         stats_.parallel_subtrees = info.parallel_subtrees;
         stats_.top_part_fronts = info.top_part_fronts;
@@ -574,9 +577,15 @@ public:
         if (ipopt_scaling_) {
             if (ipopt_dyn_.mc64_requested()) c.scaling = ScalingMethod::Matching;  // MA97 scaling = 1
             const AnalysisKeep *ak = session_.analysis_keep();
-            call = ma97_scaling_call(c, ak != nullptr && ak->matching_rejected, ipopt_dyn_.scale(),
+            // As the plugin: the full matrix's own analysis decides (slack plan).
+            const bool rejected = ak != nullptr && (c.scaling == ScalingMethod::Matching
+                                                        ? slack_full_analysis(*ak).matching_rejected
+                                                        : ak->matching_rejected);
+            call = ma97_scaling_call(c, rejected, ipopt_dyn_.scale(),
                                      static_cast<int>(pattern_->n));
         }
+        // A computed scale is passed back (the plugin): not through the slack plan.
+        if (call.computed) c.slack_elimination = SlackElimination::Off;
         session_.set_control(c);
         if (call.reuse) session_.set_user_scale(ipopt_dyn_.scale());
         const auto t0 = Clock::now();
@@ -585,6 +594,7 @@ public:
         if (plugin_stale_scale_retry() && call.reuse && st == IpmFactorStatus::Singular) {
             Control fresh = c;
             fresh.scaling = ScalingMethod::Matching;
+            fresh.slack_elimination = SlackElimination::Off;
             session_.set_control(fresh);
             const IpmFactorStatus retried = session_.factor(values);
             if (retried == IpmFactorStatus::Ok || retried == IpmFactorStatus::Singular) {
@@ -624,6 +634,8 @@ public:
         stats_.factor_entries = info.actual_factor_entries;
         stats_.flops = info.actual_flops;
         stats_.skip_trial_rescues = info.skip_trial_rescues;
+        stats_.slack_armed = info.slack_pairs > 0 ? 1 : 0;
+        stats_.slack_fallbacks = info.slack_fallbacks;
         if (const AnalysisKeep *gk = session_.analysis_keep()) {
             stats_.trial_skipped = gk->matching_trial_skipped ? 1 : 0;
             stats_.gate_flops_per_row = gk->matching_gate_flops_per_row;

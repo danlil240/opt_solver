@@ -34,7 +34,13 @@ struct FactorValues;
 struct SolveWorkspace;
 
 /// Result of SPD or indefinite multifrontal factorization.
+struct SlackFactor;
+
 struct FactorKeep {
+  /// A factorization through the analysis' slack plan (slack_elimination.hpp):
+  /// the pairs' inverses; every other member is then the reduced matrix's
+  /// factor (its order SlackPlan::nr). Null: the matrix's own factor.
+  std::shared_ptr<SlackFactor> slack;
   std::vector<double>
       factor_values; ///< packed L columns (per supernode, col-major)
   std::vector<LongInt> factor_col_ptr; ///< factor_col_ptr[s] = 64-bit start offset of supernode s
@@ -42,7 +48,7 @@ struct FactorKeep {
   std::vector<int> iperm;          ///< total inverse permutation iperm[old] = new
   std::vector<int> num_perm;       ///< numerical permutation num_perm[new_piv] = sym_idx
   std::vector<int> num_iperm;      ///< inverse numerical permutation num_iperm[sym_idx] = new_piv
-  Int n = 0;                       ///< matrix order
+  Int n = 0;                       ///< matrix order (through a slack plan: the reduced matrix's)
   FactorStatus status = FactorStatus::Success; ///< completion status of factorization
   // [s][k] = pivot type for fully-summed column k of supernode s:
   //  1 = 1×1 accepted, 2 = first of 2×2, -1 = second of 2×2, 0 = delayed
