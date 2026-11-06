@@ -101,6 +101,11 @@ struct RunRecord {
     int trial_skipped = -1;
     double gate_flops_per_row = -1.0;
     int skip_trial_rescues = -1;
+    // smf only, Control::slack_elimination: factorizations through the slack
+    // plan, and ones that tried it and took the full matrix (summed over a
+    // warm sequence's steps; -1 = not reported).
+    int slack_armed = -1;
+    int slack_fallbacks = -1;
     // smf only: smf::refine() inside the adapter's solve (static pivots, or
     // SMF_BENCH_REFINE_ALWAYS); -1 / empty = it did not run.
     int refine_iterations = -1;

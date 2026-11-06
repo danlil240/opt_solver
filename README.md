@@ -82,6 +82,18 @@ How to turn it on:
 
 The library itself reads no environment variables. Only the plugin and the harness do. Fast-mode benchmark results are reported apart from the headline numbers.
 
+### Opt-in slack-pair elimination
+
+`Control::slack_elimination` (default `Off`) eliminates IPOPT's inequality slack/multiplier pairs as 2x2 blocks before the factorization and factors only the reduced matrix. It runs only at IPOPT's pivot thresholds (`pivot_u <= 1e-6`) with an automatic ordering. A factorization it cannot take, because the guard trips or because of static pivoting or a scale IPOPT keeps, uses the full matrix's own analysis, exactly as without it. Turn it on for trajectory planners and similar problems: many inequality constraints, most of them inactive, solved over hundreds of IPOPT iterations. On a truck-trailer planner (N = 200) it halves IPOPT's wall time, 13.6 s to 6.9 s. Leave it off for short factorization sequences and for problems whose reduced matrix factors no cheaper, such as PGLib AC-OPF, which runs 30-60% slower with it on.
+
+| Interface | Setting |
+|---|---|
+| C++ | `ctrl.slack_elimination = smf::SlackElimination::On;` (`Auto`: only when pairs are at least `slack_min_share` of the rows) |
+| IPOPT plugin | environment `SMF_SLACK_ELIM=on` (or `auto`; `off` or unset: the default), read once per process |
+| Benchmark harness | `SMF_SLACK_ELIM=on` on every track (it runs only on the ipopt tracks' thresholds) |
+
+The C API keeps the default threshold `pivot_u = 0.01`, where the elimination never runs.
+
 ## Where it stands
 
 The reference board is the front-tier manifest: 144 case-tracks (78 matrices) of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8), so the headline geomeans below cover fewer than 144 case-tracks: per thread count, the 5 that smf fails and the cases where no rival is accurate drop out.

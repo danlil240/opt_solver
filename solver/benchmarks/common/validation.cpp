@@ -180,6 +180,8 @@ std::string RunRecord::to_json_line() const {
     if (trial_skipped >= 0) oss << "\"trial_skipped\":" << trial_skipped << ",";
     if (gate_flops_per_row >= 0) oss << "\"gate_flops_per_row\":" << gate_flops_per_row << ",";
     if (skip_trial_rescues >= 0) oss << "\"skip_trial_rescues\":" << skip_trial_rescues << ",";
+    if (slack_armed >= 0) oss << "\"slack_armed\":" << slack_armed << ",";
+    if (slack_fallbacks >= 0) oss << "\"slack_fallbacks\":" << slack_fallbacks << ",";
     if (refine_iterations >= 0)
         oss << "\"refine_iterations\":" << refine_iterations << ",\"refine_method\":\"" << refine_method
             << "\",";

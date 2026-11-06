@@ -200,13 +200,47 @@ inline Pivoting plugin_pivoting()
     return p;
 }
 
+/// SMF_SLACK_ELIM: Control::slack_elimination ("on", "auto"; "off" or unset:
+/// Off, the default). `valid` is false for another value (then Off).
+struct PluginSlackElimination {
+    SlackElimination mode = SlackElimination::Off;
+    bool valid = true;
+};
+inline PluginSlackElimination plugin_slack_elimination_resolve(const char *v)
+{
+    PluginSlackElimination r;
+    if (v == nullptr || *v == '\0' || std::strcmp(v, "off") == 0)
+        return r;
+    if (std::strcmp(v, "on") == 0)
+        r.mode = SlackElimination::On;
+    else if (std::strcmp(v, "auto") == 0)
+        r.mode = SlackElimination::Auto;
+    else
+        r.valid = false;
+    return r;
+}
+
+/// The plugin's slack elimination (SMF_SLACK_ELIM), read once per process.
+inline SlackElimination plugin_slack_elimination()
+{
+    static const SlackElimination m = [] {
+        const PluginSlackElimination r = plugin_slack_elimination_resolve(std::getenv("SMF_SLACK_ELIM"));
+        if (!r.valid)
+            std::fprintf(stderr, "[smf_ma97] SMF_SLACK_ELIM=\"%s\" is not on, auto or off: off\n",
+                         std::getenv("SMF_SLACK_ELIM"));
+        return r.mode;
+    }();
+    return m;
+}
+
 /// Apply one MA97 control block to `ctrl`, as the plugin does at every
 /// analyse, factor and solve call: the mapped fields above plus the plugin's
 /// fixed settings (expected_refactors = 10, Control::delay_budget =
 /// `delay_budget`; the plugin passes -1 except through its test seam;
 /// Control::num_threads = `num_threads`, or plugin_num_threads() when it is
 /// <= 0, as the plugin passes; Control::pivoting = `pivoting`, or
-/// plugin_pivoting() (SMF_PIVOTING) when unset). The rest of the parallel configuration stays
+/// plugin_pivoting() (SMF_PIVOTING) when unset; Control::slack_elimination =
+/// plugin_slack_elimination() (SMF_SLACK_ELIM)). The rest of the parallel configuration stays
 /// at Control's defaults (auto_threads, top_tiles), as on the board's
 /// multi-thread runs.
 /// Returns false for an unsupported scaling value (MA97 flag -6); `ctrl` is
@@ -216,6 +250,7 @@ inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int de
 {
     out_ctrl.num_threads = num_threads > 0 ? num_threads : plugin_num_threads();
     out_ctrl.pivoting = pivoting ? *pivoting : plugin_pivoting();
+    out_ctrl.slack_elimination = plugin_slack_elimination();
     if (opt.nemin > 0)
         out_ctrl.nemin = opt.nemin;
     if (opt.u >= 0.0 && opt.u <= 0.5)
