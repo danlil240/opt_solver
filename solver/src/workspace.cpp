@@ -126,7 +126,8 @@ bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
 }
 
 ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
-                                 NumericWorkspace &ws, bool need_clean, double *max_abs) {
+                                 NumericWorkspace &ws, bool need_clean, double *max_abs,
+                                 bool perm_later) {
     if (max_abs != nullptr) *max_abs = 0.0;
     if (ak.n < 0) return ErrorCode::IllegalValue;
     if (ak.n == 0) {
@@ -162,6 +163,22 @@ ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &val
     }
     if (max_abs != nullptr) *max_abs = vmax;
 
+    if (need_clean && perm_later) {
+        // Only the cleaned copy: the caller scatters its scaled values.
+        ws.perm_values.resize(perm_nnz);
+        if (via_orig) {
+            ws.clean_values.assign(clean_nnz, 0.0);
+            const Int *to_clean = ak.orig_to_clean_idx.data();
+            double *cv = ws.clean_values.data();
+            for (std::size_t k = 0; k < nv; ++k) {
+                const Int c_slot = to_clean[k];
+                if (c_slot >= 0) cv[c_slot] += uv[k];
+            }
+        } else {
+            ws.clean_values.assign(uv, uv + nv);
+        }
+        return ErrorCode::Success;
+    }
     if (need_clean) {
         ws.clean_values.assign(clean_nnz, 0.0);
     }

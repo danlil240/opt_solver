@@ -116,9 +116,11 @@ bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
 /// Scatter values into ws.perm_values (permuted pattern) and, when
 /// `need_clean`, ws.clean_values. Rejects non-finite values and a size that
 /// does not fit the layout; `max_abs` (optional) receives max |value|.
+/// `perm_later` (with need_clean): the caller rebuilds ws.perm_values from
+/// ws.clean_values (the scaled factorizations), so it is only sized here.
 ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
                                  NumericWorkspace &ws, bool need_clean = true,
-                                 double *max_abs = nullptr);
+                                 double *max_abs = nullptr, bool perm_later = false);
 
 /// Scatter `updated` values (original or cleaned pattern) into
 /// ws.perm_values (permuted pattern) and, when `need_clean`, ws.clean_values.
