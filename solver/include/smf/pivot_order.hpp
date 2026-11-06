@@ -16,8 +16,10 @@ struct RealizedOrder {
   Int zero_pivots = 0;    ///< columns that ended as zero pivots (placed last)
 };
 
-/// Read the realized elimination order off fk.diag_entries (lean engine, serial
-/// or tree-parallel). fk must be a factor of the matrix analysed by ak. perm is
+/// Read the realized elimination order off fk.diag_entries (any engine: the
+/// lean serial and tree-parallel ones, and the legacy Control::tree_parallel
+/// one, whose entries are in its own numerical order), mapped to original
+/// columns through fk.perm. fk must be a factor of the matrix analysed by ak. perm is
 /// empty if fk does not cover all n columns (no factor, or an engine that does
 /// not fill diag_entries); an SPD factor returns the analysis order unchanged.
 RealizedOrder realized_pivot_order(const AnalysisKeep &ak, const FactorKeep &fk);
