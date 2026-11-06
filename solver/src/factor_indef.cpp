@@ -414,8 +414,12 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.scaling_used = static_cast<int>(scaling);
   }
   double matrix_max_abs = 0.0;
+  // max |S A S| when the scaling pass below found it (direct scatter), else
+  // negative and taken from ws.perm_values.
+  double scaled_max_abs = -1.0;
+  const bool scaled = scaling != ScalingMethod::None && keep.n > 0;
   const ErrorCode map_err = map_values_to_permuted(
-      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs);
+      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs, scaled);
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
     fkeep.status = FactorStatus::Singular;
@@ -471,25 +475,34 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       return FactorStatus::Singular;
     }
 
-    // Apply scale S * A * S to clean_values and rescatter into ws.perm_values
+    // Apply scale S * A * S to clean_values and scatter it into
+    // ws.perm_values, max |S A S| taken on the way: one pass (it was three:
+    // scale, zero-fill plus scatter, and the max). The cleaned pattern has
+    // no duplicates, so orig_to_perm_idx maps its entries one to one onto
+    // the permuted slots: storing equals the zero-fill and add before.
+    const bool direct = !keep.orig_to_perm_idx.empty() &&
+                        ws.perm_values.size() == ws.clean_values.size();
+    if (!direct && !keep.orig_to_perm_idx.empty())
+      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
+    double vmax = 0.0;
+    double *const cv = ws.clean_values.data();
+    double *const pv = ws.perm_values.data();
+    const Int *const to_perm = keep.orig_to_perm_idx.empty() ? nullptr : keep.orig_to_perm_idx.data();
     for (Int j = 0; j < keep.n; ++j) {
       const double sj = fkeep.scale[static_cast<std::size_t>(j)];
       for (Int p = keep.cleaned.col_ptr[static_cast<std::size_t>(j)];
            p < keep.cleaned.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-        const Int i = keep.cleaned.row_idx[static_cast<std::size_t>(p)];
-        ws.clean_values[static_cast<std::size_t>(p)] *=
-            fkeep.scale[static_cast<std::size_t>(i)] * sj;
+        const std::size_t sp = static_cast<std::size_t>(p);
+        const Int i = keep.cleaned.row_idx[sp];
+        const double v = cv[sp] * (fkeep.scale[static_cast<std::size_t>(i)] * sj);
+        cv[sp] = v;
+        vmax = std::max(vmax, std::abs(v));
+        if (direct) pv[static_cast<std::size_t>(to_perm[sp])] = v;
+        else if (to_perm != nullptr) pv[static_cast<std::size_t>(to_perm[sp])] += v;
       }
     }
-    if (keep.orig_to_perm_idx.empty()) {
-      ws.perm_values = ws.clean_values;
-    } else {
-      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
-      for (std::size_t k = 0; k < ws.clean_values.size(); ++k) {
-        const Int p_slot = keep.orig_to_perm_idx[k];
-        ws.perm_values[static_cast<std::size_t>(p_slot)] += ws.clean_values[k];
-      }
-    }
+    if (to_perm == nullptr) ws.perm_values = ws.clean_values;
+    if (direct || to_perm == nullptr) scaled_max_abs = vmax;
   }
 
   fkeep.n = keep.n;
@@ -533,8 +546,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       keep.perm_col_ptr.empty() ? keep.cleaned.row_idx : keep.perm_row_idx;
 
   if (scaling != ScalingMethod::None) {
-    matrix_max_abs = 0.0;
-    for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
+    matrix_max_abs = scaled_max_abs;
+    if (matrix_max_abs < 0.0) {
+      matrix_max_abs = 0.0;
+      for (double v : ws.perm_values) matrix_max_abs = std::max(matrix_max_abs, std::abs(v));
+    }
   }
   // Diagonal regularization (Control::reg_diag_sign): +-reg_diag_tol * max|A|
   // on the scaled diagonal, max|A| taken before it. In the permuted pattern

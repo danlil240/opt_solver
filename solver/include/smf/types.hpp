@@ -237,6 +237,16 @@ enum class FactorStatus {
     InertiaExceeded     = 4
 };
 
+// Control::slack_elimination: IPOPT's inequality slack/multiplier pairs
+// eliminated as 2x2 blocks before the multifrontal factorization
+// (slack_elimination.hpp). Off: never; Auto: when the pairs are at least
+// Control::slack_min_share of the rows; On: whenever there are pairs.
+enum class SlackElimination {
+    Off  = 0,
+    Auto = 1,
+    On   = 2
+};
+
 enum class SolveJob {
     Full     = 0,   // AX = B
     Forward  = 1,   // PLX = SB

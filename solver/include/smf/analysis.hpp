@@ -20,6 +20,8 @@ inline std::uint64_t next_analysis_serial() noexcept {
 }
 
 /// All symbolic analysis outputs needed by the factorization phase.
+struct SlackPlan;  // slack_elimination.hpp
+
 struct AnalysisKeep {
     /// Identifies this analysis (a copy is the same analysis): FactorKeep
     /// state tied to an analysis (FactorKeep::delay_analysis) compares it,
@@ -90,6 +92,15 @@ struct AnalysisKeep {
     /// const, so one keep must not be factored from two threads at once.
     mutable std::shared_ptr<AnalysisKeep> matching_reanalysis;
     mutable bool             matching_reanalysis_tried = false;
+    /// Control::slack_elimination: the pairs and the reduced matrix's
+    /// analysis (slack_elimination.hpp); null when the reduction does not
+    /// apply. This keep's own analysis is the full matrix's, kept for the
+    /// factorizations that take it.
+    std::shared_ptr<const SlackPlan> slack;
+    /// Factorizations in a row that took the full matrix because a pair's
+    /// pivot failed; from kSlackMaxFallbacks on, factor() stops trying the
+    /// plan (mutable for the same reason as matching_reanalysis).
+    mutable int              slack_fallbacks_in_row = 0;
 
     /// Number of supernodes (= supernodes.size()).
     Int num_supernodes() const { return static_cast<Int>(supernodes.size()); }

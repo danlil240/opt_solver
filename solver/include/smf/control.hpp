@@ -455,6 +455,34 @@ struct Control {
     // run to run at ~1e-14, armed or not: there only the inertia, delays and
     // factor size are identical.
     int            max_negative_pivots = -1;
+    // Slack-pair elimination (slack_elimination.hpp): at pivot_u <= 1e-6
+    // (kSlackMaxPivotU) and an auto ordering, analyse() finds IPOPT's
+    // inequality slack/multiplier pairs and, when they are at least
+    // slack_min_share of the rows (Auto; On: any), analyses the reduced
+    // matrix, and the full matrix pairs first after it; factor() eliminates
+    // the pairs as 2x2 blocks in one pass (the condensed barrier step) and
+    // factors the reduced matrix, solve() substitutes them back. A
+    // factorization takes the full matrix instead when a pair's update
+    // exceeds slack_update_limit times the state diagonal it lands on (<= 0:
+    // no limit), and the reduction never runs with static pivoting,
+    // reg_diag_sign, user-supplied scaling or max_negative_pivots. Above
+    // kSlackMaxPivotU, or Off, nothing changes.
+    // Opt-in (default Off): it pays on IPOPT problems with many inequality
+    // slacks over long runs (trajectory optimization: 2x on a truck-trailer
+    // planner), but its analysis costs more on short sequences and on
+    // matrices whose reduced matrix factors no cheaper (PGLib AC-OPF).
+    SlackElimination slack_elimination = SlackElimination::Off;
+    double         slack_min_share = 0.2;
+    double         slack_update_limit = 1e15;
+    // A full solve through the plan is checked on the full matrix: when its
+    // componentwise backward error exceeds slack_omega_target, up to
+    // kSlackRefineSteps refinement steps with the reduced factor follow, and
+    // if it still exceeds the target the factorization is redone on the full
+    // matrix for that solve and the factor's later ones (Info::
+    // slack_solve_fallbacks). <= 0: no check. 1e-8 (the board's omega gate)
+    // catches the gross losses (Codex's huge-slack case: 1e-3); a tighter target
+    // refines solves IPOPT's own refinement handles and changes its path.
+    double         slack_omega_target = 1e-8;
     double         factor_memory_multiplier = 1.1;
     int            expected_refactors = 1;
 

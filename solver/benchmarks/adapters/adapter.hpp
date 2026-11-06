@@ -65,6 +65,10 @@ struct AdapterStats {
     int trial_skipped = -1;
     double gate_flops_per_row = 0.0;
     int skip_trial_rescues = 0;
+    // smf adapters, Control::slack_elimination: the last factor ran through
+    // the slack plan (0/1), or tried it and took the full matrix (0/1).
+    int slack_armed = 0;
+    int slack_fallbacks = 0;
     // smf adapters: the subtree engine's shape and phase times (Info) of the
     // last factor; subtree/top/gather are 0 when it ran serially.
     int threads_used = 1;

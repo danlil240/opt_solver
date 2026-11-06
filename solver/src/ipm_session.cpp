@@ -1,4 +1,5 @@
 #include "smf/ipm_session.hpp"
+#include "smf/slack_elimination.hpp"
 
 #include "smf/factor_indef.hpp"
 #include "smf/pivot_order.hpp"
@@ -264,7 +265,12 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
   // Singular with SingularMatrix) clears fk_'s factor values and may leave
   // fk_ pointing at the previous analysis. The caller still sees Singular
   // (the MA97 plugin's flag 7), but solve() refuses this factor.
-  const bool ran = fk_.analysis == ak_.get() && !fk_.factor_values.empty();
+  // A factorization through the slack plan (Control::slack_elimination)
+  // points at the reduced matrix's analysis, which the plan (kept alive by
+  // fk_.slack) owns.
+  const bool ran = (fk_.analysis == ak_.get() ||
+                    slack_owns(*ak_, fk_.analysis)) &&
+                   !fk_.factor_values.empty();
   solvable_ = result == IpmFactorStatus::Ok || (result == IpmFactorStatus::Singular && ran);
   aborted_ = result == IpmFactorStatus::WrongInertia;
   pending_accept_ = solvable_;
@@ -304,8 +310,12 @@ void IpmSession::consider_reanalysis() {
     return;
   // The attempt would run in the next factorization.
   if (last_attempt_ >= 0 && stats_.factorizations + 1 - last_attempt_ < ipm_.reanalyse_min_gap) return;
-  // fk_ is overwritten by the next factor(): read its order now.
-  RealizedOrder ro = realized_pivot_order(*ak_, fk_);
+  // A factor through the slack plan is the reduced matrix's: its order is
+  // not the full matrix's.
+  if (fk_.slack || fk_.analysis == nullptr) return;
+  // fk_ is overwritten by the next factor(): read its order now (of the
+  // analysis it ran on: ak_, or ak_'s slack plan's full analysis).
+  RealizedOrder ro = realized_pivot_order(*fk_.analysis, fk_);
   order_perm_ = std::move(ro.perm);
   order_pairs_ = std::move(ro.pairs);
   trigger_delays_ = info_.delayed_pivots;
@@ -352,11 +362,12 @@ void IpmSession::prepare_analysis() {
   // A user-supplied order computes no matching scaling. Keep the current
   // analysis' (ScalingMethod::Auto applies it; Matching reuses it only for
   // the values it was computed from), so the scaling does not change.
-  if (nak->matching_scale.empty() && !ak_->matching_scale.empty() &&
-      nak->cleaned.values.size() == ak_->cleaned.values.size()) {
-    nak->matching_scale = ak_->matching_scale;
-    nak->matching_scale_partial = ak_->matching_scale_partial;
-    nak->cleaned.values = ak_->cleaned.values;
+  const AnalysisKeep &cur = slack_full_analysis(*ak_);
+  if (nak->matching_scale.empty() && !cur.matching_scale.empty() &&
+      nak->cleaned.values.size() == cur.cleaned.values.size()) {
+    nak->matching_scale = cur.matching_scale;
+    nak->matching_scale_partial = cur.matching_scale_partial;
+    nak->cleaned.values = cur.cleaned.values;
   }
 
   // Adopt. The old analysis stays alive for the probation (and fk_, the
