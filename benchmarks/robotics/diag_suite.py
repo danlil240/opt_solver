@@ -44,6 +44,7 @@ def main() -> None:
     ap.add_argument("--solvers", default="ma27,ma57,ma97,smf")
     ap.add_argument("--seed", default="0")
     a = ap.parse_args()
+    flags = BELOW_NORMAL if os.name == "nt" else 0  # creationflags exist only on Windows
     with open(a.out, "a", encoding="utf-8") as fh:
         for cell in a.cells.split(","):
             mod, n = cell.split(":")
@@ -53,7 +54,7 @@ def main() -> None:
                 if sv == "smf":
                     env["SMF_PLUGIN_STATS"] = "2"
                 cp = subprocess.run([sys.executable, str(HERE / "diag_one.py"), mod, n, a.seed, sv], cwd=HERE, env=env,
-                                    capture_output=True, text=True, timeout=3600, creationflags=BELOW_NORMAL)
+                                    capture_output=True, text=True, timeout=3600, creationflags=flags)
                 line = next((l for l in cp.stdout.splitlines() if l.startswith("DIAG ")), None)
                 rec = json.loads(line[5:]) if line else {"cell": cell, "solver": sv, "status": "harness_error",
                                                          "stderr": cp.stderr[-1500:]}

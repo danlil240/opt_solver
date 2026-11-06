@@ -101,6 +101,10 @@ def drone_swap(N, seed):
     b = Staged(N)
     X = [[None] * (N + 1) for _ in range(DS.N_DRONES)]
     U = [[None] * N for _ in range(DS.N_DRONES)]
+    # P[d][k] = U[d][k-1], carried as a state (P_{k+1} = U_k), so the control
+    # smoothing term (U_k - U_{k-1}) is a function of stage k's variables only,
+    # as FATROP's stage-wise cost requires. P_0 is fixed (no k = 0 term uses it).
+    P = [[None] * (N + 1) for _ in range(DS.N_DRONES)]
     for k in range(N + 1):
         s = k / N
         for d in range(DS.N_DRONES):
@@ -115,6 +119,11 @@ def drone_swap(N, seed):
                 ub = np.r_[goals[d], 0.2 * np.ones(3), 0.1, 0.1, np.pi, 0.5, 0.5, 0.5]
             X[d][k] = b.x(k, f"x{d}_{k}", Q.NX, lb, ub, g)
         for d in range(DS.N_DRONES):
+            if k == 0:
+                P[d][k] = b.x(k, f"p{d}_{k}", Q.NU, Q.HOVER, Q.HOVER, Q.HOVER)
+            else:
+                P[d][k] = b.x(k, f"p{d}_{k}", Q.NU, -ca.inf, ca.inf, Q.HOVER)
+        for d in range(DS.N_DRONES):
             if k < N:
                 U[d][k] = b.u(k, f"u{d}_{k}", Q.NU, 0.0, Q.U_MAX, Q.HOVER)
         if 0 < k < N:
@@ -125,11 +134,12 @@ def drone_swap(N, seed):
     f = 0
     gs = []
     for k in range(N):
-        gs.append(ca.vertcat(*[X[d][k + 1] - F(X[d][k], U[d][k]) for d in range(DS.N_DRONES)]))
+        gs.append(ca.vertcat(*[X[d][k + 1] - F(X[d][k], U[d][k]) for d in range(DS.N_DRONES)],
+                             *[P[d][k + 1] - U[d][k] for d in range(DS.N_DRONES)]))
         for d in range(DS.N_DRONES):
             f += h * ca.sumsqr(U[d][k] - Q.HOVER)
             if k > 0:
-                f += 0.01 * ca.sumsqr(U[d][k] - U[d][k - 1]) / h
+                f += 0.01 * ca.sumsqr(U[d][k] - P[d][k]) / h
     return b, f, gs
 
 

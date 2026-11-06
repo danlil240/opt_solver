@@ -57,6 +57,7 @@ def main() -> None:
                 env[k] = str(t)
             if sv == "smf":
                 env["SMF_PLUGIN_STATS"] = "1"
+            cp = None  # this job's subprocess, once it returned (not an earlier job's)
             try:
                 cp = subprocess.run([sys.executable, str(HERE / "run_one.py"), p, str(n), str(s), sv, str(t)],
                                     cwd=HERE, capture_output=True, text=True, timeout=a.timeout,
@@ -68,7 +69,7 @@ def main() -> None:
             except subprocess.TimeoutExpired:
                 rec = {"problem": p, "N": n, "seed": s, "solver": sv, "threads": t, "status": "timeout"}
             rec["rep"] = r
-            if sv == "smf" and "cp" in locals():
+            if sv == "smf" and cp is not None:
                 m = re.search(r"factors=(\d+) \(([\d.]+) s\) solves=(\d+) rhs=(\d+) \(([\d.]+) s", cp.stderr)
                 if m:
                     rec.update(plugin_factors=int(m.group(1)), plugin_factor_s=float(m.group(2)),
