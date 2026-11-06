@@ -187,6 +187,79 @@ bool same_bits(const std::vector<double> &a, const std::vector<double> &b) {
     return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0;
 }
 
+
+// Componentwise backward error max_i |b - A x|_i / (|A| |x| + |b|)_i (rows
+// with a zero denominator: their residual must be 0).
+double omega(const CscLower &A, const std::vector<double> &x, const std::vector<double> &b) {
+    const int n = static_cast<int>(A.n);
+    std::vector<double> r(b), d(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) d[static_cast<std::size_t>(i)] = std::abs(b[static_cast<std::size_t>(i)]);
+    for (int j = 0; j < n; ++j)
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const int i = A.row_idx[static_cast<std::size_t>(p)];
+            const double v = A.values[static_cast<std::size_t>(p)];
+            r[static_cast<std::size_t>(i)] -= v * x[static_cast<std::size_t>(j)];
+            d[static_cast<std::size_t>(i)] += std::abs(v * x[static_cast<std::size_t>(j)]);
+            if (i != j) {
+                r[static_cast<std::size_t>(j)] -= v * x[static_cast<std::size_t>(i)];
+                d[static_cast<std::size_t>(j)] += std::abs(v * x[static_cast<std::size_t>(i)]);
+            }
+        }
+    double w = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double ri = std::abs(r[static_cast<std::size_t>(i)]), di = d[static_cast<std::size_t>(i)];
+        w = std::max(w, di > 0.0 ? ri / di : (ri > 0.0 ? 1.0 : 0.0));
+    }
+    return w;
+}
+
+// The solve of A x = 1 (all ones) through a fresh analysis and factor.
+struct OnesRun {
+    std::vector<double> x;
+    bool slack = false;
+    Info info;
+};
+OnesRun solve_ones(const CscLower &A, const Control &c) {
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, c, ia);
+    OnesRun r;
+    if (!ak) return r;
+    FactorKeep fk;
+    NumericWorkspace ws;
+    s.factor(*ak, std::span<const double>(A.values), c, r.info, fk, ws);
+    r.slack = fk.slack != nullptr;
+    r.x.assign(static_cast<std::size_t>(A.n), 1.0);
+    Info si;
+    s.solve(fk, c, si, r.x.data(), static_cast<int>(A.n), 1);
+    return r;
+}
+
+// Codex's repro: 100 states (diagonal 4, neighbours -0.5), each coupled by 1
+// to a multiplier whose slack block is [1e14 -1; -1 0] (an active
+// constraint at a huge barrier term).
+CscLower huge_slack_kkt() {
+    const int m = 100, n = 3 * m;
+    std::map<std::pair<int, int>, double> e;
+    for (int i = 0; i < m; ++i) {
+        e[{i, i}] = 4.0;
+        if (i + 1 < m) e[{i, i + 1}] = -0.5;
+        e[{i, 2 * m + i}] = 1.0;            // state - multiplier
+        e[{m + i, m + i}] = 1e14;           // slack
+        e[{m + i, 2 * m + i}] = -1.0;       // slack - multiplier
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (const auto &[key, v] : e) {
+        A.row_idx.push_back(key.second);
+        A.values.push_back(v);
+        ++A.col_ptr[static_cast<std::size_t>(key.first) + 1];
+    }
+    for (int j = 0; j < n; ++j) A.col_ptr[static_cast<std::size_t>(j) + 1] += A.col_ptr[static_cast<std::size_t>(j)];
+    return A;
+}
+
 } // namespace
 
 TEST(SlackElimination, MatchesFullPathOnRandomKkts) {
@@ -406,4 +479,39 @@ TEST(SlackElimination, PluginEnvironmentKnob) {
     const PluginSlackElimination bad = plugin_slack_elimination_resolve("yes");
     EXPECT_FALSE(bad.valid);
     EXPECT_EQ(bad.mode, SlackElimination::Off);
+}
+
+// Codex P2 (PR #57): pairs with a huge slack diagonal pass the update guard
+// but the substituted solution loses componentwise accuracy; the solve must
+// still meet the full path's.
+TEST(SlackElimination, HugeSlackDiagonalIsAccurate) {
+    const CscLower A = huge_slack_kkt();
+    const std::vector<double> ones(static_cast<std::size_t>(A.n), 1.0);
+    const OnesRun off = solve_ones(A, base(SlackElimination::Off));
+    const OnesRun on = solve_ones(A, base(SlackElimination::On));
+    const double woff = omega(A, off.x, ones), won = omega(A, on.x, ones);
+    std::printf("[ huge     ] omega on %.2e (slack %d) off %.2e\n", won, on.slack ? 1 : 0, woff);
+    EXPECT_LT(won, 1e-12);
+    EXPECT_EQ(on.info.num_negative, off.info.num_negative);
+}
+
+// Codex P2 (PR #57): a KKT scaled by 1e-161 makes the pair determinants
+// subnormal; the pairs must be inverted from a normalized block.
+TEST(SlackElimination, TinyScaledKktIsAccurate) {
+    Kkt k = make_kkt(5, 100, 10, 250, 0.0, 1e-4);
+    for (double &v : k.A.values) v *= 1e-161;
+    const std::vector<double> ones(static_cast<std::size_t>(k.A.n), 1.0);
+    const OnesRun off = solve_ones(k.A, base(SlackElimination::Off));
+    // The pair inverses alone (no solve check), then with the check: as
+    // accurate as the full path (itself ~4e-9 here), not 1e-3.
+    Control nc = base(SlackElimination::On);
+    nc.slack_omega_target = 0.0;
+    const OnesRun raw = solve_ones(k.A, nc);
+    const OnesRun on = solve_ones(k.A, base(SlackElimination::On));
+    const double woff = omega(k.A, off.x, ones), won = omega(k.A, on.x, ones), wraw = omega(k.A, raw.x, ones);
+    std::printf("[ tiny     ] omega on %.2e unchecked %.2e (slack %d) off %.2e\n", won, wraw, on.slack ? 1 : 0, woff);
+    EXPECT_TRUE(raw.slack);
+    EXPECT_LT(wraw, 10.0 * woff + 1e-12);
+    EXPECT_LT(won, 10.0 * woff + 1e-12);
+    EXPECT_EQ(on.info.num_negative, off.info.num_negative);
 }

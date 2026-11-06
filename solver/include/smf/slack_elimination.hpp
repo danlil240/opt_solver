@@ -44,6 +44,9 @@ constexpr double kSlackMaxPivotU = 1e-6;
 /// Fallbacks in a row after which factor() no longer tries the plan
 /// (AnalysisKeep::slack_fallbacks_in_row).
 constexpr int kSlackMaxFallbacks = 3;
+/// Refinement steps of a full solve through the plan whose accuracy check
+/// fails (Control::slack_omega_target), before the full matrix's factor.
+constexpr int kSlackRefineSteps = 3;
 /// Matrices of lower order never take the reduction.
 constexpr Int kSlackMinOrder = 256;
 struct FactorKeep;
@@ -81,6 +84,10 @@ struct SlackPlan {
     /// that does not run through the plan.
     CscLower input;
     Control actrl;
+    /// The cleaned pattern (the cleaned values' layout), for the solve's
+    /// residual on the full matrix.
+    std::vector<LongInt> clean_ptr;
+    std::vector<Int> clean_row;
     mutable std::mutex full_mu;
     mutable std::shared_ptr<const AnalysisKeep> full;
 };
@@ -91,6 +98,16 @@ struct SlackFactor {
     std::shared_ptr<const SlackPlan> plan;
     std::vector<double> pinv;
     std::vector<double> bval;
+    /// The full matrix (cleaned values, and the input-order values with the
+    /// factorization's control) for the solve's accuracy check: a full solve
+    /// whose componentwise backward error on the full matrix stays above
+    /// Control::slack_omega_target after refinement factors the full matrix
+    /// (its own analysis) once and solves with that from then on.
+    std::vector<double> cv;
+    std::vector<double> vin;     ///< empty when the input was clean (then cv is in its order)
+    Control ctrl;
+    mutable std::mutex full_mu;
+    mutable std::shared_ptr<FactorKeep> full;
     /// The last pair pass: pairs whose pivot failed, the largest growth
     /// bound among the others, the largest |a_ss|.
     int fails = 0;
@@ -117,6 +134,9 @@ std::unique_ptr<AnalysisKeep> analyse_with_slack_plan(Solver &solver, const CscL
 /// takes: the plan's full analysis (made on first use), `keep` itself
 /// without a plan.
 const AnalysisKeep &slack_full_analysis(const AnalysisKeep &keep);
+
+/// The plan's full analysis (made on first use; null when it fails).
+const AnalysisKeep *slack_plan_full_analysis(const SlackPlan &plan);
 
 /// Whether `analysis` is one of `keep`'s plan's analyses (reduced or full).
 bool slack_owns(const AnalysisKeep &keep, const AnalysisKeep *analysis);

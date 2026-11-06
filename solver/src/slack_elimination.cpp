@@ -267,6 +267,8 @@ std::unique_ptr<AnalysisKeep> analyse_with_slack_plan(Solver &solver, const CscL
     if (!cplan || cplan->nr <= 0) return nullptr;
     auto plan = std::const_pointer_cast<SlackPlan>(cplan);
     plan->input = A;
+    plan->clean_ptr.assign(cp.clean.col_ptr.begin(), cp.clean.col_ptr.end());
+    plan->clean_row.assign(cp.clean.row_idx.begin(), cp.clean.row_idx.end());
     plan->actrl = ctrl;
     plan->actrl.slack_elimination = SlackElimination::Off;
     plan->actrl.user_scale = nullptr;
@@ -302,15 +304,19 @@ std::unique_ptr<AnalysisKeep> analyse_with_slack_plan(Solver &solver, const CscL
     return keep;
 }
 
-const AnalysisKeep &slack_full_analysis(const AnalysisKeep &keep) {
-    if (!keep.slack) return keep;
-    const SlackPlan &plan = *keep.slack;
+const AnalysisKeep *slack_plan_full_analysis(const SlackPlan &plan) {
     std::lock_guard<std::mutex> lock(plan.full_mu);
     if (!plan.full) {
         Info fi;
         plan.full = Solver().analyse(plan.input, plan.actrl, fi);
     }
-    return plan.full ? *plan.full : keep;
+    return plan.full.get();
+}
+
+const AnalysisKeep &slack_full_analysis(const AnalysisKeep &keep) {
+    if (!keep.slack) return keep;
+    const AnalysisKeep *full = slack_plan_full_analysis(*keep.slack);
+    return full ? *full : keep;
 }
 
 bool slack_owns(const AnalysisKeep &keep, const AnalysisKeep *analysis) {
@@ -351,22 +357,39 @@ bool slack_pair_pass(const SlackPlan &plan, const double *cv, const Control &ctr
         const double ass = cv[static_cast<std::size_t>(pr.ss)];
         const double ays = cv[static_cast<std::size_t>(pr.ys)];
         const double ayy = pr.yy >= 0 ? cv[static_cast<std::size_t>(pr.yy)] : 0.0;
-        const double det = ass * ayy - ays * ays;
+        // The 2x2 inverse. In the common range the determinant is formed
+        // directly; a block whose largest entry is near under- or overflow is
+        // first normalized by it (as the LDL^T kernel's 2x2 pivots), so that
+        // the determinant does not underflow. A determinant lost to
+        // cancellation (or not finite) fails the pair.
+        const double amax = std::max(std::max(std::abs(ass), std::abs(ays)), std::abs(ayy));
+        const double sc = (amax > 1e-150 && amax < 1e150) ? 1.0 : (amax > 0.0 ? 1.0 / amax : 0.0);
+        const double hs = ass * sc, hsy = ays * sc, hy = ayy * sc;
+        const double hdet = hs * hy - hsy * hsy;
+        const bool det_ok = sc > 0.0 && std::isfinite(sc) &&
+                            std::abs(hdet) > 1e3 * std::numeric_limits<double>::epsilon() *
+                                                 (std::abs(hs * hy) + hsy * hsy);
+        const double det = hdet;  // its sign (the pair's inertia)
         for (Int t = 0; t < pr.nb; ++t)
             sf.bval[static_cast<std::size_t>(pr.b0 + t)] =
                 cv[static_cast<std::size_t>(plan.b_slot[static_cast<std::size_t>(pr.b0 + t)])];
         sf.max_slack = std::max(sf.max_slack, std::abs(ass));
-        if (!(std::isfinite(det) && det != 0.0)) {
+        if (!det_ok) {
             ++sf.fails;
             continue;
         }
-        const double iss = ayy / det, isy = -ays / det, iyy = ass / det;
+        const double inv = sc / hdet;  // P^-1 = sc adj(P sc) / det(P sc)
+        const double iss = hy * inv, isy = -hsy * inv, iyy = hs * inv;
+        if (!std::isfinite(inv)) {
+            ++sf.fails;
+            continue;
+        }
         double ratio = 0.0;
         for (Int t = 0; t < pr.nb; ++t) {
             const LongInt ds = plan.sdiag[static_cast<std::size_t>(plan.b_row[static_cast<std::size_t>(pr.b0 + t)])];
             const double d = ds >= 0 ? std::abs(cv[static_cast<std::size_t>(ds)]) : 0.0;
             const double bv = sf.bval[static_cast<std::size_t>(pr.b0 + t)];
-            if (d > 0.0) ratio = std::max(ratio, std::abs(iyy) * bv * bv / d);
+            if (d > 0.0) ratio = std::max(ratio, (std::abs(iyy) * std::abs(bv)) * std::abs(bv) / d);
         }
         sf.max_growth = std::max(sf.max_growth, ratio);
         if (!(ratio <= limit)) {

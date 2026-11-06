@@ -19,6 +19,9 @@ class SolvePool;
 struct SolveWorkspace {
     std::vector<double> tmp;
     std::vector<double> slack_r;  ///< slack-pair elimination: the reduced right-hand sides
+    std::vector<double> slack_b;    ///< slack path: the right-hand sides, for the accuracy check
+    std::vector<double> slack_res;  ///< its residuals / corrections
+    std::vector<double> slack_den;  ///< its componentwise denominators
     std::vector<double> loc;
     std::vector<double> ext;
     std::vector<double> rhs_perm;

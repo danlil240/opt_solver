@@ -474,6 +474,15 @@ struct Control {
     SlackElimination slack_elimination = SlackElimination::Off;
     double         slack_min_share = 0.2;
     double         slack_update_limit = 1e15;
+    // A full solve through the plan is checked on the full matrix: when its
+    // componentwise backward error exceeds slack_omega_target, up to
+    // kSlackRefineSteps refinement steps with the reduced factor follow, and
+    // if it still exceeds the target the factorization is redone on the full
+    // matrix for that solve and the factor's later ones (Info::
+    // slack_solve_fallbacks). <= 0: no check. 1e-8 (the board's omega gate)
+    // catches the gross losses (Codex's huge-slack case: 1e-3); a tighter target
+    // refines solves IPOPT's own refinement handles and changes its path.
+    double         slack_omega_target = 1e-8;
     double         factor_memory_multiplier = 1.1;
     int            expected_refactors = 1;
 

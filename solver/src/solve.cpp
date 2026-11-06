@@ -655,9 +655,9 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
 // (slack_elimination.hpp), the cleaned values `cv`. False when it does not
 // run (not armed, the plan given up on, or a pair's pivot failing): the
 // caller factors the full matrix as without the plan.
-static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, const std::vector<double> &cv,
-                         const Control &ctrl, Info &info, FactorKeep &fkeep, NumericWorkspace &ws,
-                         FactorStatus &st) {
+static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vector<double> cv,
+                         std::span<const double> vin, const Control &ctrl, Info &info, FactorKeep &fkeep,
+                         NumericWorkspace &ws, FactorStatus &st) {
   if (!slack_armed(ak, ctrl) || ak.slack_fallbacks_in_row >= kSlackMaxFallbacks) return false;
   const SlackPlan &plan = *ak.slack;
   if (cv.size() != ak.cleaned.row_idx.size()) return false;
@@ -678,6 +678,14 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, const std
   rc.slack_elimination = SlackElimination::Off;
   if (!ws.slack_ws) ws.slack_ws = std::make_shared<NumericWorkspace>();
   st = solver.factor(*plan.reduced, std::span<const double>(ws.slack_values), rc, info, fkeep, *ws.slack_ws);
+  // The full matrix, for the solve's accuracy check (Control::slack_omega_target).
+  if (ctrl.slack_omega_target > 0.0 && plan.clean_ptr.size() == static_cast<std::size_t>(plan.n_full) + 1) {
+    // (A clean input's values are the cleaned values, in the same order.)
+    if (!ak.input_clean) sf->vin.assign(vin.begin(), vin.end());
+    sf->cv = std::move(cv);
+    sf->ctrl = ctrl;
+    sf->ctrl.slack_elimination = SlackElimination::Off;
+  }
   fkeep.slack = std::move(sf);
   info.num_positive += pos;
   info.num_negative += neg;
@@ -704,7 +712,9 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, const Control &ctrl,
   info.slack_fallbacks = 0;
   if (ak_in.slack) {
     NumericWorkspace ws;
-    if (factor_slack(*this, ak_in, ak_in.cleaned.values, ctrl, info, fkeep, ws, st)) return st;
+    if (factor_slack(*this, ak_in, ak_in.cleaned.values, std::span<const double>(ak_in.slack->input.values), ctrl,
+                     info, fkeep, ws, st))
+      return st;
   }
   // A factorization off the slack plan takes the full matrix's own analysis.
   const AnalysisKeep &ak = slack_full_analysis(ak_in);
@@ -741,7 +751,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, const CscLower &updated,
   if (ak_in.slack) {
     FactorValues fv;
     if (factor_slack(*this, ak_in, resolve_factor_values(ak_in, updated, fv) ? cleaned_values(ak_in, fv) : std::vector<double>{},
-                     ctrl, info, fkeep, ws, st))
+                     std::span<const double>(updated.values), ctrl, info, fkeep, ws, st))
       return st;
   }
   // A factorization off the slack plan takes the full matrix's own analysis.
@@ -782,7 +792,8 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, std::span<const double> v
   fkeep.slack.reset();
   info.slack_pairs = 0;
   info.slack_fallbacks = 0;
-  if (ak_in.slack && factor_slack(*this, ak_in, cleaned_values(ak_in, fv), ctrl, info, fkeep, ws, st)) return st;
+  if (ak_in.slack && factor_slack(*this, ak_in, cleaned_values(ak_in, fv), values, ctrl, info, fkeep, ws, st))
+    return st;
   // A factorization off the slack plan takes the full matrix's own analysis.
   const AnalysisKeep &ak = slack_full_analysis(ak_in);
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
@@ -1012,8 +1023,8 @@ int solve_core(const FactorKeep &fkeep, const Control &ctrl, Info &info,
 // (fkeep's own arrays), and the pairs substituted back. The factorization's
 // first pivots are the pairs: A = L1 diag(P, A_r) L1^T with L1 = [I 0; B P^-1 I],
 // so every SolveJob splits into the pairs' part and the reduced job.
-int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,
-                int ldb, SolveWorkspace &ws, SolveJob job) {
+int slack_substitute(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,
+                     int ldb, SolveWorkspace &ws, SolveJob job) {
   const SlackFactor &sf = *fkeep.slack;
   const SlackPlan &plan = *sf.plan;
   const int nr = static_cast<int>(plan.nr);
@@ -1066,6 +1077,132 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
     }
   }
   return 0;
+}
+
+// The componentwise backward error of x for right-hand side b on the slack
+// factor's full matrix: max_i |b - A x|_i / max((|A| |x| + |b|)_i, tau_i), with
+// tau = n eps max_i (|A| |x| + |b|)_i for rows at roundoff level.
+// r becomes b - A x; d is scratch.
+double slack_omega(const SlackFactor &sf, const double *b, const double *x, double *r, double *d, int n) {
+  const SlackPlan &plan = *sf.plan;
+  for (int i = 0; i < n; ++i) {
+    r[i] = b[i];
+    d[i] = std::abs(b[i]);
+  }
+  const LongInt *cp = plan.clean_ptr.data();
+  const Int *ri_ = plan.clean_row.data();
+  const double *cv = sf.cv.data();
+  for (Int j = 0; j < plan.n_full; ++j) {
+    const double xj = x[j], axj = std::abs(xj);
+    double rj = 0.0, dj = 0.0;
+    for (LongInt p = cp[j]; p < cp[j + 1]; ++p) {
+      const Int i = ri_[p];
+      const double v = cv[p], av = std::abs(v);
+      r[i] -= v * xj;
+      d[i] += av * axj;
+      if (i != j) {
+        rj -= v * x[i];
+        dj += av * std::abs(x[i]);
+      }
+    }
+    r[j] += rj;
+    d[j] += dj;
+  }
+  double dmax = 0.0;
+  for (int i = 0; i < n; ++i) dmax = std::max(dmax, d[i]);
+  const double tau = static_cast<double>(n) * std::numeric_limits<double>::epsilon() * dmax;
+  // The largest |r_i| / den_i, compared without dividing.
+  double wr = 0.0, wd = 1.0;
+  for (int i = 0; i < n; ++i) {
+    const double den = std::max(d[i], tau), ai = std::abs(r[i]);
+    if (!(ai <= std::numeric_limits<double>::max())) return std::numeric_limits<double>::infinity();
+    if (den > 0.0) {
+      if (ai * wd > wr * den) {
+        wr = ai;
+        wd = den;
+      }
+    } else if (ai > 0.0) {
+      return 1.0;
+    }
+  }
+  return wr / wd;
+}
+
+// A solve through a slack factor. A full solve is checked on the full matrix
+// (Control::slack_omega_target): when a column's componentwise backward error
+// is above it, up to kSlackRefineSteps refinement steps with the reduced
+// factor follow; if one still is, the full matrix is factored with its own
+// analysis (once per factor) and the right-hand sides solved with that, as
+// are the factor's later solves.
+int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,
+                int ldb, SolveWorkspace &ws, SolveJob job) {
+  const SlackFactor &sf = *fkeep.slack;
+  info.slack_refine_steps = 0;
+  info.slack_solve_fallbacks = 0;
+  std::shared_ptr<FactorKeep> full;
+  {
+    std::lock_guard<std::mutex> lock(sf.full_mu);
+    full = sf.full;
+  }
+  if (full) {
+    info.slack_solve_fallbacks = 1;
+    return solve_core(*full, ctrl, info, b, n, nrhs, ldb, ws, job);
+  }
+  if (job != SolveJob::Full || !(ctrl.slack_omega_target > 0.0) || sf.cv.empty() || n != sf.plan->n_full)
+    return slack_substitute(fkeep, ctrl, info, b, n, nrhs, ldb, ws, job);
+  const std::size_t sn = static_cast<std::size_t>(n);
+  ws.slack_b.resize(sn * static_cast<std::size_t>(nrhs));
+  for (int j = 0; j < nrhs; ++j)
+    std::copy_n(b + static_cast<std::ptrdiff_t>(j) * ldb, n, ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n);
+  int rc = slack_substitute(fkeep, ctrl, info, b, n, nrhs, ldb, ws, job);
+  if (rc != 0) return rc;
+  ws.slack_res.resize(sn);
+  ws.slack_den.resize(sn);
+  bool accurate = true;
+  double worst = 0.0;
+  int steps = 0;
+  for (int j = 0; j < nrhs; ++j) {
+    double *x = b + static_cast<std::ptrdiff_t>(j) * ldb;
+    const double *bj = ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n;
+    double w = slack_omega(sf, bj, x, ws.slack_res.data(), ws.slack_den.data(), n);
+    for (int it = 0; it < kSlackRefineSteps && w > ctrl.slack_omega_target; ++it) {
+      rc = slack_substitute(fkeep, ctrl, info, ws.slack_res.data(), n, 1, n, ws, SolveJob::Full);
+      if (rc != 0) return rc;
+      for (int i = 0; i < n; ++i) x[i] += ws.slack_res[static_cast<std::size_t>(i)];
+      ++steps;
+      w = slack_omega(sf, bj, x, ws.slack_res.data(), ws.slack_den.data(), n);
+    }
+    worst = std::max(worst, w);
+    if (w > ctrl.slack_omega_target) accurate = false;
+  }
+  info.slack_refine_steps = steps;
+  if (accurate) {
+    if (steps > 0 && std::getenv("SMF_SLACK_TRACE") != nullptr)
+      std::fprintf(stderr, "[slack] solve refined in %d steps (omega %.3e)\n", steps, worst);
+    return 0;
+  }
+  {
+    std::lock_guard<std::mutex> lock(sf.full_mu);
+    if (!sf.full) {
+      if (const AnalysisKeep *fa = slack_plan_full_analysis(*sf.plan)) {
+        auto fk = std::make_shared<FactorKeep>();
+        NumericWorkspace nws;
+        Info fi;
+        const std::vector<double> &vin = sf.vin.empty() ? sf.cv : sf.vin;
+        if (Solver().factor(*fa, std::span<const double>(vin), sf.ctrl, fi, *fk, nws) == FactorStatus::Success)
+          sf.full = std::move(fk);
+      }
+    }
+    full = sf.full;
+  }
+  if (const char *tr = std::getenv("SMF_SLACK_TRACE"); tr != nullptr)
+    std::fprintf(stderr, "[slack] solve omega %.3e after %d refinement steps -> %s\n", worst, steps,
+                 full ? "full matrix factor" : "kept (full factor failed)");
+  if (!full) return 0;
+  for (int j = 0; j < nrhs; ++j)
+    std::copy_n(ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n, n, b + static_cast<std::ptrdiff_t>(j) * ldb);
+  info.slack_solve_fallbacks = 1;
+  return solve_core(*full, ctrl, info, b, n, nrhs, ldb, ws, job);
 }
 
 int solve_impl(const FactorKeep &fkeep, const Control &ctrl, Info &info, double *b, int n, int nrhs,

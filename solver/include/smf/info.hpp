@@ -88,6 +88,10 @@ struct Info {
     /// a pair's pivot failed and it took the full matrix.
     int          slack_pairs         = 0;
     int          slack_fallbacks     = 0;
+    /// Solve: refinement steps the slack path's accuracy check took, and 1
+    /// when it then solved with the full matrix's factor instead.
+    int          slack_refine_steps  = 0;
+    int          slack_solve_fallbacks = 0;
     /// 1 when this factor() stopped a factorization at the scale-on-delay
     /// work limit, or threw away a factor whose kept scale failed the
     /// accuracy probe (that work was spent), else 0.
