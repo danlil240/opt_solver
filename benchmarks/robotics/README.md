@@ -52,6 +52,8 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 | `stagewise_fatrop.jsonl` | `stagewise.py` records: FATROP against IPOPT (MUMPS, MA27, smf) on stage-ordered copies of quad_forest, drone_swap, car_track and truck_trailer at N = 100 and 200 |
 | `slack_elim_live_guard.jsonl` | the same against the merged build (#57, `SMF_SLACK_ELIM=auto`, with its solve accuracy check and inertia guard), truck, quad and arm |
 
+`kkt_nnz` (the lower-triangle nonzeros of IPOPT's KKT matrix) was corrected on 2026-11-06 in every record and in `summary_t1.md`: it had counted the Hessian's diagonal entries twice (once in IPOPT's Hessian count, once in the diagonal). It now matches the captured matrices exactly (the five `robotics_kkt.json` cases).
+
 Records in the `slack_elim_*` files carry `variant` (`main` / `slk`), `factors` (plugin factorizations), `slack_armed` (factorizations through the elimination) and `slack_fallbacks` (pairs failing the guard).
 
 With the merged elimination (`auto`), against smf main #56 on the same run:

@@ -143,14 +143,31 @@ def parse_ipopt_output(text: str) -> dict:
     return out
 
 
-def kkt_size(info: dict) -> tuple[int | None, int | None]:
+def hessian_diagonal(S, lbx=None, ubx=None) -> int | None:
+    """Diagonal entries of the solver's Lagrangian Hessian pattern on the
+    variables IPOPT keeps: its nnz_hess counts them, and the KKT diagonal
+    holds them already. Fixed variables (lbx == ubx) are removed by IPOPT
+    with their Hessian entries, so they are not counted."""
+    try:
+        r, c = S.get_function("nlp_hess_l").sparsity_out(0).get_triplet()
+    except RuntimeError:
+        return None
+    fixed = set()
+    if lbx is not None and ubx is not None:
+        lo, hi = np.asarray(lbx, dtype=float).ravel(), np.asarray(ubx, dtype=float).ravel()
+        fixed = set(np.nonzero(lo == hi)[0].tolist())
+    return sum(1 for a, b in zip(r, c) if a == b and a not in fixed)
+
+
+def kkt_size(info: dict, hess_diag: int | None) -> tuple[int | None, int | None]:
     """IPOPT's augmented system order: x, the inequality slacks s, and the
     multipliers of the equalities and inequalities (n_x + n_eq + 2 n_ineq),
-    and its lower-triangle nonzeros (Hessian, both Jacobians, the slacks'
-    identity coupling and the diagonal)."""
+    and its lower-triangle nonzeros: the full diagonal, the Hessian's
+    off-diagonal entries (its diagonal ones are part of the diagonal), both
+    Jacobians and the slacks' identity coupling."""
     try:
         n = info["n_var"] + info["n_eq"] + 2 * info["n_ineq"]
-        nnz = info["nnz_hess"] + info["nnz_jac_eq"] + info["nnz_jac_ineq"] + info["n_ineq"] + n
+        nnz = info["nnz_hess"] - hess_diag + info["nnz_jac_eq"] + info["nnz_jac_ineq"] + info["n_ineq"] + n
         return n, nnz
     except TypeError:
         return None, None
@@ -180,6 +197,7 @@ def solve(prob: Problem, solver: str, threads: int = 1, extra: dict | None = Non
     finally:
         os.chdir(cwd)
     t_build = time.perf_counter() - t_build
+    hess_diag = hessian_diagonal(S, prob.lbx, prob.ubx)
     t0 = time.perf_counter()
     r = S(x0=prob.x0, lbx=prob.lbx, ubx=prob.ubx, lbg=prob.lbg, ubg=prob.ubg)
     wall = time.perf_counter() - t0
@@ -198,7 +216,7 @@ def solve(prob: Problem, solver: str, threads: int = 1, extra: dict | None = Non
     xs = np.array(r["x"]).ravel()
     gval = np.array(r["g"]).ravel()
     viol = float(max(0.0, np.max(np.r_[prob.lbg - gval, gval - prob.ubg, prob.lbx - xs, xs - prob.ubx, 0.0])))
-    n, nnz = kkt_size(info)
+    n, nnz = kkt_size(info, hess_diag)
     rec = {
         "problem": prob.name, "solver": solver, "threads": threads, **prob.meta,
         "status": st.get("return_status"), "success": bool(st.get("success")),
