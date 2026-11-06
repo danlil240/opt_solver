@@ -524,3 +524,9 @@ add_test(NAME SkipTrialGate COMMAND test_skip_trial_gate)
 add_executable(test_factor_values_reuse test_factor_values_reuse.cpp)
 target_link_libraries(test_factor_values_reuse PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorValuesReuse COMMAND test_factor_values_reuse)
+
+# --- Scaled factorizations' one-pass value preparation (factor_indef) ---
+
+add_executable(test_scaled_value_prep test_scaled_value_prep.cpp)
+target_link_libraries(test_scaled_value_prep PRIVATE smf GTest::gtest_main)
+add_test(NAME ScaledValuePrep COMMAND test_scaled_value_prep)
