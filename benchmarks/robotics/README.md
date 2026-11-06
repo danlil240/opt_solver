@@ -37,3 +37,24 @@ python benchmarks/robotics/diag_suite.py --out diag.jsonl --cells p_truck_traile
 - for smf, the plugin's per-factorization trace: static pivots, inexact-inertia reports, aborts and zero pivots.
 
 The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP_DIR`) and replayed with `bench_replay`. `benchmarks/manifests/robotics_kkt.json` is the manifest; the fixtures in `benchmarks/fixtures/robotics/` are not committed.
+
+## Results
+
+`results/` holds the measurements made with the suite (2026-11-06, 1 thread, seed 0 unless noted):
+
+| file | what |
+|---|---|
+| `report_step4.md` | first measurements and where smf lost (smf main d6fd34a against MUMPS, MA27, MA57, MA97) |
+| `summary_t1.md` | that run's per-cell table (N = 50, 100, 200, 400) |
+| `suite_t1.jsonl`, `suite_seeds.jsonl` | its raw records: `run_suite.py` output, and the seed sweep |
+| `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace) |
+| `slack_elim_live_first.jsonl` | smf main #56 against the first slack-pair elimination build, all five problems at N = 100 and 200 |
+| `slack_elim_live_guard.jsonl` | the same against the merged build (#57, `SMF_SLACK_ELIM=auto`, with its solve accuracy check and inertia guard), truck, quad and arm |
+
+Records in the `slack_elim_*` files carry `variant` (`main` / `slk`), `factors` (plugin factorizations), `slack_armed` (factorizations through the elimination) and `slack_fallbacks` (pairs failing the guard).
+
+With the merged elimination (`auto`), against smf main #56 on the same run:
+- **truck_trailer:** N = 200 15.8 s -> 9.1 s (all 1192 factorizations eliminated); N = 100 21.6 s -> 5.2 s.
+- **quad_forest:** N = 100 0.96 s -> 0.60 s; N = 200 1.24 s -> 1.19 s.
+- **arm7:** about unchanged (function evaluations dominate).
+- **drone_swap, car_track:** too few slack pairs; `auto` leaves them alone.
