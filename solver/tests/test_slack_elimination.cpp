@@ -7,6 +7,7 @@
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
 #include "smf/info.hpp"
+#include "smf/matrix_market.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
 #include "smf/slack_elimination.hpp"
@@ -16,6 +17,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -668,14 +671,14 @@ TEST(SlackElimination, SolveCheckMixedMagnitudeRhs) {
 // factorization must then take the full matrix: inertia (130, 128, 0).
 // Two states (diagonal 4) and `m` pairs [1e15 -1; -1 0] whose multipliers
 // couple to the states by (1, 1 + delta).
-CscLower buried_kkt(int m, double delta) {
+CscLower buried_kkt(int m, double delta, double ass = 1e15) {
     const int n = 2 + 2 * m;
     std::map<std::pair<int, int>, double> e;
     e[{0, 0}] = 4.0;
     e[{1, 1}] = 4.0;
     for (int k = 0; k < m; ++k) {
         const int s = 2 + k, y = 2 + m + k;
-        e[{s, s}] = 1e15;
+        e[{s, s}] = ass;
         e[{s, y}] = -1.0;
         e[{0, y}] = 1.0;
         e[{1, y}] = 1.0 + delta;
@@ -792,4 +795,145 @@ TEST(SlackElimination, SolveReturnsFullRefactorFailure) {
         EXPECT_TRUE(std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); }));
     }
     detail::slack_force_full_refactor_failure = false;
+}
+
+// Codex P2 (PR #57, re-review): the inertia guard maps each D entry's pivot
+// index through the factor's own order (fkeep.perm), right on every engine.
+// The buried-eigenvalue states sit among `extra` independent rows that the
+// pairs do not touch (no accumulated rounding), so a wrong mapping would read
+// a clean row and let the buried pivot through. `zero_lead`: those rows start
+// with zero-diagonal 2x2 blocks [0 1; 1 eps] (delays / 2x2 pivots that
+// reorder the realized pivots).
+CscLower buried_among(int m, int extra, bool zero_lead, double ass = 1e15) {
+    const CscLower B = buried_kkt(m, 1e-9, ass);
+    CscLower A;
+    A.n = B.n + extra;
+    std::map<std::pair<int, int>, double> e;
+    for (int j = 0; j < extra; ++j) {
+        if (zero_lead && j + 1 < extra && j % 2 == 0) {
+            e[{j, j}] = 0.0;
+            e[{j, j + 1}] = 1.0;
+            e[{j + 1, j + 1}] = 1e-3;
+        } else if (!(zero_lead && j % 2 == 1 && j < extra)) {
+            e[{j, j}] = 2.0 + j % 3;
+        }
+        if (j + 1 < extra && !zero_lead) e[{j, j + 1}] = 0.25;
+    }
+    for (Int j = 0; j < B.n; ++j)
+        for (Int p = B.col_ptr[static_cast<std::size_t>(j)]; p < B.col_ptr[static_cast<std::size_t>(j) + 1]; ++p)
+            e[{j + extra, B.row_idx[static_cast<std::size_t>(p)] + extra}] = B.values[static_cast<std::size_t>(p)];
+    // the extra rows couple weakly to the first state
+    for (int j = 0; j < extra; ++j) e[{j, extra}] = 1e-3;
+    if (zero_lead && extra < 0) e.clear();  // (unused)
+    A.col_ptr.assign(static_cast<std::size_t>(A.n) + 1, 0);
+    for (const auto &[key, v] : e) {
+        A.row_idx.push_back(key.second);
+        A.values.push_back(v);
+        ++A.col_ptr[static_cast<std::size_t>(key.first) + 1];
+    }
+    for (Int j = 0; j < A.n; ++j) A.col_ptr[static_cast<std::size_t>(j) + 1] += A.col_ptr[static_cast<std::size_t>(j)];
+    return A;
+}
+
+TEST(SlackElimination, InertiaGuardOnEveryEngine) {
+    for (const bool zero_lead : {false, true}) {
+        const CscLower A = buried_among(128, 40, zero_lead);
+        Control off = base(SlackElimination::Off);
+        Solver so;
+        Info oa;
+        auto ok = so.analyse(A, off, oa);
+        ASSERT_NE(ok.get(), nullptr);
+        FactorKeep ofk;
+        NumericWorkspace ows;
+        Info of;
+        ASSERT_EQ(so.factor(*ok, std::span<const double>(A.values), off, of, ofk, ows), FactorStatus::Success);
+        for (const int engine : {0, 1}) {  // 0: lean serial, 1: legacy tree-parallel (4 threads)
+            Control c = base(SlackElimination::On);
+            if (engine == 1) {
+                c.tree_parallel = true;
+                c.num_threads = 4;
+                c.auto_threads = false;
+            }
+            Solver s;
+            Info ia;
+            auto ak = s.analyse(A, c, ia);
+            ASSERT_NE(ak.get(), nullptr);
+            ASSERT_NE(ak->slack, nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            Info fi;
+            ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+            bool reordered = false;
+            for (std::size_t i = 0; i < fk.num_perm.size(); ++i) reordered |= fk.num_perm[i] != static_cast<Int>(i);
+            std::printf("[ engine   ] zero_lead %d engine %d: inertia (%d, %d, %d) vs off (%d, %d, %d), fallbacks %d, "
+                        "delays %lld, reordered %d\n",
+                        zero_lead ? 1 : 0, engine, fi.num_positive, fi.num_negative, fi.num_zero, of.num_positive,
+                        of.num_negative, of.num_zero, fi.slack_fallbacks, static_cast<long long>(fi.delayed_pivots),
+                        reordered ? 1 : 0);
+            EXPECT_EQ(fi.num_positive, of.num_positive) << "engine " << engine << " zero_lead " << zero_lead;
+            EXPECT_EQ(fi.num_negative, of.num_negative) << "engine " << engine << " zero_lead " << zero_lead;
+            EXPECT_EQ(fi.num_zero, 0);
+        }
+    }
+}
+
+// The guard's pivot-to-row map on an armed factor of the legacy
+// tree-parallel engine, whose numerical order differs from the analysis
+// order: fkeep.perm takes the D entries onto every reduced row exactly once
+// (the analysis order would not, where the engine reordered).
+// (The arm7_100 robotics capture: its reduced factor delays pivots. Skipped
+// when the untracked fixture is absent.)
+TEST(SlackElimination, InertiaGuardPivotMapOnTreeParallel) {
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" / "robotics" / "arm7_100";
+    const fs::path mtx = dir / "arm7_100.mtx", vals = dir / "arm7_100.mtx.vals";
+    if (!fs::exists(mtx) || !fs::exists(vals)) GTEST_SKIP() << "no arm7_100 fixture";
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok);
+    CscLower A = std::move(mm.matrix);
+    {
+        std::ifstream vin(vals, std::ios::binary);
+        std::vector<double> v(A.values.size());
+        vin.read(reinterpret_cast<char *>(v.data()), static_cast<std::streamsize>(v.size() * sizeof(double)));
+        ASSERT_TRUE(static_cast<bool>(vin));
+        A.values = std::move(v);
+    }
+    Control c = base(SlackElimination::On);
+    c.tree_parallel = true;
+    c.num_threads = 4;
+    c.auto_threads = false;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, c, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_NE(ak->slack, nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    Info fi;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+    ASSERT_NE(fk.slack, nullptr) << "expected the reduced path";
+    const Int nr = ak->slack->nr;
+    std::vector<int> hit(static_cast<std::size_t>(nr), 0);
+    int differ = 0;
+    for (const DiagSolveEntry &e : fk.diag_entries) {
+        for (int k = 0; k < (e.tag == 2 ? 2 : 1); ++k) {
+            const Int piv = k == 0 ? e.row0 : e.row1;
+            ASSERT_GE(piv, 0);
+            ASSERT_LT(static_cast<std::size_t>(piv), fk.perm.size());
+            const Int r = fk.perm[static_cast<std::size_t>(piv)];
+            ASSERT_GE(r, 0);
+            ASSERT_LT(r, nr);
+            ++hit[static_cast<std::size_t>(r)];
+            differ += ak->slack->reduced->perm[static_cast<std::size_t>(piv)] != r;
+        }
+    }
+    for (Int r = 0; r < nr; ++r) EXPECT_EQ(hit[static_cast<std::size_t>(r)], 1) << "row " << r;
+    // (A deterministic build ignores tree_parallel: the lean engine, which
+    // keeps the analysis order.)
+    bool reordered = false;
+    for (std::size_t i = 0; i < fk.num_perm.size(); ++i) reordered |= fk.num_perm[i] != static_cast<Int>(i);
+    if (reordered) EXPECT_GT(differ, 0);
+    else EXPECT_EQ(differ, 0);
+    std::printf("[ pivmap   ] nr %d, delays %lld, D entries mapped differently by the analysis order: %d\n",
+                static_cast<int>(nr), static_cast<long long>(fi.delayed_pivots), differ);
 }

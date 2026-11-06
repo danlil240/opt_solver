@@ -687,15 +687,19 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
   // magnitude accumulated on its rows (SlackFactor::acc) has an untrustworthy
   // sign (the updates can bury a small eigenvalue of the states' block), so
   // the factorization takes the full matrix. The pivots are the reduced
-  // factor's D (of its scaled matrix: acc scales by s_i^2).
+  // factor's D (of its scaled matrix: acc scales by s_i^2). A D entry's rows
+  // are pivot indices of the factor's own final order, which fkeep.perm maps
+  // to reduced rows on every engine (the lean engines: the analysis order;
+  // the legacy tree-parallel one: its numerical order; a matching
+  // re-analysis: its own order).
   int buried = 0;
   if (st == FactorStatus::Success && info.num_zero == 0) {
-    const AnalysisKeep &rk = *plan.reduced;
     const double eps = std::numeric_limits<double>::epsilon();
     const bool scaled = fkeep.scale.size() == static_cast<std::size_t>(plan.nr);
-    const auto noise = [&](Int sym) -> double {
-      if (sym < 0 || static_cast<std::size_t>(sym) >= rk.perm.size()) return std::numeric_limits<double>::infinity();
-      const Int r = rk.perm[static_cast<std::size_t>(sym)];
+    const auto noise = [&](Int piv) -> double {
+      if (piv < 0 || static_cast<std::size_t>(piv) >= fkeep.perm.size()) return std::numeric_limits<double>::infinity();
+      const Int r = fkeep.perm[static_cast<std::size_t>(piv)];
+      if (r < 0 || r >= plan.nr) return std::numeric_limits<double>::infinity();
       const double s = scaled ? fkeep.scale[static_cast<std::size_t>(r)] : 1.0;
       return kSlackPivotNoise * eps * sf->acc[static_cast<std::size_t>(r)] * s * s;
     };
