@@ -1190,14 +1190,27 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
     info.status = ErrorCode::IllegalValue;
     return static_cast<int>(ErrorCode::IllegalValue);
   }
+  // The factor's one gate: once a solve has refactored the full matrix, every
+  // later solve of this factor (any job, any overload: all reach a slack
+  // factor here) goes through that factor, whose own status check decides
+  // as on the full path (a failed factor is refused unless
+  // Control::continue_on_singular); a refactor that could not run at all
+  // leaves its error, returned as is.
   std::shared_ptr<FactorKeep> full;
+  ErrorCode full_error = ErrorCode::Success;
   {
     std::lock_guard<std::mutex> lock(sf.full_mu);
     full = sf.full;
+    full_error = sf.full_error;
   }
   if (full) {
     info.slack_solve_fallbacks = 1;
     return solve_core(*full, ctrl, info, b, n, nrhs, ldb, ws, job);
+  }
+  if (full_error != ErrorCode::Success) {
+    info.slack_solve_fallbacks = 1;
+    info.status = full_error;
+    return static_cast<int>(full_error);
   }
   if (job != SolveJob::Full || !(ctrl.slack_omega_target > 0.0) || sf.cv.empty() || n != sf.plan->n_full)
     return slack_substitute(fkeep, ctrl, info, b, n, nrhs, ldb, ws, job);
@@ -1247,19 +1260,12 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
         C.col_ptr.assign(plan.clean_ptr.begin(), plan.clean_ptr.end());
         C.row_idx = plan.clean_row;
         C.values = sf.cv;
-        FactorStatus fs = Solver().factor(*fa, C, sf.ctrl, fi, *fk, nws);
-        if (detail::slack_force_full_refactor_failure.load()) fs = FactorStatus::Singular;  // test seam
-        // A factor the full path accepts (IpmSession: Success, MaxPivotDelays).
-        if (fs == FactorStatus::Success || fs == FactorStatus::MaxPivotDelays) {
-          sf.full = std::move(fk);
-        } else {
-          // The full matrix's own failure, as the full path reports it at
-          // factor time: this and later solves of the factor return it.
-          sf.full_error = fi.status != ErrorCode::Success ? fi.status
-                          : fs == FactorStatus::NotPositiveDefinite ? ErrorCode::NotPositiveDefinite
-                          : fs == FactorStatus::InertiaExceeded     ? ErrorCode::InertiaExceeded
-                                                                    : ErrorCode::SingularMatrix;
-        }
+        Solver().factor(*fa, C, sf.ctrl, fi, *fk, nws);
+        if (detail::slack_force_full_refactor_failure.load()) fk->status = FactorStatus::Singular;  // test seam
+        // Kept whatever its status: its solves then answer as the full path's
+        // would (solve_core refuses a failed factor unless
+        // continue_on_singular), for this and the factor's later solves.
+        sf.full = std::move(fk);
       } else {
         sf.full_error = ErrorCode::IllegalValue;
       }
@@ -1267,19 +1273,21 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
     full = sf.full;
   }
   if (const char *tr = std::getenv("SMF_SLACK_TRACE"); tr != nullptr)
-    std::fprintf(stderr, "[slack] solve omega %.3e after %d refinement steps -> %s\n", worst, steps,
-                 full ? "full matrix factor" : "full factor failed: its status returned");
+    std::fprintf(stderr, "[slack] solve omega %.3e after %d refinement steps -> full matrix factor (status %d)\n",
+                 worst, steps, full ? static_cast<int>(full->status) : -1);
+  info.slack_solve_fallbacks = 1;
   if (!full) {
-    // The refined solution stays in b; the status is the full matrix's
-    // failure, so the reduction never reports success where the full path
-    // fails.
-    info.slack_solve_fallbacks = 1;
+    // No full factor could be made: its error, the refined solution left in b.
     info.status = sf.full_error;
     return static_cast<int>(sf.full_error);
   }
-  for (int j = 0; j < nrhs; ++j)
-    std::copy_n(ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n, n, b + static_cast<std::ptrdiff_t>(j) * ldb);
-  info.slack_solve_fallbacks = 1;
+  // The right-hand sides back for the full factor's solve, unless its status
+  // check will refuse it (then the refined solution stays in b).
+  const bool proceeds = full->status == FactorStatus::Success ||
+                        (full->status != FactorStatus::MaxPivotDelays && ctrl.continue_on_singular);
+  if (proceeds)
+    for (int j = 0; j < nrhs; ++j)
+      std::copy_n(ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n, n, b + static_cast<std::ptrdiff_t>(j) * ldb);
   return solve_core(*full, ctrl, info, b, n, nrhs, ldb, ws, job);
 }
 

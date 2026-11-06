@@ -795,6 +795,33 @@ TEST(SlackElimination, SolveReturnsFullRefactorFailure) {
         EXPECT_TRUE(std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); }));
     }
     detail::slack_force_full_refactor_failure = false;
+    // Later solves of the factor, whatever they are, answer as the failed full
+    // factor does: a zero right-hand side, a partial job, the strided overload.
+    {
+        std::vector<double> z(static_cast<std::size_t>(n), 0.0);
+        Info si;
+        EXPECT_EQ(s.solve(fk, c, si, z.data(), n, 1), static_cast<int>(ErrorCode::SingularMatrix));
+    }
+    for (const SolveJob job : {SolveJob::Forward, SolveJob::DiagOnly, SolveJob::Backward}) {
+        std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+        Info si;
+        EXPECT_EQ(s.solve(fk, c, si, x.data(), n, 1, job), static_cast<int>(ErrorCode::SingularMatrix))
+            << "job " << static_cast<int>(job);
+    }
+    {
+        std::vector<double> B(static_cast<std::size_t>(n + 3) * 2, 1.0);
+        SolveWorkspace sws;
+        Info si;
+        EXPECT_EQ(s.solve(fk, c, si, std::span<double>(B), 2, n + 3, sws), static_cast<int>(ErrorCode::SingularMatrix));
+    }
+    // With continue_on_singular the full path solves with its factor; so do they.
+    {
+        Control cs = c;
+        cs.continue_on_singular = true;
+        std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+        Info si;
+        EXPECT_EQ(s.solve(fk, cs, si, x.data(), n, 1), 0);
+    }
 }
 
 // Codex P2 (PR #57, re-review): the inertia guard maps each D entry's pivot

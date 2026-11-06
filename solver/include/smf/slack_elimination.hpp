@@ -117,8 +117,8 @@ struct SlackFactor {
     Control ctrl;
     mutable std::mutex full_mu;
     mutable std::shared_ptr<FactorKeep> full;
-    /// The full refactor's failure (its status, returned by this and later
-    /// solves of the factor); Success while it was not tried or succeeded.
+    /// The solve-time full refactor when it could not run at all (no full
+    /// analysis): its error, returned by every later solve of the factor.
     mutable ErrorCode full_error = ErrorCode::Success;
     /// The last pair pass: pairs whose pivot failed, the largest growth
     /// bound among the others, the largest |a_ss|.
