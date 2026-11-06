@@ -713,3 +713,32 @@ TEST(SlackElimination, SingularReducedMatrixTakesTheFullMatrix) {
         EXPECT_LT(omega(A, x, b), 1e-12);
     }
 }
+
+// The solve-time fallback's full refactor failing (forced through the test
+// seam): the solve returns that failure, as the full path reports it at
+// factor time, instead of success with the unverified solution (kept in b).
+TEST(SlackElimination, SolveReturnsFullRefactorFailure) {
+    const CscLower A = huge_slack_kkt();
+    Control c = base(SlackElimination::On);
+    c.slack_omega_target = 1e-300;  // the check always fails: the fallback runs
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, c, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    Info fi;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+    ASSERT_NE(fk.slack, nullptr);
+    detail::slack_force_full_refactor_failure = true;
+    const int n = static_cast<int>(A.n);
+    for (int rep = 0; rep < 2; ++rep) {  // the failure stands for the factor's later solves too
+        std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+        Info si;
+        EXPECT_EQ(s.solve(fk, c, si, x.data(), n, 1), static_cast<int>(ErrorCode::SingularMatrix)) << rep;
+        EXPECT_EQ(si.status, ErrorCode::SingularMatrix);
+        EXPECT_EQ(si.slack_solve_fallbacks, 1);
+        EXPECT_TRUE(std::all_of(x.begin(), x.end(), [](double v) { return std::isfinite(v); }));
+    }
+    detail::slack_force_full_refactor_failure = false;
+}

@@ -25,8 +25,10 @@
 
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/error.hpp"
 #include "smf/types.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -107,6 +109,9 @@ struct SlackFactor {
     Control ctrl;
     mutable std::mutex full_mu;
     mutable std::shared_ptr<FactorKeep> full;
+    /// The full refactor's failure (its status, returned by this and later
+    /// solves of the factor); Success while it was not tried or succeeded.
+    mutable ErrorCode full_error = ErrorCode::Success;
     /// The last pair pass: pairs whose pivot failed, the largest growth
     /// bound among the others, the largest |a_ss|.
     int fails = 0;
@@ -149,5 +154,10 @@ bool slack_armed(const AnalysisKeep &keep, const Control &ctrl);
 /// guard (Control::slack_update_limit) or is singular.
 bool slack_pair_pass(const SlackPlan &plan, const double *cv, const Control &ctrl,
                      std::vector<double> &rv, SlackFactor &sf, int &pos, int &neg);
+
+namespace detail {
+/// Test seam: the solve-time full refactor reports failure (Singular).
+inline std::atomic<bool> slack_force_full_refactor_failure{false};
+} // namespace detail
 
 } // namespace smf

@@ -1196,7 +1196,7 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
   }
   {
     std::lock_guard<std::mutex> lock(sf.full_mu);
-    if (!sf.full) {
+    if (!sf.full && sf.full_error == ErrorCode::Success) {  // tried once per factor
       if (const AnalysisKeep *fa = slack_plan_full_analysis(*sf.plan)) {
         auto fk = std::make_shared<FactorKeep>();
         NumericWorkspace nws;
@@ -1209,16 +1209,36 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
         C.col_ptr.assign(plan.clean_ptr.begin(), plan.clean_ptr.end());
         C.row_idx = plan.clean_row;
         C.values = sf.cv;
-        if (Solver().factor(*fa, C, sf.ctrl, fi, *fk, nws) == FactorStatus::Success)
+        FactorStatus fs = Solver().factor(*fa, C, sf.ctrl, fi, *fk, nws);
+        if (detail::slack_force_full_refactor_failure.load()) fs = FactorStatus::Singular;  // test seam
+        // A factor the full path accepts (IpmSession: Success, MaxPivotDelays).
+        if (fs == FactorStatus::Success || fs == FactorStatus::MaxPivotDelays) {
           sf.full = std::move(fk);
+        } else {
+          // The full matrix's own failure, as the full path reports it at
+          // factor time: this and later solves of the factor return it.
+          sf.full_error = fi.status != ErrorCode::Success ? fi.status
+                          : fs == FactorStatus::NotPositiveDefinite ? ErrorCode::NotPositiveDefinite
+                          : fs == FactorStatus::InertiaExceeded     ? ErrorCode::InertiaExceeded
+                                                                    : ErrorCode::SingularMatrix;
+        }
+      } else {
+        sf.full_error = ErrorCode::IllegalValue;
       }
     }
     full = sf.full;
   }
   if (const char *tr = std::getenv("SMF_SLACK_TRACE"); tr != nullptr)
     std::fprintf(stderr, "[slack] solve omega %.3e after %d refinement steps -> %s\n", worst, steps,
-                 full ? "full matrix factor" : "kept (full factor failed)");
-  if (!full) return 0;
+                 full ? "full matrix factor" : "full factor failed: its status returned");
+  if (!full) {
+    // The refined solution stays in b; the status is the full matrix's
+    // failure, so the reduction never reports success where the full path
+    // fails.
+    info.slack_solve_fallbacks = 1;
+    info.status = sf.full_error;
+    return static_cast<int>(sf.full_error);
+  }
   for (int j = 0; j < nrhs; ++j)
     std::copy_n(ws.slack_b.data() + static_cast<std::ptrdiff_t>(j) * n, n, b + static_cast<std::ptrdiff_t>(j) * ldb);
   info.slack_solve_fallbacks = 1;
