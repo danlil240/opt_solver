@@ -49,6 +49,10 @@ constexpr int kSlackMaxFallbacks = 3;
 /// Refinement steps of a full solve through the plan whose accuracy check
 /// fails (Control::slack_omega_target), before the full matrix's factor.
 constexpr int kSlackRefineSteps = 3;
+/// A reduced pivot (1x1, or a 2x2 block's smaller eigenvalue) below this
+/// times eps times the update magnitude accumulated on its rows has a sign
+/// the rounding can have flipped: the factorization takes the full matrix.
+constexpr double kSlackPivotNoise = 64.0;
 /// Matrices of lower order never take the reduction.
 constexpr Int kSlackMinOrder = 256;
 struct FactorKeep;
@@ -100,6 +104,10 @@ struct SlackFactor {
     std::shared_ptr<const SlackPlan> plan;
     std::vector<double> pinv;
     std::vector<double> bval;
+    /// Per reduced row: the magnitude the pairs' updates added to its
+    /// diagonal (sum of |(P^-1)_yy| b^2), the rounding the elimination
+    /// injected there; the inertia guard compares the reduced pivots with it.
+    std::vector<double> acc;
     /// The full matrix (its cleaned values, with the factorization's
     /// control) for the solve's accuracy check: a full solve
     /// whose componentwise backward error on the full matrix stays above

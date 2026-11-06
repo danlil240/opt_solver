@@ -683,10 +683,44 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
   // accumulated updates can make it numerically singular (or fail it
   // otherwise) where the full matrix factors cleanly, so any other outcome
   // takes the full matrix, as a pair failing the guard does.
-  if (st != FactorStatus::Success || info.num_zero != 0) {
+  // The inertia guard: a reduced pivot at the rounding level of the update
+  // magnitude accumulated on its rows (SlackFactor::acc) has an untrustworthy
+  // sign (the updates can bury a small eigenvalue of the states' block), so
+  // the factorization takes the full matrix. The pivots are the reduced
+  // factor's D (of its scaled matrix: acc scales by s_i^2).
+  int buried = 0;
+  if (st == FactorStatus::Success && info.num_zero == 0) {
+    const AnalysisKeep &rk = *plan.reduced;
+    const double eps = std::numeric_limits<double>::epsilon();
+    const bool scaled = fkeep.scale.size() == static_cast<std::size_t>(plan.nr);
+    const auto noise = [&](Int sym) -> double {
+      if (sym < 0 || static_cast<std::size_t>(sym) >= rk.perm.size()) return std::numeric_limits<double>::infinity();
+      const Int r = rk.perm[static_cast<std::size_t>(sym)];
+      const double s = scaled ? fkeep.scale[static_cast<std::size_t>(r)] : 1.0;
+      return kSlackPivotNoise * eps * sf->acc[static_cast<std::size_t>(r)] * s * s;
+    };
+    Int covered = 0;
+    for (const DiagSolveEntry &e : fkeep.diag_entries) {
+      if (e.tag == 2) {
+        covered += 2;
+        // Its smaller eigenvalue |det| / lambda_max, from the block normalized by
+        // its largest entry (no under- or overflow of the products).
+        const double m = std::max({std::abs(e.d00), std::abs(e.d10), std::abs(e.d11)});
+        const double a = m > 0.0 ? e.d00 / m : 0.0, c = m > 0.0 ? e.d11 / m : 0.0, b = m > 0.0 ? e.d10 / m : 0.0;
+        const double lmax = 0.5 * std::abs(a + c) + std::hypot(0.5 * (a - c), b);
+        const double lmin = lmax > 0.0 ? m * (std::abs(a * c - b * b) / lmax) : 0.0;
+        if (!(lmin > std::max(noise(e.row0), noise(e.row1)))) ++buried;
+      } else {
+        covered += 1;
+        if (!(std::abs(e.d00) > noise(e.row0))) ++buried;
+      }
+    }
+    if (covered != plan.nr) buried = std::max(buried, 1);  // pivots not all visible: no certificate
+  }
+  if (st != FactorStatus::Success || info.num_zero != 0 || buried != 0) {
     if (std::getenv("SMF_SLACK_TRACE") != nullptr)
-      std::fprintf(stderr, "[slack] reduced factor status %d zero %d -> full matrix\n", static_cast<int>(st),
-                   info.num_zero);
+      std::fprintf(stderr, "[slack] reduced factor status %d zero %d buried %d -> full matrix\n",
+                   static_cast<int>(st), info.num_zero, buried);
     info = before;
     ++ak.slack_fallbacks_in_row;
     info.slack_fallbacks = 1;

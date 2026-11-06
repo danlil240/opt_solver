@@ -346,6 +346,7 @@ bool slack_pair_pass(const SlackPlan &plan, const double *cv, const Control &ctr
     sf.max_slack = 0.0;
     sf.pinv.resize(3 * np);
     sf.bval.resize(plan.b_slot.size());
+    sf.acc.assign(static_cast<std::size_t>(plan.nr), 0.0);
     // The guard (Control::slack_update_limit): a pair whose condensed update
     // |(P^-1)_yy| b_a^2 exceeds the limit times the nonzero state diagonal it
     // lands on would leave that diagonal below roundoff in the reduced
@@ -413,6 +414,8 @@ bool slack_pair_pass(const SlackPlan &plan, const double *cv, const Control &ctr
             const double ba = sf.bval[static_cast<std::size_t>(pr.b0 + a)] * iyy;
             for (Int c = 0; c <= a; ++c)
                 rv[static_cast<std::size_t>(blk[t++])] -= ba * sf.bval[static_cast<std::size_t>(pr.b0 + c)];
+            sf.acc[static_cast<std::size_t>(plan.b_row[static_cast<std::size_t>(pr.b0 + a)])] +=
+                std::abs(ba * sf.bval[static_cast<std::size_t>(pr.b0 + a)]);
         }
     }
     return sf.fails == 0;

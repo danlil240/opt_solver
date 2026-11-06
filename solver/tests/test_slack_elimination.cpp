@@ -666,6 +666,57 @@ TEST(SlackElimination, SolveCheckMixedMagnitudeRhs) {
 // matrix numerically singular although the full matrix factors cleanly (two
 // states, 128 pairs [1e15 -1; -1 0] each coupled by 1 to both states). The
 // factorization must then take the full matrix: inertia (130, 128, 0).
+// Two states (diagonal 4) and `m` pairs [1e15 -1; -1 0] whose multipliers
+// couple to the states by (1, 1 + delta).
+CscLower buried_kkt(int m, double delta) {
+    const int n = 2 + 2 * m;
+    std::map<std::pair<int, int>, double> e;
+    e[{0, 0}] = 4.0;
+    e[{1, 1}] = 4.0;
+    for (int k = 0; k < m; ++k) {
+        const int s = 2 + k, y = 2 + m + k;
+        e[{s, s}] = 1e15;
+        e[{s, y}] = -1.0;
+        e[{0, y}] = 1.0;
+        e[{1, y}] = 1.0 + delta;
+    }
+    CscLower A;
+    A.n = n;
+    A.col_ptr.assign(static_cast<std::size_t>(n) + 1, 0);
+    for (const auto &[key, v] : e) {
+        A.row_idx.push_back(key.second);
+        A.values.push_back(v);
+        ++A.col_ptr[static_cast<std::size_t>(key.first) + 1];
+    }
+    for (int j = 0; j < n; ++j) A.col_ptr[static_cast<std::size_t>(j) + 1] += A.col_ptr[static_cast<std::size_t>(j)];
+    return A;
+}
+
+// Codex P2 (PR #57, re-review): the pairs' accumulated updates (~1.3e17 on
+// a 2x2 state block) bury the block's true eigenvalue 4 under rounding: the
+// reduced factorization succeeds with the wrong inertia (129, 129, 0). The
+// inertia guard (kSlackPivotNoise) sends it to the full matrix: (130, 128, 0).
+TEST(SlackElimination, BuriedStateEigenvalueTakesTheFullMatrix) {
+    for (const double delta : {1e-9, 1e-7, 1e-5}) {
+        const CscLower A = buried_kkt(128, delta);
+        for (const bool on : {false, true}) {
+            const Control c = base(on ? SlackElimination::On : SlackElimination::Off);
+            Solver s;
+            Info ia;
+            auto ak = s.analyse(A, c, ia);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            Info fi;
+            ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+            EXPECT_EQ(fi.num_positive, 130) << "delta " << delta << (on ? " on" : " off");
+            EXPECT_EQ(fi.num_negative, 128) << "delta " << delta << (on ? " on" : " off");
+            EXPECT_EQ(fi.num_zero, 0);
+            if (on) EXPECT_EQ(fi.slack_fallbacks, 1);
+        }
+    }
+}
+
 TEST(SlackElimination, SingularReducedMatrixTakesTheFullMatrix) {
     const int m = 128, n = 2 + 2 * m;
     std::map<std::pair<int, int>, double> e;  // (col, row), row >= col
