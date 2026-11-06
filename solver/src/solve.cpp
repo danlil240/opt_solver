@@ -1111,21 +1111,19 @@ double slack_omega(const SlackFactor &sf, const double *b, const double *x, doub
   double dmax = 0.0;
   for (int i = 0; i < n; ++i) dmax = std::max(dmax, d[i]);
   const double tau = static_cast<double>(n) * std::numeric_limits<double>::epsilon() * dmax;
-  // The largest |r_i| / den_i, compared without dividing.
-  double wr = 0.0, wd = 1.0;
+  // The largest |r_i| / den_i, as the ratios themselves (a cross-multiplied
+  // comparison overflows or underflows with the right-hand side's scale).
+  double w = 0.0;
   for (int i = 0; i < n; ++i) {
     const double den = std::max(d[i], tau), ai = std::abs(r[i]);
     if (!(ai <= std::numeric_limits<double>::max())) return std::numeric_limits<double>::infinity();
     if (den > 0.0) {
-      if (ai * wd > wr * den) {
-        wr = ai;
-        wd = den;
-      }
+      w = std::max(w, ai / den);
     } else if (ai > 0.0) {
       return 1.0;
     }
   }
-  return wr / wd;
+  return w;
 }
 
 // A solve through a slack factor. A full solve is checked on the full matrix

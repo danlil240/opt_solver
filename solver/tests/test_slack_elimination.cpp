@@ -219,7 +219,7 @@ struct OnesRun {
     bool slack = false;
     Info info;
 };
-OnesRun solve_ones(const CscLower &A, const Control &c) {
+OnesRun solve_ones(const CscLower &A, const Control &c, double rhs = 1.0) {
     Solver s;
     Info ia;
     auto ak = s.analyse(A, c, ia);
@@ -229,10 +229,29 @@ OnesRun solve_ones(const CscLower &A, const Control &c) {
     NumericWorkspace ws;
     s.factor(*ak, std::span<const double>(A.values), c, r.info, fk, ws);
     r.slack = fk.slack != nullptr;
-    r.x.assign(static_cast<std::size_t>(A.n), 1.0);
+    r.x.assign(static_cast<std::size_t>(A.n), rhs);
     Info si;
     s.solve(fk, c, si, r.x.data(), static_cast<int>(A.n), 1);
+    r.info.slack_refine_steps = si.slack_refine_steps;
+    r.info.slack_solve_fallbacks = si.slack_solve_fallbacks;
     return r;
+}
+
+// A with the independent block [3 0.7; 0.7 2.3] in front (rows 0, 1).
+CscLower prepend_block(const CscLower &A) {
+    CscLower B;
+    B.n = A.n + 2;
+    B.col_ptr = {0, 2, 3};
+    B.row_idx = {0, 1, 1};
+    B.values = {3.0, 0.7, 2.3};
+    for (Int j = 0; j < A.n; ++j) {
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            B.row_idx.push_back(A.row_idx[static_cast<std::size_t>(p)] + 2);
+            B.values.push_back(A.values[static_cast<std::size_t>(p)]);
+        }
+        B.col_ptr.push_back(static_cast<Int>(B.row_idx.size()));
+    }
+    return B;
 }
 
 // Codex's repro: 100 states (diagonal 4, neighbours -0.5), each coupled by 1
@@ -514,4 +533,20 @@ TEST(SlackElimination, TinyScaledKktIsAccurate) {
     EXPECT_LT(wraw, 10.0 * woff + 1e-12);
     EXPECT_LT(won, 10.0 * woff + 1e-12);
     EXPECT_EQ(on.info.num_negative, off.info.num_negative);
+}
+
+// Codex P2 (PR #57, re-review): the solve check's backward error must not
+// overflow or underflow with the right-hand side's scale (1e200, 1e-200).
+TEST(SlackElimination, SolveCheckIsScaleInvariant) {
+    const CscLower A = prepend_block(huge_slack_kkt());
+    for (const double scale : {1e200, 1e-200}) {
+        const std::vector<double> b(static_cast<std::size_t>(A.n), scale);
+        const OnesRun off = solve_ones(A, base(SlackElimination::Off), scale);
+        const OnesRun on = solve_ones(A, base(SlackElimination::On), scale);
+        const double woff = omega(A, off.x, b), won = omega(A, on.x, b);
+        std::printf("[ rhs %.0e ] omega on %.2e (slack %d, refine %d, fallback %d) off %.2e\n", scale, won,
+                    on.slack ? 1 : 0, on.info.slack_refine_steps, on.info.slack_solve_fallbacks, woff);
+        EXPECT_TRUE(on.slack);
+        EXPECT_LT(won, 1e-12) << "scale " << scale;
+    }
 }
