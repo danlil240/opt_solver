@@ -633,3 +633,31 @@ TEST(SlackElimination, SolveFallbackOnUncleanInput) {
         EXPECT_LT(w, 1e-12) << "overload " << overload;
     }
 }
+
+// Codex P2 (PR #57, re-review): a right-hand side of mixed magnitude (1e20 on
+// an independent block, 1 elsewhere) must not let the large rows hide an
+// inaccurate solution in the others: the check is per row (Oettli-Prager).
+TEST(SlackElimination, SolveCheckMixedMagnitudeRhs) {
+    const CscLower A = prepend_block(huge_slack_kkt());
+    std::vector<double> b(static_cast<std::size_t>(A.n), 1.0);
+    b[0] = b[1] = 1e20;
+    for (const bool on : {false, true}) {
+        const Control c = base(on ? SlackElimination::On : SlackElimination::Off);
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, c, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(fk.slack != nullptr, on);
+        std::vector<double> x(b);
+        Info si;
+        ASSERT_EQ(s.solve(fk, c, si, x.data(), static_cast<int>(A.n), 1), 0);
+        const double w = omega(A, x, b);
+        std::printf("[ mixed    ] %s: omega %.2e (refine %d, fallback %d)\n", on ? "on" : "off", w,
+                    si.slack_refine_steps, si.slack_solve_fallbacks);
+        EXPECT_LT(w, 1e-12) << (on ? "on" : "off");
+    }
+}

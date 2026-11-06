@@ -1074,10 +1074,12 @@ int slack_substitute(const FactorKeep &fkeep, const Control &ctrl, Info &info, d
   return 0;
 }
 
-// The componentwise backward error of x for right-hand side b on the slack
-// factor's full matrix: max_i |b - A x|_i / max((|A| |x| + |b|)_i, tau_i), with
-// tau = n eps max_i (|A| |x| + |b|)_i for rows at roundoff level.
-// r becomes b - A x; d is scratch.
+// The componentwise (Oettli-Prager) backward error of x for right-hand side b
+// on the slack factor's full matrix: max_i |b - A x|_i / (|A| |x| + |b|)_i.
+// Each row is judged on its own: a row with a zero denominator is accurate
+// only when its residual is exactly zero, and a residual or denominator that
+// is not finite (overflow) counts as inaccurate. r becomes b - A x; d is
+// scratch.
 double slack_omega(const SlackFactor &sf, const double *b, const double *x, double *r, double *d, int n) {
   const SlackPlan &plan = *sf.plan;
   for (int i = 0; i < n; ++i) {
@@ -1103,19 +1105,18 @@ double slack_omega(const SlackFactor &sf, const double *b, const double *x, doub
     r[j] += rj;
     d[j] += dj;
   }
-  double dmax = 0.0;
-  for (int i = 0; i < n; ++i) dmax = std::max(dmax, d[i]);
-  const double tau = static_cast<double>(n) * std::numeric_limits<double>::epsilon() * dmax;
-  // The largest |r_i| / den_i, as the ratios themselves (a cross-multiplied
-  // comparison overflows or underflows with the right-hand side's scale).
+  // The ratios themselves (a cross-multiplied comparison overflows or
+  // underflows with the right-hand side's scale), with no floor shared
+  // between rows (a large row must not hide an inaccurate one).
+  constexpr double kMax = std::numeric_limits<double>::max();
   double w = 0.0;
   for (int i = 0; i < n; ++i) {
-    const double den = std::max(d[i], tau), ai = std::abs(r[i]);
-    if (!(ai <= std::numeric_limits<double>::max())) return std::numeric_limits<double>::infinity();
+    const double den = d[i], ai = std::abs(r[i]);
+    if (!(ai <= kMax) || !(den <= kMax)) return std::numeric_limits<double>::infinity();
     if (den > 0.0) {
       w = std::max(w, ai / den);
     } else if (ai > 0.0) {
-      return 1.0;
+      return std::numeric_limits<double>::infinity();
     }
   }
   return w;
