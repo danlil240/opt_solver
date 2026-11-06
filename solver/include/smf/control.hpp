@@ -420,6 +420,13 @@ struct Control {
     // hands its contribution block over in that buffer instead of the stack.
     // Same pivots and factor values as the generic path (false).
     bool           small_front_kernels = true;
+    // Leaf fronts (no children) on the small-front path with no budget,
+    // fallback static pivot, work limit or other kernel in play skip
+    // process_front's general bookkeeping (process_leaf_front): the same
+    // factor, D entries, solve steps and contribution blocks, bit for bit
+    // (false: the general path). KKTs with many inequality constraints are
+    // mostly such fronts (a slack with its multiplier each).
+    bool           lean_leaf_fronts = true;
 
     // Front kernel of plain threshold-pivoting indefinite fronts (see
     // FrontKernel). Aptp = APTP on all fronts; Auto = APTP on fronts with at

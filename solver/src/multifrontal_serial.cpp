@@ -307,6 +307,8 @@ struct FactorContext {
   int posdef_lapack = 0;
   // Tiled fronts' minimum rows (top_tile_min_front).
   int tile_min = kTopTileMinFront;
+  // Control::lean_leaf_fronts: process_leaf_front for lean_leaf_front leaves.
+  bool lean_leaves = false;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -373,6 +375,200 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
   vec.resize(need);
 }
 
+// A leaf front (no children, so no delays in) that process_front would
+// assemble and factor on the small-front path, with none of its other
+// options in play: no delay budget, no fallback static pivot (a leaf is
+// only a fallback front as a root), no work limit, no APTP, tile or
+// Lapack kernel, indefinite. KKTs with many inequality constraints are
+// mostly such fronts (each slack with its multiplier: 17.7k of the
+// truck-trailer KKT's 17.7k supernodes), where process_front's general
+// bookkeeping cost more than the factorization.
+bool lean_leaf_front(const FactorContext &cx, const BudgetState *bs, Int s, int f) {
+  const AnalysisKeep &keep = cx.keep;
+  const Supernode &sn = keep.supernodes[static_cast<std::size_t>(s)];
+  if (!keep.children(s).empty() || cx.posdef || cx.work_cap >= 0) return false;
+  if (bs != nullptr && cx.delay_budget >= 0 && cx.budget_static > 0.0) return false;
+  if (cx.fallback_static > 0.0 && sn.parent == -1) return false;
+  if (cx.aprm != nullptr && static_cast<int>(sn.width()) >= cx.aptp_min_elig) return false;
+  if (cx.posdef_lapack > 0 && f >= cx.posdef_lapack && cx.prm.nb > 1) return false;
+  return cx.small_fronts && f <= kSmallFrontMax && f < cx.prm.blocked_min_front && cx.prm.nb > 1 &&
+         f < cx.tile_min;
+}
+
+// process_front on a lean_leaf_front: the same steps on the same data in
+// the same order (so the same factor, D entries, solve steps and
+// contribution block, bit for bit), without the general path's child,
+// budget, kernel-choice and retry handling.
+ErrorCode process_leaf_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
+                             Int next) {
+  const AnalysisKeep &keep = cx.keep;
+  NumericWorkspace &ws = cx.ws;
+  FactorKeep &fkeep = cx.fkeep;
+  const std::size_t si = static_cast<std::size_t>(s);
+  const Supernode &sn = keep.supernodes[si];
+  const std::span<const Int> frows = keep.front_rows(s);
+  const int num_elig = static_cast<int>(sn.width());
+  const int f = static_cast<int>(frows.size());
+  const std::size_t sf = static_cast<std::size_t>(f);
+  Int *const pos = P.pos;
+  cx.front_pass[si] = me;
+
+  grow(*P.rows, sf, P.growths);
+  Int *const rows = P.rows->data();
+  for (int t = 0; t < f; ++t) {
+    const Int r = frows[static_cast<std::size_t>(t)];
+    rows[t] = r;
+    pos[r] = t;
+  }
+  grow(*P.fv, P.fo + sf * sf, P.growths);
+  grow(*P.tags, sf, P.growths);
+  double *const F = P.fv->data() + P.fo;
+  const int sb = P.sbuf[0].node >= 0 ? 1 : 0;
+  assert(P.sbuf[sb].node < 0);
+  double *const Fa = P.sbuf[sb].v;
+  const std::size_t lda = static_cast<std::size_t>(small_front_ld(f));
+
+  // The small-front layout: rows [f, fe) zero, and the rows above the
+  // diagonal its kernels write (down to the 4-row boundary) finite.
+  const std::size_t fe = (sf + 3) & ~std::size_t{3};
+  for (std::size_t j = 0; j < sf; ++j) {
+    const std::size_t r0 = j & ~std::size_t{3};
+    std::fill_n(Fa + j * lda + r0, fe - r0, 0.0);
+  }
+  for (Int j = sn.col_start; j < sn.col_end; ++j) {
+    double *Fj = Fa + static_cast<std::size_t>(pos[j]) * lda;
+    for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) Fj[pos[cx.ari[k]]] += cx.av[k];
+  }
+
+  int8_t *const tags = P.tags->data();
+  const LdltKernelResult kr =
+      ldlt_factor_small_front(Fa, static_cast<int>(lda), f, num_elig, rows, cx.prm, tags);
+  for (int c = 0; c < kr.num_accepted; ++c) {
+    const std::size_t uc = static_cast<std::size_t>(c);
+    copy_short(Fa + uc * lda + uc, F + uc * sf + uc, sf - uc);
+  }
+  SerialFactorStats &st = P.st;
+  const int p = kr.num_accepted;
+  st.inertia.positive += kr.inertia.positive;
+  st.inertia.negative += kr.inertia.negative;
+  st.inertia.zero += kr.inertia.zero;
+  st.static_pivots += kr.static_pivots;
+  st.max_growth = std::max(st.max_growth, kr.max_growth);
+  st.flops += kr.flops;
+  st.front_work += static_cast<long long>(num_elig) * f * f;
+  st.max_front = std::max(st.max_front, f);
+
+  // As process_front: a root's unaccepted columns are zero pivots.
+  const bool is_root = (sn.parent == -1);
+  int p_store = p;
+  if (is_root && p < num_elig) {
+    for (int c = p; c < num_elig; ++c) tags[c] = 0;
+    st.inertia.zero += num_elig - p;
+    p_store = num_elig;
+  }
+  bool finite_d = true;
+  double d10 = 0.0;
+  for (int c = 0; c < p_store; ++c) {
+    double *Lc = F + static_cast<std::size_t>(c) * sf;
+    const int8_t tag = tags[c];
+    if (tag == 0) {
+      P.diag->push_back(DiagSolveEntry{1, 1, rows[c], 0, 0.0, 0.0, 0.0});
+      std::fill_n(Lc + c + 1, f - c - 1, 0.0);
+      Lc[c] = 0.0;
+    } else if (tag == 2) {
+      P.diag->push_back(DiagSolveEntry{2, 0, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
+      finite_d = finite_d && is_finite_fast(Lc[c]) && is_finite_fast(Lc[c + 1]) &&
+                 is_finite_fast(Lc[sf + c + 1]);
+      d10 = Lc[c + 1];
+      Lc[c + 1] = 0.0;
+    } else if (tag == 1) {
+      P.diag->push_back(DiagSolveEntry{1, 0, rows[c], 0, Lc[c], 0.0, 0.0});
+      finite_d = finite_d && is_finite_fast(Lc[c]);
+    }
+    std::fill_n(Lc, c, 0.0);
+    if (tag == -1) Lc[c - 1] = d10;
+  }
+  fkeep.pivot_types[si].assign(tags, tags + p_store);
+  fkeep.factor_col_ptr[si] = static_cast<LongInt>(P.fo);
+  SolveStep step;
+  step.row_offset = static_cast<LongInt>(P.ro);
+  step.factor_offset = static_cast<LongInt>(P.fo);
+  step.p = p_store;
+  step.f = f;
+  P.steps->push_back(step);
+  grow(*P.sri, P.ro + sf, P.growths);
+  std::copy(rows, rows + f, P.sri->begin() + static_cast<std::ptrdiff_t>(P.ro));
+  P.fo += sf * static_cast<std::size_t>(p_store);
+  P.ro += sf;
+
+  // The Schur complement (delayed columns first) for the parent, as
+  // process_front pushes it.
+  const int q = f - p;
+  if (!is_root && q > 0 && pop && next == sn.parent) {
+    FrontPass::SmallBuf &h = P.sbuf[sb];
+    h.node = s;
+    h.ld = static_cast<int>(lda);
+    h.off = p;
+    std::copy(rows + p, rows + f, h.rows);
+    ws.cb_owner[si] = me;
+    ws.cb_value_off[si] = static_cast<LongInt>(P.cv_top);
+    ws.cb_row_off[si] = static_cast<LongInt>(P.cr_top);
+    ws.cb_size[si] = q;
+    ws.cb_delayed[si] = num_elig - p;
+    st.delayed += num_elig - p;
+    ++st.small_front_handovers;
+  } else if (!is_root && q > 0) {
+    const std::size_t sq = static_cast<std::size_t>(q);
+    double *dst;
+    Int *dst_rows;
+    const bool root_block = pop && cx.top != nullptr &&
+                            cx.top[static_cast<std::size_t>(sn.parent)] != 0 &&
+                            sq * (sq + 1) / 2 >= kRootBlockMinEntries;
+    if (pop && !root_block) {
+      grow(*P.cbv, P.cv_top + sq * (sq + 1) / 2, P.growths);
+      grow(*P.cbr, P.cr_top + sq, P.growths);
+      dst = P.cbv->data() + P.cv_top;
+      dst_rows = P.cbr->data() + P.cr_top;
+      ws.cb_owner[si] = me;
+      ws.cb_value_off[si] = static_cast<LongInt>(P.cv_top);
+      ws.cb_row_off[si] = static_cast<LongInt>(P.cr_top);
+      P.cv_top += sq * (sq + 1) / 2;
+      P.cr_top += sq;
+    } else {
+      NodeBlock &nb = (*cx.node_blocks)[si];
+      if (root_block) {
+        dst = cx.root_values->take(sq * (sq + 1) / 2);
+        dst_rows = cx.root_rows->take(sq);
+        g_root_arena_blocks.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        nb.values = cx.pool->acquire(sq * (sq + 1) / 2, nb.cap);
+        nb.rows.resize(sq);
+        dst = nb.values.get();
+        dst_rows = nb.rows.data();
+      }
+      nb.v = dst;
+      nb.r = dst_rows;
+      ws.cb_owner[si] = -1;
+      ws.cb_value_off[si] = 0;
+      ws.cb_row_off[si] = 0;
+    }
+    for (int jj = 0; jj < q; ++jj) {
+      const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
+      copy_short(src, dst, static_cast<std::size_t>(q - jj));
+      dst += q - jj;
+    }
+    std::copy(rows + p, rows + f, dst_rows);
+    ws.cb_size[si] = q;
+    ws.cb_delayed[si] = num_elig - p;
+    st.delayed += num_elig - p;
+  } else {
+    ws.cb_size[si] = 0;
+    ws.cb_delayed[si] = 0;
+  }
+  for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
+  return finite_d ? ErrorCode::Success : ErrorCode::IllegalValue;
+}
+
 // Assemble, factor and store supernode s with pass P (index `me` in
 // cx.passes). Children's contribution blocks are read from whichever pass
 // produced them; with `pop` (postorder passes, where they are the top of the
@@ -392,6 +588,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   const std::span<const Int> kids = keep.children(s);
   const int p_sym = static_cast<int>(sn.width());
   const int f_sym = static_cast<int>(frows.size());
+  if (cx.lean_leaves && kids.empty() && lean_leaf_front(cx, bs, s, f_sym))
+    return process_leaf_front(cx, P, me, s, pop, next);
   Int *const pos = P.pos;
   cx.front_pass[si] = me;
 
@@ -1288,7 +1486,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, ctrl.lean_leaf_fronts};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1359,7 +1557,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, ctrl.lean_leaf_fronts};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
