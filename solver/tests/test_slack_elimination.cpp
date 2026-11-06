@@ -550,3 +550,86 @@ TEST(SlackElimination, SolveCheckIsScaleInvariant) {
         EXPECT_LT(won, 1e-12) << "scale " << scale;
     }
 }
+
+// Codex P2 (PR #57, re-review): a slack factor's solve rejects a null
+// right-hand side and a non-positive nrhs before touching them.
+TEST(SlackElimination, SolveRejectsBadArguments) {
+    const CscLower A = huge_slack_kkt();
+    const Control c = base(SlackElimination::On);
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, c, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    Info fi;
+    ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+    ASSERT_NE(fk.slack, nullptr);
+    const int n = static_cast<int>(A.n);
+    Info si;
+    EXPECT_EQ(s.solve(fk, c, si, nullptr, n, 1), static_cast<int>(ErrorCode::IllegalValue));
+    EXPECT_EQ(si.status, ErrorCode::IllegalValue);
+    std::vector<double> x(static_cast<std::size_t>(n), 1.0);
+    Info sj;
+    EXPECT_EQ(s.solve(fk, c, sj, x.data(), n, -1), static_cast<int>(ErrorCode::IllegalValue));
+    EXPECT_EQ(s.solve(fk, c, sj, x.data(), n, 0), static_cast<int>(ErrorCode::IllegalValue));
+}
+
+// Codex P2 (PR #57, re-review): the solve-time fallback factors the full
+// matrix in the cleaned layout, so input with duplicates and unsorted rows
+// (factored through either overload) falls back to an accurate solve.
+TEST(SlackElimination, SolveFallbackOnUncleanInput) {
+    const CscLower clean = huge_slack_kkt();
+    // The same matrix with every state diagonal split into two duplicate
+    // entries and each column's rows reversed.
+    CscLower A;
+    A.n = clean.n;
+    A.col_ptr.push_back(0);
+    for (Int j = 0; j < clean.n; ++j) {
+        std::vector<std::pair<Int, double>> col;
+        for (Int p = clean.col_ptr[static_cast<std::size_t>(j)]; p < clean.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const Int i = clean.row_idx[static_cast<std::size_t>(p)];
+            const double v = clean.values[static_cast<std::size_t>(p)];
+            if (i == j && v == 4.0) {
+                col.push_back({i, 1.5});
+                col.push_back({i, 2.5});
+            } else {
+                col.push_back({i, v});
+            }
+        }
+        std::reverse(col.begin(), col.end());
+        for (const auto &[i, v] : col) {
+            A.row_idx.push_back(i);
+            A.values.push_back(v);
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    const std::vector<double> ones(static_cast<std::size_t>(clean.n), 1.0);
+    Control c = base(SlackElimination::On);
+    c.slack_omega_target = 1e-300;  // refinement can never reach it: always the fallback
+    for (int overload = 0; overload < 2; ++overload) {
+        Solver s;
+        Info ia;
+        auto ak = s.analyse(A, c, ia);
+        ASSERT_NE(ak.get(), nullptr);
+        ASSERT_NE(ak->slack, nullptr);
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        if (overload == 0) {
+            ASSERT_EQ(s.factor(*ak, std::span<const double>(A.values), c, fi, fk, ws), FactorStatus::Success);
+        } else {
+            // The CscLower overload with values in the cleaned pattern.
+            CscLower U = ak->cleaned;
+            ASSERT_EQ(s.factor(*ak, U, c, fi, fk, ws), FactorStatus::Success);
+        }
+        ASSERT_NE(fk.slack, nullptr);
+        std::vector<double> x(ones);
+        Info si;
+        ASSERT_EQ(s.solve(fk, c, si, x.data(), static_cast<int>(clean.n), 1), 0);
+        EXPECT_EQ(si.slack_solve_fallbacks, 1) << "overload " << overload;
+        const double w = omega(clean, x, ones);
+        std::printf("[ unclean  ] overload %d: omega %.2e (fallback %d)\n", overload, w, si.slack_solve_fallbacks);
+        EXPECT_LT(w, 1e-12) << "overload " << overload;
+    }
+}

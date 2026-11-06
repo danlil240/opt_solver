@@ -98,13 +98,12 @@ struct SlackFactor {
     std::shared_ptr<const SlackPlan> plan;
     std::vector<double> pinv;
     std::vector<double> bval;
-    /// The full matrix (cleaned values, and the input-order values with the
-    /// factorization's control) for the solve's accuracy check: a full solve
+    /// The full matrix (its cleaned values, with the factorization's
+    /// control) for the solve's accuracy check: a full solve
     /// whose componentwise backward error on the full matrix stays above
     /// Control::slack_omega_target after refinement factors the full matrix
     /// (its own analysis) once and solves with that from then on.
     std::vector<double> cv;
-    std::vector<double> vin;     ///< empty when the input was clean (then cv is in its order)
     Control ctrl;
     mutable std::mutex full_mu;
     mutable std::shared_ptr<FactorKeep> full;

@@ -656,8 +656,8 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
 // run (not armed, the plan given up on, or a pair's pivot failing): the
 // caller factors the full matrix as without the plan.
 static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vector<double> cv,
-                         std::span<const double> vin, const Control &ctrl, Info &info, FactorKeep &fkeep,
-                         NumericWorkspace &ws, FactorStatus &st) {
+                         const Control &ctrl, Info &info, FactorKeep &fkeep, NumericWorkspace &ws,
+                         FactorStatus &st) {
   if (!slack_armed(ak, ctrl) || ak.slack_fallbacks_in_row >= kSlackMaxFallbacks) return false;
   const SlackPlan &plan = *ak.slack;
   if (cv.size() != ak.cleaned.row_idx.size()) return false;
@@ -680,8 +680,6 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
   st = solver.factor(*plan.reduced, std::span<const double>(ws.slack_values), rc, info, fkeep, *ws.slack_ws);
   // The full matrix, for the solve's accuracy check (Control::slack_omega_target).
   if (ctrl.slack_omega_target > 0.0 && plan.clean_ptr.size() == static_cast<std::size_t>(plan.n_full) + 1) {
-    // (A clean input's values are the cleaned values, in the same order.)
-    if (!ak.input_clean) sf->vin.assign(vin.begin(), vin.end());
     sf->cv = std::move(cv);
     sf->ctrl = ctrl;
     sf->ctrl.slack_elimination = SlackElimination::Off;
@@ -712,9 +710,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, const Control &ctrl,
   info.slack_fallbacks = 0;
   if (ak_in.slack) {
     NumericWorkspace ws;
-    if (factor_slack(*this, ak_in, ak_in.cleaned.values, std::span<const double>(ak_in.slack->input.values), ctrl,
-                     info, fkeep, ws, st))
-      return st;
+    if (factor_slack(*this, ak_in, ak_in.cleaned.values, ctrl, info, fkeep, ws, st)) return st;
   }
   // A factorization off the slack plan takes the full matrix's own analysis.
   const AnalysisKeep &ak = slack_full_analysis(ak_in);
@@ -751,7 +747,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, const CscLower &updated,
   if (ak_in.slack) {
     FactorValues fv;
     if (factor_slack(*this, ak_in, resolve_factor_values(ak_in, updated, fv) ? cleaned_values(ak_in, fv) : std::vector<double>{},
-                     std::span<const double>(updated.values), ctrl, info, fkeep, ws, st))
+                     ctrl, info, fkeep, ws, st))
       return st;
   }
   // A factorization off the slack plan takes the full matrix's own analysis.
@@ -792,8 +788,7 @@ FactorStatus Solver::factor(const AnalysisKeep &ak_in, std::span<const double> v
   fkeep.slack.reset();
   info.slack_pairs = 0;
   info.slack_fallbacks = 0;
-  if (ak_in.slack && factor_slack(*this, ak_in, cleaned_values(ak_in, fv), values, ctrl, info, fkeep, ws, st))
-    return st;
+  if (ak_in.slack && factor_slack(*this, ak_in, cleaned_values(ak_in, fv), ctrl, info, fkeep, ws, st)) return st;
   // A factorization off the slack plan takes the full matrix's own analysis.
   const AnalysisKeep &ak = slack_full_analysis(ak_in);
   if (ctrl.matrix_type == MatrixType::RealSymmetricPositiveDefinite) {
@@ -1137,6 +1132,10 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
   const SlackFactor &sf = *fkeep.slack;
   info.slack_refine_steps = 0;
   info.slack_solve_fallbacks = 0;
+  if (n != sf.plan->n_full || nrhs <= 0 || b == nullptr || ldb < n) {
+    info.status = ErrorCode::IllegalValue;
+    return static_cast<int>(ErrorCode::IllegalValue);
+  }
   std::shared_ptr<FactorKeep> full;
   {
     std::lock_guard<std::mutex> lock(sf.full_mu);
@@ -1186,8 +1185,15 @@ int slack_solve(const FactorKeep &fkeep, const Control &ctrl, Info &info, double
         auto fk = std::make_shared<FactorKeep>();
         NumericWorkspace nws;
         Info fi;
-        const std::vector<double> &vin = sf.vin.empty() ? sf.cv : sf.vin;
-        if (Solver().factor(*fa, std::span<const double>(vin), sf.ctrl, fi, *fk, nws) == FactorStatus::Success)
+        // The cleaned values in the cleaned pattern (the full analysis'
+        // own, as the plan's: the same input), which factor() takes as is.
+        const SlackPlan &plan = *sf.plan;
+        CscLower C;
+        C.n = plan.n_full;
+        C.col_ptr.assign(plan.clean_ptr.begin(), plan.clean_ptr.end());
+        C.row_idx = plan.clean_row;
+        C.values = sf.cv;
+        if (Solver().factor(*fa, C, sf.ctrl, fi, *fk, nws) == FactorStatus::Success)
           sf.full = std::move(fk);
       }
     }
