@@ -68,3 +68,4 @@ benchmarks/fixtures/pglib/
 
 # Full-sequence KKT captures of the hard corpus (ipopt_kkt.py capture --suite hard --keep all)
 benchmarks/fixtures/ipopt_hard/
+benchmarks/fixtures/robotics/
