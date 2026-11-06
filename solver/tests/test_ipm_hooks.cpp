@@ -650,11 +650,12 @@ struct ReanalysisResult {
     int first_delays = 0, second_delays = 0, pairs = 0, parallel_subtrees = 0;
 };
 
-ReanalysisResult reanalyse_and_check(const CscLower &A, int threads) {
+ReanalysisResult reanalyse_and_check(const CscLower &A, int threads, bool legacy = false) {
     ReanalysisResult r;
     Control c = delay_ctrl();
     c.num_threads = threads;
     c.auto_threads = false;  // small test trees
+    c.tree_parallel = legacy;  // the older task-parallel engine (its own pivot numbering)
     Harness first(A, c);
     EXPECT_NE(first.ak.get(), nullptr);
     if (!first.ak) return r;
@@ -695,6 +696,16 @@ TEST(IpmHooks, ReanalysisRemovesDelays) {
     const ReanalysisResult serial = reanalyse_and_check(grid_kkt(40, 7), 1);
     EXPECT_GT(serial.first_delays, 0);
     EXPECT_EQ(serial.second_delays, 0);
+}
+
+TEST(IpmHooks, ReanalysisRemovesDelaysLegacyTreeParallel) {
+    // Control::tree_parallel's engine numbers its D blocks in its own
+    // numerical order (FactorKeep::num_iperm): the realized order is read
+    // through the factor's final permutation, and re-analysing from it still
+    // removes every delay. (A deterministic build ignores tree_parallel.)
+    const ReanalysisResult par = reanalyse_and_check(grid_kkt(110, 7), 4, true);
+    EXPECT_GT(par.first_delays, 0);
+    EXPECT_EQ(par.second_delays, 0);
 }
 
 TEST(IpmHooks, ReanalysisRemovesDelaysTreeParallel) {

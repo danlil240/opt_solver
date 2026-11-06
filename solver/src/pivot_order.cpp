@@ -12,12 +12,16 @@ RealizedOrder realized_pivot_order(const AnalysisKeep &ak, const FactorKeep &fk)
   out.perm.reserve(n);
   std::vector<Int> zeros;
   bool bad = false;
-  const auto orig = [&](Int sym) -> Int {
-    if (sym < 0 || static_cast<std::size_t>(sym) >= ak.perm.size()) {
+  // A D entry's rows are pivot indices of the factor's own final order, which
+  // fk.perm maps to original columns on every engine: the lean engines number
+  // them in the analysis order (fk.perm is ak.perm), the legacy tree-parallel
+  // one in its numerical order (num_iperm).
+  const auto orig = [&](Int piv) -> Int {
+    if (piv < 0 || static_cast<std::size_t>(piv) >= fk.perm.size() || fk.perm.size() != n) {
       bad = true;
       return 0;
     }
-    return ak.perm[static_cast<std::size_t>(sym)];
+    return fk.perm[static_cast<std::size_t>(piv)];
   };
   for (const DiagSolveEntry &e : fk.diag_entries) {
     if (e.was_zero) {
