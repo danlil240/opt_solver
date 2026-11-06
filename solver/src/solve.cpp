@@ -653,8 +653,9 @@ FactorStatus factor_with_matching_trigger(const AnalysisKeep &ak, const Control 
 
 // Control::slack_elimination: factor through the analysis' slack plan
 // (slack_elimination.hpp), the cleaned values `cv`. False when it does not
-// run (not armed, the plan given up on, or a pair's pivot failing): the
-// caller factors the full matrix as without the plan.
+// run (not armed, the plan given up on, a pair's pivot failing, or the
+// reduced factorization not succeeding cleanly): the caller factors the full
+// matrix as without the plan.
 static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vector<double> cv,
                          const Control &ctrl, Info &info, FactorKeep &fkeep, NumericWorkspace &ws,
                          FactorStatus &st) {
@@ -673,11 +674,25 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
     info.slack_fallbacks = 1;
     return false;
   }
-  ak.slack_fallbacks_in_row = 0;
   Control rc = ctrl;
   rc.slack_elimination = SlackElimination::Off;
   if (!ws.slack_ws) ws.slack_ws = std::make_shared<NumericWorkspace>();
+  const Info before = info;
   st = solver.factor(*plan.reduced, std::span<const double>(ws.slack_values), rc, info, fkeep, *ws.slack_ws);
+  // Only a clean factorization of the reduced matrix stands: the pairs'
+  // accumulated updates can make it numerically singular (or fail it
+  // otherwise) where the full matrix factors cleanly, so any other outcome
+  // takes the full matrix, as a pair failing the guard does.
+  if (st != FactorStatus::Success || info.num_zero != 0) {
+    if (std::getenv("SMF_SLACK_TRACE") != nullptr)
+      std::fprintf(stderr, "[slack] reduced factor status %d zero %d -> full matrix\n", static_cast<int>(st),
+                   info.num_zero);
+    info = before;
+    ++ak.slack_fallbacks_in_row;
+    info.slack_fallbacks = 1;
+    return false;
+  }
+  ak.slack_fallbacks_in_row = 0;
   // The full matrix, for the solve's accuracy check (Control::slack_omega_target).
   if (ctrl.slack_omega_target > 0.0 && plan.clean_ptr.size() == static_cast<std::size_t>(plan.n_full) + 1) {
     sf->cv = std::move(cv);
