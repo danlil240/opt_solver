@@ -52,7 +52,7 @@ def main() -> None:
         for cell in a.cells.split(","):
             mod, n = cell.split(":")
             for sv in a.solvers.split(","):
-                env = common.thread_env(a.threads)  # set before the child loads anything
+                env = common.runner_env(a.threads)  # set before the child loads anything
                 env["DIAG_DETAILED"] = "1"
                 if sv == "smf":
                     env["SMF_PLUGIN_STATS"] = "2"

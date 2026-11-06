@@ -292,7 +292,7 @@ def build(problem, N, seed=0):
 
 
 def main():
-    common.ensure_thread_env(1)  # its records are 1-thread runs
+    common.ensure_runner_env(1)  # its records are 1-thread runs
     problem, N, solver = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     b, f, gs = build(problem, N, seed)
@@ -303,8 +303,7 @@ def main():
         opts = {"structure_detection": "manual", "nx": b.nx, "nu": b.nu, "ng": b.ng, "N": N,
                 "print_time": False, "fatrop": {"print_level": 0, "tol": 1e-8, "max_iter": 3000}}
     else:
-        opts = common.ipopt_options(solver, out_file)
-        opts["ipopt.print_level"] = 0
+        opts = common.nlp_options(solver, out_file)
     S = ca.nlpsol("S", solver if solver == "fatrop" else "ipopt", {"x": x, "f": f, "g": g}, opts)
     t0 = time.perf_counter()
     r = S(x0=x0, lbx=lbx, ubx=ubx, lbg=lbg, ubg=ubg)

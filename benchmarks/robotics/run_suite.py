@@ -54,7 +54,7 @@ def main() -> None:
             # mingw-built HSL (OpenMP) and MUMPS (OpenBLAS) read it through
             # their own C runtime, which never sees os.environ changes made
             # inside the Python process.
-            env = common.thread_env(t)
+            env = common.runner_env(t)
             if sv == "smf":
                 env["SMF_PLUGIN_STATS"] = "1"
             cp = None  # this job's subprocess, once it returned (not an earlier job's)

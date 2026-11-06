@@ -47,7 +47,7 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 | `report_step4.md` | first measurements and where smf lost (smf main d6fd34a against MUMPS, MA27, MA57, MA97) |
 | `summary_t1.md` | that run's per-cell table (N = 50, 100, 200, 400) |
 | `suite_t1.jsonl`, `suite_seeds.jsonl` | its raw records: `run_suite.py` output, and the seed sweep |
-| `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace); rerun on 2026-11-06 with the thread variables set to 1 in the child (the first run did not set them; its iteration, regularisation and trial-factorization counts were identical) |
+| `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace); rerun on 2026-11-06 with the thread variables set to 1 in the child (the first run did not set them; its iteration, regularisation and trial-factorization counts were identical). The smf rows are the merged plugin with `SMF_SLACK_ELIM=auto` (the elimination runs on truck_trailer only) |
 | `slack_elim_live_first.jsonl` | smf main #56 against the first slack-pair elimination build, all five problems at N = 100 and 200 |
 | `stagewise_fatrop.jsonl` | `stagewise.py` records: FATROP against IPOPT (MUMPS, MA27, smf) on stage-ordered copies of quad_forest, drone_swap, car_track and truck_trailer at N = 100 and 200 |
 | `slack_elim_live_guard.jsonl` | the same against the merged build (#57, `SMF_SLACK_ELIM=auto`, with its solve accuracy check and inertia guard), truck, quad and arm |
@@ -62,4 +62,20 @@ With the merged elimination (`auto`), against smf main #56 on the same run:
 - **arm7:** about unchanged (function evaluations dominate).
 - **drone_swap, car_track:** too few slack pairs; `auto` leaves them alone.
 
-FATROP (`stagewise_fatrop.jsonl`): per iteration its whole solver side is only 1.0-1.25x faster than IPOPT with smf, it often needs several times the iterations, and it fails quad_forest N = 100, truck_trailer N = 200 (`success: false`). The drone_swap rows were rerun on 2026-11-06 after a fix to `stagewise.py`: its control-smoothing term coupled adjacent stages, which FATROP's stage-wise cost does not allow, and both earlier FATROP runs had failed (103 and 285 iterations). With the previous control carried as a state (the same NLP, same optimum), FATROP solves N = 100 in 27 iterations (0.60 s; IPOPT with smf 0.42 s) and N = 200 in 35 (1.57 s; IPOPT with smf 0.97 s).
+FATROP (`stagewise_fatrop.jsonl`, `stagewise.py`, 1 thread, seed 0), against IPOPT on the same stage-ordered NLPs (iterations / wall seconds):
+
+| problem | N | FATROP | IPOPT + MA27 | IPOPT + smf |
+|---|---:|---|---|---|
+| quad_forest | 100 | 138 / 0.80 (failed) | 74 / 0.48 | 74 / 0.45 |
+| quad_forest | 200 | 230 / 2.71 | 313 / 4.07 | 357 / 4.15 |
+| drone_swap | 100 | 27 / 0.60 | 27 / 0.50 | 27 / 0.41 |
+| drone_swap | 200 | 35 / 1.56 | 31 / 1.15 | 32 / 0.97 |
+| car_track | 100 | 29 / 0.13 | 29 / 0.15 | 29 / 0.13 |
+| car_track | 200 | 27 / 0.24 | 29 / 0.29 | 29 / 0.25 |
+| truck_trailer | 100 | 323 / 1.84 | 453 / 2.71 | 429 / 2.04 |
+| truck_trailer | 200 | 369 / 4.91 (failed) | 428 / 5.61 | 442 / 4.78 |
+
+Configuration:
+- The smf rows are the merged plugin (main be9cec2) with `SMF_SLACK_ELIM=auto`, the default of every runner. The elimination ran on every factorization of quad_forest and truck_trailer, and not at all on drone_swap and car_track.
+- The FATROP, MUMPS and MA27 rows are from the first run.
+- The drone_swap rows were rerun after a fix to `stagewise.py`. Its control-smoothing term coupled adjacent stages, which FATROP's stage-wise cost does not allow, and both earlier FATROP runs had failed (103 and 285 iterations). The previous control is now carried as a state: the same NLP, with the same optimum.

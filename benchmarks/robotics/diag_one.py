@@ -53,12 +53,11 @@ def iteration_stats(text: str) -> dict:
 def main() -> None:
     mod, N, seed, solver = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
     threads = int(sys.argv[5]) if len(sys.argv) > 5 else 1
-    common.ensure_thread_env(threads)
+    common.ensure_runner_env(threads)
     prob = importlib.import_module(mod).build(N, seed)
     fd, out_file = tempfile.mkstemp(prefix="ipopt_diag_", suffix=".txt")
     os.close(fd)
-    opts = common.ipopt_options(solver, out_file)
-    opts["ipopt.print_level"] = 0
+    opts = common.nlp_options(solver, out_file)
     if os.environ.get("DIAG_DETAILED"):
         opts["ipopt.file_print_level"] = 6  # prints the regularisation (delta_w, delta_c) per iteration
     S = ca.nlpsol("S", "ipopt", {"x": prob.x, "f": prob.f, "g": prob.g}, opts)

@@ -18,7 +18,7 @@ import common
 def main() -> None:
     mod, N, seed, solver = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
     threads = int(sys.argv[5]) if len(sys.argv) > 5 else 1
-    common.ensure_thread_env(threads)
+    common.ensure_runner_env(threads)
     prob = importlib.import_module(mod).build(N, seed)
     rec = common.solve(prob, solver, threads)
     print("RESULT " + json.dumps(rec, default=float))

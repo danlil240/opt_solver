@@ -11,7 +11,7 @@ cleared, goal reached). ``solve()`` runs IPOPT on it with one linear solver:
   smf          the smf MA97-compatible plugin (``linear_solver ma97`` with
                ``hsllib`` = smf_ma97.dll; SMF_PLUGIN_DLL overrides the path),
                with its opt-in slack-pair elimination on (SMF_SLACK_ELIM=auto
-               unless the environment sets it: off for the plain plugin)
+               unless the environment sets it, for every runner: runner_env())
 
 and returns wall time, iterations, objective, CasADi's function-evaluation
 split and IPOPT's own timing statistics (``print_timing_statistics``), parsed
@@ -177,42 +177,55 @@ def kkt_size(info: dict, hess_diag: int | None) -> tuple[int | None, int | None]
 THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "SMF_NUM_THREADS")
 
 
-def thread_env(threads: int, base: dict | None = None) -> dict:
-    """A child process environment with every thread-count variable set to
+# The smf plugin's slack-pair elimination (SMF_SLACK_ELIM) pays on these
+# planners (many inequality slacks, most inactive): every runner uses `auto`
+# unless the environment sets it (`off` measures the plugin without it).
+SLACK_ELIM_DEFAULT = "auto"
+
+
+def runner_env(threads: int, base: dict | None = None) -> dict:
+    """The environment every solve runs in: each thread-count variable set to
     `threads` (the mingw-built HSL and MUMPS read them through their own C
-    runtime, which never sees os.environ changes made in a running Python)."""
+    runtime, which never sees os.environ changes made in a running Python),
+    and SMF_SLACK_ELIM defaulted to SLACK_ELIM_DEFAULT. For a child process,
+    and through ensure_runner_env() for an in-process runner."""
     env = dict(os.environ if base is None else base)
     for k in THREAD_VARS:
         env[k] = str(threads)
+    env.setdefault("SMF_SLACK_ELIM", SLACK_ELIM_DEFAULT)
     return env
 
 
-def ensure_thread_env(threads: int) -> None:
-    """Called first by every runner that solves in-process: when the
-    inherited thread variables are not `threads`, runs this same script again
-    in an environment that sets them (before anything is loaded) and exits
-    with its status."""
-    if all(os.environ.get(k) == str(threads) for k in THREAD_VARS):
+def ensure_runner_env(threads: int) -> None:
+    """Called first by every runner that solves in-process: when its
+    environment is not runner_env(threads), runs this same script again in
+    that one (before anything is loaded: the plugin reads SMF_SLACK_ELIM
+    once) and exits with its status."""
+    want = runner_env(threads)
+    if all(os.environ.get(k) == want[k] for k in (*THREAD_VARS, "SMF_SLACK_ELIM")):
         return
     import subprocess
-    rc = subprocess.run([sys.executable, *sys.argv], env=thread_env(threads)).returncode
+    rc = subprocess.run([sys.executable, *sys.argv], env=want).returncode
     sys.exit(rc)
+
+
+def nlp_options(solver: str, out_file: str, extra: dict | None = None) -> dict:
+    """The IPOPT options every runner solves with: ipopt_options(), quiet on
+    the console (the output file keeps the log), and ROBO_JIT's code
+    generation."""
+    opts = ipopt_options(solver, out_file, extra)
+    opts["ipopt.print_level"] = 0
+    opts.update(jit_options())
+    return opts
 
 
 def solve(prob: Problem, solver: str, threads: int = 1, extra: dict | None = None,
           warm: bool = False) -> dict:
     """Solves prob once with `solver`; returns a result record."""
-    for k in THREAD_VARS:
-        os.environ[k] = str(threads)  # (the runner's ensure_thread_env() set the process's own)
-    if solver == "smf":
-        # The plugin's slack-pair elimination pays on these planners (many
-        # inequality slacks, most inactive); SMF_SLACK_ELIM=off measures without.
-        os.environ.setdefault("SMF_SLACK_ELIM", "auto")
+    os.environ.update(runner_env(threads))  # (the runner's ensure_runner_env() set the process's own)
     fd, out_file = tempfile.mkstemp(prefix=f"ipopt_{prob.name}_{solver}_", suffix=".txt")
     os.close(fd)
-    opts = ipopt_options(solver, out_file, extra)
-    opts["ipopt.print_level"] = 0
-    opts.update(jit_options())
+    opts = nlp_options(solver, out_file, extra)
     nlp = {"x": prob.x, "f": prob.f, "g": prob.g}
     cwd = os.getcwd()
     jit_dir = tempfile.mkdtemp(prefix="casadi_jit_")
