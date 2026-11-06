@@ -38,6 +38,7 @@ smf_benchmark(bench_replay)
 smf_benchmark(bench_front_kernel)
 smf_benchmark(bench_profile)
 smf_benchmark(bench_matching_trial)
+smf_benchmark(proto_slack_elim)
 
 # bench_compare: link optional comparison solvers (CHOLMOD, MA27)
 if(SMF_HAS_CHOLMOD AND CHOLMOD_LIBRARY AND CHOLMOD_INCLUDE_DIR)
