@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import sys
 import pathlib
 import re
 import tempfile
@@ -173,11 +174,36 @@ def kkt_size(info: dict, hess_diag: int | None) -> tuple[int | None, int | None]
         return None, None
 
 
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "SMF_NUM_THREADS")
+
+
+def thread_env(threads: int, base: dict | None = None) -> dict:
+    """A child process environment with every thread-count variable set to
+    `threads` (the mingw-built HSL and MUMPS read them through their own C
+    runtime, which never sees os.environ changes made in a running Python)."""
+    env = dict(os.environ if base is None else base)
+    for k in THREAD_VARS:
+        env[k] = str(threads)
+    return env
+
+
+def ensure_thread_env(threads: int) -> None:
+    """Called first by every runner that solves in-process: when the
+    inherited thread variables are not `threads`, runs this same script again
+    in an environment that sets them (before anything is loaded) and exits
+    with its status."""
+    if all(os.environ.get(k) == str(threads) for k in THREAD_VARS):
+        return
+    import subprocess
+    rc = subprocess.run([sys.executable, *sys.argv], env=thread_env(threads)).returncode
+    sys.exit(rc)
+
+
 def solve(prob: Problem, solver: str, threads: int = 1, extra: dict | None = None,
           warm: bool = False) -> dict:
     """Solves prob once with `solver`; returns a result record."""
-    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "SMF_NUM_THREADS"):
-        os.environ[k] = str(threads)
+    for k in THREAD_VARS:
+        os.environ[k] = str(threads)  # (the runner's ensure_thread_env() set the process's own)
     if solver == "smf":
         # The plugin's slack-pair elimination pays on these planners (many
         # inequality slacks, most inactive); SMF_SLACK_ELIM=off measures without.

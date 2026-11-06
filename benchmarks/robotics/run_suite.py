@@ -22,6 +22,8 @@ import subprocess
 import sys
 import time
 
+import common
+
 HERE = pathlib.Path(__file__).resolve().parent
 PROBLEMS = ["p_quad_forest", "p_drone_swap", "p_car_track", "p_truck_trailer", "p_arm7"]
 BELOW_NORMAL = 0x00004000
@@ -52,9 +54,7 @@ def main() -> None:
             # mingw-built HSL (OpenMP) and MUMPS (OpenBLAS) read it through
             # their own C runtime, which never sees os.environ changes made
             # inside the Python process.
-            env = os.environ.copy()
-            for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "SMF_NUM_THREADS"):
-                env[k] = str(t)
+            env = common.thread_env(t)
             if sv == "smf":
                 env["SMF_PLUGIN_STATS"] = "1"
             cp = None  # this job's subprocess, once it returned (not an earlier job's)

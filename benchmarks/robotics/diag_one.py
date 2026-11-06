@@ -53,8 +53,7 @@ def iteration_stats(text: str) -> dict:
 def main() -> None:
     mod, N, seed, solver = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
     threads = int(sys.argv[5]) if len(sys.argv) > 5 else 1
-    for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "SMF_NUM_THREADS"):
-        os.environ[k] = str(threads)
+    common.ensure_thread_env(threads)
     prob = importlib.import_module(mod).build(N, seed)
     fd, out_file = tempfile.mkstemp(prefix="ipopt_diag_", suffix=".txt")
     os.close(fd)

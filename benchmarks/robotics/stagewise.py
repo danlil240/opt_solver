@@ -292,6 +292,7 @@ def build(problem, N, seed=0):
 
 
 def main():
+    common.ensure_thread_env(1)  # its records are 1-thread runs
     problem, N, solver = sys.argv[1], int(sys.argv[2]), sys.argv[3]
     seed = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     b, f, gs = build(problem, N, seed)

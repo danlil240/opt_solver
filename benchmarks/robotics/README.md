@@ -21,7 +21,7 @@ python benchmarks/robotics/diag_suite.py --out diag.jsonl --cells p_truck_traile
 - **HSL library:** `SMF_HSL_LIBRARY` (full CoinHSL `libhsl.dll`). The default is `build-deps/coinhsl-*/bin/libhsl.dll`.
 - **smf plugin:** `SMF_PLUGIN_DLL`. The default is `build-board/Release/smf_ma97.dll`, then `build/Release`. The harness runs it with its opt-in slack-pair elimination on (`SMF_SLACK_ELIM=auto`: where slack pairs are at least a fifth of the rows); set `SMF_SLACK_ELIM=off` in the environment to measure the plugin without it.
 - **PATH:** must hold the plugin's DLL directory (MKL and friends).
-- **Thread counts:** `run_suite.py` puts them in each child's environment. The mingw HSL and MUMPS read the C runtime's environment, which never sees `os.environ` changes made inside Python.
+- **Thread counts:** every runner sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `SMF_NUM_THREADS` before anything loads (`common.thread_env` / `common.ensure_thread_env`): `run_suite.py` and `diag_suite.py` (`--threads`) put them in each child's environment, and `run_one.py`, `diag_one.py` and `stagewise.py` (1 thread) start themselves again in such an environment when the inherited values differ. The mingw HSL and MUMPS read the C runtime's environment, which never sees `os.environ` changes made inside Python.
 - **JIT:** `ROBO_JIT=1` compiles CasADi's NLP functions with `zig cc`. It is off by default, because compiling the full derivatives takes minutes at N >= 100.
 
 `run_suite.py` records:
@@ -47,7 +47,7 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 | `report_step4.md` | first measurements and where smf lost (smf main d6fd34a against MUMPS, MA27, MA57, MA97) |
 | `summary_t1.md` | that run's per-cell table (N = 50, 100, 200, 400) |
 | `suite_t1.jsonl`, `suite_seeds.jsonl` | its raw records: `run_suite.py` output, and the seed sweep |
-| `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace) |
+| `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace); rerun on 2026-11-06 with the thread variables set to 1 in the child (the first run did not set them; its iteration, regularisation and trial-factorization counts were identical) |
 | `slack_elim_live_first.jsonl` | smf main #56 against the first slack-pair elimination build, all five problems at N = 100 and 200 |
 | `stagewise_fatrop.jsonl` | `stagewise.py` records: FATROP against IPOPT (MUMPS, MA27, smf) on stage-ordered copies of quad_forest, drone_swap, car_track and truck_trailer at N = 100 and 200 |
 | `slack_elim_live_guard.jsonl` | the same against the merged build (#57, `SMF_SLACK_ELIM=auto`, with its solve accuracy check and inertia guard), truck, quad and arm |
