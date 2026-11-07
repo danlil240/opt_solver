@@ -2,7 +2,7 @@
 
 ## Bottom line
 
-- **Same obstacle, same robot geometry, same limits, same PC:** cuRobo plans in 0.49 s median (GPU), IPOPT + smf in 0.66 s median (1 CPU thread, interpreted CasADi). IPOPT's motions are 7% faster to execute (1.29 s vs 1.39 s median) and never take a detour; cuRobo's took detours of 1.7-2.8 s on 3 of 10 scenes.
+- **Same obstacle, same robot geometry, same limits, same PC:** cuRobo plans in 0.49 s median (GPU), IPOPT + smf in 0.66 s median (1 CPU thread, interpreted CasADi). With the NLP compiled, IPOPT takes 0.25-0.40 s on the three scenes tried. IPOPT's motions are 7% faster to execute (1.29 s vs 1.39 s median) and never take a detour; cuRobo's took detours of 1.7-2.8 s on 3 of 10 scenes.
 - **IPOPT holds the collision constraints, cuRobo approximates them.** IPOPT's worst penetration between knots is 0.7 mm. cuRobo's is 10 mm into the true sphere: its planner cannot load a sphere, so the sphere goes in as a triangle mesh, and its collision term is a penalty.
 - **cuRobo's fast path is boxes.** With the sphere replaced by its bounding cube (a bigger obstacle, but cuRobo's native primitive), cuRobo plans in 28 ms median. Mesh obstacles cost it about 17x.
 - **This PC runs cuRobo about 7x slower than NVIDIA's published numbers.** cuRobo's own 2,590-problem Franka benchmark gives 32 ms mean here (no payload) and 37 ms (3 kg). NVIDIA reports 4.5 and 4.9 ms on an RTX 5090 under native Linux. Here it is an RTX 5080 under WSL2. Scaling by that factor (an estimate, not measured) puts cuRobo's cube case near 4 ms and its mesh case near 70 ms on NVIDIA's setup.
@@ -54,6 +54,7 @@ Ten scenes each. Times are per plan; durations are the planned motion's length.
 | IPOPT+smf, cuRobo spheres | 10/10 | 657 | 495-937 | 1.29 | 1.22-1.31 | -0.7 |
 | IPOPT+MA27, cuRobo spheres | 10/10 | 640 | 516-909 | 1.29 | 1.22-1.31 | -0.7 |
 | IPOPT+MUMPS, cuRobo spheres | 10/10 | 925 | 712-1325 | 1.29 | 1.22-1.31 | -0.7 |
+| IPOPT+smf, cuRobo spheres, compiled (seeds 0-2) | 3/3 | 323 | 252-397 | 1.28 | 1.27-1.30 | -0.3 |
 | IPOPT+smf, arm7 points | 10/10 | 188 | 146-201 | 1.29 | 1.22-1.31 | -24.4 |
 | IPOPT+smf, arm7 points, compiled | 10/10 | 98 | 67-128 | 1.29 | 1.22-1.31 | -24.4 |
 | IPOPT+MA27, arm7 points | 10/10 | 245 | 189-268 | 1.29 | 1.22-1.31 | -24.4 |
@@ -67,6 +68,7 @@ Ten scenes each. Times are per plan; durations are the planned motion's length.
   - Seeds 0-4 ran alone: 67-87 ms.
   - Seeds 5-9 overlapped GPU runs.
   - Compiling the whole NLP takes about 4.5 minutes per scene.
+- **Compiled cuRobo-sphere row:** only seeds 0-2. The same seeds take 495-621 ms interpreted, so compiling gives 1.6-2.0x. Compiling the NLP takes about 10.5 minutes per scene.
 - **MA27 and MUMPS rows (arm7 points):** they also overlapped a GPU run.
 
 **Where IPOPT's time goes** (cuRobo spheres, smf, interpreted, medians):
