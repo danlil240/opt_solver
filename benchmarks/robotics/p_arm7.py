@@ -17,7 +17,7 @@ from __future__ import annotations
 import casadi as ca
 import numpy as np
 
-from common import Builder, Problem, rk4
+from common import Builder, Problem, rk4, stage_function, stage_jit
 
 # Panda modified DH: a_{i-1}, d_i, alpha_{i-1}.
 DH = [(0, 0.333, 0), (0, 0, -np.pi / 2), (0, 0.316, np.pi / 2), (0.0825, 0, np.pi / 2),
@@ -82,7 +82,7 @@ def make_dynamics():
     for i in range(1, len(origins)):
         pts.append(origins[i])
         pts.append(0.5 * (origins[i] + origins[i - 1]))
-    P = ca.Function("pts", [q], [ca.horzcat(*pts)])
+    P = stage_function("pts", [q], [ca.horzcat(*pts)])
     return f, P
 
 
@@ -93,8 +93,8 @@ def build(N: int, seed: int = 0) -> Problem:
     q_goal = np.array([1.2, 0.3, 0.0, -1.8, 0.0, 2.0, 0.8]) + rng.uniform(-0.1, 0.1, NQ)
     obst_r = 0.18 + rng.uniform(0, 0.04)
     xs, us, hs = ca.SX.sym("x", 2 * NQ), ca.SX.sym("u", NQ), ca.SX.sym("h")
-    F = ca.Function("F", [xs, us, hs], [rk4(lambda x, u: fdyn(x, u), xs, us, hs)])
-    b = Builder()
+    F = stage_function("F", [xs, us, hs], [rk4(lambda x, u: fdyn(x, u), xs, us, hs)])
+    b = Builder(mx=stage_jit())
     T = b.var("T", 1, 0.5, 10.0, 3.0)
     h = T / N
     X, U = [], []
@@ -130,4 +130,5 @@ def build(N: int, seed: int = 0) -> Problem:
             zmin = min(zmin, float(np.min(pts[2, 2:])))
         return {"T": float(w[0]), "obstacle_clearance": dmin, "min_height": zmin}
 
-    return b.problem("arm7", f, check, {"N": N, "seed": seed, "family": "manipulator"})
+    return b.problem("arm7", f, check, {"N": N, "seed": seed, "family": "manipulator",
+                                         "stage_jit": stage_jit()})

@@ -83,6 +83,34 @@ def jit_options() -> dict:
     either way; only the function-evaluation share depends on it."""
     if os.environ.get("ROBO_JIT", "0") != "1":
         return {}
+    return codegen_options()
+
+
+def stage_jit() -> bool:
+    """ROBO_STAGE_JIT=1: the NLP keeps its per-interval functions (MX
+    decision variables call them instead of inlining their expressions) and
+    those functions, with the derivative functions CasADi makes from them,
+    are compiled. A one-time compile of the small interval function instead
+    of the whole NLP's (which takes over 10 minutes at N = 200)."""
+    return os.environ.get("ROBO_STAGE_JIT", "0") == "1"
+
+
+def stage_function(name: str, inputs: list, outputs: list) -> ca.Function:
+    """A per-interval function (the RK4 step), compiled under stage_jit()
+    (in a scratch directory: the shell compiler writes its files there)."""
+    if not stage_jit():
+        return ca.Function(name, inputs, outputs)
+    cwd = os.getcwd()
+    os.chdir(tempfile.mkdtemp(prefix="casadi_stage_jit_"))
+    try:
+        return ca.Function(name, inputs, outputs, codegen_options())
+    finally:
+        os.chdir(cwd)
+
+
+def codegen_options() -> dict:
+    """CasADi's JIT options (`zig cc`), for a whole NLP (ROBO_JIT) or for
+    one per-interval function."""
     jo = {"compiler": "zig cc", "compiler_setup": "-c", "compiler_output_flag": "-o ",
           "compiler_flags": ["-O1"], "linker": "zig cc", "linker_setup": "-shared",
           "linker_output_flag": "-o ", "verbose": False}
@@ -284,8 +312,8 @@ class Builder:
 
     def __init__(self, mx: bool = False):
         # mx: MX decision variables, so the NLP calls the per-interval
-        # functions (SX) instead of inlining them: compact generated code for
-        # models whose interval function is large (the arm).
+        # functions instead of inlining them (problems built with
+        # stage_function() pass stage_jit(): their compiled functions need it).
         self.sym = ca.MX.sym if mx else ca.SX.sym
         self.w, self.lbw, self.ubw, self.w0 = [], [], [], []
         self.g, self.lbg, self.ubg = [], [], []
