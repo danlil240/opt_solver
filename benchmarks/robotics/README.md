@@ -23,6 +23,10 @@ python benchmarks/robotics/diag_suite.py --out diag.jsonl --cells p_truck_traile
 - **PATH:** must hold the plugin's DLL directory (MKL and friends).
 - **Thread counts:** every runner sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `SMF_NUM_THREADS` before anything loads (`common.thread_env` / `common.ensure_thread_env`): `run_suite.py` and `diag_suite.py` (`--threads`) put them in each child's environment, and `run_one.py`, `diag_one.py` and `stagewise.py` (1 thread) start themselves again in such an environment when the inherited values differ. The mingw HSL and MUMPS read the C runtime's environment, which never sees `os.environ` changes made inside Python.
 - **JIT:** `ROBO_JIT=1` compiles CasADi's NLP functions with `zig cc`. It is off by default, because compiling the full derivatives takes minutes at N >= 100.
+- **Per-stage JIT (the arm):** `ROBO_STAGE_JIT=1` builds `p_arm7` with MX variables that call its RK4 interval function and its collision-point function, and compiles those two functions (CasADi compiles the derivative functions it makes from them too).
+  - The NLP and its optimum are unchanged, as are the iterations.
+  - One-time compile: about 90 s, independent of N. A deployment would compile offline or cache.
+  - The other problems do not use it. On truck_trailer and quad_forest the per-stage form loses: their many small path constraints run slower as an MX graph than when inlined (`results/stage_jit_ab.jsonl`).
 
 `run_suite.py` records:
 - wall time, iterations, objective and constraint violation;
@@ -49,6 +53,7 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 | `suite_t1.jsonl`, `suite_seeds.jsonl` | its raw records: `run_suite.py` output, and the seed sweep |
 | `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace); rerun on 2026-11-06 with the thread variables set to 1 in the child (the first run did not set them; its iteration, regularisation and trial-factorization counts were identical). The smf rows are the merged plugin with `SMF_SLACK_ELIM=auto` (the elimination runs on truck_trailer only) |
 | `slack_elim_live_first.jsonl` | smf main #56 against the first slack-pair elimination build, all five problems at N = 100 and 200 |
+| `stage_jit_ab.jsonl` | `ROBO_STAGE_JIT` A/B at N = 100 and 200 (the arm's rows compile its interval function only; with the collision points compiled too, 5.7 s and 16.6 s) |
 | `stagewise_fatrop.jsonl` | `stagewise.py` records: FATROP against IPOPT (MUMPS, MA27, smf) on stage-ordered copies of quad_forest, drone_swap, car_track and truck_trailer at N = 100 and 200 |
 | `slack_elim_live_guard.jsonl` | the same against the merged build (#57, `SMF_SLACK_ELIM=auto`, with its solve accuracy check and inertia guard), truck, quad and arm |
 
@@ -59,7 +64,9 @@ Records in the `slack_elim_*` files carry `variant` (`main` / `slk`), `factors` 
 With the merged elimination (`auto`), against smf main #56 on the same run:
 - **truck_trailer:** N = 200 15.8 s -> 9.1 s (all 1192 factorizations eliminated); N = 100 21.6 s -> 5.2 s.
 - **quad_forest:** N = 100 0.96 s -> 0.60 s; N = 200 1.24 s -> 1.19 s.
-- **arm7:** about unchanged (function evaluations dominate).
+- **arm7:** about unchanged by the elimination: function evaluations are 96% of its time, the exact Hessian alone 27 s of 35 s at N = 200.
+  - With `ROBO_STAGE_JIT=1`, the IPOPT solve drops from 15.6 s to 5.7 s at N = 100 (176 iterations) and from 43.1 s to 16.6 s at N = 200 (246 iterations).
+  - The cost is a one-time compile of about 90 s.
 - **drone_swap, car_track:** too few slack pairs; `auto` leaves them alone.
 
 FATROP (`stagewise_fatrop.jsonl`, `stagewise.py`, 1 thread, seed 0), against IPOPT on the same stage-ordered NLPs (iterations / wall seconds):
