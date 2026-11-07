@@ -130,4 +130,5 @@ def build(N: int, seed: int = 0) -> Problem:
             zmin = min(zmin, float(np.min(pts[2, 2:])))
         return {"T": float(w[0]), "obstacle_clearance": dmin, "min_height": zmin}
 
-    return b.problem("arm7", f, check, {"N": N, "seed": seed, "family": "manipulator"})
+    return b.problem("arm7", f, check, {"N": N, "seed": seed, "family": "manipulator",
+                                         "stage_jit": stage_jit()})
