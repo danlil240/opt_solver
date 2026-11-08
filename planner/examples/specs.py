@@ -109,3 +109,53 @@ def truck_replan_spec(N: int) -> TruckReplanSpec:
 
 def truck_factory(N: int) -> tuple:
     return ("specs", "truck_replan_spec", (N,), {}, [str(HERE), str(ROBOTICS)])
+
+
+def _interp_nodes(blocks, s):
+    """Rows of `blocks` (one per node) at fractional node indices s."""
+    import numpy as np
+    k0 = np.clip(np.floor(s).astype(int), 0, len(blocks) - 1)
+    k1 = np.clip(k0 + 1, 0, len(blocks) - 1)
+    w = (s - k0)[:, None]
+    return (1 - w) * blocks[k0] + w * blocks[k1]
+
+
+def _truck_shift(self, hint: dict, frac: float) -> dict:
+    """The previous plan with the first `frac` of its horizon executed:
+    the remaining trajectory resampled onto the N nodes (T scaled by
+    1 - frac), duals moved with their nodes (path-constraint multipliers
+    scaled with the step). The classic MPC shift, for a free final time."""
+    import numpy as np
+    P, N = self.T.P, self.T.N
+    nx, nu = P.NX, P.NU
+    st = nx + nu
+    x, lx, lg = (np.asarray(hint[k], float) for k in ("x", "lam_x", "lam_g"))
+    s = frac * N + np.arange(N + 1) * (1 - frac)
+
+    def split(v):
+        X = np.array([v[1 + k * st: 1 + k * st + nx] for k in range(N + 1)])
+        U = np.array([v[1 + k * st + nx: 1 + (k + 1) * st] for k in range(N)])
+        return X, U
+
+    def join(t, X, U):
+        out = [np.atleast_1d(t)]
+        for k in range(N):
+            out += [X[k], U[k]]
+        out.append(X[N])
+        return np.concatenate(out)
+
+    X, U = split(x)
+    x2 = join(x[0] * (1 - frac), _interp_nodes(X, s), _interp_nodes(U, np.minimum(s, N - 1)))
+    LX, LU = split(lx)
+    lx2 = join(lx[0], _interp_nodes(LX, s), _interp_nodes(LU, np.minimum(s, N - 1)))
+    m = (len(lg) - nx * N - 6) // N          # path constraints per node (nodes 1..N)
+    dyn = lg[:nx * N].reshape(N, nx)
+    path = lg[nx * N: nx * N + m * N].reshape(N, m)
+    term = lg[nx * N + m * N:]
+    dyn2 = _interp_nodes(dyn, np.minimum(s[:N], N - 1))
+    path2 = _interp_nodes(path, np.clip(s[1:] - 1, 0, N - 1)) * (1 - frac)
+    lg2 = np.concatenate([dyn2.ravel(), path2.ravel(), term])
+    return {"x": x2, "lam_x": lx2, "lam_g": lg2}
+
+
+TruckReplanSpec.shift_hint = _truck_shift

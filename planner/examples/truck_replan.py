@@ -65,6 +65,8 @@ def main() -> None:
     ap.add_argument("--replans", type=int, default=8)
     ap.add_argument("--rng", type=int, default=0)
     ap.add_argument("--hint", type=int, default=1, help="1: the previous plan races alongside the library")
+    ap.add_argument("--shift", type=int, default=1, help="1: shift the previous plan in time before racing it")
+    ap.add_argument("--skip-new", action="store_true", help="skip the new-task phase")
     ap.add_argument("--out", default="truck_replan.jsonl")
     a = ap.parse_args()
     opts, env = specs.solver_setup(a.solver)
@@ -90,7 +92,7 @@ def main() -> None:
             log({"phase": "seed", "task": t.tolist(), "ok": r["success"], "wall_s": r["wall_s"], "iter": r["iter"]})
 
         # New tasks.
-        new = [pl.spec.sample(rng) for _ in range(a.new_tasks)]
+        new = [pl.spec.sample(rng) for _ in range(0 if a.skip_new else a.new_tasks)]
         cold = cold_batch(pl, new)
         recs = []
         for t, c in zip(new, cold):
@@ -103,7 +105,8 @@ def main() -> None:
             log(rec)
             print(f"new  {r.source:5s} plan {r.wall_s:6.2f} s ({r.iters:4d} it)  cold {c['wall_s']:6.2f} s "
                   f"({c['iter']:4d} it)  obj {r.obj:8.3f} vs {c['obj']:8.3f}", flush=True)
-        summarize("new tasks", recs)
+        if recs:
+            summarize("new tasks", recs)
 
         # Replanning chains.
         reps = []
@@ -120,7 +123,12 @@ def main() -> None:
                 state[2:4] += rng.uniform(-0.03, 0.03, 2)
                 state[4] = np.clip(state[4], -3.0, 5.0)
                 state[5] = np.clip(state[5], -0.6, 0.6)
-                r = pl.plan(state, hint=r.as_hint() if a.hint else None)
+                hint = None
+                if a.hint:
+                    hint = r.as_hint()
+                    if a.shift and hasattr(pl.spec, "shift_hint"):
+                        hint = pl.spec.shift_hint(hint, j / a.N)
+                r = pl.plan(state, hint=hint)
                 rec = {"phase": "replan", "chain": ch, "step": k, "task": state.tolist(), "plan_ok": r.success,
                        "plan_s": r.wall_s, "plan_iter": r.iters, "plan_obj": r.obj, "source": r.source,
                        "starts": r.starts}
