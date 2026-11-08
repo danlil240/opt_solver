@@ -252,6 +252,11 @@ class TestScore(unittest.TestCase):
         import run
         self.assertEqual(run.replay_override_args({"ordering": "matching"}), ["--ordering", "matching"])
         self.assertEqual(run.replay_override_args({}), [])
+        seq = {"seq_values_path": "x.vals", "ordering": "amd"}
+        # --ordering wins over the per-case pin; --seq-steps only for recorded sequences
+        self.assertEqual(run.replay_override_args(seq, "all", "matching"),
+                         ["--ordering", "matching", "--seq-steps", "all"])
+        self.assertEqual(run.replay_override_args({}, "all", None), [])
 
     def test_report_only_excluded_from_gates_ratio_and_listed(self):
         m = manifest([case("a", "hard_indef", "tuning"),
