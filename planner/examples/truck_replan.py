@@ -41,17 +41,23 @@ def cold_batch(pl: Planner, tasks: list) -> list[dict]:
 
 
 def summarize(name: str, recs: list[dict]) -> None:
-    c = np.array([r["cold_s"] for r in recs if r["cold_ok"] and r["plan_ok"]])
-    p = np.array([r["plan_s"] for r in recs if r["cold_ok"] and r["plan_ok"]])
+    """Planner stats over every task it solved; cold stats and speedups over
+    the tasks both solved (a cold failure is counted, not hidden)."""
+    both = [r for r in recs if r["cold_ok"] and r["plan_ok"]]
+    p_all = np.array([r["plan_s"] for r in recs if r["plan_ok"]])
     nf_c = sum(not r["cold_ok"] for r in recs)
     nf_p = sum(not r["plan_ok"] for r in recs)
-    if not len(c):
-        print(f"{name}: nothing to compare")
-        return
     print(f"{name}: {len(recs)} tasks, failures cold {nf_c} / planner {nf_p}")
-    print(f"  cold    median {np.median(c):7.2f} s  p90 {np.percentile(c, 90):7.2f} s  max {c.max():7.2f} s")
-    print(f"  planner median {np.median(p):7.2f} s  p90 {np.percentile(p, 90):7.2f} s  max {p.max():7.2f} s")
-    print(f"  total speedup {c.sum() / p.sum():.2f}x, median per-task speedup {np.median(c / p):.1f}x")
+    if len(p_all):
+        print(f"  planner median {np.median(p_all):7.2f} s  p90 {np.percentile(p_all, 90):7.2f} s  "
+              f"max {p_all.max():7.2f} s  (all {len(p_all)} it solved)")
+    if both:
+        c = np.array([r["cold_s"] for r in both])
+        p = np.array([r["plan_s"] for r in both])
+        print(f"  cold    median {np.median(c):7.2f} s  p90 {np.percentile(c, 90):7.2f} s  max {c.max():7.2f} s"
+              f"  (the {len(both)} both solved)")
+        print(f"  total speedup {c.sum() / p.sum():.2f}x, median per-task speedup {np.median(c / p):.1f}x "
+              f"(on those {len(both)})")
 
 
 def main() -> None:
