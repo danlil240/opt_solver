@@ -85,5 +85,5 @@ def test_hint_races_with_adaptive_twin(planner):
     first = planner.plan(t)
     r = planner.plan(t + 1e-2, hint=first.as_hint())
     assert r.success
-    tags = [s[0] for s in r.starts]
-    assert tags[:2] == ["hint", "hint_adapt"] and len(tags) == 3
+    tags = sorted(s[0] for s in r.starts)  # r.starts is in finishing order
+    assert tags == ["hint", "hint_adapt", "lib1"]
