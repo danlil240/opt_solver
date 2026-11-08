@@ -59,3 +59,36 @@ Local optima (objective vs the cold solve, tasks both solved):
 - The truck's mean (173 iterations) hides a tail: a few tasks still take hundreds of iterations
   from their neighbour's start. On the quad, the neighbour often goes around a tree on the other
   side, so the answer is a different local optimum, better as often as worse.
+
+## Follow-up (2026-11-08): nearest-3 in parallel, and moving obstacles
+
+`probe_learned_ws.py neighbors <dir> --k 3` warm-starts each held-out task from its 2nd and 3rd
+nearest library solutions too. **Race** = the K solves start together and the first success wins
+(on K cores). Total speedup is over the 60 held-out tasks, against the cold solve.
+
+Two new task families, both quadrotor, N = 100, with the obstacles as NLP parameters so one build
+serves every task:
+- `quadmov`: the seed-0 forest plus 4 movable obstacles (r 0.5) anywhere in the field, task = start/goal + 8 numbers.
+- `quadrand`: a fresh 24-tree layout per task. The lookup and the MLP see start/goal plus a blurred
+  31 x 10 occupancy grid.
+
+| problem | cold median / p90 s | kNN-1 total | race of 3 nearest: total | median s | p90 s | max s | MLP + 2 nearest race |
+|---|---|---:|---:|---:|---:|---:|---:|
+| quad (fixed forest) | 1.46 / 2.39 | 7.44x | **12.8x** | 0.12 | 0.19 | 0.36 | 11.2x |
+| truck (fixed yard) | 37.4 / 62.2 | 4.42x | **14.8x** | 1.26 | 7.21 | 17.9 | 12.0x |
+| quad + 4 movable obstacles | 1.48 / 3.09 | 1.39x | **3.41x** | 0.42 | 1.11 | 2.97 | 2.72x |
+| quad, random forest per task | 1.37 / 2.52 | 1.41x | 2.68x | 0.52 | 1.05 | 1.71 | **2.84x** |
+
+Every held-out task was solved by at least one of the three starts in every family.
+
+Findings:
+- Racing the 3 nearest solutions roughly doubles the single-lookup gain and cuts the tail: the
+  truck's p90 drops from 37 s (one neighbour) to 7 s, against 62 s cold.
+- Waiting for all three and keeping the lowest objective (best-of-3) finds a better local optimum
+  than cold far more often than a worse one (quad 31 better / 8 worse, truck 3 / 0), but costs
+  the slowest of the three, so it's 0.8-3.2x total only.
+- Moving obstacles hurt the lookup a lot: one neighbour gives 1.4x, three give 2.7-3.4x. The
+  neighbour's duals belong to obstacles that moved.
+- With a random forest, the MLP warm start alone (1.80x) beats one neighbour (1.41x), and an
+  MLP + 2-neighbour race is the best of all (2.84x). This is the first case where the network earns
+  its place: high-dimensional tasks.

@@ -135,7 +135,119 @@ class Quad:
         return x0
 
 
-PROBLEMS = {"truck": Truck, "quad": Quad}
+class QuadObs(Quad):
+    """Quadrotor across a forest whose obstacles are NLP parameters, so one
+    build serves every task. Task = start/goal (y, z) then obstacle (x, y)
+    pairs, sorted by x so similar layouts have similar vectors.
+      quadmov  the fixed seed-0 forest plus 4 movable obstacles (r 0.5)
+      quadrand a fresh 24-tree layout every task (radii of the seed-0 forest)
+    The lookup and the MLP see start/goal plus, for quadrand, a blurred
+    occupancy grid of the field (a raw position list is order-dependent)."""
+
+    n_fixed, n_mov = 24, 4
+
+    def __init__(self, N: int):
+        import casadi as ca
+        import p_quad_forest as P
+        import quadrotor as Q
+        from common import Builder, rk4
+        self.P, self.Q, self.N = P, Q, N
+        self.stride = Q.NX + Q.NU
+        base = P.forest(0)
+        self.fixed = base if self.n_fixed else np.zeros((0, 3))
+        self.radii = self.obstacle_radii()
+        n_obs = len(self.radii)
+        self.p = ca.SX.sym("obs", 2 * n_obs)
+        self.lo = np.r_[Quad.lo, np.tile([3.0, -4.0], self.n_mov)]
+        self.hi = np.r_[Quad.hi, np.tile([P.LENGTH - 3.0, 4.0], self.n_mov)]
+        start, goal = np.array([0, 0, 1.5]), np.array([P.LENGTH, 0, 1.5])
+        b = Builder()
+        T = b.var("T", 1, 2.0, 60.0, 12.0)
+        h = T / N
+        xs, us, hs = ca.SX.sym("xs", Q.NX), ca.SX.sym("us", Q.NU), ca.SX.sym("hs")
+        F = ca.Function("F", [xs, us, hs], [rk4(Q.dynamics, xs, us, hs)])
+        X, U, energy = [], [], 0
+        for k in range(N + 1):
+            s = k / N
+            guess = np.zeros(Q.NX)
+            guess[:3] = start + s * (goal - start)
+            guess[3] = (goal - start)[0] / 12.0
+            lb, ub = Q.X_LB.copy(), Q.X_UB.copy()
+            if k == 0:
+                lb = ub = np.r_[start, np.zeros(9)]
+            if k == N:
+                lb = np.r_[goal, -0.5 * np.ones(3), -0.2, -0.2, -np.pi, -1, -1, -1]
+                ub = np.r_[goal, 0.5 * np.ones(3), 0.2, 0.2, np.pi, 1, 1, 1]
+            X.append(b.var(f"x_{k}", Q.NX, lb, ub, guess))
+            if k < N:
+                U.append(b.var(f"u_{k}", Q.NU, 0.0, Q.U_MAX, Q.HOVER))
+        for k in range(N):
+            b.eq(F(X[k], U[k], h) - X[k + 1])
+            energy += ca.sumsqr(U[k] - Q.HOVER) * h
+        for k in range(1, N):
+            for j in range(n_obs):
+                b.ineq((X[k][0] - self.p[2 * j]) ** 2 + (X[k][1] - self.p[2 * j + 1]) ** 2,
+                       (self.radii[j] + P.MARGIN) ** 2, ca.inf)
+        self.prob = b.problem(self.name, T + 0.05 * energy, lambda w: {}, {"N": N})
+
+    def obstacle_radii(self) -> np.ndarray:
+        return np.r_[self.fixed[:, 2], 0.5 * np.ones(self.n_mov)]
+
+    def sample(self, rng) -> np.ndarray:
+        mov = np.array(sorted(rng.uniform([3.0, -4.0], [self.P.LENGTH - 3.0, 4.0], (self.n_mov, 2)).tolist()))
+        return np.r_[rng.uniform(Quad.lo, Quad.hi), mov.ravel()]
+
+    def pvec(self, p) -> np.ndarray:
+        return np.r_[self.fixed[:, :2].ravel(), p[4:]]
+
+
+class QuadMov(QuadObs):
+    name = "quad_mov4"
+
+
+class QuadRand(QuadObs):
+    name = "quad_rand"
+    n_fixed, n_mov = 0, 24
+
+    def obstacle_radii(self) -> np.ndarray:
+        return self.P.forest(0)[:, 2].copy()
+
+    def sample(self, rng) -> np.ndarray:
+        r = self.radii
+        while True:
+            trees = []
+            ok = True
+            for j in range(len(r)):
+                for _ in range(200):
+                    c = rng.uniform([3.0, -4.0], [self.P.LENGTH - 3.0, 4.0])
+                    if all(np.hypot(*(c - t[:2])) > r[j] + t[2] + 2 * self.P.MARGIN + 0.4 for t in trees):
+                        trees.append(np.r_[c, r[j]])
+                        break
+                else:
+                    ok = False
+                    break
+            if ok:
+                break
+        xy = np.array([t[:2] for t in trees])  # index j keeps radius j
+        return np.r_[rng.uniform(Quad.lo, Quad.hi), xy.ravel()]
+
+    def features(self, p) -> np.ndarray:
+        sg = 2 * (p[:4] - Quad.lo) / (Quad.hi - Quad.lo) - 1
+        gx, gy = np.meshgrid(np.linspace(0, self.P.LENGTH, 31), np.linspace(-4.5, 4.5, 10))
+        xy = p[4:].reshape(-1, 2)
+        occ = np.zeros_like(gx)
+        for (x, y), r in zip(xy, self.radii):
+            occ += np.exp(-((gx - x) ** 2 + (gy - y) ** 2) / (2 * (r + 0.5) ** 2))
+        return np.r_[3 * sg, np.minimum(occ, 1.0).ravel()]
+
+
+def features(T):
+    if hasattr(T, "features"):
+        return T.features
+    return lambda p: 2 * (p - T.lo) / (T.hi - T.lo) - 1
+
+
+PROBLEMS = {"truck": Truck, "quad": Quad, "quadmov": QuadMov, "quadrand": QuadRand}
 
 
 # ---------------------------------------------------------------- worker
@@ -153,6 +265,8 @@ def worker(a) -> None:
     fd, out_file = tempfile.mkstemp(prefix="ipopt_lws_", suffix=".txt")
     os.close(fd)
     nlp = {"x": prob.x, "f": prob.f, "g": prob.g}
+    if getattr(T, "p", None) is not None:
+        nlp["p"] = T.p
     quiet = {"ipopt.file_print_level": 0, "ipopt.print_timing_statistics": "no"}
     solvers = {}
 
@@ -166,7 +280,9 @@ def worker(a) -> None:
         p = params[i]
         lbx, ubx = T.bounds(p)
         args = dict(lbx=lbx, ubx=ubx, lbg=prob.lbg, ubg=prob.ubg)
-        warm = method in ("knn_warm", "mlp_warm")
+        if "p" in nlp:
+            args["p"] = T.pvec(p)
+        warm = method.endswith("_warm")
         if method == "cold":
             args["x0"] = T.cold_guess(p)
         else:
@@ -258,8 +374,8 @@ class MLP:
 def train_and_guess(a, d: pathlib.Path, T, params, train, test) -> dict:
     recs = {r["id"]: r for r in records(d) if r["method"] == "cold"}
     ok = [i for i in train if recs.get(i, {}).get("success")]
-    norm = lambda p: 2 * (p - T.lo) / (T.hi - T.lo) - 1
-    Xtr = norm(params[ok])
+    norm = features(T)
+    Xtr = np.array([norm(p) for p in params[ok]])
     sols = {i: np.load(d / f"sol_cold_{i}.npz") for i in ok}
     Ytr = np.array([sols[i]["x"] for i in ok])
     mu, sd = Ytr.mean(0), Ytr.std(0)
@@ -294,6 +410,81 @@ def train_and_guess(a, d: pathlib.Path, T, params, train, test) -> dict:
                 errs[meth].append(float(np.sqrt(np.mean(((xg - xc) / sd) ** 2))))
     info.update({f"{k}_guess_rms_sd": float(np.median(v)) if v else None for k, v in errs.items()})
     return info
+
+
+def neighbors(a) -> None:
+    """Warm starts from the 2nd..Kth nearest library solutions on an existing
+    run's held-out tasks (methods knn2_warm, ...; knn_warm is the 1st), then
+    the parallel nearest-K table."""
+    d = pathlib.Path(a.dir)
+    meta = json.loads((d / "meta.json").read_text())
+    key = meta["problem"]
+    T = PROBLEMS[key](meta["N"])
+    params = np.load(d / "params.npy")
+    train = range(meta["ntrain"])
+    test = list(range(meta["ntrain"], meta["ntrain"] + meta["ntest"]))
+    cold = {r["id"]: r for r in records(d) if r["method"] == "cold"}
+    ok = [i for i in train if cold.get(i, {}).get("success")]
+    norm = features(T)
+    Xtr = np.array([norm(p) for p in params[ok]])
+    done = {(r["id"], r["method"]) for r in records(d)}
+    jobs = []
+    for i in test:
+        order = np.argsort(np.sum((Xtr - norm(params[i])) ** 2, axis=1))
+        lbx, ubx = T.bounds(params[i])
+        for k in range(2, a.k + 1):
+            m = f"knn{k}_warm"
+            nb = np.load(d / f"sol_cold_{ok[int(order[k - 1])]}.npz")
+            np.savez(d / f"guess_{m}_{i}.npz", x=np.clip(nb["x"], lbx, ubx), lam_x=nb["lam_x"], lam_g=nb["lam_g"])
+            if (i, m) not in done:
+                jobs.append((i, m))
+    run_args = argparse.Namespace(problem=key, N=meta["N"], solver=meta["solver"], workers=a.workers)
+    run_jobs(run_args, d, jobs, "nbr")
+    parallel_table(d, test, a.k)
+
+
+def parallel_table(d: pathlib.Path, test: list, K: int) -> None:
+    """race: K solves start together, the first success wins (wall = its wall).
+    best: all K finish, the lowest objective is kept (wall = slowest)."""
+    R = {(r["id"], r["method"]): r for r in records(d)}
+    names = ["knn_warm"] + [f"knn{k}_warm" for k in range(2, K + 1)]
+    rows = {}
+    for kk in range(1, K + 1):
+        race_w, best_w, race_it, fails, ro_race, ro_best, cw = [], [], [], 0, [], [], []
+        for i in test:
+            c = R.get((i, "cold"))
+            rs = [R.get((i, m)) for m in names[:kk]]
+            good = [r for r in rs if r and r["success"]]
+            if not good:
+                fails += 1
+                continue
+            first = min(good, key=lambda r: r["wall_s"])
+            best = min(good, key=lambda r: r["obj"])
+            race_w.append(first["wall_s"]); race_it.append(first["iter"])
+            best_w.append(max(r["wall_s"] for r in rs if r))
+            if c and c["success"]:
+                cw.append(c["wall_s"])
+                ro_race.append((first["obj"] - c["obj"]) / abs(c["obj"]))
+                ro_best.append((best["obj"] - c["obj"]) / abs(c["obj"]))
+            else:
+                cw.append(np.nan)
+        cw = np.array(cw)
+        m = ~np.isnan(cw)
+        rows[kk] = dict(fails=fails, race_med=np.median(race_w), race_it=np.median(race_it),
+                        race_tot=np.nansum(cw) / np.sum(np.array(race_w)[m]), race_p90=np.percentile(race_w, 90),
+                        race_max=max(race_w), best_tot=np.nansum(cw) / np.sum(np.array(best_w)[m]),
+                        best_p90=np.percentile(best_w, 90),
+                        race_worse=sum(x > 0.01 for x in ro_race), race_better=sum(x < -0.01 for x in ro_race),
+                        best_worse=sum(x > 0.01 for x in ro_best), best_better=sum(x < -0.01 for x in ro_best))
+    c = [R[(i, "cold")]["wall_s"] for i in test if (i, "cold") in R and R[(i, "cold")]["success"]]
+    print(f"cold: median {np.median(c):.2f} s, p90 {np.percentile(c, 90):.2f} s, max {max(c):.2f} s")
+    print("| K | unsolved | race median iters | race median s | race p90 s | race max s | race total speedup | "
+          "race obj worse/better >1% | best-of-K p90 s | best-of-K total speedup | best obj worse/better >1% |")
+    print("|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---|")
+    for kk, r in rows.items():
+        print(f"| {kk} | {r['fails']} | {r['race_it']:.0f} | {r['race_med']:.2f} | {r['race_p90']:.2f} | {r['race_max']:.2f} | "
+              f"{r['race_tot']:.2f}x | {r['race_worse']}/{r['race_better']} | {r['best_p90']:.2f} | {r['best_tot']:.2f}x | "
+              f"{r['best_worse']}/{r['best_better']} |")
 
 
 # ---------------------------------------------------------------- driver
@@ -376,8 +567,12 @@ def main() -> None:
     w.add_argument("--solver", required=True); w.add_argument("--dir", required=True); w.add_argument("--jobs", required=True)
     s = sub.add_parser("summary")
     s.add_argument("dir")
+    nb = sub.add_parser("neighbors", help="parallel nearest-K warm starts on an existing run")
+    nb.add_argument("dir"); nb.add_argument("--k", type=int, default=3); nb.add_argument("--workers", type=int, default=4)
     a = ap.parse_args()
-    if a.cmd == "run":
+    if a.cmd == "neighbors":
+        neighbors(a)
+    elif a.cmd == "run":
         run(a)
     elif a.cmd == "worker":
         worker(a)
