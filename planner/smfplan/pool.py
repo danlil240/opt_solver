@@ -77,11 +77,12 @@ def _worker(factory: tuple, base_options: dict, conn, flag) -> None:
     cb = _stop_callback(nx, ng, np_, flag, race_box)
     solvers = {}
 
-    def solver(warm: bool):
-        if warm not in solvers:
-            opts = {**base_options, **(WARM_OPTIONS if warm else {}), "iteration_callback": cb}
-            solvers[warm] = ca.nlpsol("smfplan", "ipopt", nlp, opts)
-        return solvers[warm]
+    def solver(warm: bool, extra: dict | None = None):
+        key = (warm, tuple(sorted((extra or {}).items())))
+        if key not in solvers:
+            opts = {**base_options, **(WARM_OPTIONS if warm else {}), **(extra or {}), "iteration_callback": cb}
+            solvers[key] = ca.nlpsol("smfplan", "ipopt", nlp, opts)
+        return solvers[key]
 
     solver(False)
     solver(True)
@@ -98,7 +99,7 @@ def _worker(factory: tuple, base_options: dict, conn, flag) -> None:
             args["p"] = p
         if warm:
             args.update(lam_x0=start["lam_x0"], lam_g0=start["lam_g0"])
-        S = solver(warm)
+        S = solver(warm, start.get("opts"))
         t1 = time.perf_counter()
         try:
             r = S(**args)
@@ -148,10 +149,12 @@ class SolverPool:
     def workers(self) -> int:
         return len(self.conns)
 
-    def race(self, lbx, ubx, p, starts: list[dict]) -> tuple[dict | None, list[dict], float]:
+    def race(self, lbx, ubx, p, starts: list[dict], stop_losers: bool = True) -> tuple[dict | None, list[dict], float]:
         """Solve one task from each start in parallel. Returns the winner
         (first success; None when none succeeded), every worker's result, and
-        the wall time to the winner (or to the last result)."""
+        the wall time to the winner (or to the last result). A start may carry
+        "opts": IPOPT options for that start only. stop_losers=False lets
+        every start run to the end (for measuring)."""
         assert 0 < len(starts) <= self.workers, "one start per worker"
         self._race += 1
         rid = self._race
@@ -168,7 +171,8 @@ class SolverPool:
                 results.append(r)
                 if winner is None and r["success"]:
                     winner, t_win = r, time.perf_counter() - t0
-                    self.flag.value = rid
+                    if stop_losers:
+                        self.flag.value = rid
         return winner, results, t_win if t_win is not None else time.perf_counter() - t0
 
     def map(self, jobs: list[tuple]) -> list[dict]:
