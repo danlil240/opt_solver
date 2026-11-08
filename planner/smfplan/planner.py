@@ -39,13 +39,14 @@ class Planner:
 
     def __init__(self, factory: tuple, workers: int = 3, k: int = 3, solver_options: dict | None = None,
                  env: dict | None = None, library: SolutionLibrary | None = None, min_dist: float = 0.0,
-                 cold_in_race: bool = False):
+                 cold_in_race: bool = False, hint_adaptive: bool = True):
         self.spec = build_spec(factory)
         self.pool = SolverPool(factory, workers, solver_options, env)
         self.library = library if library is not None else SolutionLibrary()
         self.k = min(k, workers)
         self.min_dist = min_dist
         self.cold_in_race = cold_in_race
+        self.hint_adaptive = hint_adaptive
 
     def starts_for(self, task, hint: dict | None = None) -> tuple[list[dict], Any, Any, Any]:
         lbx, ubx = self.spec.bounds(task)
@@ -53,8 +54,13 @@ class Planner:
         feat = self.spec.features(task)
         starts = []
         if hint is not None:
-            starts.append({"x0": np.clip(hint["x"], lbx, ubx), "lam_x0": hint["lam_x"], "lam_g0": hint["lam_g"],
-                           "tag": "hint"})
+            x0 = np.clip(hint["x"], lbx, ubx)
+            starts.append({"x0": x0, "lam_x0": hint["lam_x"], "lam_g0": hint["lam_g"], "tag": "hint"})
+            if self.hint_adaptive and self.k >= 3:
+                # the same start under IPOPT's adaptive barrier: on the truck it wins the replans the
+                # monotone barrier finds slow (12900K probe, planner/examples/replan_starts.py)
+                starts.append({"x0": x0, "lam_x0": hint["lam_x"], "lam_g0": hint["lam_g"], "tag": "hint_adapt",
+                               "opts": {"ipopt.mu_strategy": "adaptive"}})
         _, idx = self.library.nearest(feat, self.k - len(starts))
         for rank, j in enumerate(idx, 1):
             e = self.library.entry(int(j))
@@ -67,7 +73,8 @@ class Planner:
     def plan(self, task, learn: bool = True, hint: dict | None = None) -> PlanResult:
         """Plan one task. `hint` (x, lam_x, lam_g; e.g. the previous plan's
         PlanResult.as_hint() in a replanning loop) takes one of the race's
-        slots ahead of the library."""
+        slots ahead of the library, and (hint_adaptive, k >= 3) a second one
+        under IPOPT's adaptive barrier."""
         starts, lbx, ubx, p = self.starts_for(task, hint)
         win, results, wall = self.pool.race(lbx, ubx, p, starts)
         log = [(r.get("tag"), r["status"], r["iter"], r["wall_s"]) for r in results]

@@ -77,3 +77,13 @@ def test_library_roundtrip(tmp_path):
     assert not lib2.add([2.0, 0.01], np.zeros(3), np.zeros(3), np.zeros(2), 9.0, min_dist=0.1)
     assert lib2.add([2.0, 0.01], np.zeros(3), np.zeros(3), np.zeros(2), -1.0, min_dist=0.1)
     assert len(lib2) == 5 and lib2.obj[2] == -1.0
+
+
+def test_hint_races_with_adaptive_twin(planner):
+    rng = np.random.default_rng(2)
+    t = planner.spec.sample(rng)
+    first = planner.plan(t)
+    r = planner.plan(t + 1e-2, hint=first.as_hint())
+    assert r.success
+    tags = [s[0] for s in r.starts]
+    assert tags[:2] == ["hint", "hint_adapt"] and len(tags) == 3
