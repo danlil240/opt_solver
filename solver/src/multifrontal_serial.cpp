@@ -155,15 +155,17 @@ struct TreeParallelBuffers {
   // part (its nodes in postorder and tree), every front's solve step size
   // (p, f) by supernode (the steps' order follows the threads' tasks, which
   // varies), the top steps' rows, and what was derived from them. analysis 0:
-  // none. cur_node_pf: this factorization's sizes.
+  // none. The sizes are kept as an order-independent 64-bit fingerprint of
+  // every (supernode, p, f) (cur_pf_hash: this factorization's): one
+  // comparison instead of an O(ns) array per factorization.
   struct SolveLayoutCache {
     std::uint64_t analysis = 0;
     int threads = 0;
     std::uint64_t gen = 0;
     std::vector<Int> top_nodes;
     std::vector<Int> top_parent;
-    std::vector<std::pair<int, int>> node_pf;
-    std::vector<std::pair<int, int>> cur_node_pf;
+    std::uint64_t pf_hash = 0;
+    std::uint64_t cur_pf_hash = 0;
     std::vector<Int> top_rows;
     int solve_threads = 1;
     bool rows_valid = false;
@@ -1881,14 +1883,23 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         main.growths += tpass[ti].growths;
       }
       if (ctrl.cached_solve_layout && !det) {
-        auto &cur = tbuf.layout.cur_node_pf;
-        cur.assign(ns, {-1, -1});
+        // Sum of a mixed hash per front: independent of which thread ran it.
+        std::uint64_t h = 0;
         for (int t = 0; t < threads; ++t) {
           const FrontPass &P = tpass[static_cast<std::size_t>(t)];
           const auto &steps = *P.steps;
-          for (std::size_t k = 0; k < P.diag_marks.size() && k < steps.size(); ++k)
-            cur[static_cast<std::size_t>(P.diag_marks[k].first)] = {steps[k].p, steps[k].f};
+          for (std::size_t k = 0; k < P.diag_marks.size() && k < steps.size(); ++k) {
+            std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(P.diag_marks[k].first)) *
+                                  0x9E3779B97F4A7C15ull ^
+                              (static_cast<std::uint64_t>(static_cast<std::uint32_t>(steps[k].p)) << 32 |
+                               static_cast<std::uint32_t>(steps[k].f));
+            x ^= x >> 31;
+            x *= 0xBF58476D1CE4E5B9ull;
+            x ^= x >> 29;
+            h += x;
+          }
         }
+        tbuf.layout.cur_pf_hash = h;
       }
       phase_mark("mf_steps");
       // D entries in elimination order: fronts by their position in the
@@ -2073,7 +2084,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (ctrl.cached_solve_layout && !fkeep.solve_subtrees.empty() && ws.tree_par &&
       ws.tree_par->layout.analysis == keep.serial && ws.tree_par->layout.rows_valid) {
     auto &lc = ws.tree_par->layout;
-    bool same = lc.node_pf.size() == ns && lc.node_pf == lc.cur_node_pf;
+    bool same = lc.pf_hash == lc.cur_pf_hash;
     std::size_t at = 0;
     for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin); same && k < fkeep.solve_steps.size(); ++k) {
       const SolveStep &step = fkeep.solve_steps[k];
@@ -2143,7 +2154,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     if (ctrl.cached_solve_layout && ws.tree_par && ws.tree_par->layout.analysis == keep.serial) {
       static std::atomic<std::uint64_t> next_gen{0};
       auto &lc = ws.tree_par->layout;
-      lc.node_pf = lc.cur_node_pf;
+      lc.pf_hash = lc.cur_pf_hash;
       lc.top_rows = fkeep.solve_top_rows;
       lc.solve_threads = fkeep.solve_threads;
       lc.gen = ++next_gen;
