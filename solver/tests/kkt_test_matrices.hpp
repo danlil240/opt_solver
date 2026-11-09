@@ -2,6 +2,7 @@
 // Synthetic KKT matrices shared by the analysis tests.
 
 #include "smf/csc_matrix.hpp"
+#include "smf/factor_posdef.hpp"
 #include "smf/types.hpp"
 
 #include <algorithm>
@@ -125,6 +126,19 @@ inline CscLower cascade_kkt(int g, int m, double hdiag, double spread, double cr
         A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
     }
     return A;
+}
+
+// The factor's values front by front, in solve-step order (postorder in
+// deterministic mode): independent of where each thread's slice of the
+// FactorStore landed (Control::factor_in_place), which follows the dynamic
+// task assignment.
+inline std::vector<double> factor_in_step_order(const FactorKeep &fk) {
+    std::vector<double> v;
+    for (const SolveStep &st : fk.solve_steps) {
+        const double *p = fk.factor_values.data() + st.factor_offset;
+        v.insert(v.end(), p, p + static_cast<std::ptrdiff_t>(st.p) * st.f);
+    }
+    return v;
 }
 
 } // namespace smf

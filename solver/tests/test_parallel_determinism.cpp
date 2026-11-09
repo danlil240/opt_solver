@@ -39,20 +39,7 @@
 
 using namespace smf;
 
-namespace {
-// The factor's values front by front, in solve-step order (postorder in
-// deterministic mode): independent of where each thread's slice of the
-// FactorStore landed (Control::factor_in_place), which follows the dynamic
-// task assignment.
-std::vector<double> factor_in_step_order(const FactorKeep &fk) {
-    std::vector<double> v;
-    for (const SolveStep &st : fk.solve_steps) {
-        const double *p = fk.factor_values.data() + st.factor_offset;
-        v.insert(v.end(), p, p + static_cast<std::ptrdiff_t>(st.p) * st.f);
-    }
-    return v;
-}
-}  // namespace
+// factor_in_step_order: kkt_test_matrices.hpp.
 
 // ---------------------------------------------------------------------------
 // Matrix builders

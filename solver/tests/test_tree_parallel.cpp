@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <random>
@@ -1028,4 +1029,69 @@ TEST(TreeParallel, LayoutCacheClearedAfterAbort) {
     const LayoutRun r = layout_factor(s, *ak, V0, c, fk, ws);
     EXPECT_EQ(r.reused, 0);
     EXPECT_LT(r.resid, 1e-10);
+}
+
+
+// Control::parallel_front_assembly (8T engine Part 5): large top fronts
+// assembled in column blocks on their share's threads give the serial
+// assembly's values bit for bit, so in deterministic mode the factor and the
+// solution are identical with it on and off, at every thread count.
+namespace {
+struct AsmRun {
+    FactorStatus status = FactorStatus::Success;
+    std::vector<double> factor, x;
+    int negative = 0;
+    int asm_fronts = 0;
+    int retries = 0;
+};
+AsmRun factor_with_assembly(const CscLower &A, Control c, bool on) {
+    c.parallel_front_assembly = on;
+    c.parallel_assembly_min_front = 64;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    AsmRun r;
+    if (!ak) {
+        r.status = FactorStatus::Singular;
+        return r;
+    }
+    FactorKeep fk;
+    NumericWorkspace ws;
+    r.status = s.factor(*ak, A, c, info, fk, ws);
+    if (r.status != FactorStatus::Success) return r;
+    r.factor = factor_in_step_order(fk);
+    r.negative = info.num_negative;
+    r.asm_fronts = info.parallel_assembly_fronts;
+    r.retries = info.delay_budget_retries;
+    r.x.resize(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < r.x.size(); ++i) r.x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    SolveWorkspace sws;
+    if (s.solve(fk, c, info, r.x.data(), static_cast<int>(A.n), 1, sws) != 0) r.status = FactorStatus::Singular;
+    return r;
+}
+bool bits_equal(const std::vector<double> &a, const std::vector<double> &b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+}  // namespace
+
+TEST(TreeParallel, ParallelAssemblyBitwiseInDeterministicMode) {
+    const CscLower mats[] = {grid_kkt(200, 7), opf_like_kkt(20000, 8000, 3)};
+    for (const CscLower &A : mats) {
+        for (const int t : {2, 4, 8}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.deterministic = true;
+            c.num_threads = t;
+            c.auto_threads = false;
+            const AsmRun off = factor_with_assembly(A, c, false);
+            const AsmRun on = factor_with_assembly(A, c, true);
+            ASSERT_EQ(off.status, FactorStatus::Success);
+            ASSERT_EQ(on.status, FactorStatus::Success);
+            EXPECT_EQ(off.asm_fronts, 0);
+            EXPECT_GT(on.asm_fronts, 0) << "n " << A.n << ", " << t << " threads: no front assembled in parallel";
+            EXPECT_EQ(on.negative, off.negative);
+            EXPECT_TRUE(bits_equal(on.factor, off.factor)) << "n " << A.n << ", " << t << " threads";
+            EXPECT_TRUE(bits_equal(on.x, off.x)) << "n " << A.n << ", " << t << " threads";
+        }
+    }
 }

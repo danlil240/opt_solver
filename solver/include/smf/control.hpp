@@ -594,6 +594,12 @@ struct Control {
     // step's size and the top steps' rows are unchanged
     // (Info::solve_layout_reused).
     bool           cached_solve_layout       = true;
+    // parallel_front_assembly (8T engine Part 5): a top front of at least
+    // parallel_assembly_min_front rows with a BLAS share of 2 or more is
+    // assembled in column blocks by the share's threads (idle pool threads),
+    // bit for bit the serial assembly (Info::parallel_assembly_fronts).
+    bool           parallel_front_assembly   = false;
+    int            parallel_assembly_min_front = 1024;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
