@@ -2,16 +2,21 @@
 #include "smf/dense_kernel.hpp"
 
 #include "phase_trace.hpp"
+#include "ldlt_lookahead.hpp"
+#include "parallel/tile_tasks.hpp"
+#include "smf/blas_thread_guard.hpp"
 
 #include <chrono>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
@@ -561,30 +566,22 @@ LdltKernelResult ldlt_factor_small_front(double *F, int ld, int f, int num_elig,
     }
 }
 
-LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
-                                   const LdltKernelParams &prm, int8_t *tags,
-                                   double *work, int first) {
-    LdltKernelResult res;
-    int k = first;
+namespace {
+// A panel the lookahead (ldlt_factor_front_lookahead) left stalled: columns
+// [ps, pl), pivots applied up to the k it stalled at, W its panel buffer.
+struct StalledPanel {
+    int ps = 0;
+    int pl = 0;
+    const double *W = nullptr;
+};
 
-    if (f - first < prm.blocked_min_front || prm.nb <= 1) {
-        // Unblocked right-looking: every pivot updates the full trailing
-        // triangle. No BLAS calls; fronts this small live in L1/L2.
-        while (k < num_elig) {
-            PivotChoice pc = select_pivot(F, static_cast<std::size_t>(f), f, k, num_elig, num_elig, prm);
-            bool as_zero = false;
-            if (pc.kind == 0) {
-                if (!(prm.static_pivot > 0.0)) break;
-                int raised = 0;
-                pc = force_static_pivot(F, static_cast<std::size_t>(f), f, k, num_elig, prm, res, raised);
-                as_zero = static_counts_as_zero(raised, prm);
-            }
-            apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res, as_zero);
-        }
-        res.num_accepted = k;
-        return res;
-    }
-
+// ldlt_factor_front's blocked path from column k on: the first loop's panels
+// (plain threshold), the second loop, then the Schur update of the pivots
+// [schur_from, k) (the earlier ones are in already). With `resume` the first
+// loop starts on that stalled panel. k ends at the accepted count.
+void blocked_from(double *F, int f, int num_elig, Int *rows, const LdltKernelParams &prm,
+                  int8_t *tags, double *work, int schur_from, int &k, LdltKernelResult &res,
+                  const StalledPanel *resume) {
     // Blocked: pivots within an nb-wide panel update only the panel columns
     // and are saved (unscaled) in W; the trailing triangle is then updated
     // with one lower-only GEMM per panel.
@@ -622,11 +619,16 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
         const std::size_t sf = static_cast<std::size_t>(f);
         int live = num_elig;
         int k_paired = -1;
+        // resume: a panel the lookahead left stalled at k (its pivots
+        // applied within the panel, its deferred update not yet done).
+        bool resuming = resume != nullptr;
         while (k < live) {
-            const int ps = k;
-            const int pl = std::min(live, ps + prm.nb);
-            bool stalled = false;
-            while (k < pl) {
+            const int ps = resuming ? resume->ps : k;
+            const int pl = resuming ? resume->pl : std::min(live, ps + prm.nb);
+            const double *Wp = resuming ? resume->W : W;
+            bool stalled = resuming;
+            resuming = false;
+            while (!stalled && k < pl) {
                 const PivotChoice pc = select_pivot(F, sf, f, k, num_elig, pl, prm);
                 if (pc.kind == 0) {
                     stalled = true;
@@ -635,7 +637,7 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                 apply_pivot(pc, F, f, k, rows, tags, W, k - ps, pl, prm, res);
             }
             lap(PhaseSum::TopPanel);
-            deferred_update(F, f, ps, k, pl, num_elig, W);
+            deferred_update(F, f, ps, k, pl, num_elig, Wp);
             lap(PhaseSum::TopDefer);
             if (stalled && k != k_paired) {
                 // order: (failed column, partner) row ids, distinct partners.
@@ -724,8 +726,164 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
         }
     }
     lap(PhaseSum::TopPanel);
-    schur_update(F, f, first, k, num_elig, tags);
+    schur_update(F, f, schur_from, k, num_elig, tags);
     lap(PhaseSum::TopSchur);
+}
+} // namespace
+
+LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
+                                   const LdltKernelParams &prm, int8_t *tags,
+                                   double *work, int first) {
+    LdltKernelResult res;
+    int k = first;
+
+    if (f - first < prm.blocked_min_front || prm.nb <= 1) {
+        // Unblocked right-looking: every pivot updates the full trailing
+        // triangle. No BLAS calls; fronts this small live in L1/L2.
+        while (k < num_elig) {
+            PivotChoice pc = select_pivot(F, static_cast<std::size_t>(f), f, k, num_elig, num_elig, prm);
+            bool as_zero = false;
+            if (pc.kind == 0) {
+                if (!(prm.static_pivot > 0.0)) break;
+                int raised = 0;
+                pc = force_static_pivot(F, static_cast<std::size_t>(f), f, k, num_elig, prm, res, raised);
+                as_zero = static_counts_as_zero(raised, prm);
+            }
+            apply_pivot(pc, F, f, k, rows, tags, nullptr, 0, f, prm, res, as_zero);
+        }
+        res.num_accepted = k;
+        return res;
+    }
+
+    blocked_from(F, f, num_elig, rows, prm, tags, work, first, k, res, nullptr);
+    res.num_accepted = k;
+    return res;
+}
+
+namespace {
+// The lookahead's task graph (ldlt_lookahead.hpp): task 3k is P_k, 3k + 1 is
+// N_k, 3k + 2 is R_k.
+class LookaheadDag final : public TileDag {
+public:
+    LookaheadDag(double *F, int f, int num_elig, Int *rows, const LdltKernelParams &prm, int8_t *tags,
+                 double *W0, double *W1, int panels, int rest_threads, int blocktime, bool lap_on,
+                 LdltKernelResult &res)
+        : F_(F), f_(f), ne_(num_elig), rows_(rows), prm_(prm), tags_(tags), panels_(panels),
+          rest_threads_(rest_threads), blocktime_(blocktime), lap_on_(lap_on), res_(res) {
+        W_[0] = W0;
+        W_[1] = W1;
+    }
+    int ps(int p) const { return p * prm_.nb; }
+    int pl(int p) const { return std::min(ne_, (p + 1) * prm_.nb); }
+    double *W(int p) const { return W_[p & 1]; }
+
+    void execute(int t) override {
+        const int p = t / 3, kind = t % 3;
+        // Every task of panel s and later (P: later only) is a no-op once
+        // panel s stalled: the caller continues from it.
+        const int s = stall_panel_.load(std::memory_order_acquire);
+        if (kind == 0 ? (s >= 0 && p > s) : (s >= 0 && p >= s)) return;
+        const auto t0 = lap_on_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        const auto lap = [&](PhaseSum slot) {
+            if (lap_on_)
+                phase_sum_add(slot, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        };
+        if (kind == 0) {
+            BlasThreadGuard g(1, blocktime_);
+            const std::size_t sf = static_cast<std::size_t>(f_);
+            const int a = ps(p), b = pl(p);
+            int k = a;
+            while (k < b) {
+                const PivotChoice pc = select_pivot(F_, sf, f_, k, ne_, b, prm_);
+                if (pc.kind == 0) {
+                    stall_k_ = k;
+                    stall_panel_.store(p, std::memory_order_release);
+                    break;
+                }
+                apply_pivot(pc, F_, f_, k, rows_, tags_, W(p), k - a, b, prm_, res_);
+            }
+            lap(PhaseSum::TopPanel);
+        } else if (kind == 1) {
+            BlasThreadGuard g(1, blocktime_);
+            deferred_update(F_, f_, ps(p), pl(p), pl(p), pl(p + 1), W(p));
+            lap(PhaseSum::TopDefer);
+        } else {
+            BlasThreadGuard g(rest_threads_, blocktime_);
+            deferred_update(F_, f_, ps(p), pl(p), pl(p + 1), ne_, W(p));
+            schur_update(F_, f_, ps(p), pl(p), ne_, tags_);
+            lap(PhaseSum::TopSchur);
+        }
+    }
+    void release(int t, TileRunner &runner) override {
+        const int p = t / 3, kind = t % 3;
+        if (kind == 0) {
+            runner.release(3 * p + 1);
+            runner.release(3 * p + 2);
+        } else if (kind == 1) {
+            if (p + 1 < panels_) runner.release(3 * (p + 1));
+        } else if (p + 1 < panels_) {
+            runner.release(3 * (p + 1) + 1);
+            runner.release(3 * (p + 1) + 2);
+        }
+    }
+    bool urgent(int t) const override { return t % 3 != 2; }
+
+    // The panel that stalled (-1: none), written by its P task while the
+    // previous panel's R task may read it; where it stalled.
+    std::atomic<int> stall_panel_{-1};
+    int stall_k_ = 0;
+
+private:
+    double *F_;
+    int f_, ne_;
+    Int *rows_;
+    const LdltKernelParams &prm_;
+    int8_t *tags_;
+    double *W_[2];
+    int panels_, rest_threads_, blocktime_;
+    bool lap_on_;
+    LdltKernelResult &res_;
+};
+} // namespace
+
+LdltKernelResult ldlt_factor_front_lookahead(double *F, int f, int num_elig, Int *rows,
+                                             const LdltKernelParams &prm, int8_t *tags, double *work,
+                                             int nthreads, TileHelpers *helpers) {
+    const bool plain = !prm.posdef && prm.static_pivot == 0.0 && prm.min_abs_pivot == 0.0;
+    if (nthreads < 2 || !plain || f < prm.blocked_min_front || prm.nb <= 1 || num_elig <= prm.nb)
+        return ldlt_factor_front(F, f, num_elig, rows, prm, tags, work);
+    LdltKernelResult res;
+    const int panels = (num_elig + prm.nb - 1) / prm.nb;
+    double *W0 = work;
+    double *W1 = work + ldlt_work_size(f, prm);
+    // The caller's blocktime for the tasks' own BLAS guards (a helper thread
+    // may never have set one).
+    const int blocktime = mkl_blocktime_get();
+    LookaheadDag dag(F, f, num_elig, rows, prm, tags, W0, W1, panels, std::max(1, nthreads - 1), blocktime,
+                     phase_in_top_front(), res);
+    const int total = 3 * panels;
+    std::vector<int> scratch(4 * static_cast<std::size_t>(total), 0);
+    int *pending = scratch.data();
+    int *ready_hi = pending + total;
+    int *ready_lo = ready_hi + total;
+    for (int p = 0; p < panels; ++p) {
+        pending[3 * p] = p == 0 ? 0 : 1;          // P_p after N_{p-1}
+        pending[3 * p + 1] = p == 0 ? 1 : 2;      // N_p after P_p, R_{p-1}
+        pending[3 * p + 2] = p == 0 ? 1 : 2;      // R_p after P_p, R_{p-1}
+    }
+    const int root = 0;
+    TileRunner runner;
+    runner.run(dag, pending, &root, 1, total, ready_hi, ready_lo, nthreads, helpers);
+    int k = 0;
+    if (dag.stall_panel_.load() >= 0) {
+        const int sp = dag.stall_panel_.load();
+        k = dag.stall_k_;
+        const StalledPanel resume{dag.ps(sp), dag.pl(sp), dag.W(sp)};
+        // Panels before sp have their Schur chunks in.
+        blocked_from(F, f, num_elig, rows, prm, tags, work, dag.ps(sp), k, res, &resume);
+    } else {
+        k = num_elig;
+    }
     res.num_accepted = k;
     return res;
 }

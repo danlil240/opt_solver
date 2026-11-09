@@ -338,6 +338,12 @@ target_include_directories(test_front_assembly PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(test_front_assembly PRIVATE smf GTest::gtest_main)
 add_test(NAME FrontAssembly COMMAND test_front_assembly)
 
+# TPP kernel with panel lookahead (8T engine Part 6).
+add_executable(test_ldlt_lookahead test_ldlt_lookahead.cpp)
+target_include_directories(test_ldlt_lookahead PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_ldlt_lookahead PRIVATE smf GTest::gtest_main)
+add_test(NAME LdltLookahead COMMAND test_ldlt_lookahead)
+
 # Thread-count model and tree partition of the subtree-parallel factorization.
 add_executable(test_thread_plan test_thread_plan.cpp)
 target_include_directories(test_thread_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
