@@ -155,3 +155,29 @@ TEST(FactorStore, SingleSliceDetachKeepsDataValid) {
     EXPECT_EQ(s.data()[99], 99.0);
     s.data()[99999] = 1.0;  // writable through data()
 }
+
+// A copy made when no range can be reserved keeps every slice at its original
+// offset from data() (the factor's offsets were taken there), in one block.
+TEST(FactorStore, CopyWithoutReservationKeepsOffsets) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(2, 1000));
+    ASSERT_TRUE(s.slice(0).grow(10));
+    ASSERT_TRUE(s.slice(1).grow(20));
+    for (std::size_t k = 0; k < 10; ++k) s.slice(0).data()[k] = static_cast<double>(k);
+    for (std::size_t k = 0; k < 20; ++k) s.slice(1).data()[k] = 100.0 + static_cast<double>(k);
+    const std::size_t off1 = s.slice_offset(1);
+#ifdef _WIN32
+    _putenv_s("SMF_TEST_STORE_FAIL_RESERVE", "1");
+#else
+    setenv("SMF_TEST_STORE_FAIL_RESERVE", "1", 1);
+#endif
+    const FactorStore<double> c(s);
+#ifdef _WIN32
+    _putenv_s("SMF_TEST_STORE_FAIL_RESERVE", "");
+#else
+    unsetenv("SMF_TEST_STORE_FAIL_RESERVE");
+#endif
+    ASSERT_GE(c.size(), off1 + 20);
+    EXPECT_EQ(c.data()[3], 3.0);
+    EXPECT_EQ(c.data()[off1 + 19], 119.0);
+}
