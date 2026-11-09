@@ -84,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     meta = score.manifest_case_index(manifest["cases"])
     A, B = collect(pathlib.Path(args.a)), collect(pathlib.Path(args.b))
 
+    def num(x: Any) -> str:
+        return f"{x:.2f}" if isinstance(x, (int, float)) and x == x else "n/a"
+
     rows = []
     for key in sorted(set(A) & set(B), key=lambda k: (k[2], k[0], k[1])):
         c = meta.get(key[:2])
@@ -108,10 +111,10 @@ def main(argv: list[str] | None = None) -> int:
         rr = (b["rss"] / a["rss"]) if a["rss"] and b["rss"] else math.nan
         lines.append(
             f"| {key[0]} | {TRACK_LABEL.get(key[1], key[1][:5])} | {key[2]} | {c.get('class')} | {c.get('split')} | "
-            f"{a[m]:.2f} | {b[m]:.2f} | {ratio:.3f} | {a['factor']:.2f} | {b['factor']:.2f} | "
+            f"{num(a[m])} | {num(b[m])} | {ratio:.3f} | {a['factor']:.2f} | {b['factor']:.2f} | "
             f"{fr:.3f} | {a['delays']}>{b['delays']} | {er:.3f} | {flr:.3f} | {rr:.3f} | "
             f"{'y' if a['ok'] else 'N'}/{'y' if b['ok'] else 'N'} |")
-        if a["ok"] and b["ok"]:
+        if a["ok"] and b["ok"] and a[m] and b[m]:  # a missing timing (no refactorization): n/a
             for g in ((key[2], c.get("class"), c.get("split")), (key[2], "all", c.get("split"))):
                 groups[g].append((b[m], a[m]))
         elif a["ok"] != b["ok"]:

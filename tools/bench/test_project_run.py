@@ -48,3 +48,22 @@ def test_gate_sets():
     assert len(project_run.STAGE1_WINS) == 6
     assert project_run.STAGE1_WINS < project_run.STAGE2_WINS
     assert len(project_run.STAGE2_WINS) == 8
+
+
+def test_cli_keeps_only_the_manifest_tracks(tmp_path, capsys):
+    import json
+    man = tmp_path / "m.json"
+    man.write_text(json.dumps({"cases": [{"matrix_id": "a", "track": "ipopt", "factorizations": 3}]}))
+    recs = [dict(rec("a", 8, "smf", 1, 2, 2, 1), track="ipopt"),
+            dict(rec("a", 8, "mkl_pardiso", 1, 1, 1, 1), track="ipopt"),
+            dict(rec("a", 8, "smf", 1, 1, 1, 1), track="recommended"),
+            dict(rec("a", 8, "mkl_pardiso", 100, 100, 100, 1), track="recommended")]
+    d = tmp_path / "r"
+    d.mkdir()
+    (d / "records.jsonl").write_text("\n".join(json.dumps(r) for r in recs))
+    rc = project_run.main(["--smf", str(d), "--rivals", str(d), "--manifest", str(man), "--threads", "8"])
+    out = capsys.readouterr().out
+    # the ipopt track alone: (1 + 2 + 2 * 2) / (1 + 1 + 2 * 1); pooled with the
+    # recommended records the medians would blend into another ratio
+    assert " 1.750 " in out
+    assert rc == 0

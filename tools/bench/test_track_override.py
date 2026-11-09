@@ -265,3 +265,28 @@ class AbSeqStepsTests(unittest.TestCase):
         r = rec("a", 10.0)
         r["refactor_ms"] = 2.5
         self.assertEqual(ab_compare.summarize([r])["refactor"], 2.5)
+
+
+class AbCompareMissingRefactorTests(unittest.TestCase):
+    def test_refactor_metric_tolerates_missing_timings(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": CASES}))
+            for side, refac in (("a", 2.0), ("b", None)):
+                d = td / side
+                d.mkdir()
+                rows = []
+                for m in ("a", "b"):
+                    r = rec(m, 10.0, track="recommended")
+                    if refac is not None and m == "a":
+                        r["refactor_ms"] = refac
+                    rows.append(json.dumps(r))
+                (d / "records.jsonl").write_text("\n".join(rows))
+            out = td / "out.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = ab_compare.main(["--a", str(td / "a"), "--b", str(td / "b"), "--manifest", str(manifest),
+                                      "--metric", "refactor", "--output", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertIn("n/a", out.read_text())

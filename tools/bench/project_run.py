@@ -93,8 +93,12 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     man = json.loads(pathlib.Path(a.manifest).read_text(encoding="utf-8"))
     nf = {c["matrix_id"]: int(c["factorizations"]) for c in man["cases"] if "factorizations" in c}
-    smf = [r for r in load(a.smf) if r.get("solver_id") == "smf"]
-    riv = [r for r in load(a.rivals) if r.get("solver_id") == a.rival]
+    # Only the manifest's (case, track) pairs: board results hold the same
+    # matrix on several tracks, whose timings must not blend into one median.
+    tracks = {(c["matrix_id"], c.get("track")) for c in man["cases"]}
+    keep = lambda r: (r.get("matrix_id"), r.get("track")) in tracks  # noqa: E731
+    smf = [r for r in load(a.smf) if r.get("solver_id") == "smf" and keep(r)]
+    riv = [r for r in load(a.rivals) if r.get("solver_id") == a.rival and keep(r)]
     recs = smf + riv
     proj = project(recs, nf)
     rat = ratios(proj, a.threads, a.rival)
