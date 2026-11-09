@@ -1201,7 +1201,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     have_sums = true;
     return buffers().sums;
   };
-  // The delay budget's regions: the flops-only view, whatever the plan's.
+  // The flops-only view: the delay budget's regions and the task partition
+  // (which fronts form the subtrees and which the top part) use it, whatever
+  // the plan's. Front costs price the thread count only: priced, mid-size
+  // fronts weigh more and the largest-first split moved subtree roots into
+  // the serial top part (obstacle_surface_200: 33 top fronts, not 23, 7.6%
+  // slower at 8 threads).
   TreeView budget_tv;
   bool have_budget_tv = false;
   const auto budget_view = [&]() -> const TreeView & {
@@ -1300,7 +1305,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pp.analysis = 0;  // until rebuilt
       pp.ranges = budget ? partition_subtrees(budget_view(), budget_sums(), nthreads,
                                               kBudgetRegionMinWork, pp.top)
-                         : partition_tasks(view(), sums(), nthreads, thread_costs.min_work, pp.top);
+                         : partition_tasks(budget_view(), budget_sums(), nthreads, thread_costs.min_work,
+                                           pp.top);
       pp.analysis = keep.serial;
       pp.ns = ns;
       pp.threads = nthreads;

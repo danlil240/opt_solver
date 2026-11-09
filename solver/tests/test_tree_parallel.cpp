@@ -833,3 +833,32 @@ TEST(TreeParallel, PlanCacheSurvivesAbort) {
     EXPECT_EQ(again.plan_from_realized, 0);
     EXPECT_EQ(again.threads_used, first.threads_used);
 }
+
+// Control::thread_plan_front_costs prices the thread count only: the task
+// partition (which fronts form the subtrees and which the serial top part)
+// stays the flops one. Priced, mid-size fronts weigh more and the largest-
+// first split moved subtree roots into the top part (obstacle_surface_200:
+// 33 top fronts instead of 23, 7.6% slower at 8 threads).
+TEST(TreeParallel, FrontCostsKeepTheFlopsPartition) {
+    const CscLower A = grid_kkt(200, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;  // the same thread count both ways
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    int top[2] = {0, 0};
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        ASSERT_GT(fi.threads_used, 1) << "premise: tree-parallel";
+        top[costs ? 1 : 0] = fi.top_part_fronts;
+    }
+    EXPECT_EQ(top[0], top[1]);
+}
