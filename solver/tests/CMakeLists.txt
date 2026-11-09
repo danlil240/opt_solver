@@ -342,6 +342,9 @@ add_test(NAME ThreadPlan COMMAND test_thread_plan)
 add_executable(test_factor_store test_factor_store.cpp)
 target_link_libraries(test_factor_store PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorStore COMMAND test_factor_store)
+add_executable(test_factor_store_engine test_factor_store_engine.cpp)
+target_link_libraries(test_factor_store_engine PRIVATE smf GTest::gtest_main)
+add_test(NAME FactorStoreEngine COMMAND test_factor_store_engine)
 
 # A warm refactorization allocates no matrix-sized buffer (replaces the
 # global operator new: its own executable).

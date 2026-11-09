@@ -1146,19 +1146,27 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   reserve_plan(ws.pivot_tags, max_f);
   reserve_plan(ws.kernel_work, max_work);
 
-  // The FactorKeep's factor: one slice reserved for 4x the predicted factor
-  // plus the largest front (delays grow fronts; past it the slice moves to
-  // private memory). An unchanged reservation keeps its committed pages, so a
-  // refactorization neither faults nor zero-fills them again.
-  fkeep.factor_values.reserve_slices(1, 4 * pred_factor + max_f * max_f);
-  fkeep.solve_row_indices.reserve_slices(1, 4 * pred_rows + max_f);
-  auto &fv = fkeep.factor_values.slice(0);
-  auto &sri = fkeep.solve_row_indices.slice(0);
-  {
-    int64_t g = 0;
-    grow(fv, pred_factor, g);
-    grow(sri, pred_rows, g);
+  // The FactorKeep's factor: slices reserved for 4x the predicted factor plus
+  // the largest front each (delays grow fronts; past it a slice moves to
+  // private memory). One slice for a serial factorization or one gathered at
+  // the end; with Control::factor_in_place one per thread, reserved once the
+  // thread count is known. An unchanged reservation keeps its committed pages,
+  // so a refactorization neither faults nor zero-fills them again.
+  // SMF_TEST_STORE_SLICE_CAP (tests, read per call) caps the slices.
+  std::size_t fv_cap = 4 * pred_factor + max_f * max_f;
+  std::size_t sri_cap = 4 * pred_rows + max_f;
+  if (const char *cap = std::getenv("SMF_TEST_STORE_SLICE_CAP"); cap != nullptr && *cap != '\0') {
+    fv_cap = std::min<std::size_t>(fv_cap, static_cast<std::size_t>(std::atoll(cap)));
+    sri_cap = std::min<std::size_t>(sri_cap, static_cast<std::size_t>(std::atoll(cap)));
   }
+  FactorSlice<double> *fv_slice = nullptr;
+  FactorSlice<Int> *sri_slice = nullptr;
+  const auto bind_store = [&](int slices) {
+    fkeep.factor_values.reserve_slices(slices, fv_cap);
+    fkeep.solve_row_indices.reserve_slices(slices, sri_cap);
+    fv_slice = &fkeep.factor_values.slice(0);
+    sri_slice = &fkeep.solve_row_indices.slice(0);
+  };
   fkeep.factor_col_ptr.resize(ns + 1);
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
@@ -1176,8 +1184,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   if (!posdef) fkeep.diag_entries.reserve(n);
 
   FrontPass main;
-  main.fv = &fv;
-  main.sri = &sri;
+  main.fv = nullptr;  // bound with the store (bind_store) once the thread count is known
+  main.sri = nullptr;
   main.steps = &fkeep.solve_steps;
   main.diag = &fkeep.diag_entries;
   main.cbv = &ws.cb_values;
@@ -1405,6 +1413,19 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         at >= 9.0e18 ? std::numeric_limits<long long>::max() : static_cast<long long>(at), works);
   }
 
+  const bool in_place = ctrl.factor_in_place && threads > 1;
+  if (!in_place) {
+    bind_store(1);
+    main.fv = fv_slice;
+    main.sri = sri_slice;
+    if (threads <= 1) {
+      int64_t g = 0;
+      grow(*fv_slice, pred_factor, g);
+      grow(*sri_slice, pred_rows, g);
+    }
+  } else {
+    bind_store(threads);
+  }
   if (threads <= 1) {
     if (det_tc != nullptr) {
       if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
@@ -1465,12 +1486,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       b.steps.clear();
       b.diag.clear();
       FrontPass &P = tpass[static_cast<std::size_t>(t)];
-      if (b.fv.slices() == 0) {  // once: reserved like the FactorKeep's
-        b.fv.reserve_slices(1, 4 * pred_factor + max_f * max_f);
-        b.sri.reserve_slices(1, 4 * pred_rows + max_f);
+      if (in_place) {  // the FactorKeep's own slice t: no gather
+        P.fv = &fkeep.factor_values.slice(t);
+        P.sri = &fkeep.solve_row_indices.slice(t);
+      } else {
+        if (b.fv.slices() == 0) {  // once: reserved like the FactorKeep's
+          b.fv.reserve_slices(1, fv_cap);
+          b.sri.reserve_slices(1, sri_cap);
+        }
+        P.fv = &b.fv.slice(0);
+        P.sri = &b.sri.slice(0);
       }
-      P.fv = &b.fv.slice(0);
-      P.sri = &b.sri.slice(0);
       P.steps = &b.steps;
       P.diag = &b.diag;
       P.cbv = &b.cbv;
@@ -1757,20 +1783,49 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
       phase_mark("mf_p3");
-      const auto phase3_start = PhaseClock::now();
-      grow(fv, main.fo, main.growths);
-      grow(sri, main.ro, main.growths);
-      const bool in_pieces =
-          main.fo * sizeof(double) + main.ro * sizeof(Int) <= kCachedGatherBytes;
-      run_pool([&](int tid) {
-        const std::size_t ti = static_cast<std::size_t>(tid);
-        const FrontPass &P = tpass[ti];
-        assert(P.fo <= P.fv->size() && fbase[ti] + P.fo <= fv.size());
-        assert(P.ro <= P.sri->size() && rbase[ti] + P.ro <= sri.size());
-        gather_copy(P.fv->data(), P.fo, fv.data() + fbase[ti], in_pieces);
-        gather_copy(P.sri->data(), P.ro, sri.data() + rbase[ti], in_pieces);
-      });
-      st.gather_seconds = seconds_since(phase3_start);
+      if (in_place) {
+        // Each slice holds exactly its pass's fill. Attached slices are the
+        // final layout (offsets from the store's base); a slice that moved
+        // to private memory makes the store gather into one array, in slice
+        // order: the prefix-sum bases above.
+        for (int t = 0; t < threads; ++t) {
+          const std::size_t ti = static_cast<std::size_t>(t);
+          fkeep.factor_values.slice(t).grow(tpass[ti].fo);
+          fkeep.solve_row_indices.slice(t).grow(tpass[ti].ro);
+        }
+        if (fkeep.factor_values.all_attached() && fkeep.solve_row_indices.all_attached()) {
+          for (int t = 0; t < threads; ++t) {
+            fbase[static_cast<std::size_t>(t)] = fkeep.factor_values.slice_offset(t);
+            rbase[static_cast<std::size_t>(t)] = fkeep.solve_row_indices.slice_offset(t);
+          }
+          main.fo = fkeep.factor_values.size();
+          main.ro = fkeep.solve_row_indices.size();
+        } else {
+          const auto regather_start = PhaseClock::now();
+          fkeep.factor_values.regather();
+          fkeep.solve_row_indices.regather();
+          ++st.factor_store_regathers;
+          ++main.growths;
+          st.gather_seconds = seconds_since(regather_start);
+        }
+      } else {
+        const auto phase3_start = PhaseClock::now();
+        grow(*fv_slice, main.fo, main.growths);
+        grow(*sri_slice, main.ro, main.growths);
+        double *const fvd = fv_slice->data();
+        Int *const srid = sri_slice->data();
+        const bool in_pieces =
+            main.fo * sizeof(double) + main.ro * sizeof(Int) <= kCachedGatherBytes;
+        run_pool([&](int tid) {
+          const std::size_t ti = static_cast<std::size_t>(tid);
+          const FrontPass &P = tpass[ti];
+          assert(P.fo <= P.fv->size() && fbase[ti] + P.fo <= fv_slice->size());
+          assert(P.ro <= P.sri->size() && rbase[ti] + P.ro <= sri_slice->size());
+          gather_copy(P.fv->data(), P.fo, fvd + fbase[ti], in_pieces);
+          gather_copy(P.sri->data(), P.ro, srid + rbase[ti], in_pieces);
+        });
+        st.gather_seconds = seconds_since(phase3_start);
+      }
       phase_mark("mf_gathered");
       const auto relocated = [&](int t, SolveStep step) {
         step.factor_offset += static_cast<LongInt>(fbase[static_cast<std::size_t>(t)]);
@@ -1898,6 +1953,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     fkeep.solve_threads = 1;
     std::fill(ws.cb_size.begin(), ws.cb_size.end(), Int{0});
     std::fill(ws.cb_delayed.begin(), ws.cb_delayed.end(), Int{0});
+    if (in_place) {
+      fkeep.factor_values.clear();
+      fkeep.solve_row_indices.clear();
+    }
     return status;
   }
   fkeep.factor_col_ptr[ns] = static_cast<LongInt>(main.fo);
@@ -1912,8 +1971,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     ws.realized_analysis = keep.serial;
     ws.realized_valid = true;
   }
-  fv.grow(main.fo);
-  sri.grow(main.ro);
+  if (in_place) {
+    fkeep.factor_values.trim();
+    fkeep.solve_row_indices.trim();
+  } else {
+    fv_slice->grow(main.fo);
+    sri_slice->grow(main.ro);
+  }
   if (!fkeep.solve_subtrees.empty()) {
     // Pivot rows of the top part (delayed subtree pivots included): the
     // parallel forward solve sends subtree updates to them through
@@ -1925,7 +1989,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin);
          k < fkeep.solve_steps.size(); ++k) {
       const SolveStep &step = fkeep.solve_steps[k];
-      const Int *rows = sri.data() + step.row_offset;
+      const Int *rows = fkeep.solve_row_indices.data() + step.row_offset;
       for (int i = 0; i < step.p; ++i) {
         fkeep.solve_top_slot[static_cast<std::size_t>(rows[i])] =
             static_cast<Int>(fkeep.solve_top_rows.size());

@@ -657,6 +657,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.top_part_fronts = st.top_part_fronts;
       info.top_part_queue_pops = st.top_part_queue_pops;
       info.threads_used = st.threads_used;
+      info.factor_store_regathers = st.factor_store_regathers;
       info.plan_from_realized = st.plan_from_realized;
       info.subtree_seconds = st.subtree_seconds;
       info.top_seconds = st.top_seconds;
@@ -682,6 +683,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.top_part_fronts = st.top_part_fronts;
     info.top_part_queue_pops = st.top_part_queue_pops;
     info.threads_used = st.threads_used;
+    info.factor_store_regathers = st.factor_store_regathers;
     info.plan_from_realized = st.plan_from_realized;
     info.subtree_seconds = st.subtree_seconds;
     info.top_seconds = st.top_seconds;
@@ -718,6 +720,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.top_part_fronts = st.top_part_fronts;
     info.top_part_queue_pops = st.top_part_queue_pops;
     info.threads_used = st.threads_used;
+    info.factor_store_regathers = st.factor_store_regathers;
     info.plan_from_realized = st.plan_from_realized;
     info.subtree_seconds = st.subtree_seconds;
     info.top_seconds = st.top_seconds;

@@ -467,6 +467,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_part_fronts = st.top_part_fronts;
   info.top_part_queue_pops = st.top_part_queue_pops;
   info.threads_used = st.threads_used;
+  info.factor_store_regathers = st.factor_store_regathers;
   info.subtree_seconds = st.subtree_seconds;
   info.top_seconds = st.top_seconds;
   info.gather_seconds = st.gather_seconds;

@@ -678,6 +678,8 @@ int main(int argc, char **argv) {
         ctrl.thread_plan_front_costs = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_PARALLEL_VALUE_PREP"))
         ctrl.parallel_value_prep = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_FACTOR_IN_PLACE"))
+        ctrl.factor_in_place = std::atoi(e) != 0;
     // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.
