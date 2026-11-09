@@ -1749,6 +1749,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
                                          ws.tree_par->root_rows.growths() - arena_growths0);
     phase_mark("mf_p2");
+    phase_sum_discard();  // an earlier factorization that stopped before its flush
     const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)
