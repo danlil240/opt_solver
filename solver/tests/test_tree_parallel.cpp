@@ -864,6 +864,35 @@ TEST(TreeParallel, FrontCostsKeepTheFlopsPartition) {
     EXPECT_EQ(top[0], top[1]);
 }
 
+// A forced thread count (auto_threads off) keeps the flops floor: a tree
+// below it stays serial with front costs on, as with them off.
+TEST(TreeParallel, ForcedThreadsKeepTheFloorWithFrontCosts) {
+  // Sizes up to just under the floor, where priced work passes it first.
+  for (const int g : {40, 80, 110, 130, 150, 170}) {
+    const CscLower A = grid_kkt(g, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    if (i.predicted_flops >= 2e7) continue;  // above the floor
+    ASSERT_GE(ak->num_supernodes(), 2) << "premise: a tree to split";
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(fi.threads_used, 1) << "grid " << g << " flops " << i.predicted_flops
+                                      << " front costs " << costs;
+    }
+  }
+}
+
 // Front costs price only trees the flops model sent to one thread (below its
 // 2e7 floor: PGLib's shape). Above it the fitted flops plan stands: priced,
 // mid-size subtree fronts weighed more than the top's and the plan took 16

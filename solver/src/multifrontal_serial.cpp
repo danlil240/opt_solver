@@ -1243,7 +1243,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const ThreadCosts thread_costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
                                  ctrl.thread_cost_per_split_front_thread,
                                  ctrl.thread_split_scaling_cap,
-                                 front_costs ? 0.0 : kBudgetRegionMinWork};
+                                 // Front costs replace the floor only in the
+                                 // auto plan; a forced thread count keeps it.
+                                 front_costs && ctrl.auto_threads ? 0.0 : kBudgetRegionMinWork};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
   // Control::thread_plan_front_costs: the previous successful factorization
   // of this analysis left its realized front sizes; when their total moved
