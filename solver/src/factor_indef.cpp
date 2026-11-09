@@ -501,8 +501,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     // the permuted slots: storing equals the zero-fill and add before.
     const bool direct = !keep.orig_to_perm_idx.empty() &&
                         ws.perm_values.size() == ws.clean_values.size();
-    if (!direct && !keep.orig_to_perm_idx.empty())
-      std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
+    if (!direct && !keep.orig_to_perm_idx.empty()) {
+      double *const pz = ws.perm_values.data();
+      parallel_ranges(ws, prep_threads, ws.perm_values.size(), 0,
+                      [pz](int, std::size_t b, std::size_t e) { std::fill(pz + b, pz + e, 0.0); });
+    }
     double *const cv = ws.clean_values.data();
     double *const pv = ws.perm_values.data();
     const Int *const to_perm = keep.orig_to_perm_idx.empty() ? nullptr : keep.orig_to_perm_idx.data();
@@ -524,9 +527,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       return m;
     };
     double vmax = 0.0;
-    // A one-to-one scatter (direct) or none: column ranges of about equal
-    // entry counts run on the pool, each with its own max (exact in any order).
-    if (prep_threads > 1 && (direct || to_perm == nullptr)) {
+    // Column ranges of about equal entry counts run on the pool, each with
+    // its own max (exact in any order). The cleaned pattern has no
+    // duplicates, so even the += scatter into a larger permuted pattern
+    // (not direct) gives every slot one writer, adding to its 0.0 as before.
+    if (prep_threads > 1) {
       const std::vector<Int> bounds = balanced_columns(keep.cleaned.col_ptr, keep.n, prep_threads);
       std::vector<double> range_max(static_cast<std::size_t>(prep_threads), 0.0);
       parallel_ranges(ws, prep_threads, static_cast<std::size_t>(prep_threads), 0,

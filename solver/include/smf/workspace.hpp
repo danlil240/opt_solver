@@ -54,6 +54,11 @@ struct NumericWorkspace {
     std::vector<double> slack_values;
     std::vector<double> clean_values;
     std::vector<double> perm_values;
+    /// Control::parallel_value_prep: whether the analysis' original-to-
+    /// cleaned map hits every cleaned slot at most once (no duplicate input
+    /// entries), so its scatter can run over ranges; checked once per analysis.
+    std::uint64_t orig_clean_injective_analysis = 0;
+    bool orig_clean_injective = false;
     std::vector<double> front_scratch;
     std::vector<Int> row_map_scratch;
     std::vector<FrontResult> node_results;

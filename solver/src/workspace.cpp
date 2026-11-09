@@ -182,12 +182,44 @@ ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &val
         // Only the cleaned copy: the caller scatters its scaled values.
         ws.perm_values.resize(perm_nnz);
         if (via_orig) {
-            ws.clean_values.assign(clean_nnz, 0.0);
             const Int *to_clean = ak.orig_to_clean_idx.data();
+            // One input entry per cleaned slot (the usual case: no duplicate
+            // entries) lets ranges scatter in parallel, each slot added to
+            // its 0.0 once, as the serial loop does.
+            bool injective = false;
+            if (T > 1) {
+                if (ws.orig_clean_injective_analysis != ak.serial) {
+                    std::vector<char> seen(clean_nnz, 0);
+                    bool inj = true;
+                    for (std::size_t k = 0; inj && k < nv; ++k) {
+                        const Int c_slot = to_clean[k];
+                        if (c_slot < 0) continue;
+                        inj = seen[static_cast<std::size_t>(c_slot)] == 0;
+                        seen[static_cast<std::size_t>(c_slot)] = 1;
+                    }
+                    ws.orig_clean_injective = inj;
+                    ws.orig_clean_injective_analysis = ak.serial;
+                }
+                injective = ws.orig_clean_injective;
+            }
+            ws.clean_values.resize(clean_nnz);
             double *cv = ws.clean_values.data();
-            for (std::size_t k = 0; k < nv; ++k) {
-                const Int c_slot = to_clean[k];
-                if (c_slot >= 0) cv[c_slot] += uv[k];
+            if (injective) {
+                parallel_ranges(ws, T, clean_nnz, 0, [&](int, std::size_t b, std::size_t e) {
+                    std::fill(cv + b, cv + e, 0.0);
+                });
+                parallel_ranges(ws, T, nv, 0, [&](int, std::size_t b, std::size_t e) {
+                    for (std::size_t k = b; k < e; ++k) {
+                        const Int c_slot = to_clean[k];
+                        if (c_slot >= 0) cv[c_slot] += uv[k];
+                    }
+                });
+            } else {
+                std::fill(cv, cv + clean_nnz, 0.0);
+                for (std::size_t k = 0; k < nv; ++k) {
+                    const Int c_slot = to_clean[k];
+                    if (c_slot >= 0) cv[c_slot] += uv[k];
+                }
             }
         } else {
             ws.clean_values.resize(nv);
