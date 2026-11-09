@@ -173,8 +173,9 @@ Files: new `include/smf/factor_store.hpp` and `src/factor_store.cpp`, `FactorKee
 - Each slice's address space is sized so that any one thread could hold the whole factor: 4x the predicted factor plus
   the largest front squared. Address space is cheap: 16 slices of a 4 GB factor reserve about 260 GB of the 128 TB
   available.
-- If a slice still runs out (delays more than quadrupled the factor), the factorization restarts on the fallback path
-  below and counts it in the stats. The next factorization reserves from the realized size.
+- If a slice still runs out (delays more than quadrupled the factor), that slice moves to a private reservation and
+  the factorization ends with today's copy into one contiguous range ("regather"), counted in the stats. There is no
+  restart. The next factorization reserves from the realized size.
 - After a factorization, a slice whose committed memory exceeds its use by more than 25% (and more than 16 MB)
   releases the excess.
 
@@ -198,7 +199,8 @@ new `used()`.
 
 **One thread.** One slice, exactly today's serial path.
 
-**Fallback.** If the reservation fails, the engine falls back to today's per-thread buffers plus the gather. That path
+**Fallback.** If the reservation fails, every slice is private and the factorization regathers, which is today's
+per-thread buffers plus the gather. That path
 stays, and a test switch forces it.
 
 **Target:**
