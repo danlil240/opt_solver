@@ -8,6 +8,7 @@
 #include "parallel/chunk_arena.hpp"
 #include "parallel/tile_tasks.hpp"
 #include "parallel/thread_plan.hpp"
+#include "phase_trace.hpp"
 #include "parallel/top_scheduler.hpp"
 
 #include <algorithm>
@@ -1299,6 +1300,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     }
     BudgetState budget;  // the running state of the current region
     std::size_t k = 0;
+    phase_mark("mf_setup");
     for (; k < keep.postorder.size(); ++k) {
       const Int sk = keep.postorder[k];
       BudgetState top_state;
@@ -1407,6 +1409,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // blocks lived there.
     const std::size_t arena_growths0 =
         ws.tree_par->root_values.growths() + ws.tree_par->root_rows.growths();
+    phase_mark("mf_setup");
     const auto phase1_start = PhaseClock::now();
     // Thread t takes task t first, then the next one left: the heaviest
     // tasks (the first, heaviest first) land on the same passes in every
@@ -1483,6 +1486,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     st.subtree_seconds = seconds_since(phase1_start);
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
                                          ws.tree_par->root_rows.growths() - arena_growths0);
+    phase_mark("mf_p2");
     const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)
@@ -1620,6 +1624,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       }
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
+      phase_mark("mf_p3");
       const auto phase3_start = PhaseClock::now();
       grow(fv, main.fo, main.growths);
       grow(sri, main.ro, main.growths);
@@ -1634,6 +1639,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         gather_copy(P.sri->data(), P.ro, sri.data() + rbase[ti], in_pieces);
       });
       st.gather_seconds = seconds_since(phase3_start);
+      phase_mark("mf_gathered");
       const auto relocated = [&](int t, SolveStep step) {
         step.factor_offset += static_cast<LongInt>(fbase[static_cast<std::size_t>(t)]);
         step.row_offset += static_cast<LongInt>(rbase[static_cast<std::size_t>(t)]);
@@ -1656,6 +1662,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         add_stats(st, tpass[ti].st);
         main.growths += tpass[ti].growths;
       }
+      phase_mark("mf_steps");
       // D entries in elimination order: fronts by their position in the
       // postorder (children before parents), each front's entries in pivot
       // order. Thread assignment and the top phase's completion order vary
@@ -1683,6 +1690,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                     d.begin() + static_cast<std::ptrdiff_t>(c.e));
         }
       }
+      phase_mark("mf_diag");
       if (det) {
         // Deterministic mode: every front's solve step in postorder, the
         // order of the serial factorization, and no parallel solve layout
@@ -1741,6 +1749,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
         }
       }
+      phase_mark("mf_top");
       for (std::size_t si = 0; si < ns; ++si)
         fkeep.factor_col_ptr[si] +=
             static_cast<LongInt>(fbase[static_cast<std::size_t>(front_pass[si] - 1)]);
@@ -1805,8 +1814,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // subtrees)): store what a solve can use.
     fkeep.solve_threads =
         std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
+    phase_mark("mf_toprows");
   }
   finish_solve_layout(fkeep, ctrl.small_solve_kernels);
+  phase_mark("mf_ret");
   return ErrorCode::Success;
 }
 
