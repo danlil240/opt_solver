@@ -127,6 +127,11 @@ struct TreeParallelBuffers {
     bool front_costs = false;  // Control::thread_plan_front_costs of the task partition
     std::vector<std::pair<std::size_t, std::size_t>> ranges;
     std::vector<std::uint8_t> top;
+    // Control::top_critical_shares: each top front's remaining path cost to
+    // the root (local top order), rebuilt with the partition or when the
+    // plan re-plans from realized sizes.
+    std::vector<double> top_priority;
+    bool priority_ok = false;
   };
   Partition partition;
   // The tree walks of the thread plan and the partition (tree_view's
@@ -1462,6 +1467,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pp.threads = nthreads;
       pp.budget = budget;
       pp.front_costs = front_costs;
+      pp.priority_ok = false;
     }
     return &pp;
   };
@@ -1777,11 +1783,54 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       const Int par = keep.supernodes[static_cast<std::size_t>(top_nodes[i])].parent;
       if (par >= 0) top_parent[i] = top_local[static_cast<std::size_t>(par)];
     }
+    // Control::top_critical_shares: each top front's remaining path cost to
+    // the root, f^2 p + c f^2 summed up the tree (realized sizes when the
+    // previous factorization of this analysis left them), cached with the
+    // partition.
+    std::vector<double> top_priority;
+    if (ctrl.top_critical_shares && !det && part != nullptr) {
+      auto &pp = ws.tree_par->partition;
+      if (replan_realized) pp.priority_ok = false;
+      if (!pp.priority_ok || pp.top_priority.size() != top_nodes.size()) {
+        const bool realized = ws.realized_valid && ws.realized_analysis == keep.serial &&
+                              ws.realized_rows.size() == ns && ws.realized_pivots.size() == ns;
+        const double c_entry = ctrl.thread_cost_per_front_entry;
+        const auto cost = [&](std::size_t local) {
+          const std::size_t s = static_cast<std::size_t>(top_nodes[local]);
+          const double f = realized ? static_cast<double>(ws.realized_rows[s])
+                                    : static_cast<double>(keep.front_size(static_cast<Int>(s)));
+          const double p = realized ? static_cast<double>(ws.realized_pivots[s])
+                                    : static_cast<double>(keep.supernodes[s].width());
+          return f * f * p + c_entry * f * f;
+        };
+        auto &pr = pp.top_priority;
+        pr.assign(top_nodes.size(), -1.0);
+        std::vector<Int> walk;
+        for (std::size_t i = 0; i < top_nodes.size(); ++i) {
+          if (pr[i] >= 0.0) continue;
+          // Up to the first ancestor already known (or the root), then down.
+          Int v = static_cast<Int>(i);
+          while (v >= 0 && pr[static_cast<std::size_t>(v)] < 0.0) {
+            walk.push_back(v);
+            v = top_parent[static_cast<std::size_t>(v)];
+          }
+          double base = v >= 0 ? pr[static_cast<std::size_t>(v)] : 0.0;
+          while (!walk.empty()) {
+            const std::size_t u = static_cast<std::size_t>(walk.back());
+            walk.pop_back();
+            base += cost(u);
+            pr[u] = base;
+          }
+        }
+        pp.priority_ok = true;
+      }
+      top_priority = pp.top_priority;
+    }
     // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
     // offers blas_threads - 1 places to the scheduler, taken by the workers
     // that the BLAS-thread budget leaves idle; they run its tasks on serial
     // BLAS.
-    TopScheduler sched(std::move(top_parent), threads);
+    TopScheduler sched(std::move(top_parent), threads, std::move(top_priority));
     // The passes as lanes (PassLanes): a chain of top fronts runs on a pass
     // that already has the room its next front assembles in (factor values
     // past the pass's fill), whichever thread runs it, so the root fronts
@@ -1827,6 +1876,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // share (its tile tasks still recruit blas_threads - 1 helpers).
             BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
             const PhaseTopFrontScope phase_top;
+            // Control::top_critical_shares: BLAS follows the front's share,
+            // which grows when the scheduler hands it threads that came free.
+            const BlasShareScope share_scope(ctrl.top_critical_shares && !det ? &sched.share(local) : nullptr);
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }

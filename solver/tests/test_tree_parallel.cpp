@@ -1095,3 +1095,42 @@ TEST(TreeParallel, ParallelAssemblyBitwiseInDeterministicMode) {
         }
     }
 }
+
+// Control::top_critical_shares (8T engine Part 7): top fronts by remaining
+// path cost, freed threads to the running front on the critical path. The
+// factorization and solve stay as accurate as without it.
+TEST(TreeParallel, CriticalSharesSolveCorrectly) {
+    const CscLower mats[] = {grid_kkt(200, 7), opf_like_kkt(20000, 8000, 3)};
+    for (const CscLower &A : mats) {
+        int neg[2] = {0, 0}, tops[2] = {0, 0};
+        double omega[2] = {0.0, 0.0};
+        for (const bool on : {false, true}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.num_threads = 8;
+            c.auto_threads = false;
+            c.top_critical_shares = on;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+            ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+            neg[on ? 1 : 0] = info.num_negative;
+            tops[on ? 1 : 0] = info.top_part_fronts;
+            std::vector<double> b(static_cast<std::size_t>(A.n)), x;
+            for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+            x = b;
+            ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1), 0);
+            const auto val = smf::bench::validate(A, b, x, 1);
+            EXPECT_LT(val.eta_inf, 1e-12) << "n " << A.n << " on " << on;
+            omega[on ? 1 : 0] = val.omega;
+        }
+        // As accurate as without it (rounding differs with the BLAS shares).
+        EXPECT_LE(omega[1], 10.0 * omega[0] + 1e-15) << "n " << A.n << " omega off " << omega[0] << " on " << omega[1];
+        EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
+        EXPECT_EQ(tops[0], tops[1]) << "n " << A.n;
+    }
+}

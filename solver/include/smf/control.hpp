@@ -600,6 +600,13 @@ struct Control {
     // bit for bit the serial assembly (Info::parallel_assembly_fronts).
     bool           parallel_front_assembly   = false;
     int            parallel_assembly_min_front = 1024;
+    // top_critical_shares (8T engine Part 7): top fronts are taken by their
+    // remaining path cost to the root (f^2 p + thread_cost_per_front_entry f^2
+    // summed up the tree, realized sizes when known), start with a share in
+    // proportion to it among the ready fronts, and threads that come free
+    // while nothing is ready go to the running front with the highest cost,
+    // whose next BLAS call uses them. Not in deterministic mode.
+    bool           top_critical_shares       = false;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;

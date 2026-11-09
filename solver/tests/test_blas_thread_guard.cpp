@@ -324,3 +324,35 @@ TEST(BlasThreadGuardBlocktime, RealRuntimeWorkerAndCaller) {
     EXPECT_EQ(worker_after, worker_before);
     EXPECT_EQ(smf::mkl_blocktime_get(), caller0) << "caller's blocktime not restored";
 }
+
+// Control::top_critical_shares (8T engine Part 7): inside a BlasShareScope
+// the BLAS thread count follows the front's share as it grows; a guard
+// nested inside (serial BLAS of tile or lookahead tasks) suspends it.
+TEST(BlasShare, FollowsAGrowingShare) {
+    {
+        smf::BlasThreadGuard probe(4);
+        if (smf::blas_max_threads() != 4) GTEST_SKIP() << "no BLAS threading API (sequential MKL or none)";
+    }
+    const int before = smf::blas_max_threads();
+    {
+        smf::BlasThreadGuard g(2);
+        std::atomic<int> a{2};
+        smf::BlasShareScope s(&a);
+        smf::blas_follow_share();
+        EXPECT_EQ(smf::blas_max_threads(), 2);
+        a.store(5);
+        smf::blas_follow_share();
+        EXPECT_EQ(smf::blas_max_threads(), 5);
+        EXPECT_EQ(smf::blas_threads_active(), 5);
+        {
+            smf::BlasThreadGuard inner(1);
+            a.store(6);
+            smf::blas_follow_share();
+            EXPECT_EQ(smf::blas_max_threads(), 1) << "a nested guard suspends following";
+        }
+        smf::blas_follow_share();
+        EXPECT_EQ(smf::blas_max_threads(), 6);
+    }
+    EXPECT_EQ(smf::blas_max_threads(), before);
+    EXPECT_EQ(smf::blas_threads_active(), 0);
+}
