@@ -5,6 +5,7 @@
 #include "smf/pivoting.hpp"
 
 #include <algorithm>
+#include <mutex>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -214,12 +215,30 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   info.factor_seconds += info.inverse_diag_seconds;
 }
 
+const std::vector<DiagSolveEntry> &FactorKeep::diag() const {
+  if (!diag_merge.pending.load(std::memory_order_acquire)) return diag_entries;
+  std::lock_guard<std::mutex> lk(*diag_merge.mu);
+  if (diag_merge.pending.load(std::memory_order_relaxed)) {
+    std::size_t total = 0;
+    for (const auto &c : diag_merge.chunks) total += c.e - c.b;
+    diag_entries.clear();
+    diag_entries.reserve(total);
+    for (const auto &c : diag_merge.chunks) {
+      const auto &d = diag_merge.parts[static_cast<std::size_t>(c.part)];
+      diag_entries.insert(diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
+                          d.begin() + static_cast<std::ptrdiff_t>(c.e));
+    }
+    diag_merge.pending.store(false, std::memory_order_release);
+  }
+  return diag_entries;
+}
+
 void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   (void)n;
   if (fkeep.is_posdef)
     return;
-  if (!fkeep.diag_entries.empty()) {
-    for (const DiagSolveEntry &entry : fkeep.diag_entries) {
+  if (!fkeep.diag().empty()) {
+    for (const DiagSolveEntry &entry : fkeep.diag()) {
       if (entry.tag == 1) {
         if (entry.d00 == 0.0 || !is_finite_fast(entry.d00)) {
           x[entry.row0] = 0.0;

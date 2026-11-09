@@ -173,6 +173,8 @@ struct Info {
     /// Control::factor_in_place: 1 when a slice outgrew its reservation (or
     /// none could be reserved) and the factor was gathered into one array.
     int          factor_store_regathers = 0;
+    /// 2x2 pivot blocks of the factorization (the count of tag-2 D entries).
+    int          two_by_two_pivots      = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
     /// phases, 0 when serial: the subtrees, the top part, and the gather of
     /// the per-thread factors into one array.

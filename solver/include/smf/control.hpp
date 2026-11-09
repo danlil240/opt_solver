@@ -583,6 +583,11 @@ struct Control {
     // table is built over ranges of solve steps on the factorization's pool
     // (bit-for-bit the serial build).
     bool           parallel_dinv             = false;
+    // lazy_diag_entries: a tree-parallel factorization leaves FactorKeep's D
+    // entries in its threads' lists; FactorKeep::diag() merges them into
+    // elimination order on first use (Info::two_by_two_pivots counts the 2x2
+    // blocks without it).
+    bool           lazy_diag_entries         = false;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;

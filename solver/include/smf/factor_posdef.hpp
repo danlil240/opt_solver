@@ -2,6 +2,9 @@
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
 #include "smf/factor_store.hpp"
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include "smf/info.hpp"
 #include "smf/types.hpp"
 #include <utility>
@@ -57,7 +60,54 @@ struct FactorKeep {
   // [s][k] = pivot type for fully-summed column k of supernode s:
   //  1 = 1×1 accepted, 2 = first of 2×2, -1 = second of 2×2, 0 = delayed
   std::vector<std::vector<int8_t>> pivot_types; ///< [s][k] = pivot type per supernode column
-  std::vector<DiagSolveEntry> diag_entries; ///< flattened D blocks for solve_diag
+  /// Flattened D blocks for solve_diag, in elimination order. Read it through
+  /// diag(): with Control::lazy_diag_entries a tree-parallel factorization
+  /// leaves the entries in its threads' lists (diag_merge) and diag() merges
+  /// them on first use.
+  mutable std::vector<DiagSolveEntry> diag_entries;
+  /// The pending merge of diag(): each thread's entries (parts) and, in
+  /// elimination order, the [b, e) range of a part that holds each front's.
+  struct DiagMerge {
+    struct Chunk {
+      int part = 0;
+      std::size_t b = 0, e = 0;
+    };
+    std::vector<std::vector<DiagSolveEntry>> parts;
+    std::vector<Chunk> chunks;
+    std::atomic<bool> pending{false};
+    std::unique_ptr<std::mutex> mu = std::make_unique<std::mutex>();
+    DiagMerge() = default;
+    DiagMerge(const DiagMerge &o) : parts(o.parts), chunks(o.chunks), pending(o.pending.load()) {}
+    DiagMerge(DiagMerge &&o) noexcept
+        : parts(std::move(o.parts)), chunks(std::move(o.chunks)), pending(o.pending.load()),
+          mu(std::make_unique<std::mutex>()) {
+      o.pending.store(false);
+    }
+    DiagMerge &operator=(const DiagMerge &o) {
+      if (this != &o) {
+        parts = o.parts;
+        chunks = o.chunks;
+        pending.store(o.pending.load());
+      }
+      return *this;
+    }
+    DiagMerge &operator=(DiagMerge &&o) noexcept {
+      if (this != &o) {
+        parts = std::move(o.parts);
+        chunks = std::move(o.chunks);
+        pending.store(o.pending.load());
+        o.pending.store(false);
+      }
+      return *this;
+    }
+    void reset() noexcept {
+      pending.store(false);
+      chunks.clear();
+    }
+  };
+  mutable DiagMerge diag_merge;
+  /// diag_entries, merged first when a merge is pending (thread-safe).
+  const std::vector<DiagSolveEntry> &diag() const;
   std::vector<SolveStep> solve_steps; ///< flattened front traversal for triangular solves
   FactorStore<Int> solve_row_indices; ///< row indices referenced by solve_steps (as factor_values)
   // Tree-parallel factorizations also leave the solve its parallel layout:

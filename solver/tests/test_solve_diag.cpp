@@ -137,3 +137,66 @@ TEST(SolveDiag, ParallelDinvEqualsSerialBuild) {
         EXPECT_EQ(std::memcmp(x[0].data(), x[1].data(), x[0].size() * 8), 0);
     }
 }
+
+namespace {
+struct DiagRun {
+    std::vector<smf::DiagSolveEntry> diag;
+    int two_by_two = 0;
+    int scanned_two = 0;
+};
+DiagRun diag_run(const smf::CscLower &A, bool lazy) {
+    using namespace smf;
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.deterministic = true;
+    c.lazy_diag_entries = lazy;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    EXPECT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    s.factor(*ak, A, c, info, fk, ws);
+    EXPECT_GT(info.threads_used, 1) << "premise: tree-parallel";
+    DiagRun r;
+    r.diag = fk.diag();
+    r.two_by_two = info.two_by_two_pivots;
+    for (const auto &e : r.diag) r.scanned_two += e.tag == 2;
+    const FactorKeep copy(fk);  // a copy builds the same entries
+    EXPECT_EQ(copy.diag().size(), r.diag.size());
+    return r;
+}
+bool same_entries(const std::vector<smf::DiagSolveEntry> &a, const std::vector<smf::DiagSolveEntry> &b) {
+    if (a.size() != b.size()) return false;
+    const auto bits = [](double x, double y) { return std::memcmp(&x, &y, sizeof x) == 0; };
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (a[i].tag != b[i].tag || a[i].was_zero != b[i].was_zero || a[i].row0 != b[i].row0 ||
+            a[i].row1 != b[i].row1 || !bits(a[i].d00, b[i].d00) || !bits(a[i].d10, b[i].d10) ||
+            !bits(a[i].d11, b[i].d11))
+            return false;
+    return true;
+}
+}  // namespace
+
+// Control::lazy_diag_entries: a tree-parallel factorization leaves the D
+// entries in its threads' lists and FactorKeep::diag() merges them into
+// elimination order on first use: the same entries as the eager merge.
+TEST(SolveDiag, LazyDiagEqualsEager) {
+    const smf::CscLower A = smf::cascade_kkt(90, 300, 2.5, 1.5);
+    const DiagRun eager = diag_run(A, false), lazy = diag_run(A, true);
+    ASSERT_FALSE(eager.diag.empty());
+    EXPECT_TRUE(same_entries(eager.diag, lazy.diag));
+}
+
+// Info::two_by_two_pivots counts the 2x2 pivot blocks as the factorization
+// makes them: the IPOPT plugin's count, without a scan of the D entries.
+TEST(SolveDiag, TwoByTwoCounterMatchesScan) {
+    const smf::CscLower A = smf::cascade_kkt(90, 300, 2.5, 1.5);
+    for (const bool lazy : {false, true}) {
+        const DiagRun r = diag_run(A, lazy);
+        ASSERT_GT(r.scanned_two, 0) << "premise: 2x2 pivots";
+        EXPECT_EQ(r.two_by_two, r.scanned_two) << lazy;
+    }
+}

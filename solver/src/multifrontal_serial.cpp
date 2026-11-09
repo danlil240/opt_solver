@@ -805,6 +805,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       } else if (tag == 2) {
         P.diag->push_back(DiagSolveEntry{
             2, 0, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
+        ++st.two_by_two_pivots;
         finite_d = finite_d && is_finite_fast(Lc[c]) && is_finite_fast(Lc[c + 1]) &&
                    is_finite_fast(Lc[sf + c + 1]);
         d10 = Lc[c + 1];
@@ -902,6 +903,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
 }
 
 void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
+  to.two_by_two_pivots += from.two_by_two_pivots;
   to.inertia.positive += from.inertia.positive;
   to.inertia.negative += from.inertia.negative;
   to.inertia.zero += from.inertia.zero;
@@ -1182,6 +1184,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   fkeep.solve_top_rows.clear();
   fkeep.solve_top_parent.clear();
   fkeep.diag_entries.clear();
+  fkeep.diag_merge.reset();
   if (!posdef) fkeep.diag_entries.reserve(n);
 
   FrontPass main;
@@ -1871,11 +1874,26 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             b = end;
           }
         }
-        for (const Chunk &c : chunks) {
-          if (c.e == c.b) continue;
-          const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
-          fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
-                                    d.begin() + static_cast<std::ptrdiff_t>(c.e));
+        if (ctrl.lazy_diag_entries) {
+          // Control::lazy_diag_entries: the threads' lists move into the
+          // FactorKeep (their buffers come back next time) and diag() merges
+          // them in this order on first use.
+          auto &m = fkeep.diag_merge;
+          m.parts.resize(static_cast<std::size_t>(threads));
+          for (int t = 0; t < threads; ++t)
+            m.parts[static_cast<std::size_t>(t)].swap(*tpass[static_cast<std::size_t>(t)].diag);
+          m.chunks.clear();
+          for (const Chunk &c : chunks)
+            if (c.e != c.b) m.chunks.push_back({c.pass, c.b, c.e});
+          fkeep.diag_entries.clear();
+          m.pending.store(true, std::memory_order_release);
+        } else {
+          for (const Chunk &c : chunks) {
+            if (c.e == c.b) continue;
+            const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
+            fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
+                                      d.begin() + static_cast<std::ptrdiff_t>(c.e));
+          }
         }
       }
       phase_mark("mf_diag");
