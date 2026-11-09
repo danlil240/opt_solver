@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 
 namespace smf {
@@ -28,17 +29,73 @@ template <class Pred> bool spin_until(Pred ready) {
 }
 } // namespace
 
-TopScheduler::TopScheduler(std::vector<Int> parent, int threads)
-    : parent_(std::move(parent)), pending_(parent_.size(), 0) {
+TopScheduler::TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority)
+    : parent_(std::move(parent)), pending_(parent_.size(), 0), share_(parent_.size()) {
   const std::size_t n = parent_.size();
+  if (priority.size() == n) prio_ = std::move(priority);
   for (std::size_t i = 0; i < n; ++i)
     if (parent_[i] >= 0) ++pending_[static_cast<std::size_t>(parent_[i])];
   for (std::size_t i = 0; i < n; ++i)
-    if (pending_[i] == 0) ready_.push_back(static_cast<Int>(i));
+    if (pending_[i] == 0) push_ready(static_cast<Int>(i));
   completed_.reserve(n);
-  free_ = std::max(1, threads);
+  threads_ = std::max(1, threads);
+  free_ = threads_;
   remaining_ = static_cast<int>(n);
   publish();
+}
+
+namespace {
+// Max-heap order on (priority, id).
+struct ByPriority {
+  const std::vector<double> *p;
+  bool operator()(Int a, Int b) const {
+    const double pa = (*p)[static_cast<std::size_t>(a)], pb = (*p)[static_cast<std::size_t>(b)];
+    return pa < pb || (pa == pb && a < b);
+  }
+};
+} // namespace
+
+void TopScheduler::push_ready(Int v) {
+  ready_.push_back(v);
+  if (prio_.empty()) return;
+  ready_prio_ += prio_[static_cast<std::size_t>(v)];
+  std::push_heap(ready_.begin(), ready_.end(), ByPriority{&prio_});
+}
+
+Int TopScheduler::pop_ready() {
+  if (!prio_.empty()) std::pop_heap(ready_.begin(), ready_.end(), ByPriority{&prio_});
+  const Int v = ready_.back();
+  ready_.pop_back();
+  if (!prio_.empty()) {
+    ready_prio_ -= prio_[static_cast<std::size_t>(v)];
+    if (ready_.empty()) ready_prio_ = 0.0;  // no drift
+  }
+  return v;
+}
+
+int TopScheduler::start_share(double p) const {
+  const int k = static_cast<int>(ready_.size());  // the others still listed
+  const int cap = std::max(1, free_ - k);
+  const double total = p + ready_prio_;
+  int s = total > 0.0 ? static_cast<int>(std::floor(static_cast<double>(free_) * p / total))
+                      : free_ / (k + 1);
+  return std::clamp(s, 1, cap);
+}
+
+void TopScheduler::grant_free() {
+  if (prio_.empty() || free_ <= 0 || !ready_.empty() || running_.empty()) return;
+  Int best = running_.front();
+  for (const Int v : running_)
+    if (prio_[static_cast<std::size_t>(v)] > prio_[static_cast<std::size_t>(best)] ||
+        (prio_[static_cast<std::size_t>(v)] == prio_[static_cast<std::size_t>(best)] && v > best))
+      best = v;
+  share_[static_cast<std::size_t>(best)].fetch_add(free_, std::memory_order_release);
+  free_ = 0;
+}
+
+int TopScheduler::shares_in_use() {
+  std::lock_guard<std::mutex> lk(mtx_);
+  return threads_ - free_;
 }
 
 void TopScheduler::publish() {
@@ -81,10 +138,16 @@ TopScheduler::Task TopScheduler::acquire() {
   Task t;
   if (stopped_.load(std::memory_order_acquire) || remaining_ == 0) return t;
   if (!ready_.empty() && free_ > 0) {
-    t.node = ready_.back();
-    ready_.pop_back();
-    t.threads = std::max(1, free_ / static_cast<int>(ready_.size() + 1));
+    t.node = pop_ready();
+    if (prio_.empty()) {
+      t.threads = std::max(1, free_ / static_cast<int>(ready_.size() + 1));
+    } else {
+      t.threads = start_share(prio_[static_cast<std::size_t>(t.node)]);
+      running_.push_back(t.node);
+    }
+    share_[static_cast<std::size_t>(t.node)].store(t.threads, std::memory_order_release);
     free_ -= t.threads;
+    grant_free();
     ++queue_pops_;
   } else {
     // Tile helper: the newest offer (runnable() holds, so there is one).
@@ -105,7 +168,13 @@ Int TopScheduler::finish(Int node, int tid, bool ok, int &threads) {
   // the lock).
   if (!ok) stopped_.store(true, std::memory_order_release);
   std::lock_guard<std::mutex> lk(mtx_);
-  free_ += threads;
+  if (prio_.empty()) {
+    free_ += threads;
+  } else {
+    // Its current share: grants may have grown it since it started.
+    free_ += share_[static_cast<std::size_t>(node)].load(std::memory_order_acquire);
+    running_.erase(std::find(running_.begin(), running_.end(), node));
+  }
   Int next = -1;
   if (!ok) {
     publish();
@@ -126,9 +195,16 @@ Int TopScheduler::finish(Int node, int tid, bool ok, int &threads) {
     // Continuation: the parent's share is computed as if it were taken from
     // the list, among the nodes ready there.
     next = p;
-    threads = std::max(1, free_ / static_cast<int>(ready_.size() + 1));
+    if (prio_.empty()) {
+      threads = std::max(1, free_ / static_cast<int>(ready_.size() + 1));
+    } else {
+      threads = start_share(prio_[static_cast<std::size_t>(p)]);
+      running_.push_back(p);
+    }
+    share_[static_cast<std::size_t>(p)].store(threads, std::memory_order_release);
     free_ -= threads;
   }
+  grant_free();
   publish();
   // The threads this node released may let a sleeper take a listed node.
   wake_one_if_runnable();
