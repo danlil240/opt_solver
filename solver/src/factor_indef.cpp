@@ -357,6 +357,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
                           const EarlyWorkStop &early) {
   const auto t0 = std::chrono::steady_clock::now();
   phase_mark("fi_entry");
+  // The last lean factorization into this FactorKeep set up the same analysis:
+  // its perm / iperm and per-supernode pivot_types slots stand. Cleared until
+  // this factorization completes its own setup (every error return leaves 0).
+  const bool setup_reuse = fkeep.setup_analysis == keep.serial;
+  fkeep.setup_analysis = 0;
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
   info.delayed_pivots = 0;
@@ -539,8 +544,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   phase_mark("fi_scaled");
 
   fkeep.n = keep.n;
-  fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
-  fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
+  if (!setup_reuse || fkeep.perm.size() != keep.perm.size() || fkeep.iperm.size() != keep.iperm.size()) {
+    fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
+    fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
+  }
   fkeep.num_perm.resize(static_cast<std::size_t>(keep.n));
   std::iota(fkeep.num_perm.begin(), fkeep.num_perm.end(), 0);
   fkeep.num_iperm = fkeep.num_perm;
@@ -558,7 +565,11 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   // whole predicted factor again (multifrontal_factor_serial's reserve, one
   // thread) before the first front: 69 MB, about 4 ms of each pde_control_250
   // refactorization at 8 threads.
-  fkeep.pivot_types.assign(static_cast<std::size_t>(ns), {});
+  // Every front of a factorization that completes writes its own slot; a
+  // reused setup keeps the slots' storage instead of freeing and
+  // reallocating one small vector per supernode.
+  if (!setup_reuse || fkeep.pivot_types.size() != static_cast<std::size_t>(ns))
+    fkeep.pivot_types.assign(static_cast<std::size_t>(ns), {});
 
   if (ns == 0 || keep.n == 0) {
     fkeep.factor_values.clear();
@@ -730,6 +741,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.status = (fkeep.status == FactorStatus::Success)
                       ? ErrorCode::Success
                       : ErrorCode::SingularMatrix;
+    fkeep.setup_analysis = keep.serial;
     return fkeep.status;
   }
 
