@@ -338,6 +338,11 @@ target_include_directories(test_thread_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/
 target_link_libraries(test_thread_plan PRIVATE smf GTest::gtest_main)
 add_test(NAME ThreadPlan COMMAND test_thread_plan)
 
+# Per-thread slices of one reserved range (the factor written in place).
+add_executable(test_factor_store test_factor_store.cpp)
+target_link_libraries(test_factor_store PRIVATE smf GTest::gtest_main)
+add_test(NAME FactorStore COMMAND test_factor_store)
+
 # A warm refactorization allocates no matrix-sized buffer (replaces the
 # global operator new: its own executable).
 add_executable(test_refactor_allocations test_refactor_allocations.cpp)
