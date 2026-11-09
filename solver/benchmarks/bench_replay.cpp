@@ -694,6 +694,8 @@ int main(int argc, char **argv) {
     // SMF_BENCH_TOP_OVERLAP = 0 | 1: Control::top_overlap.
     if (const char *e = std::getenv("SMF_BENCH_TOP_OVERLAP"))
         ctrl.top_overlap = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_TOP_OVERLAP_MAX_WORK"))
+        ctrl.top_overlap_max_work = std::atof(e);
     if (const char *e = std::getenv("SMF_BENCH_PARALLEL_DINV"))
         ctrl.parallel_dinv = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_LAZY_DIAG"))

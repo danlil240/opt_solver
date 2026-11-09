@@ -1806,12 +1806,26 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       }
       top_external = pp.top_external;
     }
+    // Control::top_overlap_max_work: the fronts that may start while subtree
+    // tasks run.
+    std::vector<char> top_early_ok;
+    if (overlap && ctrl.top_overlap_max_work >= 0.0) {
+      top_early_ok.resize(top_nodes.size());
+      for (std::size_t i = 0; i < top_nodes.size(); ++i) {
+        const std::size_t s = static_cast<std::size_t>(top_nodes[i]);
+        const double f = prev_realized ? static_cast<double>(ws.realized_rows[s])
+                                       : static_cast<double>(keep.front_size(static_cast<Int>(s)));
+        const double piv = prev_realized ? static_cast<double>(ws.realized_pivots[s])
+                                         : static_cast<double>(keep.supernodes[s].width());
+        top_early_ok[i] = f * f * piv <= ctrl.top_overlap_max_work ? 1 : 0;
+      }
+    }
     // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
     // offers blas_threads - 1 places to the scheduler, taken by the workers
     // that the BLAS-thread budget leaves idle; they run its tasks on serial
     // BLAS.
     TopScheduler sched(std::move(top_parent), threads, std::move(top_priority), std::move(top_external),
-                       overlap ? 0 : -1);
+                       overlap ? 0 : -1, std::move(top_early_ok));
     // The passes as lanes (PassLanes): a chain of top fronts runs on a pass
     // that already has the room its next front assembles in (factor values
     // past the pass's fill), whichever thread runs it, so the root fronts

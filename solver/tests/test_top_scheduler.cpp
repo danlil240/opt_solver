@@ -396,6 +396,37 @@ TEST(TopScheduler, JoinedThreadsBoundTheShares) {
     }
 }
 
+TEST(TopScheduler, HeldNodesWaitForTheLastExternalCompletion) {
+    // Chain 0 -> 1 -> 2 (root); node 0 also waits for one external
+    // completion, node 2 for another, and node 1 may not start while any
+    // external completion is outstanding (a big front: started on the few
+    // threads joined so far, it would run far slower than once all have).
+    // Node 0 runs once reported; node 1, readied by it, waits (it is not
+    // continued) until node 2's completion is reported too.
+    const std::vector<Int> parent = {1, 2, -1};
+    TopScheduler sched(parent, 2, {}, {1, 0, 1}, 0, {1, 0, 1});
+    std::atomic<int> phase{0};  // 1: node 0's completion reported, 2: node 2's
+    std::atomic<int> ran1_at{-1};
+    SolvePool pool(2);
+    pool.run([&](int tid) {
+        if (tid == 1) {
+            const Int v0 = 0, v2 = 2;
+            phase.store(1);
+            sched.external_done(&v0, 1);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            phase.store(2);
+            sched.external_done(&v2, 1);
+        }
+        sched.join();
+        sched.work(tid, [&](Int v, int, int) {
+            if (v == 1) ran1_at.store(phase.load());
+            return true;
+        });
+    });
+    EXPECT_EQ(ran1_at.load(), 2);
+    expect_topological(sched, parent);
+}
+
 TEST(TopScheduler, StopEndsWorkersWaitingOnExternalCompletions) {
     // Node 0 waits for a completion that never comes (its subtree task
     // failed): stop() ends the joined workers.

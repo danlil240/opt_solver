@@ -1230,8 +1230,25 @@ TEST(TreeParallel, TopFrontStartsBeforeTheLastSubtreeTask) {
     }
 }
 
-// Control::top_overlap on by default; the phase times still split the
-// factorization (the subtree phase ends when its last task does).
+// Control::top_overlap_max_work: a front above it never starts while subtree
+// tasks run (0: none does), and the factorization is unchanged.
+TEST(TreeParallel, TopOverlapMaxWorkHoldsBigFronts) {
+    const CscLower A = grid_kkt(200, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    const Run base = factor_and_solve(A, c, 8, /*refactors=*/3);
+    c.top_overlap_max_work = 0.0;
+    const Run capped = factor_and_solve(A, c, 8, /*refactors=*/3);
+    ASSERT_GT(capped.info.top_part_fronts, 0) << "premise: a top part";
+    EXPECT_EQ(capped.info.top_fronts_overlapped, 0);
+    EXPECT_EQ(capped.info.num_negative, base.info.num_negative);
+    EXPECT_EQ(capped.info.delayed_pivots, base.info.delayed_pivots);
+    EXPECT_LT(max_rel_diff(base.x, capped.x), 1e-10);
+}
+
 TEST(TreeParallel, TopOverlapOnByDefault) {
     EXPECT_TRUE(Control{}.top_overlap);
+    EXPECT_GT(Control{}.top_overlap_max_work, 0.0);
 }

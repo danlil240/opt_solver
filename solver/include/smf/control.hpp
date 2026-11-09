@@ -615,8 +615,13 @@ struct Control {
     // with no subtree task left joins the top scheduler, and a top front
     // starts once its own children are factored (a subtree root's block on
     // its thread's stack counts once that thread is done with its tasks).
-    // Info::top_fronts_overlapped.
+    // Info::top_fronts_overlapped. Only fronts of at most
+    // top_overlap_max_work (rows^2 x pivots, realized sizes when known) start
+    // while subtree tasks run; a bigger one waits for the subtree phase to
+    // end: on the few threads free by then it ran 3x slower on c-big
+    // (3,000-5,300-row fronts) and held the critical path. Negative: no cap.
     bool           top_overlap               = true;
+    double         top_overlap_max_work      = 1e8;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;

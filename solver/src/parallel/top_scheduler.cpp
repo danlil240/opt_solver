@@ -30,10 +30,11 @@ template <class Pred> bool spin_until(Pred ready) {
 } // namespace
 
 TopScheduler::TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority,
-                           std::vector<Int> external, int joined)
+                           std::vector<Int> external, int joined, std::vector<char> early)
     : parent_(std::move(parent)), pending_(parent_.size(), 0), share_(parent_.size()) {
   const std::size_t n = parent_.size();
   if (priority.size() == n) prio_ = std::move(priority);
+  if (early.size() == n) early_ = std::move(early);
   for (std::size_t i = 0; i < n; ++i)
     if (parent_[i] >= 0) ++pending_[static_cast<std::size_t>(parent_[i])];
   if (external.size() == n)
@@ -42,7 +43,7 @@ TopScheduler::TopScheduler(std::vector<Int> parent, int threads, std::vector<dou
       external_left_ += external[i];
     }
   for (std::size_t i = 0; i < n; ++i)
-    if (pending_[i] == 0) push_ready(static_cast<Int>(i));
+    if (pending_[i] == 0) make_ready(static_cast<Int>(i));
   completed_.reserve(n);
   threads_ = std::max(1, threads);
   joined_ = joined < 0 ? threads_ : std::min(joined, threads_);
@@ -57,7 +58,11 @@ void TopScheduler::external_done(const Int *nodes, std::size_t count) {
   for (std::size_t k = 0; k < count; ++k) {
     const std::size_t v = static_cast<std::size_t>(nodes[k]);
     --external_left_;
-    if (--pending_[v] == 0) push_ready(static_cast<Int>(v));
+    if (--pending_[v] == 0) make_ready(static_cast<Int>(v));
+  }
+  if (external_left_ == 0) {
+    for (const Int v : held_) push_ready(v);
+    held_.clear();
   }
   grant_free();
   publish();
@@ -91,6 +96,13 @@ struct ByPriority {
   }
 };
 } // namespace
+
+void TopScheduler::make_ready(Int v) {
+  if (held(v))
+    held_.push_back(v);
+  else
+    push_ready(v);
+}
 
 void TopScheduler::push_ready(Int v) {
   ready_.push_back(v);
@@ -229,7 +241,9 @@ Int TopScheduler::finish(Int node, int tid, bool ok, int &threads) {
   // After another thread's stop: its notify_all has woken the sleepers.
   if (stopped_.load(std::memory_order_acquire)) return next;
   const Int p = parent_[static_cast<std::size_t>(node)];
-  if (p >= 0 && --pending_[static_cast<std::size_t>(p)] == 0) {
+  if (p >= 0 && --pending_[static_cast<std::size_t>(p)] == 0 && held(p)) {
+    held_.push_back(p);
+  } else if (p >= 0 && pending_[static_cast<std::size_t>(p)] == 0) {
     // Continuation: the parent's share is computed as if it were taken from
     // the list, among the nodes ready there.
     next = p;

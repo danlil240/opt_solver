@@ -55,15 +55,20 @@ namespace smf {
 // `joined` < threads threads, the others added by join() as the workers that
 // hold them come to work(). While any external completion is outstanding,
 // free threads are not granted to running nodes: a node readied by a
-// subtree task can still start on them.
+// subtree task can still start on them. A node with early[i] == 0 (a big
+// front: on the few threads joined so far it would run far slower than
+// once all have) is held, neither listed nor continued, until the last
+// external completion.
 class TopScheduler final : public TileHelpers {
 public:
   // parent[i]: parent of local node i (-1: root); pending counts derive from it.
   // priority: empty (equal shares, LIFO list) or one value per node.
   // external: empty (none) or per node its external completions to wait for.
   // joined: threads in the budget at the start (-1: all `threads`).
+  // early: empty (every node) or per node 1 when it may start while external
+  // completions are outstanding.
   TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority = {},
-               std::vector<Int> external = {}, int joined = -1);
+               std::vector<Int> external = {}, int joined = -1, std::vector<char> early = {});
   TopScheduler(const TopScheduler &) = delete;
   TopScheduler &operator=(const TopScheduler &) = delete;
 
@@ -122,6 +127,7 @@ private:
   int start_share(double p) const;
   void grant_free();
   void push_ready(Int v);
+  void make_ready(Int v);  // listed, or held (held())
   Int pop_ready();
 
   bool runnable_hint() const;  // lock-free, for spinning
@@ -142,6 +148,11 @@ private:
   int free_ = 0;               // BLAS threads not held by running nodes
   int joined_ = 0;             // threads in the budget (free_ + the running shares)
   long long external_left_ = 0;  // external completions not reported yet
+  std::vector<char> early_;    // empty: every node may start early
+  std::vector<Int> held_;      // ready nodes waiting for the last external completion
+  bool held(Int v) const {
+    return external_left_ > 0 && !early_.empty() && early_[static_cast<std::size_t>(v)] == 0;
+  }
   int remaining_ = 0;          // nodes not completed
   int sleepers_ = 0;           // workers blocked on cv_
   int queue_pops_ = 0;
