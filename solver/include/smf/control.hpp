@@ -606,7 +606,7 @@ struct Control {
     // proportion to it among the ready fronts, and threads that come free
     // while nothing is ready go to the running front with the highest cost,
     // whose next BLAS call uses them. Not in deterministic mode.
-    bool           top_critical_shares       = false;
+    bool           top_critical_shares       = true;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
