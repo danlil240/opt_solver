@@ -555,6 +555,14 @@ struct Control {
     // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
     // per_thread 5e5-7e5 with per_split_front_thread 2e5-5e5 at a cap of
     // 7-8 all lie within about 3% of that loss.
+    // thread_plan_front_costs: the thread plan prices each front as
+    // f^2 p + thread_cost_per_front_entry f^2 + thread_cost_per_front (work
+    // units of f^2 p: assembly and fixed overhead on top of the flops), and
+    // has no work floor (kBudgetRegionMinWork stays the delay-budget regions'
+    // floor, which decide numerics). Off: flops alone above a 2e7 floor.
+    bool           thread_plan_front_costs   = false;
+    double         thread_cost_per_front_entry = 0.0;
+    double         thread_cost_per_front     = 0.0;
     double         thread_cost_per_thread    = 7e5;
     double         thread_cost_per_top_front = 5e3;
     // Per tile-split top front and thread (team set-up and barriers). 5e5,

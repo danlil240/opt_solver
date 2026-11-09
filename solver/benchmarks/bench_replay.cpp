@@ -674,6 +674,8 @@ int main(int argc, char **argv) {
     // refines with smf::refine whenever its factor has static pivots.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_PIVOT_TOL")) ctrl.static_pivot_tol = std::atof(e);
     if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
+    if (const char *e = std::getenv("SMF_BENCH_PLAN_FRONT_COSTS"))
+        ctrl.thread_plan_front_costs = std::atoi(e) != 0;
     // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.

@@ -214,10 +214,10 @@ TEST(ThreadPlan, PartitionCoversTree) {
         EXPECT_EQ(t.split[s], keep.front_size(static_cast<Int>(s)) >= 512 ? 1 : 0);
         total += t.work[s];
     }
-    ASSERT_GT(total, kTreeParallelMinWork) << "premise: heavy enough to partition";
+    ASSERT_GT(total, kBudgetRegionMinWork) << "premise: heavy enough to partition";
 
     std::vector<std::uint8_t> top;
-    const auto subtrees = partition_subtrees(t, 4, kTreeParallelMinWork, top);
+    const auto subtrees = partition_subtrees(t, 4, kBudgetRegionMinWork, top);
     ASSERT_GE(subtrees.size(), 2u);
     ASSERT_EQ(top.size(), ns);
     std::vector<int> covered(ns, 0);
@@ -302,12 +302,12 @@ TEST(ThreadPlan, TasksMergeTinySubtrees) {
     const TreeView t = comb.view();
     double total = 0.0;
     for (const double w : comb.work) total += w;
-    ASSERT_GT(total, kTreeParallelMinWork) << "premise: heavy enough to partition";
+    ASSERT_GT(total, kBudgetRegionMinWork) << "premise: heavy enough to partition";
 
     for (const int T : {2, 4, 8, 16}) {
         std::vector<std::uint8_t> btop, ttop;
-        const auto sub = partition_subtrees(t, T, kTreeParallelMinWork, btop);
-        const auto tasks = partition_tasks(t, T, kTreeParallelMinWork, ttop);
+        const auto sub = partition_subtrees(t, T, kBudgetRegionMinWork, btop);
+        const auto tasks = partition_tasks(t, T, kBudgetRegionMinWork, ttop);
         EXPECT_EQ(btop, ttop) << "T = " << T;
         for (const Int ci : chain) EXPECT_EQ(ttop[static_cast<std::size_t>(ci)], 1);
 
@@ -346,7 +346,7 @@ TEST(ThreadPlan, TasksMergeTinySubtrees) {
         EXPECT_TRUE(heavy_alone) << "T = " << T;
 
         // The plan's terms describe the tasks.
-        const PartitionCount pc = partition_count(t, T, kTreeParallelMinWork);
+        const PartitionCount pc = partition_count(t, T, kBudgetRegionMinWork);
         EXPECT_EQ(pc.subtrees, tasks.size());
         EXPECT_EQ(pc.top, chain.size());
         for (const auto &k : factor_plan_terms(t, T)) {
@@ -391,9 +391,9 @@ TEST(ThreadPlan, PartitionCountMatchesPartition) {
     for (std::size_t v = 0; v < std::size(views); ++v) {
         for (const int T : {1, 2, 3, 4, 8, 12, 16, 64}) {
             std::vector<std::uint8_t> top, ttop;
-            const auto sub = partition_subtrees(views[v], T, kTreeParallelMinWork, top);
-            const auto tasks = partition_tasks(views[v], T, kTreeParallelMinWork, ttop);
-            const PartitionCount pc = partition_count(views[v], T, kTreeParallelMinWork);
+            const auto sub = partition_subtrees(views[v], T, kBudgetRegionMinWork, top);
+            const auto tasks = partition_tasks(views[v], T, kBudgetRegionMinWork, ttop);
+            const PartitionCount pc = partition_count(views[v], T, kBudgetRegionMinWork);
             std::size_t ntop = 0;
             for (const auto x : top) ntop += x;
             EXPECT_EQ(pc.subtrees, tasks.size()) << "tree " << v << ", T = " << T;
@@ -431,12 +431,12 @@ TEST(ThreadPlan, ReusedSubtreeSumsMatchFresh) {
         subtree_sums(views[v], kept);
         for (const int T : {2, 4, 8, 16}) {
             std::vector<std::uint8_t> top, ktop;
-            EXPECT_EQ(partition_tasks(views[v], kept, T, kTreeParallelMinWork, ktop),
-                      partition_tasks(views[v], T, kTreeParallelMinWork, top))
+            EXPECT_EQ(partition_tasks(views[v], kept, T, kBudgetRegionMinWork, ktop),
+                      partition_tasks(views[v], T, kBudgetRegionMinWork, top))
                 << "tree " << v << ", T = " << T;
             EXPECT_EQ(ktop, top) << "tree " << v << ", T = " << T;
-            EXPECT_EQ(partition_subtrees(views[v], kept, T, kTreeParallelMinWork, ktop),
-                      partition_subtrees(views[v], T, kTreeParallelMinWork, top))
+            EXPECT_EQ(partition_subtrees(views[v], kept, T, kBudgetRegionMinWork, ktop),
+                      partition_subtrees(views[v], T, kBudgetRegionMinWork, top))
                 << "tree " << v << ", T = " << T;
             EXPECT_EQ(ktop, top) << "tree " << v << ", T = " << T;
         }
@@ -520,7 +520,7 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
     const Int troot = tiled.add(-1, 5e10, true);
     binary(tiled, troot, 9, 1e6, 1e3, true);
     binary(tiled, troot, 9, 1e6, 1e3);
-    Synth light;  // below kTreeParallelMinWork: 1 alone
+    Synth light;  // below kBudgetRegionMinWork: 1 alone
     binary(light, -1, 3, 1e5, 1e3);
 
     const TreeView views[] = {bal.view(), cat.view(), rooty.view(), tiled.view(), light.view()};
@@ -536,7 +536,7 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
             ASSERT_FALSE(terms.empty());
             EXPECT_EQ(terms[0].threads, 1);
             EXPECT_TRUE(terms[0].ok);
-            const bool candidates = max_threads >= 2 && terms[0].total >= kTreeParallelMinWork;
+            const bool candidates = max_threads >= 2 && terms[0].total >= kBudgetRegionMinWork;
             if (!candidates) {
                 EXPECT_EQ(terms.size(), 1u) << "tree " << v;
             } else {
@@ -549,7 +549,7 @@ TEST(ThreadPlan, FactorTermsReproducePlan) {
                     EXPECT_EQ(k.threads, want[i]);
                     EXPECT_DOUBLE_EQ(k.total, terms[0].total);
                     const PartitionCount pc =
-                        partition_count(views[v], k.threads, kTreeParallelMinWork);
+                        partition_count(views[v], k.threads, kBudgetRegionMinWork);
                     EXPECT_EQ(k.top_fronts, pc.top);
                     EXPECT_EQ(k.ok, pc.subtrees >= 2);
                     EXPECT_LE(k.split_top_fronts, k.top_fronts);
@@ -800,9 +800,9 @@ TEST(ThreadPlan, SplitCapStopsAtCap) {
 // shape at or below it, any max_threads and cost set, picks 1.
 TEST(ThreadPlan, SerialBoundFromPerThreadCost) {
     ThreadCosts c;
-    c.per_thread = 1e8;  // bound 4e8, above kTreeParallelMinWork
+    c.per_thread = 1e8;  // bound 4e8, above kBudgetRegionMinWork
     const double bound = 4.0 * c.per_thread;
-    ASSERT_GT(bound, kTreeParallelMinWork);
+    ASSERT_GT(bound, kBudgetRegionMinWork);
     Synth at;
     binary(at, -1, 10, bound / 1024.0, 0.0);
     Synth above;
@@ -836,22 +836,22 @@ TEST(ThreadPlan, SerialBoundFromPerThreadCost) {
         }
     }
 
-    // A negative cost voids the per-thread bound; kTreeParallelMinWork
+    // A negative cost voids the per-thread bound; kBudgetRegionMinWork
     // stands whatever the costs.
     ThreadCosts neg = c;
     neg.per_top_front = -1.0;
     EXPECT_FALSE(plan_is_serial(bound, neg));
-    EXPECT_TRUE(plan_is_serial(0.5 * kTreeParallelMinWork, neg));
+    EXPECT_TRUE(plan_is_serial(0.5 * kBudgetRegionMinWork, neg));
     EXPECT_TRUE(plan_is_serial(0.0, ThreadCosts{}));
     // The defaults: the per-thread bound (2.8e6) lies below the minimum work.
-    EXPECT_TRUE(plan_is_serial(kTreeParallelMinWork - 1.0, ThreadCosts{}));
-    EXPECT_FALSE(plan_is_serial(kTreeParallelMinWork, ThreadCosts{}));
+    EXPECT_TRUE(plan_is_serial(kBudgetRegionMinWork - 1.0, ThreadCosts{}));
+    EXPECT_FALSE(plan_is_serial(kBudgetRegionMinWork, ThreadCosts{}));
 }
 
 // The factorization skips the plan on a tree plan_is_serial rules serial:
 // no plan is cached (NumericWorkspace::thread_plan stays empty) and no
 // tree-parallel buffers or partition are made, at 16 threads with
-// auto_threads on, with a light tree (below kTreeParallelMinWork) and with
+// auto_threads on, with a light tree (below kBudgetRegionMinWork) and with
 // a heavier one under a per-thread cost that rules it out. The same heavier
 // tree under the default costs builds its plan.
 TEST(ThreadPlan, SerialBoundSkipsPlan) {
@@ -971,4 +971,80 @@ TEST(ThreadPlan, SolveTermsReproducePlan) {
         << text;
     EXPECT_NE(text.find("\nplan-solve T=4 sub_total="), std::string::npos) << text;
     EXPECT_NE(text.find("\nplan-solve chosen=2\n"), std::string::npos) << text;
+}
+
+// Control::thread_plan_front_costs: a front's work is f^2 p + per_front_entry
+// f^2 + per_front (assembly and fixed overhead priced in work units).
+TEST(ThreadPlan, FrontCostsAddAssemblyAndOverhead) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    std::vector<Int> parent;
+    std::vector<double> work;
+    std::vector<std::uint8_t> split;
+    FrontCostModel fc;
+    fc.per_front_entry = 3.0;
+    fc.per_front = 500.0;
+    tree_view(*ak, false, false, parent, work, split, kTopTileMinFront, fc);
+    for (std::size_t s = 0; s < ak->supernodes.size(); ++s) {
+        const double f = static_cast<double>(ak->front_size(static_cast<Int>(s)));
+        const double p = static_cast<double>(ak->supernodes[s].width());
+        EXPECT_EQ(work[s], f * f * p + 3.0 * f * f + 500.0) << s;
+    }
+}
+
+TEST(ThreadPlan, ZeroFrontCostsKeepFlopsView) {
+    const CscLower A = laplacian_2d(120);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    std::vector<Int> parent;
+    std::vector<double> work;
+    std::vector<std::uint8_t> split;
+    tree_view(*ak, false, false, parent, work, split, kTopTileMinFront, FrontCostModel{});
+    for (std::size_t s = 0; s < ak->supernodes.size(); ++s) {
+        const double f = static_cast<double>(ak->front_size(static_cast<Int>(s)));
+        EXPECT_EQ(work[s], f * f * static_cast<double>(ak->supernodes[s].width())) << s;
+    }
+}
+
+// PGLib's shape: thousands of tiny fronts whose time is per-front overhead.
+// Priced with a per-front cost and no work floor, the tree goes parallel; its
+// flops alone (64 x 300 x 10) stay below the budget floor.
+TEST(ThreadPlan, ManyTinyFrontsParallelWithoutFloor) {
+    Synth t;
+    const double w = 10.0 + 5e4;
+    const Int root = t.add(-1, w);
+    for (int c = 0; c < 64; ++c) {
+        Int s = root;
+        for (int k = 0; k < 300; ++k) s = t.add(s, w);
+    }
+    const TreeView view = t.view();
+    double total = 0.0;
+    for (const double x : t.work) total += x;
+    ThreadCosts c;
+    c.min_work = 0.0;
+    EXPECT_FALSE(plan_is_serial(total, c));
+    EXPECT_EQ(plan_threads(view, 8, c).threads, 8);
+    ThreadCosts floor;  // min_work = kBudgetRegionMinWork
+    EXPECT_TRUE(plan_is_serial(64.0 * 300 * 10, floor));
+}
+
+TEST(ThreadPlan, SmallTreeStaysSerialWithoutFloor) {
+    Synth t;
+    binary(t, -1, 6, 3e4, 1e4);  // total ~2.6e6 <= 4 per_thread (2.8e6)
+    double total = 0.0;
+    for (const double x : t.work) total += x;
+    ASSERT_LE(total, 4.0 * ThreadCosts{}.per_thread);
+    ThreadCosts c;
+    c.min_work = 0.0;
+    EXPECT_TRUE(plan_is_serial(total, c));
+    EXPECT_EQ(plan_threads(t.view(), 8, c).threads, 1);
 }

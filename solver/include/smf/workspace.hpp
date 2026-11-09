@@ -91,6 +91,9 @@ struct NumericWorkspace {
         bool tiles_on = false;        ///< top_tiles_on(): which fronts are split
         bool blas_parallel = false;   ///< plan_blas_parallel(): untiled fronts' BLAS threads
         int tile_min = 0;             ///< top_tile_min_front(): tiled fronts' minimum rows
+        bool front_costs = false;     ///< Control::thread_plan_front_costs
+        double per_front_entry = 0.0; ///< Control::thread_cost_per_front_entry (when front_costs)
+        double per_front = 0.0;       ///< Control::thread_cost_per_front (when front_costs)
         int threads = 1;              ///< the plan
     };
     ThreadPlanCache thread_plan;

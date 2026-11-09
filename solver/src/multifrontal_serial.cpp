@@ -107,6 +107,7 @@ struct TreeParallelBuffers {
     std::size_t ns = 0;
     int threads = 0;
     bool budget = false;
+    bool front_costs = false;  // Control::thread_plan_front_costs of the task partition
     std::vector<std::pair<std::size_t, std::size_t>> ranges;
     std::vector<std::uint8_t> top;
   };
@@ -119,6 +120,13 @@ struct TreeParallelBuffers {
   std::vector<double> view_work;
   std::vector<std::uint8_t> view_split;
   SubtreeSums sums;
+  // With Control::thread_plan_front_costs the plan's view prices fronts in
+  // time; the delay-budget regions keep this flops-only view (they decide
+  // numerics).
+  std::vector<Int> budget_view_parent;
+  std::vector<double> budget_view_work;
+  std::vector<std::uint8_t> budget_view_split;
+  SubtreeSums budget_sums;
 };
 
 namespace {
@@ -1043,6 +1051,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::size_t pred_factor = 0;
   std::size_t pred_rows = 0;
   double tree_work = 0.0;
+  // tree_work priced as the thread plan prices it (plan_is_serial's total).
+  const bool front_costs = ctrl.thread_plan_front_costs;
+  FrontCostModel front_cost_model;
+  if (front_costs) {
+    front_cost_model.per_front_entry = ctrl.thread_cost_per_front_entry;
+    front_cost_model.per_front = ctrl.thread_cost_per_front;
+  }
+  double tree_cost = 0.0;
   ws.cb_value_off.resize(ns);
   ws.cb_row_off.resize(ns);
   ws.cb_size.resize(ns);
@@ -1063,6 +1079,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pred_rows += f;
       const double fd = static_cast<double>(f);
       tree_work += fd * fd * static_cast<double>(p);
+      tree_cost += fd * fd * static_cast<double>(p) +
+                   (front_costs ? front_cost_model.per_front_entry * fd * fd +
+                                      front_cost_model.per_front
+                                : 0.0);
       for (const Int c : keep.children(s)) {
         const std::size_t ci = static_cast<std::size_t>(c);
         if (ws.cb_size[ci] > 0) {
@@ -1151,7 +1171,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // its thread count alone: ws.tree_par->partition keeps it.
   //
   // A tree whose work alone rules out every T > 1 (plan_is_serial: below
-  // kTreeParallelMinWork, or within the per-thread cost) takes the serial
+  // ThreadCosts::min_work, or within the per-thread cost) takes the serial
   // engine without the plan, the tree view or the partition, all of which
   // would come out serial (about 1 ms per analysis on boyd1, ns ~ 90k).
   // The plan trace (SMF_BENCH_PLAN_TRACE) still evaluates the plan.
@@ -1166,7 +1186,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     if (!have_tv) {
       TreeParallelBuffers &b = buffers();
       tv = tree_view(keep, tiles_on, blas_parallel, b.view_parent, b.view_work, b.view_split,
-                     tile_min);
+                     tile_min, front_cost_model);
     }
     have_tv = true;
     return tv;
@@ -1177,12 +1197,34 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     have_sums = true;
     return buffers().sums;
   };
+  // The delay budget's regions: the flops-only view, whatever the plan's.
+  TreeView budget_tv;
+  bool have_budget_tv = false;
+  const auto budget_view = [&]() -> const TreeView & {
+    if (!front_costs) return view();
+    if (!have_budget_tv) {
+      TreeParallelBuffers &b = buffers();
+      budget_tv = tree_view(keep, tiles_on, blas_parallel, b.budget_view_parent,
+                            b.budget_view_work, b.budget_view_split, tile_min);
+      subtree_sums(budget_tv, b.budget_sums);
+    }
+    have_budget_tv = true;
+    return budget_tv;
+  };
+  const auto budget_sums = [&]() -> SubtreeSums & {
+    if (!front_costs) return sums();
+    budget_view();
+    return buffers().budget_sums;
+  };
   const ThreadCosts thread_costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
                                  ctrl.thread_cost_per_split_front_thread,
-                                 ctrl.thread_split_scaling_cap};
+                                 ctrl.thread_split_scaling_cap,
+                                 front_costs ? 0.0 : kBudgetRegionMinWork};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
-  const bool below_min_work = tree_work < kTreeParallelMinWork;
-  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(tree_work, thread_costs) &&
+  // Below the plan's floor no partition is built (the budget's: its own).
+  const bool below_min_work = tree_cost < thread_costs.min_work;
+  const bool below_budget_min_work = tree_work < kBudgetRegionMinWork;
+  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(tree_cost, thread_costs) &&
       !plan_trace_enabled()) {
     want_threads = 1;
   } else if (ctrl.auto_threads && want_threads > 1) {
@@ -1192,7 +1234,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.per_top_front != thread_costs.per_top_front ||
         pc.per_split_front_thread != thread_costs.per_split_front_thread ||
         pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on ||
-        pc.blas_parallel != blas_parallel || pc.tile_min != tile_min) {
+        pc.blas_parallel != blas_parallel || pc.tile_min != tile_min ||
+        pc.front_costs != front_costs || pc.per_front_entry != front_cost_model.per_front_entry ||
+        pc.per_front != front_cost_model.per_front) {
       pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
@@ -1203,6 +1247,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pc.tiles_on = tiles_on;
       pc.blas_parallel = blas_parallel;
       pc.tile_min = tile_min;
+      pc.front_costs = front_costs;
+      pc.per_front_entry = front_cost_model.per_front_entry;
+      pc.per_front = front_cost_model.per_front;
     }
     want_threads = pc.threads;
   } else if (want_threads > 1 && plan_trace_enabled()) {
@@ -1214,22 +1261,23 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
     auto &pp = ws.tree_par->partition;
     if (pp.analysis != keep.serial || pp.ns != ns || pp.threads != nthreads ||
-        pp.budget != budget) {
+        pp.budget != budget || (!budget && pp.front_costs != front_costs)) {
       pp.analysis = 0;  // until rebuilt
-      pp.ranges = budget
-                      ? partition_subtrees(view(), sums(), nthreads, kTreeParallelMinWork, pp.top)
-                      : partition_tasks(view(), sums(), nthreads, kTreeParallelMinWork, pp.top);
+      pp.ranges = budget ? partition_subtrees(budget_view(), budget_sums(), nthreads,
+                                              kBudgetRegionMinWork, pp.top)
+                         : partition_tasks(view(), sums(), nthreads, thread_costs.min_work, pp.top);
       pp.analysis = keep.serial;
       pp.ns = ns;
       pp.threads = nthreads;
       pp.budget = budget;
+      pp.front_costs = front_costs;
     }
     return &pp;
   };
   const TreeParallelBuffers::Partition *part = nullptr;
-  // Below kTreeParallelMinWork both partitions are empty: none.
+  // Below its floor a partition is empty: none.
   if (delay_budget >= 0 && ns >= 2) {
-    if (!below_min_work) part = partition(kBudgetNominalThreads, true);
+    if (!below_budget_min_work) part = partition(kBudgetNominalThreads, true);
   } else if (want_threads > 1 && !below_min_work) {
     part = partition(want_threads, false);
   }

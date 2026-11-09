@@ -4,6 +4,7 @@
 // by the same code on the same data), solutions to rounding.
 
 #include "../benchmarks/common/validation.hpp"
+#include "kkt_test_matrices.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
@@ -733,4 +734,42 @@ TEST(TreeParallel, TwoWorkspacesConcurrently) {
     t1.join();
     t2.join();
     EXPECT_EQ(bad.load(), 0);
+}
+
+// Control::thread_plan_front_costs prices the thread plan in time, but the
+// delay budget's regions (which decide where fronts static-pivot) keep the
+// flops-only view and the 2e7 floor: the factorization is the same either way.
+TEST(TreeParallel, DelayBudgetRegionsUnchangedByFrontCosts) {
+    const CscLower A = cascade_kkt(40, 600, 4.1, 3.0);
+    Control base;
+    base.delay_budget = 20;
+    base.num_threads = 4;
+    base.auto_threads = true;
+    Solver solver;
+    std::vector<std::vector<double>> xs;
+    std::vector<Info> infos;
+    for (const bool costs : {false, true}) {
+        Control ctrl = base;
+        ctrl.thread_plan_front_costs = costs;
+        ctrl.thread_cost_per_front = 1e5;
+        ctrl.thread_cost_per_front_entry = 10.0;
+        Info info;
+        auto ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace nws;
+        SolveWorkspace sws;
+        FactorKeep fk;
+        const FactorStatus st = solver.factor(*ak, A, ctrl, info, fk, nws);
+        ASSERT_TRUE(st == FactorStatus::Success || st == FactorStatus::Singular);
+        std::vector<double> x(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+        EXPECT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+        xs.push_back(x);
+        infos.push_back(info);
+    }
+    EXPECT_EQ(infos[0].delayed_pivots, infos[1].delayed_pivots);
+    EXPECT_EQ(infos[0].static_pivots, infos[1].static_pivots);
+    EXPECT_EQ(infos[0].num_negative, infos[1].num_negative);
+    EXPECT_EQ(infos[0].num_positive, infos[1].num_positive);
+    EXPECT_EQ(xs[0], xs[1]);
 }

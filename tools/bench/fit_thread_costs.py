@@ -217,7 +217,7 @@ def trace_covers(terms: dict[int, dict[str, Any]], max_threads: int) -> bool:
 def pick_factor_threads(terms: dict[int, dict[str, Any]], max_threads: int,
                         c: FactorConsts) -> int:
     """plan_threads on traced terms. Only T = 1 traced (a tree below
-    kTreeParallelMinWork): 1."""
+    ThreadCosts::min_work): 1."""
     if set(terms) <= {1}:
         return 1
     return least_cost_threads([(t, factor_cost(terms[t], c))
