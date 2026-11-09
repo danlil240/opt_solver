@@ -10,7 +10,7 @@ solved accurately; cases accurate on one side only are listed.
 Usage:
   python tools/bench/ab_compare.py --a results/ab/smf --b results/ab/cost \
       --manifest benchmarks/manifests/fronttier.json [--split tuning] \
-      [--metric wall|factor] [--output out.md]
+      [--metric wall|factor|refactor] [--output out.md]
 """
 
 from __future__ import annotations
@@ -54,6 +54,8 @@ def summarize(recs: list[dict[str, Any]]) -> dict[str, Any]:
         "wall": med([score.wall_ms(r) for r in recs]),
         "analyse": med([float(r.get("analyse_ms") or 0.0) for r in recs]),
         "factor": med([float(r.get("factor_ms") or 0.0) for r in recs]),
+        "refactor": med([float(r["refactor_ms"]) for r in recs
+                         if isinstance(r.get("refactor_ms"), (int, float)) and r["refactor_ms"] >= 0]),
         "solve": med([float(r.get("solve_ms") or 0.0) + float(r.get("refine_ms") or 0.0)
                       for r in recs]),
         "rss": med([float(r["peak_rss_bytes"]) for r in recs
@@ -73,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--b", required=True, help="candidate records (file or directory)")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--split", default="all", choices=["tuning", "heldout", "all"])
-    ap.add_argument("--metric", default="wall", choices=["wall", "factor", "analyse", "solve"])
+    ap.add_argument("--metric", default="wall", choices=["wall", "factor", "refactor", "analyse", "solve"])
     ap.add_argument("--shift-ms", type=float, default=score.DEFAULT_SHIFT_MS)
     ap.add_argument("--output", default=None)
     args = ap.parse_args(argv)

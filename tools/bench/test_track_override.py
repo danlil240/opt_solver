@@ -239,3 +239,29 @@ class ScoreAndCompareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AbSeqStepsTests(unittest.TestCase):
+    def test_seq_steps_passed_to_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": CASES}))
+            calls = []
+
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(ab_run.subprocess, "run", fake):
+                ab_run.main(["--manifest", str(manifest), "--output", str(td / "o"),
+                             "--variant", "A=X=1", "--variant", "B=X=2", "--rounds", "1",
+                             "--cases", "a", "--seq-steps", "all"])
+            self.assertEqual(len(calls), 2)
+            for cmd in calls:
+                self.assertEqual(cmd[cmd.index("--seq-steps") + 1], "all")
+
+    def test_refactor_metric_summarized(self):
+        r = rec("a", 10.0)
+        r["refactor_ms"] = 2.5
+        self.assertEqual(ab_compare.summarize([r])["refactor"], 2.5)
