@@ -3,10 +3,12 @@
 // serial assembly's values bit for bit.
 
 #include "front_assembly.hpp"
+#include "parallel/tile_tasks.hpp"
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -122,6 +124,57 @@ TEST(FrontAssembly, ParallelEqualsSerialAtEveryThreadCount) {
     std::vector<double> par = blank();
     assemble_front_parallel(par.data(), kF, fr.orig, fr.kids, t, nullptr);
     EXPECT_TRUE(same(serial, par)) << t << " threads";
+  }
+}
+
+namespace {
+// Records what assemble_front_parallel lends to the top-part scheduler's
+// workers; lends nothing back (the runner then runs every task itself).
+class RecordingHelpers final : public smf::TileHelpers {
+public:
+  void offer(smf::TileRunner &, int slots) override { offered += slots; }
+  void withdraw(smf::TileRunner &) override {}
+  int offered = 0;
+};
+}  // namespace
+
+// With OpenMP the blocks run on the calling thread's OpenMP team, the one
+// its MKL calls use, never on the scheduler's workers: workers next to
+// MKL's spinning team made the front's following BLAS calls slower by
+// about what the assembly saved (2026-11-09 acopf profile).
+TEST(FrontAssembly, ParallelRunsOnTheCallersOpenMPTeam) {
+#ifndef _OPENMP
+  GTEST_SKIP() << "built without OpenMP";
+#else
+  const Front fr = make_front();
+  std::vector<double> serial = blank();
+  assemble_front_columns(serial.data(), kF, fr.orig, fr.kids, 0, kF);
+  RecordingHelpers helpers;
+  std::vector<double> par = blank();
+  assemble_front_parallel(par.data(), kF, fr.orig, fr.kids, 4, &helpers);
+  EXPECT_EQ(helpers.offered, 0);
+  EXPECT_TRUE(same(serial, par));
+#endif
+}
+
+// The contribution block (rows and columns [p, f) of the front, lower part)
+// copied out packed, column by column, on any number of threads.
+TEST(FrontAssembly, ContributionBlockCopyEqualsSerial) {
+  const int f = 640, p = 140, q = f - p;
+  std::vector<double> F(static_cast<std::size_t>(f) * f);
+  for (std::size_t i = 0; i < F.size(); ++i) F[i] = std::sin(0.37 * static_cast<double>(i));
+  const std::size_t packed = static_cast<std::size_t>(q) * (q + 1) / 2;
+  std::vector<double> ref(packed);
+  double *d = ref.data();
+  for (int jj = 0; jj < q; ++jj) {
+    const double *src = F.data() + static_cast<std::size_t>(p + jj) * f + (p + jj);
+    d = std::copy(src, src + (q - jj), d);
+  }
+  for (const int t : {1, 2, 4, 8}) {
+    std::vector<double> out(packed + 1, -1.0);
+    copy_contribution_block(out.data(), F.data() + static_cast<std::size_t>(p) * f + p, f, q, t);
+    EXPECT_TRUE(std::memcmp(out.data(), ref.data(), packed * sizeof(double)) == 0) << t << " threads";
+    EXPECT_EQ(out[packed], -1.0) << "wrote past the block";
   }
 }
 

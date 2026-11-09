@@ -448,6 +448,11 @@ template <class T> void grow(FactorSlice<T> &s, std::size_t need, int64_t &growt
 // `next` is the front P processes right after s (-1: none or unknown): a
 // small front whose parent it is hands its contribution block over in
 // P.sbuf.
+// Contribution blocks of at least this many rows are copied out on the
+// front's team when it assembled in parallel; smaller ones cost less than
+// waking the team.
+constexpr int kParallelBlockCopyMin = 128;
+
 ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
                         BudgetState *bs, const TileCtx *tc = nullptr, Int next = -1) {
   const AnalysisKeep &keep = cx.keep;
@@ -985,11 +990,19 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       ws.cb_value_off[si] = 0;
       ws.cb_row_off[si] = 0;
     }
-    for (int jj = 0; jj < q; ++jj) {
-      const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
-      if (small) copy_short(src, dst, static_cast<std::size_t>(q - jj));
-      else std::copy(src, src + (q - jj), dst);
-      dst += q - jj;
+    if (small) {
+      for (int jj = 0; jj < q; ++jj) {
+        const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
+        copy_short(src, dst, static_cast<std::size_t>(q - jj));
+        dst += q - jj;
+      }
+    } else {
+      // A front assembled in parallel copies its block out on the same
+      // team (front_assembly.hpp), when the block is worth splitting.
+      const int copy_threads = par_asm && q >= kParallelBlockCopyMin ? tc->nthreads : 1;
+      copy_contribution_block(dst, Fa + static_cast<std::size_t>(p) * lda + static_cast<std::size_t>(p), lda, q,
+                              copy_threads);
+      dst += sq * (sq + 1) / 2;
     }
     std::copy(rows + p, rows + f, dst_rows);
     ws.cb_size[si] = q;

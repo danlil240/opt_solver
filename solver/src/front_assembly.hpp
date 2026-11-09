@@ -47,9 +47,16 @@ void assemble_front_columns(double *F, int f, const AssemblyOriginal &orig,
                             std::span<const AssemblyChild> kids, int c0, int c1);
 
 // The whole front in 4 * nthreads column blocks of equal lower-triangle area,
-// run as independent tasks by a TileRunner on nthreads threads (helpers, or
-// the runner's own threads when null). nthreads <= 1: one block on the caller.
+// on nthreads threads: the calling thread's OpenMP team when built with
+// OpenMP (helpers unused), else a TileRunner (helpers, or the runner's own
+// threads when null). nthreads <= 1: one block on the caller.
 void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
                              std::span<const AssemblyChild> kids, int nthreads, TileHelpers *helpers);
+
+// The q x q contribution block whose top-left entry is cb (leading dimension
+// lda, lower part) into dst, packed column by column (q (q + 1) / 2 values),
+// on nthreads threads (the calling thread's OpenMP team; serial without
+// OpenMP).
+void copy_contribution_block(double *dst, const double *cb, std::size_t lda, int q, int nthreads);
 
 } // namespace smf
