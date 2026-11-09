@@ -167,6 +167,8 @@ struct Info {
     /// Control::parallel_front_assembly: top fronts assembled in column
     /// blocks on several threads.
     int          parallel_assembly_fronts = 0;
+    /// Control::tpp_lookahead: top fronts factored with panel lookahead.
+    int          lookahead_fronts       = 0;
     /// Threads the factorization ran on (1 = serial).
     int          threads_used           = 1;
     /// Control::thread_plan_front_costs: 1 when this factorization's thread

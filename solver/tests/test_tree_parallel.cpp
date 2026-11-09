@@ -23,6 +23,8 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <cstdlib>
+#include <future>
 #include <memory>
 #include <random>
 #include <string>
@@ -1133,4 +1135,90 @@ TEST(TreeParallel, CriticalSharesSolveCorrectly) {
         EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
         EXPECT_EQ(tops[0], tops[1]) << "n " << A.n;
     }
+}
+
+
+// Control::tpp_lookahead (8T engine Part 6): large top fronts take the TPP
+// kernel with panel lookahead. Same pivots as without it (inertia, delays),
+// and as accurate.
+TEST(TreeParallel, LookaheadSolvesLikeTpp) {
+    const CscLower mats[] = {opf_like_kkt(20000, 8000, 3), grid_kkt(200, 7)};
+    for (const CscLower &A : mats) {
+        int neg[2] = {0, 0}, delays[2] = {0, 0}, la[2] = {0, 0};
+        double omega[2] = {0.0, 0.0};
+        for (const bool on : {false, true}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.num_threads = 8;
+            c.auto_threads = false;
+            c.tpp_lookahead = on;
+            c.tpp_lookahead_min_front = 128;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+            const int k = on ? 1 : 0;
+            neg[k] = info.num_negative;
+            delays[k] = info.delayed_pivots;
+            la[k] = info.lookahead_fronts;
+            std::vector<double> b(static_cast<std::size_t>(A.n));
+            for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+            std::vector<double> x = b;
+            ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1), 0);
+            const auto val = smf::bench::validate(A, b, x, 1);
+            EXPECT_LT(val.eta_inf, 1e-12) << "n " << A.n << " on " << on;
+            omega[k] = val.omega;
+        }
+        EXPECT_EQ(la[0], 0);
+        EXPECT_GT(la[1], 0) << "n " << A.n << ": no front took the lookahead";
+        EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
+        EXPECT_EQ(delays[0], delays[1]) << "n " << A.n;
+        EXPECT_LE(omega[1], 10.0 * omega[0] + 1e-15) << "n " << A.n << " omega off " << omega[0] << " on " << omega[1];
+    }
+}
+
+// A factorization stopped by the inertia limit with Parts 5-7 on (parallel
+// assembly, critical-path shares, lookahead): no hang, and the next
+// factorization into the same FactorKeep succeeds and solves.
+TEST(TreeParallel, StopWithStage2PartsOn) {
+    const CscLower A = opf_like_kkt(20000, 8000, 3);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.parallel_front_assembly = true;
+    c.parallel_assembly_min_front = 128;
+    c.top_critical_shares = true;
+    c.tpp_lookahead = true;
+    c.tpp_lookahead_min_front = 128;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+    const int negatives = info.num_negative;
+    ASSERT_GT(negatives, 10);
+    Control limited = c;
+    limited.max_negative_pivots = negatives / 2;
+    auto stopped = std::async(std::launch::async, [&] {
+        Info i2;
+        return s.factor(*ak, A, limited, i2, fk, ws);
+    });
+    if (stopped.wait_for(std::chrono::seconds(60)) != std::future_status::ready) {
+        ADD_FAILURE() << "the stopped factorization hung";
+        std::_Exit(1);
+    }
+    EXPECT_EQ(stopped.get(), FactorStatus::InertiaExceeded);
+    ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.num_negative, negatives);
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.02 * static_cast<double>(i)) + 0.25;
+    std::vector<double> x = b;
+    ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1), 0);
+    EXPECT_LT(smf::bench::validate(A, b, x, 1).eta_inf, 1e-12);
 }

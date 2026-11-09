@@ -1273,3 +1273,54 @@ TEST(ParallelDeterminism, Engine8tStage1PartsOn) {
         EXPECT_EQ(std::memcmp(xs[0].data(), xs[1].data(), xs[0].size() * sizeof(double)), 0) << "n " << A.n;
     }
 }
+
+// As Engine8tStage1PartsOn with Stage 2's parts on as well: 1 vs 8 threads
+// bit for bit (the lookahead and critical-path shares never run in
+// deterministic mode; parallel assembly is bitwise).
+TEST(ParallelDeterminism, Engine8tStage2PartsOn) {
+    const CscLower mats[] = {opf_like_kkt(20000, 8000, 1), cascade_kkt(40, 600, 2.5, 1.5)};
+    for (const CscLower &A : mats) {
+        std::vector<double> xs[2];
+        int neg[2] = {0, 0};
+        for (const int t : {1, 8}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.deterministic = true;
+            c.num_threads = t;
+            c.thread_plan_front_costs = true;
+            c.parallel_value_prep = true;
+            c.factor_in_place = true;
+            c.parallel_dinv = true;
+            c.lazy_diag_entries = true;
+            c.cached_solve_layout = true;
+            c.parallel_front_assembly = true;  // Part 5
+            c.parallel_assembly_min_front = 128;
+            c.top_critical_shares = true;      // Part 7 (off in deterministic mode)
+            c.tpp_lookahead = true;            // Part 6 (never in deterministic mode)
+            c.tpp_lookahead_min_front = 128;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            SolveWorkspace sws;
+            std::vector<double> v = A.values;
+            std::vector<double> &out = xs[t == 1 ? 0 : 1];
+            for (int it = 0; it < 3; ++it) {
+                for (std::size_t p = 0; p < v.size(); ++p)
+                    v[p] = A.values[p] * (1.0 + 1e-3 * it * std::sin(0.37 * static_cast<double>(p)));
+                const FactorStatus st = s.factor(*ak, std::span<const double>(v), c, info, fk, ws);
+                ASSERT_TRUE(st == FactorStatus::Success || st == FactorStatus::Singular);
+                neg[t == 1 ? 0 : 1] += info.num_negative;
+                std::vector<double> x(static_cast<std::size_t>(A.n));
+                for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+                ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+                out.insert(out.end(), x.begin(), x.end());
+            }
+        }
+        EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
+        ASSERT_EQ(xs[0].size(), xs[1].size());
+        EXPECT_EQ(std::memcmp(xs[0].data(), xs[1].data(), xs[0].size() * sizeof(double)), 0) << "n " << A.n;
+    }
+}

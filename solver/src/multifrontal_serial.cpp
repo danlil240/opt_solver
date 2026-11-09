@@ -9,6 +9,7 @@
 #include "parallel/tile_tasks.hpp"
 #include "parallel/thread_plan.hpp"
 #include "front_assembly.hpp"
+#include "ldlt_lookahead.hpp"
 #include "phase_trace.hpp"
 #include "parallel/par_for.hpp"
 #include "parallel/top_scheduler.hpp"
@@ -362,6 +363,9 @@ struct FactorContext {
   // Control::parallel_front_assembly: top fronts of at least this many rows
   // with a share of 2 or more threads assemble in column blocks; 0 = off.
   int parallel_asm_min = 0;
+  // Control::tpp_lookahead: plain threshold top fronts of at least this many
+  // rows with a share of 2 or more threads take the lookahead kernel; 0 = off.
+  int lookahead_min = 0;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -608,6 +612,16 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     prm = &budget_prm;
   }
 
+  // Control::tpp_lookahead: a plain threshold TPP front (not APTP, small or
+  // LAPACK) of at least lookahead_min rows with a share of 2 or more. Its
+  // kernel needs two panel buffers. A delay-budget retry (static pivots)
+  // takes the plain kernel.
+  const auto plain_tpp = [](const LdltKernelParams &q) {
+    return !q.posdef && q.static_pivot == 0.0 && q.min_abs_pivot == 0.0;
+  };
+  const bool lookahead = cx.lookahead_min > 0 && tc != nullptr && tc->nthreads >= 2 && aprm == nullptr &&
+                         !small && !lapack_front && f >= cx.lookahead_min && plain_tpp(*prm);
+  if (lookahead) grow(*P.work, ldlt_lookahead_work_size(f, cx.prm), P.growths);
   int8_t *tags = P.tags->data();
   SerialFactorStats &st = P.st;
   double *const work = P.work->data();
@@ -799,6 +813,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       kr = ldlt_factor_small_front(Fa, static_cast<int>(lda), f, num_elig, rows, *prm, tags);
     } else if (lapack_front) {
       kr = posdef_factor_front_lapack(F, f, num_elig, tags);
+    } else if (lookahead && plain_tpp(*prm)) {
+      kr = ldlt_factor_front_lookahead(F, f, num_elig, rows, *prm, tags, work, tc->nthreads, tc->helpers);
+      ++st.lookahead_fronts;
     } else {
       kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
     }
@@ -1016,6 +1033,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.posdef_lapack_fronts += from.posdef_lapack_fronts;
   to.top_part_fronts += from.top_part_fronts;
   to.parallel_assembly_fronts += from.parallel_assembly_fronts;
+  to.lookahead_fronts += from.lookahead_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
   to.front_work += from.front_work;
@@ -1139,6 +1157,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   const bool det = deterministic_mode(ctrl);
   const int parallel_asm_min =
       ctrl.parallel_front_assembly ? std::max(2, ctrl.parallel_assembly_min_front) : 0;
+  const int lookahead_min = ctrl.tpp_lookahead && !det ? std::max(2, ctrl.tpp_lookahead_min_front) : 0;
   if (det) enable_blas_reproducibility();
   // Control::posdef_front_kernel: deterministic mode keeps the Ldlt kernel,
   // so its factor stays the one every thread count reproduces.
@@ -1547,7 +1566,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min, det, parallel_asm_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min, lookahead_min};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1629,7 +1648,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min, det, parallel_asm_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min, lookahead_min};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit

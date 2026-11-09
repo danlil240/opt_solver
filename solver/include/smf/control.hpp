@@ -607,6 +607,14 @@ struct Control {
     // while nothing is ready go to the running front with the highest cost,
     // whose next BLAS call uses them. Not in deterministic mode.
     bool           top_critical_shares       = true;
+    // tpp_lookahead (8T engine Part 6): a top front of at least
+    // tpp_lookahead_min_front rows with a share of 2 or more threads, pivoting
+    // by plain threshold, takes the TPP kernel with panel lookahead (panel
+    // k+1 factored while panel k's update and Schur chunk run on the other
+    // threads; same pivots, the Schur update summed in per-panel chunks).
+    // Not in deterministic mode (Info::lookahead_fronts).
+    bool           tpp_lookahead             = false;
+    int            tpp_lookahead_min_front   = 1024;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
