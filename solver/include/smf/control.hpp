@@ -582,18 +582,18 @@ struct Control {
     // parallel_dinv: after a tree-parallel factorization the solve's D^-1
     // table is built over ranges of solve steps on the factorization's pool
     // (bit-for-bit the serial build).
-    bool           parallel_dinv             = false;
+    bool           parallel_dinv             = true;
     // lazy_diag_entries: a tree-parallel factorization leaves FactorKeep's D
     // entries in its threads' lists; FactorKeep::diag() merges them into
     // elimination order on first use (Info::two_by_two_pivots counts the 2x2
     // blocks without it).
-    bool           lazy_diag_entries         = false;
+    bool           lazy_diag_entries         = true;
     // cached_solve_layout: the top of a tree-parallel factorization's solve
     // takes its steps in postorder (not completion order), so its tree, row
     // map and thread count are kept per analysis and reused while every
     // step's size and the top steps' rows are unchanged
     // (Info::solve_layout_reused).
-    bool           cached_solve_layout       = false;
+    bool           cached_solve_layout       = true;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
