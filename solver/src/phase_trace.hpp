@@ -28,6 +28,10 @@ enum class PhaseSum : int { TopAsm, TopPanel, TopDefer, TopSchur, Count };
 void phase_sum_add(PhaseSum slot, double seconds) noexcept;
 // Prints `# sum <name> s=<seconds>` for every slot and zeroes them (level 2).
 void phase_sum_flush() noexcept;
+// Zeroes the sums without printing them: the top phase starts with it, so a
+// factorization that stopped before its flush (an inertia or work limit)
+// leaves nothing in the next one's sums.
+void phase_sum_discard() noexcept;
 
 // Level 2 only: marks this thread as running a top front while it lives, so
 // that the TPP kernel's laps are summed (phase_in_top_front()).
