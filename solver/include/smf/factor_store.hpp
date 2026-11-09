@@ -264,7 +264,9 @@ public:
   }
   // Vector-style use of a one-slice store (the paths that build the factor in
   // one piece, and tests). Each acts on slice 0, creating it when there is
-  // none; resize() never zero-fills.
+  // none; a store left with one slice per thread (an in-place factorization)
+  // is first made one slice holding its values in slice order, so data()
+  // follows slice 0 wherever it grows. resize() never zero-fills.
   T *begin() noexcept { return data(); }
   T *end() noexcept { return data() + size(); }
   const T *begin() const noexcept { return data(); }
@@ -272,15 +274,18 @@ public:
   T &operator[](std::size_t i) noexcept { return data()[i]; }
   const T &operator[](std::size_t i) const noexcept { return data()[i]; }
   void reserve(std::size_t n) {
+    one_slice();
     if (slices_.empty() || (slices_.size() == 1 && slices_[0].size_ == 0 && !slices_[0].detached_ &&
                             (base_ == nullptr || cap_ < n)))
       reserve_slices(1, n);
   }
   void resize(std::size_t n) {
+    one_slice();
     if (slices_.empty()) reserve_slices(1, n);
     slices_[0].grow(n);
   }
   void push_back(const T &v) {
+    one_slice();
     if (slices_.empty()) reserve_slices(1, 0);
     FactorSlice<T> &s = slices_[0];
     const std::size_t n = s.size_;
@@ -289,6 +294,7 @@ public:
   }
   template <class It> void insert(const T *pos, It first, It last) {
     (void)pos;  // appends: the only use (pos == end())
+    one_slice();
     if (slices_.empty()) reserve_slices(1, 0);
     FactorSlice<T> &s = slices_[0];
     const std::size_t n = s.size_;
@@ -330,6 +336,9 @@ public:
   }
 
 private:
+  void one_slice() {
+    if (slices_.size() > 1) regather();
+  }
   FactorStore &set(const T *first, const T *last) {
     const std::size_t n = static_cast<std::size_t>(last - first);
     reserve_slices(1, n);

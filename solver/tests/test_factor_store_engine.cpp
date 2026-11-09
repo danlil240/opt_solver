@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <algorithm>
+#include <string>
 // Control::factor_in_place: the tree-parallel factorization's threads write the
 // factor straight into per-thread slices of the FactorKeep's store, with no
 // gather. Deterministic mode makes runs bit-for-bit comparable (its results do
@@ -199,4 +202,66 @@ TEST(FactorStoreEngine, MovedFactorKeepSolves) {
     EXPECT_TRUE(same_bits(solve_with(copied), ref.x));
     const FactorKeep moved(std::move(fk));
     EXPECT_TRUE(same_bits(solve_with(moved), ref.x));
+}
+
+namespace {
+CscLower laplacian(int m) {  // 5-point stencil, SPD
+    CscLower A;
+    A.n = m * m;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < A.n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back(4.5);
+        if ((j % m) + 1 < m) { A.row_idx.push_back(j + 1); A.values.push_back(-1.0); }
+        if (j + m < A.n) { A.row_idx.push_back(j + m); A.values.push_back(-1.0); }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+}  // namespace
+
+// A FactorKeep whose stores hold one slice per thread (an in-place
+// tree-parallel factorization) and then goes through a path that builds its
+// arrays in one piece (SPD) on a larger matrix: the solve reads the new layout.
+TEST(FactorStoreEngine, OtherPathAfterInPlaceFactorization) {
+    const CscLower A = opf_like_kkt(20000, 8000, 3);
+    const CscLower B = laplacian(260);
+    Solver s;
+    Info i;
+    Control ca = base(8, true);
+    auto akA = s.analyse(A, ca, i);
+    Control cb;
+    cb.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    cb.num_threads = 8;  // the parallel SPD path builds the rows by appending
+    cb.tree_parallel = true;
+    auto akB = s.analyse(B, cb, i);
+    ASSERT_NE(akA.get(), nullptr);
+    ASSERT_NE(akB.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    // Size the slices just above what A uses, so B's rows outgrow slice 0.
+    {
+        FactorKeep probe;
+        NumericWorkspace pws;
+        ASSERT_EQ(factor_solve(s, *akA, A, ca, probe, pws).status, FactorStatus::Success);
+        std::size_t most = 0;
+        for (int t = 0; t < probe.factor_values.slices(); ++t)
+            most = std::max({most, probe.factor_values.slice(t).size(), probe.solve_row_indices.slice(t).size()});
+        set_env("SMF_TEST_STORE_SLICE_CAP", std::to_string(2 * most).c_str());
+    }
+    const Out a = factor_solve(s, *akA, A, ca, fk, ws);
+    set_env("SMF_TEST_STORE_SLICE_CAP", "");
+    ASSERT_EQ(a.status, FactorStatus::Success);
+    ASSERT_GT(fk.solve_row_indices.slices(), 1) << "premise: per-thread slices";
+    ASSERT_EQ(a.info.factor_store_regathers, 0) << "premise: A fits its slices";
+    const Out b = factor_solve(s, *akB, B, cb, fk, ws);
+    ASSERT_EQ(b.status, FactorStatus::Success);
+    const Out ref = fresh(B, cb);
+    ASSERT_EQ(b.x.size(), ref.x.size());
+    double err = 0.0, mag = 0.0;
+    for (std::size_t i = 0; i < ref.x.size(); ++i) {
+        err = std::max(err, std::abs(b.x[i] - ref.x[i]));
+        mag = std::max(mag, std::abs(ref.x[i]));
+    }
+    EXPECT_LE(err, 1e-10 * mag);
 }
