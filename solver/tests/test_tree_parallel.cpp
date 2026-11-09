@@ -1096,6 +1096,28 @@ TEST(TreeParallel, ParallelAssemblyBitwiseInDeterministicMode) {
     }
 }
 
+// Parallel assembly is on by default from 256 rows (8T sweep 2026-11-09,
+// with the assembly on the caller's OpenMP team: refactorization geomean
+// 0.948 over the PR #64 cases): a default 8-thread factorization of a KKT
+// with large top fronts assembles some of them in parallel.
+TEST(TreeParallel, ParallelAssemblyOnByDefault) {
+    EXPECT_TRUE(Control{}.parallel_front_assembly);
+    EXPECT_EQ(Control{}.parallel_assembly_min_front, 256);
+    const CscLower A = opf_like_kkt(20000, 8000, 3);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_GT(info.parallel_assembly_fronts, 0);
+}
+
 // Control::top_critical_shares (8T engine Part 7): top fronts by remaining
 // path cost, freed threads to the running front on the critical path. The
 // factorization and solve stay as accurate as without it.

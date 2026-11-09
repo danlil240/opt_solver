@@ -596,10 +596,13 @@ struct Control {
     bool           cached_solve_layout       = true;
     // parallel_front_assembly (8T engine Part 5): a top front of at least
     // parallel_assembly_min_front rows with a BLAS share of 2 or more is
-    // assembled in column blocks by the share's threads (idle pool threads),
-    // bit for bit the serial assembly (Info::parallel_assembly_fronts).
-    bool           parallel_front_assembly   = false;
-    int            parallel_assembly_min_front = 1024;
+    // assembled in column blocks on the share's threads (the calling
+    // thread's OpenMP team, which its MKL calls use), and copies its
+    // contribution block out there too; bit for bit the serial assembly
+    // (Info::parallel_assembly_fronts). On from 256 rows: 8T refactorization
+    // geomean 0.948 over the PR #64 cases (512: 0.971, 1024: 0.978).
+    bool           parallel_front_assembly   = true;
+    int            parallel_assembly_min_front = 256;
     // top_critical_shares (8T engine Part 7): top fronts are taken by their
     // remaining path cost to the root (f^2 p + thread_cost_per_front_entry f^2
     // summed up the tree, realized sizes when known), start with a share in
