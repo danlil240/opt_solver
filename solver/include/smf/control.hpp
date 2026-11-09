@@ -568,7 +568,7 @@ struct Control {
     // front (c) is below what the traces resolve (their own print cost is
     // ~1.4 us per front), so 0. PGLib's tiny fronts cost ~6x the big fronts'
     // time per f^2 p unit: the f^2 term prices it.
-    bool           thread_plan_front_costs   = false;
+    bool           thread_plan_front_costs   = true;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
     double         thread_cost_per_thread    = 7e5;
