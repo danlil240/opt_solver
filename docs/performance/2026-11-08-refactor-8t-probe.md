@@ -50,7 +50,10 @@ At 1 thread smf wins every case (0.50-0.89). At 8 threads it loses 6 of 8 to PAR
 - **The gap is thread scaling, not single-thread speed.** At 1 thread smf's refactorization is faster than PARDISO's
   on 7 of 8 cases. At 8 threads smf reaches 1.9-3.1x on delay-free cases and 0.97-0.99x on PGLib; PARDISO 3.7-5.8x.
 - **PGLib does not scale at all.** Its refactorizations are tiny (6.8 MFlop in 5.8 ms on case1354, about 1.2 GFlop/s:
-  memory traffic and per-front overhead) and carry 14-21k delayed pivots each.
+  memory traffic and per-front overhead). *Corrected 2026-11-09:* the cause is not its 14-21k delays. PGLib runs on one
+  thread at 8T because `kTreeParallelMinWork = 2e7` is a hard floor and the planner prices flops only. Forced to 8
+  threads the existing engine gets 2.2x with identical inertia (front trace 2026-11-09; see
+  `docs/superpowers/specs/2026-11-09-refactor-8t-engine-design.md`).
 - **Re-analysis does nothing here.** `SMF_IPM_REANALYSE=1` leaves the delays unchanged (13,932 / 20,844) and adds
   its own cost (PGLib 8T ratios 0.96 -> 1.22 and 1.67 -> 2.02).
 - **The matching ordering removes most PGLib delays** (20,844 -> 2,001; 13,932 -> 1,972) and gives case2000 its
@@ -64,8 +67,8 @@ Go for bet 2, but as engineering, not a switch. No existing option closes the 8-
 refactorization engine must do, from these numbers:
 1. Parallelise the many small fronts of a sparse KKT tree. Delay-free cases reach only 1.9-3.1x on 8 threads where
    PARDISO reaches 3.7-5.8x; the earlier factor profile (2026-11-04) put serial setup and gather at 22-25%.
-2. Keep delays from serialising the tree. PGLib's delays block all speedup; removing them (matching ordering) unlocks
-   1.8x at once, but that ordering's analysis is too expensive to be the answer.
+2. Price the planner in time, not flops. *Corrected 2026-11-09:* PGLib's delays do not serialise it; the planner's
+   work floor does. With the floor removed it gets 2.2x on 8 threads.
 3. Use the run length. With 12-136 factorizations ahead, schedule, scatter maps and buffers can be built once per run.
 
 Re-analysis from the realized order (`SMF_IPM_REANALYSE`) is dead for this purpose.
