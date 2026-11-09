@@ -9,15 +9,17 @@
 
 namespace smf::bench {
 
-// "ipopt": KKT sequences captured from IPOPT are factorized the way IPOPT
+// "ipopt": KKT matrices captured from IPOPT are factorized the way IPOPT
 // drives its linear solvers: IPOPT's pivot threshold (ma27_pivtol /
-// ma57_pivtol / ma97_u default 1e-8), and analysed for as many
-// refactorizations as the IPOPT plugin expects (kIpoptExpectedRefactors).
+// ma57_pivtol / ma97_u default 1e-8). A replayed sequence (`sequence`:
+// --mode warm_sequence) stands for an IPOPT run, so it is also analysed for
+// as many refactorizations as the IPOPT plugin expects
+// (kIpoptExpectedRefactors); one cold factorization is analysed for one.
 // Other tracks keep the defaults.
-inline void apply_replay_track(Control &ctrl, std::string_view track) {
+inline void apply_replay_track(Control &ctrl, std::string_view track, bool sequence) {
     if (track == "ipopt") {
         ctrl.pivot_u = 1e-8;
-        ctrl.expected_refactors = kIpoptExpectedRefactors;
+        if (sequence) ctrl.expected_refactors = kIpoptExpectedRefactors;
     }
 }
 

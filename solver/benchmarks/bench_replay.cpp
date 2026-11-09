@@ -630,8 +630,9 @@ int main(int argc, char **argv) {
         ctrl = *plugin_ctrl;
     }
     // The track's settings (common/replay_track.hpp; "ipopt": IPOPT's pivot
-    // threshold and the plugin's refactorization estimate).
-    smf::bench::apply_replay_track(ctrl, track);
+    // threshold, and for a replayed sequence the plugin's refactorization
+    // estimate).
+    smf::bench::apply_replay_track(ctrl, track, mode == "warm_sequence");
     if (pivot_u_override >= 0.0) ctrl.pivot_u = pivot_u_override;
     // SMF_BENCH_EXPECTED_REFACTORS = n (Control::expected_refactors; A/B runs).
     if (const char *e = std::getenv("SMF_BENCH_EXPECTED_REFACTORS")) ctrl.expected_refactors = std::atoi(e);

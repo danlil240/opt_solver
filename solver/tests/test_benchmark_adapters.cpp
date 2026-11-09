@@ -189,18 +189,23 @@ TEST(BenchmarkAdapters, ParseIpmStatic) {
 }
 
 TEST(BenchmarkAdapters, IpoptTrackFactorizesLikeThePlugin) {
-    // bench_replay --track ipopt: IPOPT's pivot threshold and the plugin's
+    // bench_replay --track ipopt: IPOPT's pivot threshold; a replayed IPOPT
+    // sequence (warm_sequence) is also analysed for the plugin's
     // refactorization estimate (which steers the analysis: the compressed
-    // METIS trial, the matching resume), so captured IPOPT sequences are
-    // analysed and factorized as the plugin would.
+    // METIS trial, the matching resume), as the plugin would analyse it.
     Control c;
-    smf::bench::apply_replay_track(c, "ipopt");
+    smf::bench::apply_replay_track(c, "ipopt", /*sequence=*/true);
     EXPECT_EQ(c.pivot_u, 1e-8);
     EXPECT_EQ(c.expected_refactors, kIpoptExpectedRefactors);
     EXPECT_EQ(c.expected_refactors, ipopt_plugin_control()->expected_refactors);
+    // One cold factorization is analysed for one factorization.
+    Control one;
+    smf::bench::apply_replay_track(one, "ipopt", /*sequence=*/false);
+    EXPECT_EQ(one.pivot_u, 1e-8);
+    EXPECT_EQ(one.expected_refactors, Control{}.expected_refactors);
     // Other tracks keep the library's defaults.
     Control r;
-    smf::bench::apply_replay_track(r, "recommended");
+    smf::bench::apply_replay_track(r, "recommended", /*sequence=*/true);
     EXPECT_EQ(r.pivot_u, Control{}.pivot_u);
     EXPECT_EQ(r.expected_refactors, Control{}.expected_refactors);
 }
