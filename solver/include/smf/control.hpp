@@ -579,6 +579,10 @@ struct Control {
     // FactorKeep's FactorStore (no gather copy); a slice that outgrows its
     // reservation falls back to the gather (Info::factor_store_regathers).
     bool           factor_in_place           = true;
+    // parallel_dinv: after a tree-parallel factorization the solve's D^-1
+    // table is built over ranges of solve steps on the factorization's pool
+    // (bit-for-bit the serial build).
+    bool           parallel_dinv             = false;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;

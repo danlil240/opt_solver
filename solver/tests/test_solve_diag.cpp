@@ -87,3 +87,53 @@ TEST(SolveDiag, BlockD2x2) {
   EXPECT_NEAR(x[0], 1.0 / 3.0, 1e-14) << "x[0] wrong after 2×2 D solve";
   EXPECT_NEAR(x[1], 7.0 / 3.0, 1e-14) << "x[1] wrong after 2×2 D solve";
 }
+
+// Control::parallel_dinv: the solve's D^-1 table (FactorKeep::dinv,
+// dinv_kind, dinv_offset) is built over ranges of solve steps on the
+// factorization's pool; it is bit-for-bit the serial build. Deterministic mode
+// makes the two factorizations identical, so the tables can be compared.
+#include "kkt_test_matrices.hpp"
+#include "smf/solver.hpp"
+#include "smf/workspace.hpp"
+
+#include <cstring>
+#include <vector>
+
+TEST(SolveDiag, ParallelDinvEqualsSerialBuild) {
+    using namespace smf;
+    const CscLower mats[] = {opf_like_kkt(20000, 8000, 1), cascade_kkt(90, 300, 2.5, 1.5)};
+    for (const CscLower &A : mats) {
+        std::vector<double> dinv[2], x[2];
+        std::vector<std::int8_t> kind[2];
+        std::vector<LongInt> off[2];
+        for (int v = 0; v < 2; ++v) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.num_threads = 8;
+            c.auto_threads = false;
+            c.deterministic = true;
+            c.parallel_dinv = v == 1;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            const FactorStatus st = s.factor(*ak, A, c, info, fk, ws);
+            ASSERT_TRUE(st == FactorStatus::Success || st == FactorStatus::Singular);
+            ASSERT_GT(info.threads_used, 1) << "premise: tree-parallel";
+            ASSERT_FALSE(fk.dinv_offset.empty()) << "premise: a D^-1 table";
+            dinv[v] = fk.dinv;
+            kind[v] = fk.dinv_kind;
+            off[v] = fk.dinv_offset;
+            x[v].assign(static_cast<std::size_t>(A.n), 1.0);
+            SolveWorkspace sws;
+            ASSERT_EQ(s.solve(fk, c, info, x[v].data(), static_cast<int>(A.n), 1, sws), 0);
+        }
+        EXPECT_EQ(off[0], off[1]);
+        EXPECT_EQ(kind[0], kind[1]);
+        ASSERT_EQ(dinv[0].size(), dinv[1].size());
+        EXPECT_EQ(std::memcmp(dinv[0].data(), dinv[1].data(), dinv[0].size() * 8), 0);
+        EXPECT_EQ(std::memcmp(x[0].data(), x[1].data(), x[0].size() * 8), 0);
+    }
+}

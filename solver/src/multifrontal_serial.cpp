@@ -9,6 +9,7 @@
 #include "parallel/tile_tasks.hpp"
 #include "parallel/thread_plan.hpp"
 #include "phase_trace.hpp"
+#include "parallel/par_for.hpp"
 #include "parallel/top_scheduler.hpp"
 
 #include <algorithm>
@@ -2023,7 +2024,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
     phase_mark("mf_toprows");
   }
-  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
+  if (ctrl.parallel_dinv && threads > 1) {
+    const RangeRunner run = [&](std::size_t n, const std::function<void(std::size_t, std::size_t)> &fn) {
+      parallel_ranges(ws, threads, n, 64, [&](int, std::size_t b, std::size_t e) { fn(b, e); });
+    };
+    finish_solve_layout(fkeep, ctrl.small_solve_kernels, run);
+  } else {
+    finish_solve_layout(fkeep, ctrl.small_solve_kernels);
+  }
   phase_mark("mf_ret");
   return ErrorCode::Success;
 }
