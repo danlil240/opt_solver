@@ -378,6 +378,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.band_kd = 0;
   fkeep.band_factor.clear();
   fkeep.scale.clear();
+  // Its own permutation: the lean indefinite path's setup no longer stands.
+  fkeep.setup_analysis = 0;
   fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
   fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
   fkeep.num_perm.resize(static_cast<std::size_t>(n));

@@ -360,7 +360,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   // The last lean factorization into this FactorKeep set up the same analysis:
   // its perm / iperm and per-supernode pivot_types slots stand. Cleared until
   // this factorization completes its own setup (every error return leaves 0).
-  const bool setup_reuse = fkeep.setup_analysis == keep.serial;
+  const bool setup_reuse = fkeep.setup_analysis == keep.serial && fkeep.analysis == &keep;
   fkeep.setup_analysis = 0;
   const Int ns = static_cast<Int>(keep.supernodes.size());
 

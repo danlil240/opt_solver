@@ -369,3 +369,39 @@ TEST(RepeatedFactor, SetupReuseResetsOnNewAnalysis) {
     EXPECT_EQ(fk.setup_analysis, 0u);
     run(*akA, A);
 }
+
+// A FactorKeep that went through another factorization path in between (SPD,
+// another analysis with its own permutation, same order) must not keep that
+// permutation for the next refactorization of the first analysis.
+TEST(RepeatedFactor, SetupReuseInvalidatedBySpdFactorization) {
+    using namespace smf;
+    const int m = 60;
+    const CscLower A = grid_kkt_like(m);  // indefinite
+    CscLower B = A;                        // SPD, same order and pattern
+    for (Int j = 0; j < B.n; ++j) B.values[static_cast<std::size_t>(B.col_ptr[j])] = 8.0;
+    Control ci;
+    ci.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ci.ordering = OrderingMethod::METIS;
+    Control cs = ci;
+    cs.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    cs.ordering = OrderingMethod::AMD;  // a different permutation than A's
+    Solver s;
+    Info info;
+    auto akA = s.analyse(A, ci, info);
+    auto akB = s.analyse(B, cs, info);
+    ASSERT_NE(akA.get(), nullptr);
+    ASSERT_NE(akB.get(), nullptr);
+    ASSERT_NE(akA->perm, akB->perm) << "premise: different permutations";
+    FactorKeep fk;
+    NumericWorkspace ws;
+    SolveWorkspace sws;
+    ASSERT_EQ(s.factor(*akA, A, ci, info, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(s.factor(*akB, B, cs, info, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(s.factor(*akA, A, ci, info, fk, ws), FactorStatus::Success);
+    EXPECT_TRUE(std::equal(fk.perm.begin(), fk.perm.end(), akA->perm.begin(), akA->perm.end()));
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.01 * static_cast<double>(i)) + 1.0;
+    std::vector<double> x = b;
+    ASSERT_EQ(s.solve(fk, ci, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+    EXPECT_LT(residual(A, x, b), 1e-12);
+}
