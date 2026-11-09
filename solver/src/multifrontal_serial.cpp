@@ -1837,6 +1837,20 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // Top fronts started while a subtree task ran (Info::top_fronts_overlapped).
     std::atomic<int> top_early{0};
     const bool hold_first = overlap && g_hold_first_subtree_task.load(std::memory_order_relaxed);
+    // PROBE (not for merge): per top front start/end (ms from phase 1 start), shares, rows.
+    const bool ftrace = phase_trace_level() >= 3;
+    std::vector<double> tf0, tf1, p1x;
+    std::vector<int> tsh0, tsh1, tfr, tearly;
+    if (ftrace) {
+      tf0.assign(top_nodes.size(), -1.0);
+      tf1.assign(top_nodes.size(), -1.0);
+      tsh0.assign(top_nodes.size(), 0);
+      tsh1.assign(top_nodes.size(), 0);
+      tfr.assign(top_nodes.size(), 0);
+      tearly.assign(top_nodes.size(), 0);
+      p1x.assign(static_cast<std::size_t>(threads), 0.0);
+    }
+    const auto ms_since_p1 = [&] { return 1e3 * std::chrono::duration<double>(PhaseClock::now() - phase1_start).count(); };
     const auto running = [&failed] {
       return failed.load(std::memory_order_relaxed) == static_cast<int>(ErrorCode::Success);
     };
@@ -1919,6 +1933,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           }
       }
       phase1_steps[own] = P.steps->size();
+      if (ftrace) p1x[own] = ms_since_p1();
       if (overlap) {
         // A stop (here or elsewhere) leaves top fronts waiting for subtree
         // tasks that never end: stop the scheduler too.
@@ -1965,6 +1980,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         if (overlap && phase1_left.load(std::memory_order_relaxed) > 0) {
           ++P.st.top_fronts_overlapped;
           top_early.fetch_add(1, std::memory_order_relaxed);
+          if (ftrace) tearly[static_cast<std::size_t>(local)] = 1;
+        }
+        if (ftrace) {
+          tf0[static_cast<std::size_t>(local)] = ms_since_p1();
+          tsh0[static_cast<std::size_t>(local)] = blas_threads;
+          tfr[static_cast<std::size_t>(local)] = static_cast<int>(f);
         }
         // Delay budget of a top front: its children's end states, all
         // final once it is ready (written before the scheduler recorded
@@ -1993,6 +2014,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         if (work_armed) count_work(P.st.front_work - work0);
         top_pass[static_cast<std::size_t>(local)] = lane;
         top_step[static_cast<std::size_t>(local)] = P.steps->size() - 1;
+        if (ftrace) {
+          tf1[static_cast<std::size_t>(local)] = ms_since_p1();
+          tsh1[static_cast<std::size_t>(local)] = sched.share(local).load();
+        }
         ++P.st.top_part_fronts;
         P.diag_marks.emplace_back(s, P.diag->size());
         if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
@@ -2014,6 +2039,16 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       if (running() && !top_nodes.empty()) run_pool(top_phase);
     }
     st.subtree_seconds = std::chrono::duration<double>(phase1_end - phase1_start).count();
+    if (ftrace) {
+      std::fprintf(stderr, "# p1end %.4f\n", 1e3 * st.subtree_seconds);
+      for (int t = 0; t < threads; ++t) std::fprintf(stderr, "# p1x %d %.4f\n", t, p1x[static_cast<std::size_t>(t)]);
+      for (std::size_t i = 0; i < top_nodes.size(); ++i) {
+        const Int par = keep.supernodes[static_cast<std::size_t>(top_nodes[i])].parent;
+        std::fprintf(stderr, "# tf %zu %d %d %.4f %.4f %d %d %d %d\n", i, static_cast<int>(top_nodes[i]),
+                     par >= 0 ? static_cast<int>(top_local[static_cast<std::size_t>(par)]) : -1, tf0[i], tf1[i],
+                     tsh0[i], tsh1[i], tfr[i], tearly[i]);
+      }
+    }
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
                                          ws.tree_par->root_rows.growths() - arena_growths0);
     // Top fronts in completion order, which is topological: the solve
