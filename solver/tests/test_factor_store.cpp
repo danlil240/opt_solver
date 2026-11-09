@@ -181,3 +181,28 @@ TEST(FactorStore, CopyWithoutReservationKeepsOffsets) {
     EXPECT_EQ(c.data()[3], 3.0);
     EXPECT_EQ(c.data()[off1 + 19], 119.0);
 }
+
+// trim() keeps what a slice reached in any of its last kTrimWindow
+// factorizations (reserve_slices .. trim): a large front that moves between
+// the engine's lanes from one factorization to the next does not make its
+// room be released and faulted in again. Older room is released.
+TEST(FactorStore, TrimKeepsRoomUsedWithinTheWindow) {
+    FactorStore<double> s;
+    const std::size_t cap = 256 * kMiB / sizeof(double);
+    ASSERT_TRUE(s.reserve_slices(1, cap));
+    ASSERT_TRUE(s.slice(0).grow(64 * kMiB / sizeof(double)));  // a big front's room
+    std::memset(s.data(), 1, 64 * kMiB);
+    ASSERT_TRUE(s.slice(0).grow(kMiB / sizeof(double)));        // ends at a small fill
+    s.trim();
+    EXPECT_GE(s.committed_bytes(), 64 * kMiB) << "the room just used is kept";
+    for (int k = 1; k < FactorSlice<double>::kTrimWindow; ++k) {
+        ASSERT_TRUE(s.reserve_slices(1, cap));
+        ASSERT_TRUE(s.slice(0).grow(kMiB / sizeof(double)));
+        s.trim();
+        EXPECT_GE(s.committed_bytes(), 64 * kMiB) << "factorization " << k << " after the big one";
+    }
+    ASSERT_TRUE(s.reserve_slices(1, cap));
+    ASSERT_TRUE(s.slice(0).grow(kMiB / sizeof(double)));
+    s.trim();
+    EXPECT_LE(s.committed_bytes(), 16 * kMiB + 2 * kMiB) << "room older than the window is released";
+}

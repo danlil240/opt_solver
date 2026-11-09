@@ -1724,7 +1724,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::vector<int> lane_of(static_cast<std::size_t>(threads), -1);
     const auto lane_room = [&tpass](int l) -> std::size_t {
       const FrontPass &Q = tpass[static_cast<std::size_t>(l)];
-      return Q.fv->size() > Q.fo ? Q.fv->size() - Q.fo : 0;
+      // Committed room: an in-place slice ends a factorization at its fill,
+      // with the room its fronts used still committed (FactorStore::trim).
+      return Q.fv->capacity() > Q.fo ? Q.fv->capacity() - Q.fo : 0;
     };
     // Each top front's pass and step index in it (by local index).
     std::vector<int> top_pass(top_nodes.size(), 0);

@@ -33,6 +33,8 @@ namespace smf {
 void *vm_reserve(std::size_t bytes) noexcept;
 bool vm_commit(void *p, std::size_t bytes) noexcept;  // p, bytes: multiples of vm_page()
 void vm_decommit(void *p, std::size_t bytes) noexcept;
+// Bytes vm_decommit has released since process start (tests, diagnostics).
+long long vm_decommit_bytes() noexcept;
 void vm_release(void *p, std::size_t bytes) noexcept;
 std::size_t vm_granule() noexcept;  // reservation granularity
 std::size_t vm_page() noexcept;     // commit granularity
@@ -45,16 +47,23 @@ template <class T> class FactorSlice {
 public:
   // Commits grow in chunks of this many bytes (within the slice's share).
   static constexpr std::size_t kCommitChunk = std::size_t{2} << 20;
+  // FactorStore::trim keeps what a slice reached in any of its last this many
+  // factorizations (reserve_slices .. trim).
+  static constexpr int kTrimWindow = 8;
 
   T *data() noexcept { return base_; }
   const T *data() const noexcept { return base_; }
   std::size_t size() const noexcept { return size_; }
   bool detached() const noexcept { return detached_; }
+  // Elements the slice holds without new memory: its committed pages, or its
+  // private block. The engine's lanes go by it (the room past a pass's fill).
+  std::size_t capacity() const noexcept { return detached_ ? heap_cap_ : std::max(committed_, size_); }
 
   // size() = n, keeping the first min(n, size()) values. Within the slice's
   // reservation it commits pages; beyond it (or with no reservation) it moves
   // to private heap memory of 2n elements. false: out of memory.
   bool grow(std::size_t n) {
+    if (n > peak_) peak_ = n;
     if (n <= size_) {
       size_ = n;
       return true;
@@ -110,6 +119,9 @@ private:
   std::size_t size_ = 0;
   std::size_t cap_ = 0;        // elements of this slice's share of the range
   std::size_t committed_ = 0;  // elements committed in the share
+  std::size_t peak_ = 0;       // largest size this factorization (the fronts' room past the fill)
+  std::size_t recent_[kTrimWindow] = {};  // peaks of the last kTrimWindow trims
+  unsigned recent_at_ = 0;
   std::size_t heap_cap_ = 0;   // detached: elements of the private block
   bool detached_ = false;
 };
@@ -156,6 +168,7 @@ public:
           s.base_ = base_ + stride_ * t;
         }
         s.size_ = 0;
+        s.peak_ = 0;  // trim() keeps what this factorization reaches
       }
       return true;
     }
@@ -246,11 +259,20 @@ public:
   }
   // Per attached slice: committed memory beyond its use by more than
   // max(use / 4, 16 MiB) is released down to the use (rounded up to a chunk).
+  // The use is the largest size the slice reached in any of its last
+  // kTrimWindow factorizations (the room its fronts assembled in past the
+  // fill included): the engine's lanes move a large front between slices
+  // from one factorization to the next, and releasing its room made the next
+  // factorization fault every page of it in again (acopf_grid_160, 8T: ~2 ms).
   void trim() noexcept {
     const std::size_t page = vm_page();
     for (auto &s : slices_) {
+      s.recent_[s.recent_at_++ % FactorSlice<T>::kTrimWindow] = std::max(s.peak_, s.size_);
+      s.peak_ = s.size_;
+      std::size_t peak = 0;
+      for (const std::size_t r : s.recent_) peak = std::max(peak, r);
       if (s.detached_ || base_ == nullptr) continue;
-      const std::size_t used_b = s.size_ * sizeof(T);
+      const std::size_t used_b = peak * sizeof(T);
       const std::size_t comm_b = s.committed_ * sizeof(T);
       if (comm_b <= used_b || comm_b - used_b <= std::max(used_b / 4, std::size_t{16} << 20)) continue;
       std::size_t keep = (used_b + FactorSlice<T>::kCommitChunk - 1) / FactorSlice<T>::kCommitChunk *

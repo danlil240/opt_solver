@@ -265,3 +265,27 @@ TEST(FactorStoreEngine, OtherPathAfterInPlaceFactorization) {
     }
     EXPECT_LE(err, 1e-10 * mag);
 }
+
+// A refactorization of the same matrix into the same FactorKeep neither
+// decommits nor faults in the room its large top fronts assemble in: trim()
+// keeps what the last factorization reached (its fronts' room past the fill),
+// not only the fill. Decommitting that room cost acopf_grid_160 ~2 ms of
+// assembly per 8-thread refactorization (8T engine Stage 2, Task 0).
+TEST(FactorStoreEngine, RefactorKeepsAssemblyRoom) {
+    const CscLower A = opf_like_kkt(60000, 24000, 3);
+    Solver s;
+    Info i;
+    const Control c = base(8, true);
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const Out a = factor_solve(s, *ak, A, c, fk, ws);
+    ASSERT_EQ(a.status, FactorStatus::Success);
+    ASSERT_GT(fk.factor_values.slices(), 1) << "premise: per-thread slices";
+    const long long d0 = vm_decommit_bytes();
+    const Out b = factor_solve(s, *ak, A, c, fk, ws);
+    ASSERT_EQ(b.status, FactorStatus::Success);
+    EXPECT_EQ(vm_decommit_bytes() - d0, 0) << "the refactorization decommitted memory it needs again";
+    EXPECT_TRUE(same_bits(a.x, b.x));
+}
