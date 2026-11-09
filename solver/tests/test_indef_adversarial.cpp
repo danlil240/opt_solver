@@ -195,7 +195,7 @@ TEST(IndefAdversarial, SecondaryPivotZeroDiagonal) {
         for (double v : fk.factor_values) {
             EXPECT_TRUE(std::isfinite(v));
         }
-        for (const auto& de : fk.diag_entries) {
+        for (const auto& de : fk.diag()) {
             if (de.tag == 1) {
                 EXPECT_GT(std::abs(de.d00), 1e-12);
             }
