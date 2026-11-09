@@ -89,6 +89,9 @@ private:
     T *p = static_cast<T *>(std::malloc(cap * sizeof(T)));
     if (p == nullptr) return false;
     if (size_ > 0) std::memcpy(p, base_, size_ * sizeof(T));
+    // The rest reads as zeros, as fresh committed pages and std::vector's
+    // growth do (the engine assembles fronts into the tail it grew).
+    std::memset(static_cast<void *>(p + size_), 0, (cap - size_) * sizeof(T));
     if (detached_) std::free(base_);
     base_ = p;
     heap_cap_ = cap;

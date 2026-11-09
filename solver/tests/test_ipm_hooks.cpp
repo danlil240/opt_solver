@@ -320,7 +320,7 @@ TEST(IpmHooks, TreeParallelAbort) {
     EXPECT_EQ(h.info.delayed_pivots, base.info.delayed_pivots);
     EXPECT_EQ(h.info.parallel_subtrees, base.info.parallel_subtrees);
     EXPECT_EQ(h.info.aborted_flops_skipped, 0.0);
-    EXPECT_EQ(h.fk.factor_values.size(), base.fk.factor_values.size());
+    EXPECT_EQ(h.fk.factor_values.used(), base.fk.factor_values.used());  // entries (size(): extent, with gaps)
     std::vector<double> x;
     ASSERT_EQ(h.solve(x), 0);
     EXPECT_LT(max_rel_diff(x_base, x), 1e-12);

@@ -58,7 +58,7 @@ void build_inline_dinv(FactorKeep &fkeep, bool usable) {
   LongInt total = 0;
   for (const SolveStep &st : fkeep.solve_steps) {
     if (st.p < 0 || st.f < st.p || st.factor_offset < 0 ||
-        st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals) {
+        (st.p > 0 && st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals)) {
       fkeep.dinv.clear();
       fkeep.dinv_kind.clear();
       fkeep.dinv_offset.clear();
@@ -150,7 +150,7 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   const auto nvals = static_cast<LongInt>(fkeep.factor_values.size());
   for (const SolveStep &st : fkeep.solve_steps)
     if (st.p < 0 || st.f < st.p || st.factor_offset < 0 ||
-        st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals) {
+        (st.p > 0 && st.factor_offset + static_cast<LongInt>(st.p) * st.f > nvals)) {
       fkeep.inv_diag.clear();
       return;
     }

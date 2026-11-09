@@ -38,6 +38,21 @@
 
 using namespace smf;
 
+namespace {
+// The factor's values front by front, in solve-step order (postorder in
+// deterministic mode): independent of where each thread's slice of the
+// FactorStore landed (Control::factor_in_place), which follows the dynamic
+// task assignment.
+std::vector<double> factor_in_step_order(const FactorKeep &fk) {
+    std::vector<double> v;
+    for (const SolveStep &st : fk.solve_steps) {
+        const double *p = fk.factor_values.data() + st.factor_offset;
+        v.insert(v.end(), p, p + static_cast<std::ptrdiff_t>(st.p) * st.f);
+    }
+    return v;
+}
+}  // namespace
+
 // ---------------------------------------------------------------------------
 // Matrix builders
 // ---------------------------------------------------------------------------
@@ -805,7 +820,8 @@ OneThreadRun one_thread_run(const DetCase &c, int num_threads) {
             EXPECT_EQ(solver.factor(*ak, std::span<const double>(v), ctrl, info, fk, nws),
                       FactorStatus::Success);
         }
-        r.l.insert(r.l.end(), fk.factor_values.begin(), fk.factor_values.end());
+        const std::vector<double> lv = factor_in_step_order(fk);
+        r.l.insert(r.l.end(), lv.begin(), lv.end());
         r.l.insert(r.l.end(), fk.band_factor.begin(), fk.band_factor.end());
         r.neg += info.num_negative;
         r.banded = fk.use_banded_spd;
@@ -838,7 +854,7 @@ OneThreadRun one_thread_run(const DetCase &c, int num_threads) {
         EXPECT_TRUE(r.ipm_ok);
         if (!r.ipm_ok) return r;
         const FactorKeep &ipk = s.factor_keep();
-        r.ipm.assign(ipk.factor_values.begin(), ipk.factor_values.end());
+        r.ipm = factor_in_step_order(ipk);
         std::vector<double> b(static_cast<std::size_t>(n) * 4);
         for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::cos(0.011 * static_cast<double>(i));
         EXPECT_EQ(s.solve(b.data(), n, 1), 0);
@@ -1101,7 +1117,7 @@ PluginDetRun plugin_det_run(const CscLower &A, int threads, bool auto_threads) {
                 r.l.insert(r.l.end(), fk.factor_values.begin() + b, fk.factor_values.begin() + b + len);
                 total += len;
             }
-            EXPECT_EQ(total, static_cast<LongInt>(fk.factor_values.size())) << "blocks do not tile L";
+            EXPECT_EQ(total, static_cast<LongInt>(fk.factor_values.used())) << "blocks do not tile L";
         }
         for (const DiagSolveEntry &e : fk.diag_entries) {
             r.d.push_back(e.d00);
