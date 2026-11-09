@@ -573,7 +573,7 @@ struct Control {
     // parallel_value_prep_min_entries matrix entries, mapping the values to the
     // permuted pattern and scaling them run over ranges on the factorization's
     // pool (bit-for-bit the serial result).
-    bool           parallel_value_prep       = false;
+    bool           parallel_value_prep       = true;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
