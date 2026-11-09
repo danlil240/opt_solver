@@ -1023,11 +1023,11 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f static_fb=%d static_rej=%d growth=%.3g refine=%d omega0=%.3g\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d early=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f static_fb=%d static_rej=%d growth=%.3g refine=%d omega0=%.3g\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.delay_early_stops, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
-                                 fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
+                                 fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.top_fronts_overlapped, fst.subtree_ms, fst.top_ms,
                                  fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms,
                                  fst.static_fallback, fst.static_rejects, fst.pivot_growth, fst.refine_iterations, fst.refine_omega_start);
                 }

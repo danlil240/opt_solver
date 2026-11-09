@@ -75,6 +75,7 @@ struct AdapterStats {
     int parallel_subtrees = 0;
     int top_part_fronts = 0;
     int top_part_queue_pops = 0;  // of those, taken from the scheduler's shared list
+    int top_fronts_overlapped = 0;  // Info::top_fronts_overlapped
     double subtree_ms = 0.0;
     double top_ms = 0.0;
     double gather_ms = 0.0;
