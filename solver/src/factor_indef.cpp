@@ -332,7 +332,7 @@ bool finalize_factor_from_front_results(
     }
   }
 
-  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.used());
   info.actual_flops = total_flops;
   if (max_realized_front > info.max_front_size) {
     info.max_front_size = max_realized_front;
@@ -727,7 +727,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.num_negative = st.inertia.negative;
     info.num_zero = st.inertia.zero;
     info.numerical_rank = static_cast<int>(keep.n) - st.inertia.zero;
-    info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+    info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.used());
     info.actual_flops = st.flops;
     info.front_work = static_cast<double>(st.front_work);
     info.max_front_size = std::max(info.max_front_size, st.max_front);

@@ -18,6 +18,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <initializer_list>
+#include <iterator>
 #include <new>
 #include <type_traits>
 #include <utility>
@@ -250,6 +252,66 @@ public:
       s.committed_ = keep / sizeof(T);
     }
   }
+  // Vector-style use of a one-slice store (the paths that build the factor in
+  // one piece, and tests). Each acts on slice 0, creating it when there is
+  // none; resize() never zero-fills.
+  T *begin() noexcept { return data(); }
+  T *end() noexcept { return data() + size(); }
+  const T *begin() const noexcept { return data(); }
+  const T *end() const noexcept { return data() + size(); }
+  T &operator[](std::size_t i) noexcept { return data()[i]; }
+  const T &operator[](std::size_t i) const noexcept { return data()[i]; }
+  void reserve(std::size_t n) {
+    if (slices_.empty() || (slices_.size() == 1 && slices_[0].size_ == 0 && !slices_[0].detached_ &&
+                            (base_ == nullptr || cap_ < n)))
+      reserve_slices(1, n);
+  }
+  void resize(std::size_t n) {
+    if (slices_.empty()) reserve_slices(1, n);
+    slices_[0].grow(n);
+  }
+  void push_back(const T &v) {
+    if (slices_.empty()) reserve_slices(1, 0);
+    FactorSlice<T> &s = slices_[0];
+    const std::size_t n = s.size_;
+    s.grow(n + 1);
+    s.base_[n] = v;
+  }
+  template <class It> void insert(const T *pos, It first, It last) {
+    (void)pos;  // appends: the only use (pos == end())
+    if (slices_.empty()) reserve_slices(1, 0);
+    FactorSlice<T> &s = slices_[0];
+    const std::size_t n = s.size_;
+    const std::size_t k = static_cast<std::size_t>(std::distance(first, last));
+    s.grow(n + k);
+    std::copy(first, last, s.base_ + n);
+  }
+  // One slice holding exactly these values (hand-built factors in tests).
+  FactorStore &operator=(std::initializer_list<T> v) { return set(v.begin(), v.end()); }
+  FactorStore &operator=(const std::vector<T> &v) { return set(v.data(), v.data() + v.size()); }
+
+  // The values as one array: the used slices in slice order (what the engine's
+  // gather produced). For comparisons and copies in tests and tools.
+  operator std::vector<T>() const {
+    std::vector<T> v;
+    v.reserve(used());
+    for_each_used([&v](const T *p, std::size_t n) { v.insert(v.end(), p, p + n); });
+    return v;
+  }
+  friend bool operator==(const FactorStore &a, const FactorStore &b) {
+    return static_cast<std::vector<T>>(a) == static_cast<std::vector<T>>(b);
+  }
+  friend bool operator==(const FactorStore &a, const std::vector<T> &b) {
+    return static_cast<std::vector<T>>(a) == b;
+  }
+
+  // Elements slice 0 holds without new memory (committed or private).
+  std::size_t capacity() const noexcept {
+    if (slices_.empty()) return 0;
+    const auto &s = slices_[0];
+    return s.detached_ ? s.heap_cap_ : std::max(s.committed_, s.size_);
+  }
+
   // Committed bytes of the range plus private blocks (the trim rule, tests).
   std::size_t committed_bytes() const noexcept {
     std::size_t b = 0;
@@ -258,6 +320,13 @@ public:
   }
 
 private:
+  FactorStore &set(const T *first, const T *last) {
+    const std::size_t n = static_cast<std::size_t>(last - first);
+    reserve_slices(1, n);
+    slices_[0].grow(n);
+    if (n > 0) std::memcpy(slices_[0].base_, first, n * sizeof(T));
+    return *this;
+  }
   void reset() noexcept {
     for (auto &s : slices_) s.free_heap();
     slices_.clear();

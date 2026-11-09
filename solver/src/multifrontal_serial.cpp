@@ -98,8 +98,12 @@ struct TreeParallelBuffers {
   std::unique_ptr<std::atomic<long long>[]> early_works;
   std::size_t early_works_cap = 0;
   struct Thread {
-    std::vector<double> fv, cbv, work;
-    std::vector<Int> sri, cbr, pos, rows, cmap;
+    // This thread's factor values and row ids (one slice each), gathered into
+    // the FactorKeep after the factorization.
+    FactorStore<double> fv;
+    FactorStore<Int> sri;
+    std::vector<double> cbv, work;
+    std::vector<Int> cbr, pos, rows, cmap;
     std::vector<int8_t> tags;
     std::vector<SolveStep> steps;
     std::vector<DiagSolveEntry> diag;
@@ -151,8 +155,8 @@ namespace {
 // the tree-parallel path runs one pass per thread over whole subtrees, then
 // the serial pass over the top of the tree.
 struct FrontPass {
-  std::vector<double> *fv;   // factor values; fronts are assembled in place here
-  std::vector<Int> *sri;     // solve row indices
+  FactorSlice<double> *fv;   // factor values; fronts are assembled in place here
+  FactorSlice<Int> *sri;     // solve row indices
   std::vector<SolveStep> *steps;
   std::vector<DiagSolveEntry> *diag;
   // Tree-parallel only: (front, end offset in *diag) after each front this
@@ -385,6 +389,16 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
     vec.reserve(std::max(need, vec.capacity() + vec.capacity() / 2));
   }
   vec.resize(need);
+}
+
+// A factor slice never shrinks here (its size past the pass's fill is the room
+// the next front assembles in); it counts a growth when it moves to private
+// memory (out of its reservation).
+template <class T> void grow(FactorSlice<T> &s, std::size_t need, int64_t &growths) {
+  if (s.size() >= need) return;
+  const bool was = s.detached();
+  if (!s.grow(need)) throw std::bad_alloc();
+  if (s.detached() && (!was || s.size() > need)) ++growths;
 }
 
 // Assemble, factor and store supernode s with pass P (index `me` in
@@ -811,7 +825,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   step.f = f;
   P.steps->push_back(step);
   grow(*P.sri, P.ro + sf, P.growths);
-  std::copy(rows, rows + f, P.sri->begin() + static_cast<std::ptrdiff_t>(P.ro));
+  std::copy(rows, rows + f, P.sri->data() + P.ro);
   P.fo += sf * static_cast<std::size_t>(p_store);
   P.ro += sf;
 
@@ -1132,10 +1146,19 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   reserve_plan(ws.pivot_tags, max_f);
   reserve_plan(ws.kernel_work, max_work);
 
-  auto &fv = fkeep.factor_values;
-  auto &sri = fkeep.solve_row_indices;
-  reserve_plan(fv, pred_factor);
-  reserve_plan(sri, pred_rows);
+  // The FactorKeep's factor: one slice reserved for 4x the predicted factor
+  // plus the largest front (delays grow fronts; past it the slice moves to
+  // private memory). An unchanged reservation keeps its committed pages, so a
+  // refactorization neither faults nor zero-fills them again.
+  fkeep.factor_values.reserve_slices(1, 4 * pred_factor + max_f * max_f);
+  fkeep.solve_row_indices.reserve_slices(1, 4 * pred_rows + max_f);
+  auto &fv = fkeep.factor_values.slice(0);
+  auto &sri = fkeep.solve_row_indices.slice(0);
+  {
+    int64_t g = 0;
+    grow(fv, pred_factor, g);
+    grow(sri, pred_rows, g);
+  }
   fkeep.factor_col_ptr.resize(ns + 1);
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
@@ -1442,8 +1465,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       b.steps.clear();
       b.diag.clear();
       FrontPass &P = tpass[static_cast<std::size_t>(t)];
-      P.fv = &b.fv;
-      P.sri = &b.sri;
+      if (b.fv.slices() == 0) {  // once: reserved like the FactorKeep's
+        b.fv.reserve_slices(1, 4 * pred_factor + max_f * max_f);
+        b.sri.reserve_slices(1, 4 * pred_rows + max_f);
+      }
+      P.fv = &b.fv.slice(0);
+      P.sri = &b.sri.slice(0);
       P.steps = &b.steps;
       P.diag = &b.diag;
       P.cbv = &b.cbv;
@@ -1885,8 +1912,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     ws.realized_analysis = keep.serial;
     ws.realized_valid = true;
   }
-  fv.resize(main.fo);
-  sri.resize(main.ro);
+  fv.grow(main.fo);
+  sri.grow(main.ro);
   if (!fkeep.solve_subtrees.empty()) {
     // Pivot rows of the top part (delayed subtree pivots included): the
     // parallel forward solve sends subtree updates to them through
