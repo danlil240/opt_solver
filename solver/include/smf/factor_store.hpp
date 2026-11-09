@@ -359,12 +359,17 @@ private:
       }
       return;
     }
-    reserve_slices(o.slices(), 0);
+    // No range for the copy (or none in the source): one private block of
+    // the source's extent, every attached slice at its original offset from
+    // data() (the factor's offsets were taken there; the gaps read as zeros).
+    slices_.assign(1, FactorSlice<T>{});
+    const std::size_t extent = o.size();
+    if (!slices_[0].grow(extent)) throw std::bad_alloc();
     for (std::size_t t = 0; t < o.slices_.size(); ++t) {
-      slices_[t].cap_ = 0;
-      slices_[t].grow(o.slices_[t].size_);
-      if (o.slices_[t].size_ > 0)
-        std::memcpy(slices_[t].base_, o.slices_[t].base_, o.slices_[t].size_ * sizeof(T));
+      const auto &src = o.slices_[t];
+      if (src.size_ == 0) continue;
+      const std::size_t at = (o.base_ != nullptr && !src.detached_) ? o.stride_ * t : 0;
+      std::memcpy(slices_[0].base_ + at, src.base_, src.size_ * sizeof(T));
     }
   }
 
