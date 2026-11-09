@@ -54,9 +54,9 @@ template <class F> std::string capture_stderr(F &&fn) {
 
 TEST(PhaseTrace, MarksInOrderWhenOn) {
 #ifdef _WIN32
-    _putenv_s("SMF_BENCH_PHASE_TRACE", "1");
+    _putenv_s("SMF_BENCH_PHASE_TRACE", "2");  // level 2: marks plus kernel sums
 #else
-    setenv("SMF_BENCH_PHASE_TRACE", "1", 1);
+    setenv("SMF_BENCH_PHASE_TRACE", "2", 1);
 #endif
     const CscLower A = opf_like_kkt(20000, 8000, 1);
     for (const int threads : {1, 4}) {
@@ -84,5 +84,41 @@ TEST(PhaseTrace, MarksInOrderWhenOn) {
             ASSERT_NE(k, std::string::npos) << threads << "T: mark " << m << " missing or out of order in\n" << err;
             at = k;
         }
+    }
+}
+
+// SMF_BENCH_PHASE_TRACE=2: after mf_p3 the factorization prints the top
+// fronts' kernel time, `# sum <slot> s=<seconds>` for top_asm, top_panel,
+// top_defer and top_schur, and the large top fronts' assembly and TPP panels
+// are counted in them.
+TEST(PhaseTrace, KernelSumsAtLevelTwo) {
+#ifdef _WIN32
+    _putenv_s("SMF_BENCH_PHASE_TRACE", "2");
+#else
+    setenv("SMF_BENCH_PHASE_TRACE", "2", 1);
+#endif
+    const CscLower A = opf_like_kkt(20000, 8000, 1);
+    Control ctrl;
+    ctrl.num_threads = 4;
+    ctrl.auto_threads = false;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    FactorKeep fk;
+    FactorStatus st = FactorStatus::Success;
+    const std::string err = capture_stderr([&] { st = solver.factor(*ak, A, ctrl, info, fk, nws); });
+    ASSERT_EQ(st, FactorStatus::Success);
+    ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+    const std::size_t p3 = err.find("# seg mf_p3 t=");
+    ASSERT_NE(p3, std::string::npos);
+    for (const char *slot : {"top_asm", "top_panel", "top_defer", "top_schur"}) {
+        const std::string key = std::string("# sum ") + slot + " s=";
+        const std::size_t k = err.find(key, p3);
+        ASSERT_NE(k, std::string::npos) << "sum " << slot << " missing after mf_p3 in\n" << err;
+        const double v = std::atof(err.c_str() + k + key.size());
+        EXPECT_GE(v, 0.0) << slot;
+        if (std::string(slot) == "top_asm" || std::string(slot) == "top_panel") EXPECT_GT(v, 0.0) << slot;
     }
 }

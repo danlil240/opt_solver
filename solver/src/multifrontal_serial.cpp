@@ -630,7 +630,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // top of P's stack when P made them) are only read here, and nothing is
   // pushed or released before this front's own Schur complement, so a delay
   // budget retry can assemble the front again.
+  // SMF_BENCH_PHASE_TRACE=2: a top front's assembly time (top_asm).
+  const bool asm_lap = tc != nullptr && phase_in_top_front();
   for (;;) {
+    const auto asm_t0 = asm_lap ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (small) {
       // The small-front layout: rows [f, fe) zero, and the rows above the
       // diagonal its kernels write (down to the 4-row boundary) finite.
@@ -692,6 +695,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
     }
 
+    if (asm_lap)
+      phase_sum_add(PhaseSum::TopAsm,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - asm_t0).count());
     kr = LdltKernelResult{};
     aptp_failed = 0;
     if (aprm != nullptr) {
@@ -1750,6 +1756,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // Deterministic mode: BLAS on one thread whatever the front's
             // share (its tile tasks still recruit blas_threads - 1 helpers).
             BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
+            const PhaseTopFrontScope phase_top;
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }
@@ -1813,6 +1820,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
       phase_mark("mf_p3");
+      phase_sum_flush();
       if (in_place) {
         // Each slice holds exactly its pass's fill. Attached slices are the
         // final layout (offsets from the store's base); a slice that moved
