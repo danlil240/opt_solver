@@ -202,9 +202,16 @@ public:
     swap(out);
   }
 
-  T *data() noexcept { return base_ != nullptr ? base_ : (slices_.empty() ? nullptr : slices_[0].base_); }
+  // The base offsets count from: the range's start, except for a one-slice
+  // store (or one without a range), whose slice may have moved to private
+  // memory: then the slice's own data.
+  T *data() noexcept {
+    if (slices_.empty()) return base_;
+    return (base_ == nullptr || slices_.size() == 1) ? slices_[0].base_ : base_;
+  }
   const T *data() const noexcept {
-    return base_ != nullptr ? base_ : (slices_.empty() ? nullptr : slices_[0].base_);
+    if (slices_.empty()) return base_;
+    return (base_ == nullptr || slices_.size() == 1) ? slices_[0].base_ : base_;
   }
   // Extent: one past the highest used element, from data().
   std::size_t size() const noexcept {

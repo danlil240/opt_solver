@@ -139,3 +139,19 @@ TEST(FactorStore, ReservationFailureFallsBackToDetached) {
     unsetenv("SMF_TEST_STORE_FAIL_RESERVE");
 #endif
 }
+
+// A one-slice store whose slice outgrows its reservation (the serial engine's
+// factor when delays exceed the reserved 4x prediction): data() is the
+// slice's new memory, so offsets from data() stay valid without a regather.
+TEST(FactorStore, SingleSliceDetachKeepsDataValid) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(1, 100));
+    ASSERT_TRUE(s.slice(0).grow(100));
+    for (std::size_t k = 0; k < 100; ++k) s.slice(0).data()[k] = static_cast<double>(k);
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    ASSERT_TRUE(s.slice(0).detached());
+    EXPECT_EQ(s.data(), s.slice(0).data());
+    EXPECT_EQ(s.size(), 100000u);
+    EXPECT_EQ(s.data()[99], 99.0);
+    s.data()[99999] = 1.0;  // writable through data()
+}
