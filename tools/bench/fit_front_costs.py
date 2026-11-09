@@ -3,7 +3,8 @@
 
 The plan prices a front as f^2 p + c_asm f^2 + c_front work units (thread_plan.hpp, FrontCostModel). Its time
 on one thread is modelled as t = a f^2 p + b f^2 + c, fitted by least squares over the fronts of 1-thread
-per-front traces, so c_asm = b / a and c_front = (c - fprintf_s) / a, where fprintf_s is the trace's own cost
+per-front traces, by least squares in relative error (fronts span six orders of magnitude), so c_asm = b / a and c_front =
+(c - fprintf_s) / a, where fprintf_s is the trace's own cost
 per front (one fprintf; measured as traced minus untraced refactorization time over the front count).
 
 Traces: the probe build of branch probe/front-trace-8t with SMF_PROBE_FRONTS=<path> and SMF_PROBE_MINF=0 (every
@@ -53,7 +54,10 @@ def fit(fronts: list[tuple[int, int, int, float]], fprintf_s: float) -> tuple[fl
     p = np.array([x[2] for x in fronts], dtype=float)
     t = np.array([x[3] for x in fronts], dtype=float)
     X = np.column_stack([f * f * p, f * f, np.ones_like(f)])
-    (a, b, c), *_ = np.linalg.lstsq(X, t, rcond=None)
+    # Relative error (residual / t): the constants price small fronts, whose
+    # times absolute least squares lets the large fronts' drown.
+    w = 1.0 / np.maximum(t, 1e-8)
+    (a, b, c), *_ = np.linalg.lstsq(X * w[:, None], t * w, rcond=None)
     return float(b / a), float((c - fprintf_s) / a)
 
 
