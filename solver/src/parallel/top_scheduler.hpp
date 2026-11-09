@@ -35,7 +35,8 @@ namespace smf {
 // Runs a DAG of top-part fronts on a pool. A node is ready once all its
 // children have completed. Ready nodes share `threads` BLAS threads: a node
 // taken while k others are ready gets max(1, free / (k + 1)), and the sum of
-// the shares of running nodes never exceeds `threads`.
+// the shares of running nodes never exceeds `threads` (the threads joined
+// so far, with the overlap below).
 //
 // With priorities (Control::top_critical_shares, 8T engine Part 7; one value
 // per node, its remaining path cost to the root):
@@ -47,13 +48,32 @@ namespace smf {
 // - threads freed while nothing is ready go to the running node with the
 //   highest priority: its share (share(node), an atomic the front's BLAS
 //   calls follow) grows, and finish() returns its current share.
+//
+// Overlap with the subtree phase (Control::top_overlap): a node may also
+// wait for `external[i]` completions of work outside the DAG (its subtree
+// tasks), reported by external_done(), and the budget may start with
+// `joined` < threads threads, the others added by join() as the workers that
+// hold them come to work(). While any external completion is outstanding,
+// free threads are not granted to running nodes: a node readied by a
+// subtree task can still start on them.
 class TopScheduler final : public TileHelpers {
 public:
   // parent[i]: parent of local node i (-1: root); pending counts derive from it.
   // priority: empty (equal shares, LIFO list) or one value per node.
-  TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority = {});
+  // external: empty (none) or per node its external completions to wait for.
+  // joined: threads in the budget at the start (-1: all `threads`).
+  TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority = {},
+               std::vector<Int> external = {}, int joined = -1);
   TopScheduler(const TopScheduler &) = delete;
   TopScheduler &operator=(const TopScheduler &) = delete;
+
+  // One external completion of each listed node (a node may be listed more
+  // than once). A node with nothing else pending becomes ready.
+  void external_done(const Int *nodes, std::size_t count);
+  // `k` more threads in the budget (at most `threads` in all).
+  void join(int k = 1);
+  // Stop: no node is taken after this, and every work() returns.
+  void stop();
 
   // Worker loop for thread `tid`. run(node, blas_threads, tid) -> bool
   // (false: stop everything). Returns when every node completed or after a stop.
@@ -78,7 +98,7 @@ public:
   // The live BLAS share of a node while run(node, ...) runs (with
   // priorities it grows when threads come free).
   const std::atomic<int> &share(Int node) const { return share_[static_cast<std::size_t>(node)]; }
-  // Threads held by running nodes (threads - free). For tests.
+  // Threads held by running nodes (joined - free). For tests.
   int shares_in_use();
 
 private:
@@ -120,6 +140,8 @@ private:
   std::vector<std::pair<TileRunner *, int>> offers_;  // (job, slots left), newest last
   std::vector<std::pair<Int, int>> completed_;
   int free_ = 0;               // BLAS threads not held by running nodes
+  int joined_ = 0;             // threads in the budget (free_ + the running shares)
+  long long external_left_ = 0;  // external completions not reported yet
   int remaining_ = 0;          // nodes not completed
   int sleepers_ = 0;           // workers blocked on cv_
   int queue_pops_ = 0;
@@ -150,7 +172,9 @@ private:
 // lane's holder is the only thread that changes its room.
 class PassLanes {
 public:
-  explicit PassLanes(int lanes);
+  // all_busy: every lane starts held (by the subtree phase, which releases
+  // each when its thread is done with it).
+  explicit PassLanes(int lanes, bool all_busy = false);
   PassLanes(const PassLanes &) = delete;
   PassLanes &operator=(const PassLanes &) = delete;
 

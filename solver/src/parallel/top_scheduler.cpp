@@ -29,19 +29,56 @@ template <class Pred> bool spin_until(Pred ready) {
 }
 } // namespace
 
-TopScheduler::TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority)
+TopScheduler::TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority,
+                           std::vector<Int> external, int joined)
     : parent_(std::move(parent)), pending_(parent_.size(), 0), share_(parent_.size()) {
   const std::size_t n = parent_.size();
   if (priority.size() == n) prio_ = std::move(priority);
   for (std::size_t i = 0; i < n; ++i)
     if (parent_[i] >= 0) ++pending_[static_cast<std::size_t>(parent_[i])];
+  if (external.size() == n)
+    for (std::size_t i = 0; i < n; ++i) {
+      pending_[i] += external[i];
+      external_left_ += external[i];
+    }
   for (std::size_t i = 0; i < n; ++i)
     if (pending_[i] == 0) push_ready(static_cast<Int>(i));
   completed_.reserve(n);
   threads_ = std::max(1, threads);
-  free_ = threads_;
+  joined_ = joined < 0 ? threads_ : std::min(joined, threads_);
+  free_ = joined_;
   remaining_ = static_cast<int>(n);
   publish();
+}
+
+void TopScheduler::external_done(const Int *nodes, std::size_t count) {
+  if (count == 0) return;
+  std::lock_guard<std::mutex> lk(mtx_);
+  for (std::size_t k = 0; k < count; ++k) {
+    const std::size_t v = static_cast<std::size_t>(nodes[k]);
+    --external_left_;
+    if (--pending_[v] == 0) push_ready(static_cast<Int>(v));
+  }
+  grant_free();
+  publish();
+  wake_one_if_runnable();
+}
+
+void TopScheduler::join(int k) {
+  std::lock_guard<std::mutex> lk(mtx_);
+  k = std::clamp(k, 0, threads_ - joined_);
+  joined_ += k;
+  free_ += k;
+  grant_free();
+  publish();
+  wake_one_if_runnable();
+}
+
+void TopScheduler::stop() {
+  stopped_.store(true, std::memory_order_release);
+  std::lock_guard<std::mutex> lk(mtx_);
+  publish();
+  cv_.notify_all();
 }
 
 namespace {
@@ -83,7 +120,8 @@ int TopScheduler::start_share(double p) const {
 }
 
 void TopScheduler::grant_free() {
-  if (prio_.empty() || free_ <= 0 || !ready_.empty() || running_.empty()) return;
+  // Not while a subtree task may still ready a node, which then starts on them.
+  if (prio_.empty() || free_ <= 0 || !ready_.empty() || running_.empty() || external_left_ > 0) return;
   Int best = running_.front();
   for (const Int v : running_)
     if (prio_[static_cast<std::size_t>(v)] > prio_[static_cast<std::size_t>(best)] ||
@@ -95,7 +133,7 @@ void TopScheduler::grant_free() {
 
 int TopScheduler::shares_in_use() {
   std::lock_guard<std::mutex> lk(mtx_);
-  return threads_ - free_;
+  return joined_ - free_;
 }
 
 void TopScheduler::publish() {
@@ -229,7 +267,8 @@ void TopScheduler::withdraw(TileRunner &job) {
   publish();
 }
 
-PassLanes::PassLanes(int lanes) : busy_(static_cast<std::size_t>(std::max(1, lanes)), 0) {}
+PassLanes::PassLanes(int lanes, bool all_busy)
+    : busy_(static_cast<std::size_t>(std::max(1, lanes)), all_busy ? 1 : 0) {}
 
 void PassLanes::release(int lane) {
   if (lane < 0) return;

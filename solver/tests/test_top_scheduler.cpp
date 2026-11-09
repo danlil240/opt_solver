@@ -15,6 +15,7 @@
 #include <chrono>
 #include <memory>
 #include <random>
+#include <thread>
 #include <vector>
 
 using namespace smf;
@@ -308,6 +309,116 @@ TEST(TopScheduler, GrantRacingFinishKeepsBudget) {
     }
 }
 
+// Overlap with the subtree phase (Control::top_overlap): a node also waits
+// for its external completions (subtree tasks), and the BLAS budget starts
+// empty and grows as workers join.
+TEST(TopScheduler, ExternalCompletionsHoldTheirNode) {
+    // Leaves 0 and 1 under root 2; leaf 0 also waits for one external
+    // completion. One thread joins at once; the other reports the external
+    // completion after a while, then joins.
+    const std::vector<Int> parent = {2, 2, -1};
+    TopScheduler sched(parent, 2, {}, {1, 0, 0}, 0);
+    EXPECT_EQ(sched.shares_in_use(), 0);
+    std::atomic<bool> reported{false};
+    std::atomic<int> ran0_before{0}, ran1_before{0};
+    SolvePool pool(2);
+    pool.run([&](int tid) {
+        if (tid == 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            const Int v = 0;
+            reported.store(true);
+            sched.external_done(&v, 1);
+        }
+        sched.join();
+        sched.work(tid, [&](Int v, int blas_threads, int) {
+            EXPECT_GE(blas_threads, 1);
+            if (!reported.load()) (v == 0 ? ran0_before : ran1_before).fetch_add(1);
+            return true;
+        });
+    });
+    EXPECT_EQ(ran0_before.load(), 0);  // held until reported
+    EXPECT_EQ(ran1_before.load(), 1);  // ran on the one joined thread meanwhile
+    EXPECT_EQ(sched.shares_in_use(), 0);
+    expect_topological(sched, parent);
+}
+
+TEST(TopScheduler, JoinedThreadsBoundTheShares) {
+    // Random trees whose leaves wait for external completions, reported by
+    // the workers in random order before each joins: a node never runs
+    // before its completions, and the shares never exceed the joined threads.
+    std::mt19937 rng(5);
+    SolvePool pool(T);
+    for (int trial = 0; trial < 100; ++trial) {
+        const Int n = std::uniform_int_distribution<Int>(1, 500)(rng);
+        std::vector<Int> parent(static_cast<std::size_t>(n), -1);
+        for (Int i = 0; i + 1 < n; ++i)
+            parent[static_cast<std::size_t>(i)] = std::uniform_int_distribution<Int>(i + 1, n - 1)(rng);
+        std::vector<double> prio;
+        if (trial % 2 == 1) {
+            prio.resize(static_cast<std::size_t>(n));
+            for (double &p : prio) p = std::uniform_real_distribution<double>(0.0, 100.0)(rng);
+        }
+        std::vector<Int> external(static_cast<std::size_t>(n), 0);
+        std::vector<Int> events;  // one entry per external completion
+        for (Int i = 0; i < n; ++i) {
+            const Int k = std::uniform_int_distribution<Int>(0, 2)(rng);
+            external[static_cast<std::size_t>(i)] = k;
+            for (Int j = 0; j < k; ++j) events.push_back(i);
+        }
+        std::shuffle(events.begin(), events.end(), rng);
+        std::vector<std::atomic<int>> reported(static_cast<std::size_t>(n));
+        TopScheduler sched(parent, T, prio, external, 0);
+        std::atomic<std::size_t> next{0};
+        std::atomic<int> joined{0}, over{0}, early{0};
+        pool.run([&](int tid) {
+            for (std::size_t e; (e = next.fetch_add(1)) < events.size();) {
+                const Int v = events[e];
+                reported[static_cast<std::size_t>(v)].fetch_add(1);
+                sched.external_done(&v, 1);
+            }
+            joined.fetch_add(1);
+            sched.join();
+            sched.work(tid, [&](Int v, int blas_threads, int) {
+                if (reported[static_cast<std::size_t>(v)].load() != external[static_cast<std::size_t>(v)])
+                    early.fetch_add(1);
+                // In this order: the joined count read after the shares
+                // (joins only add to both).
+                const int in_use = sched.shares_in_use();
+                const int j = joined.load();
+                if (in_use > j || blas_threads > j) over.fetch_add(1);
+                return true;
+            });
+        });
+        ASSERT_EQ(early.load(), 0) << "trial " << trial;
+        ASSERT_EQ(over.load(), 0) << "trial " << trial;
+        ASSERT_EQ(sched.shares_in_use(), 0) << "trial " << trial;
+        expect_topological(sched, parent);
+    }
+}
+
+TEST(TopScheduler, StopEndsWorkersWaitingOnExternalCompletions) {
+    // Node 0 waits for a completion that never comes (its subtree task
+    // failed): stop() ends the joined workers.
+    const std::vector<Int> parent = {1, -1};
+    TopScheduler sched(parent, T, {}, {1, 0}, 0);
+    std::atomic<int> runs{0};
+    SolvePool pool(T);
+    pool.run([&](int tid) {
+        if (tid == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            sched.stop();
+        }
+        sched.join();
+        sched.work(tid, [&](Int, int, int) {
+            runs.fetch_add(1);
+            return true;
+        });
+    });
+    EXPECT_TRUE(sched.stopped());
+    EXPECT_EQ(runs.load(), 0);
+    EXPECT_TRUE(sched.completed().empty());
+}
+
 namespace {
 
 // Rooms of 8 lanes, as PassLanes::pick reads them.
@@ -389,6 +500,17 @@ TEST(PassLanes, NeverTwoHoldersOfALane) {
         }
     });
     EXPECT_EQ(clash.load(), 0);
+}
+
+TEST(PassLanes, BusyLanesWaitForTheirRelease) {
+    // Lanes held by the subtree phase at the start: a chain takes only a
+    // released one.
+    PassLanes lanes(T, /*all_busy=*/true);
+    Rooms rooms;
+    lanes.release(5);
+    EXPECT_EQ(lanes.pick(-1, 0, 1, rooms), 5);
+    lanes.release(2);
+    EXPECT_EQ(lanes.pick(-1, 0, 1, rooms), 2);
 }
 
 TEST(ChunkArena, NeedsTheTotalWhateverTheOrder) {

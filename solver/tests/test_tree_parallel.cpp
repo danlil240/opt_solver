@@ -11,6 +11,7 @@
 #include "smf/determinism.hpp"
 #include "smf/info.hpp"
 #include "smf/matrix_market.hpp"
+#include "smf/multifrontal_serial.hpp"
 #include "smf/solve_pool.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
@@ -1186,4 +1187,51 @@ TEST(TreeParallel, CriticalSharesUseRealizedSizes) {
     ASSERT_EQ(s.factor(*ak, V1, c, info, fk, ws), FactorStatus::Success);
     EXPECT_EQ(info.top_priority_from_realized, 1);
     EXPECT_GT(delays_v1, 0) << "premise: V1 delays";
+}
+
+namespace {
+// Tests: hold the first subtree task (the heaviest) until a top front has
+// started, for the scope's lifetime.
+struct HoldFirstTask {
+    HoldFirstTask() { set_hold_first_subtree_task_for_test(true); }
+    ~HoldFirstTask() { set_hold_first_subtree_task_for_test(false); }
+};
+} // namespace
+
+// Control::top_overlap: a top front starts as soon as its own subtree tasks
+// are done, while other subtree tasks still run. With the heaviest task held
+// until a top front has started, one does (Info::top_fronts_overlapped), and
+// the factorization is the one without the overlap: same inertia and delays,
+// solutions to rounding. Without the overlap no top front starts early.
+TEST(TreeParallel, TopFrontStartsBeforeTheLastSubtreeTask) {
+    const CscLower mats[] = {grid_kkt(200, 7), cascade_kkt(40, 600, 2.5, 1.5)};
+    for (const CscLower &A : mats) {
+        Run runs[2];
+        for (const bool on : {false, true}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.scaling = ScalingMethod::None;
+            c.scale_on_delay_ratio = -1.0;
+            c.top_overlap = on;
+            std::unique_ptr<HoldFirstTask> hold;
+            if (on) hold = std::make_unique<HoldFirstTask>();
+            runs[on ? 1 : 0] = factor_and_solve(A, c, 8, /*refactors=*/3);
+        }
+        const Info &off = runs[0].info, &on = runs[1].info;
+        ASSERT_GE(on.parallel_subtrees, 2) << "parallel path not taken, n " << A.n;
+        ASSERT_GT(on.top_part_fronts, 0) << "premise: a top part, n " << A.n;
+        EXPECT_EQ(off.top_fronts_overlapped, 0) << "n " << A.n;
+        EXPECT_GT(on.top_fronts_overlapped, 0) << "n " << A.n;
+        EXPECT_EQ(on.num_positive, off.num_positive) << "n " << A.n;
+        EXPECT_EQ(on.num_negative, off.num_negative) << "n " << A.n;
+        EXPECT_EQ(on.delayed_pivots, off.delayed_pivots) << "n " << A.n;
+        EXPECT_EQ(on.top_part_fronts, off.top_part_fronts) << "n " << A.n;
+        EXPECT_LT(max_rel_diff(runs[0].x, runs[1].x), 1e-10) << "n " << A.n;
+    }
+}
+
+// Control::top_overlap on by default; the phase times still split the
+// factorization (the subtree phase ends when its last task does).
+TEST(TreeParallel, TopOverlapOnByDefault) {
+    EXPECT_TRUE(Control{}.top_overlap);
 }

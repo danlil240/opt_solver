@@ -164,6 +164,9 @@ struct Info {
     /// ready list; the others were continued by the thread that factored
     /// their last child (a chain runs on one thread).
     int          top_part_queue_pops    = 0;
+    /// Control::top_overlap: top fronts that started while a subtree task
+    /// was still running.
+    int          top_fronts_overlapped  = 0;
     /// Control::parallel_front_assembly: top fronts assembled in column
     /// blocks on several threads.
     int          parallel_assembly_fronts = 0;

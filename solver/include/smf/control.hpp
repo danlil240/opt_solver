@@ -610,6 +610,13 @@ struct Control {
     // while nothing is ready go to the running front with the highest cost,
     // whose next BLAS call uses them. Not in deterministic mode.
     bool           top_critical_shares       = true;
+    // top_overlap: the top phase of a tree-parallel factorization starts as
+    // the subtree phase runs out of tasks, not after its last task: a worker
+    // with no subtree task left joins the top scheduler, and a top front
+    // starts once its own children are factored (a subtree root's block on
+    // its thread's stack counts once that thread is done with its tasks).
+    // Info::top_fronts_overlapped.
+    bool           top_overlap               = true;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;

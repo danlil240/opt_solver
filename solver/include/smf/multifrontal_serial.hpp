@@ -25,6 +25,7 @@ struct SerialFactorStats {
   // Subtree engine: top fronts taken from the scheduler's shared ready list;
   // the others were continued by the thread that factored their last child.
   int top_part_queue_pops = 0;
+  int top_fronts_overlapped = 0;  // Info::top_fronts_overlapped
   int parallel_assembly_fronts = 0;  // Info::parallel_assembly_fronts
   int top_priority_from_realized = 0;  // Info::top_priority_from_realized
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
@@ -117,5 +118,10 @@ void set_late_phase1_thread_for_test(int tid);
 /// Dealt subtree tasks (the heaviest, one per thread) that a thread other
 /// than their own took, by every factorization of this process so far.
 long long dealt_tasks_taken_over();
+
+/// Tests: in every tree-parallel factorization with Control::top_overlap,
+/// the first subtree task (the heaviest) starts only once a top front has
+/// started (or after 10 s), so that the top phase overlaps it.
+void set_hold_first_subtree_task_for_test(bool on);
 
 } // namespace smf

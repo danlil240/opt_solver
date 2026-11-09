@@ -44,6 +44,8 @@ std::atomic<long long> g_root_arena_blocks{0};
 // phase starts late, -1 for none; and the dealt tasks other threads took.
 std::atomic<int> g_late_phase1_thread{-1};
 std::atomic<long long> g_dealt_tasks_taken_over{0};
+// Tests (set_hold_first_subtree_task_for_test).
+std::atomic<bool> g_hold_first_subtree_task{false};
 } // namespace
 
 // Per-thread output and scratch of the tree-parallel path, kept in the
@@ -1030,6 +1032,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.top_tile_fronts += from.top_tile_fronts;
   to.posdef_lapack_fronts += from.posdef_lapack_fronts;
   to.top_part_fronts += from.top_part_fronts;
+  to.top_fronts_overlapped += from.top_fronts_overlapped;
   to.parallel_assembly_fronts += from.parallel_assembly_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
@@ -1079,6 +1082,10 @@ long long root_arena_blocks_taken() { return g_root_arena_blocks.load(std::memor
 
 void set_late_phase1_thread_for_test(int tid) {
   g_late_phase1_thread.store(tid, std::memory_order_relaxed);
+}
+
+void set_hold_first_subtree_task_for_test(bool on) {
+  g_hold_first_subtree_task.store(on, std::memory_order_relaxed);
 }
 
 long long dealt_tasks_taken_over() {
@@ -1699,101 +1706,6 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // blocks lived there.
     const std::size_t arena_growths0 =
         ws.tree_par->root_values.growths() + ws.tree_par->root_rows.growths();
-    phase_mark("mf_setup");
-    const auto phase1_start = PhaseClock::now();
-    // Thread t takes task t first, then the next one left: the heaviest
-    // tasks (the first, heaviest first) land on the same passes in every
-    // factorization of an analysis, whose buffers then hold them without
-    // growing (which thread wakes first is a race on the pool). A dealt task
-    // is claimed, not pinned: a thread that finds no task left takes any
-    // dealt task whose thread has not claimed it yet, so a thread that wakes
-    // late (by a scheduler quantum on a loaded machine) holds up no task.
-    // Only then may a pass take a dealt task not its own, and grow.
-    const std::size_t dealt = std::min(subtrees.size(), static_cast<std::size_t>(threads));
-    std::vector<std::atomic<bool>> claimed(dealt);
-    const auto claim = [&claimed](std::size_t i) {
-      return !claimed[i].load(std::memory_order_relaxed) &&
-             !claimed[i].exchange(true, std::memory_order_relaxed);
-    };
-    std::atomic<std::size_t> next{dealt};
-    std::vector<std::vector<std::pair<std::size_t, std::size_t>>> subtree_steps(
-        static_cast<std::size_t>(threads));
-    run_pool([&](int tid) {
-      BlasSerialGuard serial_blas;
-      FrontPass &P = tpass[static_cast<std::size_t>(tid)];
-      const std::size_t own = static_cast<std::size_t>(tid);
-      const auto running = [&failed] {
-        return failed.load(std::memory_order_relaxed) == static_cast<int>(ErrorCode::Success);
-      };
-      if (own < dealt && tid == g_late_phase1_thread.load(std::memory_order_relaxed)) {
-        // Tests: start once another thread has taken this thread's task.
-        const auto t0 = std::chrono::steady_clock::now();
-        while (!claimed[own].load(std::memory_order_relaxed) &&
-               std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
-          std::this_thread::yield();
-      }
-      const auto run_task = [&](std::size_t i) {
-        const auto [lo, hi] = subtrees[i];
-        const std::size_t first_step = P.steps->size();
-        // Delay budget: each subtree from zero over its own postorder, so the
-        // outcome does not depend on which thread takes it or when.
-        BudgetState budget;
-        bool complete = true;
-        for (std::size_t k = lo; k <= hi; ++k) {
-          if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
-            break;
-          const int neg0 = P.st.inertia.negative;
-          const long long work0 = P.st.front_work;
-          const Int next_s = k < hi ? keep.postorder[k + 1] : Int{-1};
-          const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
-                                            budget_regions ? &budget : nullptr, det_tc, next_s);
-          if (e != ErrorCode::Success) {
-            failed.store(static_cast<int>(e), std::memory_order_relaxed);
-            complete = false;
-            break;
-          }
-          P.diag_marks.emplace_back(keep.postorder[k], P.diag->size());
-          if (armed) count_negatives(P.st.inertia.negative - neg0);
-          if (work_armed) count_work(P.st.front_work - work0);
-        }
-        // The subtree root's end state, read by the top part after the join.
-        if (budget_regions && complete)
-          node_budget[static_cast<std::size_t>(keep.postorder[hi])] = budget;
-        subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
-      };
-      if (own < dealt && running() && claim(own)) run_task(own);
-      while (running()) {
-        const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
-        if (i >= subtrees.size()) break;
-        run_task(i);
-      }
-      for (std::size_t i = 0; i < dealt && running(); ++i)
-        if (claim(i)) {
-          g_dealt_tasks_taken_over.fetch_add(1, std::memory_order_relaxed);
-          run_task(i);
-        }
-    });
-    st.subtree_seconds = seconds_since(phase1_start);
-    main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
-                                         ws.tree_par->root_rows.growths() - arena_growths0);
-    phase_mark("mf_p2");
-    phase_sum_discard();  // an earlier factorization that stopped before its flush
-    const auto phase2_start = PhaseClock::now();
-    std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
-    for (int t = 0; t < threads; ++t)
-      phase1_steps[static_cast<std::size_t>(t)] = tpass[static_cast<std::size_t>(t)].steps->size();
-
-    // Phase 2: the top of the tree as a task DAG (TopScheduler). A node is
-    // ready once its children are factored; ready nodes run concurrently
-    // under a budget of `threads` BLAS threads in total (oversubscribing
-    // MKL's spinning teams is ruinous): a front takes its share of the free
-    // threads among the fronts ready with it, so sibling separators run side
-    // by side and the root, alone, gets them all. The thread that factors a
-    // front's last child continues with that front itself: the top part is
-    // mostly long chains of small fronts, which then run without hand-offs
-    // or wake-ups between threads.
-    // Stacks are no longer popped (a worker's blocks are consumed out of
-    // order).
     std::vector<Int> top_nodes;            // local index -> supernode
     std::vector<Int> top_local(ns, -1);    // supernode -> local index (-1: not top)
     for (std::size_t si = 0; si < ns; ++si) {
@@ -1855,18 +1767,37 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       top_priority = pp.top_priority;
       st.top_priority_from_realized = pp.priority_realized ? 1 : 0;
     }
+    // Control::top_overlap: the top phase starts as the subtree phase runs
+    // out of tasks. A top front also waits for each of its children that is
+    // a subtree root (an external completion, reported when the root's task
+    // is done), the BLAS-thread budget starts empty, and a worker with no
+    // subtree task left releases its pass and joins it.
+    const bool overlap = ctrl.top_overlap && !top_nodes.empty();
+    std::vector<Int> top_external;
+    if (overlap) {
+      top_external.assign(top_nodes.size(), 0);
+      for (const auto &[lo, hi] : subtrees)
+        for (std::size_t k = lo; k <= hi; ++k) {
+          const Int par = keep.supernodes[static_cast<std::size_t>(keep.postorder[k])].parent;
+          if (par >= 0 && top_local[static_cast<std::size_t>(par)] >= 0)
+            ++top_external[static_cast<std::size_t>(top_local[static_cast<std::size_t>(par)])];
+        }
+    }
     // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
     // offers blas_threads - 1 places to the scheduler, taken by the workers
     // that the BLAS-thread budget leaves idle; they run its tasks on serial
     // BLAS.
-    TopScheduler sched(std::move(top_parent), threads, std::move(top_priority));
+    TopScheduler sched(std::move(top_parent), threads, std::move(top_priority), std::move(top_external),
+                       overlap ? 0 : -1);
     // The passes as lanes (PassLanes): a chain of top fronts runs on a pass
     // that already has the room its next front assembles in (factor values
     // past the pass's fill), whichever thread runs it, so the root fronts
     // stay in the buffers they grew in an earlier factorization. A thread
     // starts on its own pass (its phase-1 blocks are there) when that has
-    // the room. lane_of: per thread, the pass its current chain holds.
-    PassLanes lanes(threads);
+    // the room. lane_of: per thread, the pass its current chain holds. With
+    // the overlap each pass is held by its thread's subtree phase until that
+    // thread is done with its tasks.
+    PassLanes lanes(threads, overlap);
     std::vector<int> lane_of(static_cast<std::size_t>(threads), -1);
     const auto lane_room = [&tpass](int l) -> std::size_t {
       const FrontPass &Q = tpass[static_cast<std::size_t>(l)];
@@ -1877,60 +1808,214 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // Each top front's pass and step index in it (by local index).
     std::vector<int> top_pass(top_nodes.size(), 0);
     std::vector<std::size_t> top_step(top_nodes.size(), 0);
-    if (failed.load() == static_cast<int>(ErrorCode::Success) && !top_nodes.empty()) {
-      run_pool([&](int tid) {
-        // false stops every thread: an error here, or a stop raised by
-        // another thread (an error, or a limit crossed by the counts).
-        int &lane = lane_of[static_cast<std::size_t>(tid)];
-        const auto run = [&](Int local, int blas_threads, int) {
-          if (failed.load() != static_cast<int>(ErrorCode::Success)) return false;
-          const Int s = top_nodes[static_cast<std::size_t>(local)];
-          // The front's rows at most (its children's delays are final), and
-          // the factor values it is assembled in.
-          std::size_t f = static_cast<std::size_t>(keep.front_size(s));
-          for (const Int c : keep.children(s))
-            f += static_cast<std::size_t>(ws.cb_delayed[static_cast<std::size_t>(c)]);
-          lane = lanes.pick(lane, tid, f * f, lane_room);
-          FrontPass &P = tpass[static_cast<std::size_t>(lane)];
-          // Delay budget of a top front: its children's end states, all
-          // final once it is ready (written before the scheduler recorded
-          // their completion, under its lock, or by this thread).
-          BudgetState top_state;
-          if (budget_regions) top_state = top_in_state(s);
-          const int neg0 = P.st.inertia.negative;
-          const long long work0 = P.st.front_work;
-          ErrorCode e;
-          {
-            // Deterministic mode: BLAS on one thread whatever the front's
-            // share (its tile tasks still recruit blas_threads - 1 helpers).
-            BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
-            const PhaseTopFrontScope phase_top;
-            // Control::top_critical_shares: BLAS follows the front's share,
-            // which grows when the scheduler hands it threads that came free.
-            const BlasShareScope share_scope(ctrl.top_critical_shares && !det ? &sched.share(local) : nullptr);
-            const TileCtx tc{blas_threads, &sched};
-            e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
+    phase_mark("mf_setup");
+    phase_sum_discard();  // an earlier factorization that stopped before its flush
+    const auto phase1_start = PhaseClock::now();
+    // Thread t takes task t first, then the next one left: the heaviest
+    // tasks (the first, heaviest first) land on the same passes in every
+    // factorization of an analysis, whose buffers then hold them without
+    // growing (which thread wakes first is a race on the pool). A dealt task
+    // is claimed, not pinned: a thread that finds no task left takes any
+    // dealt task whose thread has not claimed it yet, so a thread that wakes
+    // late (by a scheduler quantum on a loaded machine) holds up no task.
+    // Only then may a pass take a dealt task not its own, and grow.
+    const std::size_t dealt = std::min(subtrees.size(), static_cast<std::size_t>(threads));
+    std::vector<std::atomic<bool>> claimed(dealt);
+    const auto claim = [&claimed](std::size_t i) {
+      return !claimed[i].load(std::memory_order_relaxed) &&
+             !claimed[i].exchange(true, std::memory_order_relaxed);
+    };
+    std::atomic<std::size_t> next{dealt};
+    std::vector<std::vector<std::pair<std::size_t, std::size_t>>> subtree_steps(
+        static_cast<std::size_t>(threads));
+    // Per pass: its steps when its thread left the subtree phase (the top
+    // fronts' steps follow).
+    std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
+    // Threads still in the subtree phase; the last one out records its end.
+    std::atomic<int> phase1_left{threads};
+    PhaseClock::time_point phase1_end = phase1_start;
+    // Top fronts started while a subtree task ran (Info::top_fronts_overlapped).
+    std::atomic<int> top_early{0};
+    const bool hold_first = overlap && g_hold_first_subtree_task.load(std::memory_order_relaxed);
+    const auto running = [&failed] {
+      return failed.load(std::memory_order_relaxed) == static_cast<int>(ErrorCode::Success);
+    };
+    const auto subtree_phase = [&](int tid) {
+      FrontPass &P = tpass[static_cast<std::size_t>(tid)];
+      const std::size_t own = static_cast<std::size_t>(tid);
+      // Control::top_overlap: the top fronts whose child, a subtree root,
+      // this thread factored. A root block in the root arenas (or none) is
+      // reported with its task; one on this pass's stack only once the
+      // thread is done with its tasks, since later tasks grow the stack.
+      std::vector<Int> reported, on_stack;
+      {
+        BlasSerialGuard serial_blas;
+        if (own < dealt && tid == g_late_phase1_thread.load(std::memory_order_relaxed)) {
+          // Tests: start once another thread has taken this thread's task.
+          const auto t0 = std::chrono::steady_clock::now();
+          while (!claimed[own].load(std::memory_order_relaxed) &&
+                 std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
+            std::this_thread::yield();
+        }
+        const auto run_task = [&](std::size_t i) {
+          if (i == 0 && hold_first) {
+            // Tests: start once a top front has started.
+            const auto t0 = std::chrono::steady_clock::now();
+            while (top_early.load(std::memory_order_relaxed) == 0 &&
+                   std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
+              std::this_thread::yield();
           }
-          if (e != ErrorCode::Success) {
-            failed.store(static_cast<int>(e));
-            return false;
+          const auto [lo, hi] = subtrees[i];
+          const std::size_t first_step = P.steps->size();
+          // Delay budget: each subtree from zero over its own postorder, so the
+          // outcome does not depend on which thread takes it or when.
+          BudgetState budget;
+          bool complete = true;
+          for (std::size_t k = lo; k <= hi; ++k) {
+            if (failed.load(std::memory_order_relaxed) != static_cast<int>(ErrorCode::Success))
+              break;
+            const int neg0 = P.st.inertia.negative;
+            const long long work0 = P.st.front_work;
+            const Int next_s = k < hi ? keep.postorder[k + 1] : Int{-1};
+            const ErrorCode e = process_front(cx, P, 1 + tid, keep.postorder[k], true,
+                                              budget_regions ? &budget : nullptr, det_tc, next_s);
+            if (e != ErrorCode::Success) {
+              failed.store(static_cast<int>(e), std::memory_order_relaxed);
+              complete = false;
+              break;
+            }
+            P.diag_marks.emplace_back(keep.postorder[k], P.diag->size());
+            if (armed) count_negatives(P.st.inertia.negative - neg0);
+            if (work_armed) count_work(P.st.front_work - work0);
           }
-          if (armed) count_negatives(P.st.inertia.negative - neg0);
-          if (work_armed) count_work(P.st.front_work - work0);
-          top_pass[static_cast<std::size_t>(local)] = lane;
-          top_step[static_cast<std::size_t>(local)] = P.steps->size() - 1;
-          ++P.st.top_part_fronts;
-          P.diag_marks.emplace_back(s, P.diag->size());
-          if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
-          // The counts above may have raised the stop.
-          return failed.load() == static_cast<int>(ErrorCode::Success);
+          // The subtree root's end state, read by its top parent (after the
+          // scheduler learns of this task's end, under its lock).
+          if (budget_regions && complete)
+            node_budget[static_cast<std::size_t>(keep.postorder[hi])] = budget;
+          subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
+          if (overlap && complete) {
+            reported.clear();
+            for (std::size_t k = lo; k <= hi; ++k) {
+              const std::size_t sk = static_cast<std::size_t>(keep.postorder[k]);
+              const Int par = keep.supernodes[sk].parent;
+              if (par < 0) continue;
+              const Int local = top_local[static_cast<std::size_t>(par)];
+              if (local < 0) continue;
+              (ws.cb_size[sk] == 0 || ws.cb_owner[sk] < 0 ? reported : on_stack).push_back(local);
+            }
+            sched.external_done(reported.data(), reported.size());
+          }
         };
-        sched.work(tid, run, [&](int) {
-          lanes.release(lane);
-          lane = -1;
-        });
+        if (own < dealt && running() && claim(own)) run_task(own);
+        while (running()) {
+          const std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+          if (i >= subtrees.size()) break;
+          run_task(i);
+        }
+        for (std::size_t i = 0; i < dealt && running(); ++i)
+          if (claim(i)) {
+            g_dealt_tasks_taken_over.fetch_add(1, std::memory_order_relaxed);
+            run_task(i);
+          }
+      }
+      phase1_steps[own] = P.steps->size();
+      if (overlap) {
+        // A stop (here or elsewhere) leaves top fronts waiting for subtree
+        // tasks that never end: stop the scheduler too.
+        if (running())
+          sched.external_done(on_stack.data(), on_stack.size());
+        else
+          sched.stop();
+      }
+      if (phase1_left.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        phase1_end = PhaseClock::now();
+        phase_mark("mf_p2");
+      }
+      if (overlap) {
+        lanes.release(tid);
+        sched.join();
+      }
+    };
+
+    // Phase 2: the top of the tree as a task DAG (TopScheduler). A node is
+    // ready once its children are factored; ready nodes run concurrently
+    // under a budget of `threads` BLAS threads in total (oversubscribing
+    // MKL's spinning teams is ruinous): a front takes its share of the free
+    // threads among the fronts ready with it, so sibling separators run side
+    // by side and the root, alone, gets them all. The thread that factors a
+    // front's last child continues with that front itself: the top part is
+    // mostly long chains of small fronts, which then run without hand-offs
+    // or wake-ups between threads.
+    // Stacks are no longer popped (a worker's blocks are consumed out of
+    // order).
+    const auto top_phase = [&](int tid) {
+      // false stops every thread: an error here, or a stop raised by
+      // another thread (an error, or a limit crossed by the counts).
+      int &lane = lane_of[static_cast<std::size_t>(tid)];
+      const auto run = [&](Int local, int blas_threads, int) {
+        if (failed.load() != static_cast<int>(ErrorCode::Success)) return false;
+        const Int s = top_nodes[static_cast<std::size_t>(local)];
+        // The front's rows at most (its children's delays are final), and
+        // the factor values it is assembled in.
+        std::size_t f = static_cast<std::size_t>(keep.front_size(s));
+        for (const Int c : keep.children(s))
+          f += static_cast<std::size_t>(ws.cb_delayed[static_cast<std::size_t>(c)]);
+        lane = lanes.pick(lane, tid, f * f, lane_room);
+        FrontPass &P = tpass[static_cast<std::size_t>(lane)];
+        if (overlap && phase1_left.load(std::memory_order_relaxed) > 0) {
+          ++P.st.top_fronts_overlapped;
+          top_early.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Delay budget of a top front: its children's end states, all
+        // final once it is ready (written before the scheduler recorded
+        // their completion, under its lock, or by this thread).
+        BudgetState top_state;
+        if (budget_regions) top_state = top_in_state(s);
+        const int neg0 = P.st.inertia.negative;
+        const long long work0 = P.st.front_work;
+        ErrorCode e;
+        {
+          // Deterministic mode: BLAS on one thread whatever the front's
+          // share (its tile tasks still recruit blas_threads - 1 helpers).
+          BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
+          const PhaseTopFrontScope phase_top;
+          // Control::top_critical_shares: BLAS follows the front's share,
+          // which grows when the scheduler hands it threads that came free.
+          const BlasShareScope share_scope(ctrl.top_critical_shares && !det ? &sched.share(local) : nullptr);
+          const TileCtx tc{blas_threads, &sched};
+          e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
+        }
+        if (e != ErrorCode::Success) {
+          failed.store(static_cast<int>(e));
+          return false;
+        }
+        if (armed) count_negatives(P.st.inertia.negative - neg0);
+        if (work_armed) count_work(P.st.front_work - work0);
+        top_pass[static_cast<std::size_t>(local)] = lane;
+        top_step[static_cast<std::size_t>(local)] = P.steps->size() - 1;
+        ++P.st.top_part_fronts;
+        P.diag_marks.emplace_back(s, P.diag->size());
+        if (budget_regions) node_budget[static_cast<std::size_t>(s)] = top_state;
+        // The counts above may have raised the stop.
+        return failed.load() == static_cast<int>(ErrorCode::Success);
+      };
+      sched.work(tid, run, [&](int) {
+        lanes.release(lane);
+        lane = -1;
       });
+    };
+    if (overlap) {
+      run_pool([&](int tid) {
+        subtree_phase(tid);
+        top_phase(tid);
+      });
+    } else {
+      run_pool(subtree_phase);
+      if (running() && !top_nodes.empty()) run_pool(top_phase);
     }
+    st.subtree_seconds = std::chrono::duration<double>(phase1_end - phase1_start).count();
+    main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
+                                         ws.tree_par->root_rows.growths() - arena_growths0);
     // Top fronts in completion order, which is topological: the solve
     // layout of the top part.
     struct Done {
@@ -1945,7 +2030,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       done_order.push_back({top_pass[local], top_step[local], top_nodes[local]});
     }
     st.top_part_queue_pops = sched.queue_pops();
-    st.top_seconds = seconds_since(phase2_start);
+    st.top_seconds = seconds_since(phase1_end);
     status = static_cast<ErrorCode>(failed.load());
     st.parallel_subtrees = static_cast<int>(subtrees.size());
 

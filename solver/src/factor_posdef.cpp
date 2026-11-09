@@ -330,6 +330,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.parallel_subtrees = 0;
   info.top_part_fronts = 0;
   info.top_part_queue_pops = 0;
+  info.top_fronts_overlapped = 0;
   info.posdef_lapack_fronts = 0;
   info.threads_used = 1;
   info.plan_from_realized = 0;
@@ -470,6 +471,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.parallel_subtrees = st.parallel_subtrees;
   info.top_part_fronts = st.top_part_fronts;
   info.top_part_queue_pops = st.top_part_queue_pops;
+  info.top_fronts_overlapped = st.top_fronts_overlapped;
   info.threads_used = st.threads_used;
   info.solve_layout_reused = st.solve_layout_reused;
   info.two_by_two_pivots = st.two_by_two_pivots;
