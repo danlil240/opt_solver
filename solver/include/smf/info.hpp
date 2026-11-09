@@ -169,6 +169,10 @@ struct Info {
     int          parallel_assembly_fronts = 0;
     /// Control::tpp_lookahead: top fronts factored with panel lookahead.
     int          lookahead_fronts       = 0;
+    /// Control::top_critical_shares: 1 when this factorization's top-front
+    /// priorities came from realized front sizes (an earlier factorization of
+    /// this analysis), 0 from the symbolic sizes.
+    int          top_priority_from_realized = 0;
     /// Threads the factorization ran on (1 = serial).
     int          threads_used           = 1;
     /// Control::thread_plan_front_costs: 1 when this factorization's thread

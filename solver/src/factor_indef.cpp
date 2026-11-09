@@ -377,6 +377,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_part_fronts = 0;
   info.parallel_assembly_fronts = 0;
   info.lookahead_fronts = 0;
+  info.top_priority_from_realized = 0;
   info.top_part_queue_pops = 0;
   info.threads_used = 1;
   info.plan_from_realized = 0;
@@ -663,7 +664,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.front_work = static_cast<double>(st.front_work);
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_part_fronts = st.top_part_fronts;
-      info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts;
+      info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts; info.top_priority_from_realized = st.top_priority_from_realized;
       info.threads_used = st.threads_used;
       info.solve_layout_reused = st.solve_layout_reused;
       info.two_by_two_pivots = st.two_by_two_pivots;
@@ -691,7 +692,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.parallel_subtrees = st.parallel_subtrees;
       info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
-    info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts;
+    info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts; info.top_priority_from_realized = st.top_priority_from_realized;
     info.threads_used = st.threads_used;
     info.solve_layout_reused = st.solve_layout_reused;
     info.two_by_two_pivots = st.two_by_two_pivots;
@@ -730,7 +731,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.parallel_subtrees = st.parallel_subtrees;
     info.top_tile_fronts = st.top_tile_fronts;
     info.top_part_fronts = st.top_part_fronts;
-    info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts;
+    info.top_part_queue_pops = st.top_part_queue_pops; info.parallel_assembly_fronts = st.parallel_assembly_fronts; info.lookahead_fronts = st.lookahead_fronts; info.top_priority_from_realized = st.top_priority_from_realized;
     info.threads_used = st.threads_used;
     info.solve_layout_reused = st.solve_layout_reused;
     info.two_by_two_pivots = st.two_by_two_pivots;

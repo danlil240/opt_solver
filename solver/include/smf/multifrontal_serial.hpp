@@ -27,6 +27,7 @@ struct SerialFactorStats {
   int top_part_queue_pops = 0;
   int parallel_assembly_fronts = 0;  // Info::parallel_assembly_fronts
   int lookahead_fronts = 0;          // Info::lookahead_fronts
+  int top_priority_from_realized = 0;  // Info::top_priority_from_realized
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   int threads_used = 1;  // threads the factorization ran on (1 when serial)
   // Control::thread_plan_front_costs: the thread plan was rebuilt from the
