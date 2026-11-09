@@ -136,6 +136,14 @@ struct TreeParallelBuffers {
     bool priority_ok = false;
     bool priority_realized = false;  // built from realized front sizes
     double priority_total = 0.0;     // their realized total (0: symbolic)
+    // Control::top_overlap: per range, its subtree roots whose parent is a
+    // top front, as (the parent's local top id, the root) from
+    // root_ptr[range] on; per top front, how many such children it has.
+    // Built with the partition, on first use.
+    std::vector<std::size_t> root_ptr;
+    std::vector<std::pair<Int, Int>> roots;
+    std::vector<Int> top_external;
+    bool overlap_ok = false;
   };
   Partition partition;
   // The tree walks of the thread plan and the partition (tree_view's
@@ -1497,6 +1505,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pp.budget = budget;
       pp.front_costs = front_costs;
       pp.priority_ok = false;
+      pp.overlap_ok = false;
     }
     return &pp;
   };
@@ -1774,14 +1783,28 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // subtree task left releases its pass and joins it.
     const bool overlap = ctrl.top_overlap && !top_nodes.empty();
     std::vector<Int> top_external;
+    const TreeParallelBuffers::Partition &opart = ws.tree_par->partition;
     if (overlap) {
-      top_external.assign(top_nodes.size(), 0);
-      for (const auto &[lo, hi] : subtrees)
-        for (std::size_t k = lo; k <= hi; ++k) {
-          const Int par = keep.supernodes[static_cast<std::size_t>(keep.postorder[k])].parent;
-          if (par >= 0 && top_local[static_cast<std::size_t>(par)] >= 0)
-            ++top_external[static_cast<std::size_t>(top_local[static_cast<std::size_t>(par)])];
+      auto &pp = ws.tree_par->partition;  // `part`: top_nodes is not empty
+      if (!pp.overlap_ok || pp.top_external.size() != top_nodes.size()) {
+        pp.root_ptr.assign(subtrees.size() + 1, 0);
+        pp.roots.clear();
+        pp.top_external.assign(top_nodes.size(), 0);
+        for (std::size_t i = 0; i < subtrees.size(); ++i) {
+          for (std::size_t k = subtrees[i].first; k <= subtrees[i].second; ++k) {
+            const Int sk = keep.postorder[k];
+            const Int par = keep.supernodes[static_cast<std::size_t>(sk)].parent;
+            if (par < 0) continue;
+            const Int local = top_local[static_cast<std::size_t>(par)];
+            if (local < 0) continue;
+            pp.roots.emplace_back(local, sk);
+            ++pp.top_external[static_cast<std::size_t>(local)];
+          }
+          pp.root_ptr[i + 1] = pp.roots.size();
         }
+        pp.overlap_ok = true;
+      }
+      top_external = pp.top_external;
     }
     // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
     // offers blas_threads - 1 places to the scheduler, taken by the workers
@@ -1895,12 +1918,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
           subtree_steps[static_cast<std::size_t>(tid)].emplace_back(first_step, P.steps->size());
           if (overlap && complete) {
             reported.clear();
-            for (std::size_t k = lo; k <= hi; ++k) {
-              const std::size_t sk = static_cast<std::size_t>(keep.postorder[k]);
-              const Int par = keep.supernodes[sk].parent;
-              if (par < 0) continue;
-              const Int local = top_local[static_cast<std::size_t>(par)];
-              if (local < 0) continue;
+            for (std::size_t r = opart.root_ptr[i]; r < opart.root_ptr[i + 1]; ++r) {
+              const auto [local, root] = opart.roots[r];
+              const std::size_t sk = static_cast<std::size_t>(root);
               (ws.cb_size[sk] == 0 || ws.cb_owner[sk] < 0 ? reported : on_stack).push_back(local);
             }
             sched.external_done(reported.data(), reported.size());
