@@ -55,6 +55,11 @@ void phase_sum_flush() noexcept {
   }
 }
 
+void phase_sum_discard() noexcept {
+  if (phase_trace_level() < 2) return;
+  for (auto &g : g_sum_ns) g.store(0, std::memory_order_relaxed);
+}
+
 PhaseTopFrontScope::PhaseTopFrontScope() noexcept : on_(phase_trace_level() >= 2) {
   if (on_) ++t_top_front;
 }

@@ -553,6 +553,7 @@ add_test(NAME ScaledValuePrep COMMAND test_scaled_value_prep)
 
 # SMF_BENCH_PHASE_TRACE marks (own executable: the environment is read once).
 add_executable(test_phase_trace test_phase_trace.cpp)
+target_include_directories(test_phase_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_phase_trace PRIVATE smf GTest::gtest_main)
 add_test(NAME PhaseTrace COMMAND test_phase_trace)
 
