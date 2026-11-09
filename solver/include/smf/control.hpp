@@ -578,7 +578,7 @@ struct Control {
     // factor and its row ids straight into per-thread slices of the
     // FactorKeep's FactorStore (no gather copy); a slice that outgrows its
     // reservation falls back to the gather (Info::factor_store_regathers).
-    bool           factor_in_place           = false;
+    bool           factor_in_place           = true;
     std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
