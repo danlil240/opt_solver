@@ -1134,3 +1134,34 @@ TEST(TreeParallel, CriticalSharesSolveCorrectly) {
         EXPECT_EQ(tops[0], tops[1]) << "n " << A.n;
     }
 }
+
+// Control::top_critical_shares: the priorities of a refactorization come from
+// the previous factorization's realized front sizes (delays grow fronts),
+// also on trees above the work floor, where the thread plan keeps the
+// symbolic flops view.
+TEST(TreeParallel, CriticalSharesUseRealizedSizes) {
+    const CscLower V0 = cascade_kkt(40, 600, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(40, 600, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.top_critical_shares = true;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(V1, c, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, V0, c, info, fk, ws), FactorStatus::Success);
+    ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+    EXPECT_EQ(info.top_priority_from_realized, 0) << "nothing realized yet";
+    ASSERT_EQ(s.factor(*ak, V1, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.top_priority_from_realized, 1) << "V0's realized sizes were known";
+    const int delays_v1 = info.delayed_pivots;
+    ASSERT_EQ(s.factor(*ak, V1, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.top_priority_from_realized, 1);
+    EXPECT_GT(delays_v1, 0) << "premise: V1 delays";
+}
