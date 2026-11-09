@@ -139,9 +139,14 @@ bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
 /// does not fit the layout; `max_abs` (optional) receives max |value|.
 /// `perm_later` (with need_clean): the caller rebuilds ws.perm_values from
 /// ws.clean_values (the scaled factorizations), so it is only sized here.
+/// `threads` > 1 (Control::parallel_value_prep): the passes whose every entry
+/// goes to one slot run over ranges on ws's pool (the finiteness and max pass,
+/// the plain copy, a one-to-one scatter); the result is bit-for-bit the
+/// serial one. Scatters that may sum duplicates stay serial.
 ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
                                  NumericWorkspace &ws, bool need_clean = true,
-                                 double *max_abs = nullptr, bool perm_later = false);
+                                 double *max_abs = nullptr, bool perm_later = false,
+                                 int threads = 1);
 
 /// Scatter `updated` values (original or cleaned pattern) into
 /// ws.perm_values (permuted pattern) and, when `need_clean`, ws.clean_values.

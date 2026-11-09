@@ -10,6 +10,7 @@
 #include "smf/threading.hpp"
 #include "smf/workspace.hpp"
 #include "phase_trace.hpp"
+#include "parallel/par_for.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -420,8 +421,18 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   // negative and taken from ws.perm_values.
   double scaled_max_abs = -1.0;
   const bool scaled = scaling != ScalingMethod::None && keep.n > 0;
+  // Control::parallel_value_prep: the thread count the plan cached for this
+  // analysis (auto_threads), else num_threads; below the entry threshold, 1.
+  int prep_threads = 1;
+  if (ctrl.parallel_value_prep && ctrl.num_threads > 1 &&
+      keep.cleaned.row_idx.size() >= ctrl.parallel_value_prep_min_entries) {
+    prep_threads = ctrl.num_threads;
+    if (ctrl.auto_threads && ws.thread_plan.analysis == keep.serial &&
+        ws.thread_plan.num_threads == ctrl.num_threads)
+      prep_threads = ws.thread_plan.threads;
+  }
   const ErrorCode map_err = map_values_to_permuted(
-      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs, scaled);
+      keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs, scaled, prep_threads);
   phase_mark("fi_mapped");
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
@@ -487,22 +498,40 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
                         ws.perm_values.size() == ws.clean_values.size();
     if (!direct && !keep.orig_to_perm_idx.empty())
       std::fill(ws.perm_values.begin(), ws.perm_values.end(), 0.0);
-    double vmax = 0.0;
     double *const cv = ws.clean_values.data();
     double *const pv = ws.perm_values.data();
     const Int *const to_perm = keep.orig_to_perm_idx.empty() ? nullptr : keep.orig_to_perm_idx.data();
-    for (Int j = 0; j < keep.n; ++j) {
-      const double sj = fkeep.scale[static_cast<std::size_t>(j)];
-      for (Int p = keep.cleaned.col_ptr[static_cast<std::size_t>(j)];
-           p < keep.cleaned.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
-        const std::size_t sp = static_cast<std::size_t>(p);
-        const Int i = keep.cleaned.row_idx[sp];
-        const double v = cv[sp] * (fkeep.scale[static_cast<std::size_t>(i)] * sj);
-        cv[sp] = v;
-        vmax = std::max(vmax, std::abs(v));
-        if (direct) pv[static_cast<std::size_t>(to_perm[sp])] = v;
-        else if (to_perm != nullptr) pv[static_cast<std::size_t>(to_perm[sp])] += v;
+    const auto scale_columns = [&](Int j0, Int j1) {
+      double m = 0.0;
+      for (Int j = j0; j < j1; ++j) {
+        const double sj = fkeep.scale[static_cast<std::size_t>(j)];
+        for (Int p = keep.cleaned.col_ptr[static_cast<std::size_t>(j)];
+             p < keep.cleaned.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+          const std::size_t sp = static_cast<std::size_t>(p);
+          const Int i = keep.cleaned.row_idx[sp];
+          const double v = cv[sp] * (fkeep.scale[static_cast<std::size_t>(i)] * sj);
+          cv[sp] = v;
+          m = std::max(m, std::abs(v));
+          if (direct) pv[static_cast<std::size_t>(to_perm[sp])] = v;
+          else if (to_perm != nullptr) pv[static_cast<std::size_t>(to_perm[sp])] += v;
+        }
       }
+      return m;
+    };
+    double vmax = 0.0;
+    // A one-to-one scatter (direct) or none: column ranges of about equal
+    // entry counts run on the pool, each with its own max (exact in any order).
+    if (prep_threads > 1 && (direct || to_perm == nullptr)) {
+      const std::vector<Int> bounds = balanced_columns(keep.cleaned.col_ptr, keep.n, prep_threads);
+      std::vector<double> range_max(static_cast<std::size_t>(prep_threads), 0.0);
+      parallel_ranges(ws, prep_threads, static_cast<std::size_t>(prep_threads), 0,
+                      [&](int, std::size_t b, std::size_t e) {
+                        for (std::size_t t = b; t < e; ++t)
+                          range_max[t] = scale_columns(bounds[t], bounds[t + 1]);
+                      });
+      for (const double m : range_max) vmax = std::max(vmax, m);
+    } else {
+      vmax = scale_columns(0, keep.n);
     }
     if (to_perm == nullptr) ws.perm_values = ws.clean_values;
     if (direct || to_perm == nullptr) scaled_max_abs = vmax;
