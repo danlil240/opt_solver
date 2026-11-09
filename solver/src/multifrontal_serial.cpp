@@ -1056,7 +1056,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::size_t pred_rows = 0;
   double tree_work = 0.0;
   // tree_work priced as the thread plan prices it (plan_is_serial's total).
-  const bool front_costs = ctrl.thread_plan_front_costs;
+  bool front_costs = ctrl.thread_plan_front_costs;
   FrontCostModel front_cost_model;
   if (front_costs) {
     front_cost_model.per_front_entry = ctrl.thread_cost_per_front_entry;
@@ -1109,6 +1109,16 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     }
     reserve_plan(ws.cb_values, vpeak);
     reserve_plan(ws.cb_rows, rpeak);
+  }
+  // Front costs price only trees the flops model sends to one thread (below
+  // its floor: many tiny fronts, PGLib's shape). Above it the fitted flops
+  // plan stands: priced, mid-size subtree fronts weighed more than the top's
+  // and the plan took 16 threads, E-cores included on the 12900K
+  // (obstacle_surface_200 +28%, acopf_grid_80 / pde_control_120 +20% at 16T).
+  if (front_costs && tree_work >= kBudgetRegionMinWork) {
+    front_costs = false;
+    front_cost_model = FrontCostModel{};
+    tree_cost = tree_work;
   }
 
   if (ws.row_pos.size() != n) ws.row_pos.assign(n, -1);

@@ -874,6 +874,7 @@ TEST(ThreadPlan, SerialBoundSkipsPlan) {
         ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
         ctrl.num_threads = 16;
         ctrl.thread_cost_per_thread = cs.per_thread;
+        ctrl.thread_plan_front_costs = false;  // the flops model's floor and bound
         Solver solver;
         Info info;
         auto ak = solver.analyse(A, ctrl, info);

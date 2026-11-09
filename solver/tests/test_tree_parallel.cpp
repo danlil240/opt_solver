@@ -746,6 +746,7 @@ TEST(TreeParallel, DelayBudgetRegionsUnchangedByFrontCosts) {
     base.delay_budget = 20;
     base.num_threads = 4;
     base.auto_threads = false;  // same thread count both ways: only the regions could differ
+    base.deterministic = true;  // bitwise comparable (BLAS shares vary with scheduling otherwise)
     Solver solver;
     std::vector<std::vector<double>> xs;
     std::vector<Info> infos;
@@ -780,8 +781,8 @@ namespace {
 // costs on: V0 delays little, V1 cascades (cascade_kkt's spread) on the same
 // pattern, so V1's realized fronts are much larger than the analysis says.
 struct ReplanFixture {
-    CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
-    CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    CscLower V0 = cascade_kkt(20, 150, 2.5, 0.0);  // below the flops floor: front costs plan it
+    CscLower V1 = cascade_kkt(20, 150, 2.5, 1.5);
     Control ctrl;
     Solver solver;
     std::unique_ptr<AnalysisKeep> ak;
@@ -793,11 +794,11 @@ struct ReplanFixture {
         ctrl.scale_on_delay_ratio = -1.0;
         ctrl.num_threads = 8;
         ctrl.auto_threads = true;
-        ctrl.thread_plan_front_costs = true;
-        ctrl.thread_cost_per_front = 1e5;
-        ctrl.thread_cost_per_front_entry = 10.0;
+        ctrl.thread_plan_front_costs = true;  // the fitted per-entry cost (a constant per
+                                              // front would hide the delays' growth)
         Info info;
         ak = solver.analyse(V1, ctrl, info);
+        if (ak) EXPECT_LT(info.predicted_flops, 2e7) << "premise: below the flops floor";
     }
     Info factor(const CscLower &A, Control c) {
         Info info;
@@ -861,4 +862,34 @@ TEST(TreeParallel, FrontCostsKeepTheFlopsPartition) {
         top[costs ? 1 : 0] = fi.top_part_fronts;
     }
     EXPECT_EQ(top[0], top[1]);
+}
+
+// Front costs price only trees the flops model sent to one thread (below its
+// 2e7 floor: PGLib's shape). Above it the fitted flops plan stands: priced,
+// mid-size subtree fronts weighed more than the top's and the plan took 16
+// threads, E-cores included on the 12900K (obstacle_surface_200 +28%,
+// acopf_grid_80 / pde_control_120 +20% at 16T).
+TEST(TreeParallel, FrontCostsLeaveTreesAboveTheFloorAlone) {
+    const CscLower A = grid_kkt(200, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 16;
+    c.auto_threads = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_GE(i.predicted_flops, 2e7) << "premise: above the flops floor";
+    int threads[2] = {0, 0};
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        cc.thread_cost_per_front_entry = 1e4;  // strong pricing: any effect shows
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        threads[costs ? 1 : 0] = fi.threads_used;
+    }
+    EXPECT_EQ(threads[0], threads[1]);
 }
