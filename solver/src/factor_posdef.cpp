@@ -335,6 +335,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.plan_from_realized = 0;
   info.factor_store_regathers = 0;
   info.two_by_two_pivots = 0;
+  info.solve_layout_reused = 0;
   info.subtree_seconds = 0.0;
   info.top_seconds = 0.0;
   info.gather_seconds = 0.0;
@@ -470,6 +471,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_part_fronts = st.top_part_fronts;
   info.top_part_queue_pops = st.top_part_queue_pops;
   info.threads_used = st.threads_used;
+  info.solve_layout_reused = st.solve_layout_reused;
   info.two_by_two_pivots = st.two_by_two_pivots;
   info.factor_store_regathers = st.factor_store_regathers;
   info.subtree_seconds = st.subtree_seconds;

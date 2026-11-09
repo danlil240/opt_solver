@@ -893,3 +893,110 @@ TEST(TreeParallel, FrontCostsLeaveTreesAboveTheFloorAlone) {
     }
     EXPECT_EQ(threads[0], threads[1]);
 }
+
+namespace {
+// Control::cached_solve_layout on one FactorKeep and workspace: the top of the
+// solve in postorder, its tree and row map reused while nothing moved.
+struct LayoutRun {
+    int reused = -1;
+    std::vector<Int> top_parent;
+    double resid = 1.0;
+    FactorStatus status = FactorStatus::Success;
+};
+LayoutRun layout_factor(const Solver &s, const AnalysisKeep &ak, const CscLower &A, Control c,
+                        FactorKeep &fk, NumericWorkspace &ws) {
+    LayoutRun r;
+    Info info;
+    r.status = s.factor(ak, A, c, info, fk, ws);
+    if (r.status != FactorStatus::Success) return r;
+    r.reused = info.solve_layout_reused;
+    r.top_parent = fk.solve_top_parent;
+    std::vector<double> x(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    const std::vector<double> b = x;
+    SolveWorkspace sws;
+    EXPECT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+    r.resid = smf::bench::validate(A, b, x, 1).eta_inf;
+    return r;
+}
+}  // namespace
+
+TEST(TreeParallel, LayoutCacheReusedOnUnchangedSequence) {
+    const CscLower A = grid_kkt(200, 7);  // indefinite: the multifrontal engine's layout
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const LayoutRun a = layout_factor(s, *ak, A, c, fk, ws);
+    ASSERT_FALSE(a.top_parent.empty()) << "premise: a parallel solve layout";
+    const LayoutRun b = layout_factor(s, *ak, A, c, fk, ws);
+    const LayoutRun d = layout_factor(s, *ak, A, c, fk, ws);
+    EXPECT_EQ(a.reused, 0);
+    EXPECT_EQ(b.reused, 1);
+    EXPECT_EQ(d.reused, 1);
+    EXPECT_EQ(a.top_parent, b.top_parent);
+    EXPECT_EQ(a.top_parent, d.top_parent);
+    for (const LayoutRun *r : {&a, &b, &d}) EXPECT_LT(r->resid, 1e-12);
+    FactorKeep other;  // a FactorKeep the cache did not fill still solves
+    const LayoutRun e = layout_factor(s, *ak, A, c, other, ws);
+    EXPECT_LT(e.resid, 1e-12);
+}
+
+TEST(TreeParallel, LayoutCacheRebuiltWhenDelaysMoveRows) {
+    const CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(V1, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const LayoutRun a = layout_factor(s, *ak, V0, c, fk, ws);
+    const LayoutRun b = layout_factor(s, *ak, V1, c, fk, ws);
+    const LayoutRun d = layout_factor(s, *ak, V1, c, fk, ws);
+    ASSERT_FALSE(a.top_parent.empty()) << "premise: a parallel solve layout";
+    EXPECT_EQ(b.reused, 0);
+    EXPECT_EQ(d.reused, 1);
+    EXPECT_LT(a.resid, 1e-10);
+    EXPECT_LT(b.resid, 1e-8);
+    EXPECT_LT(d.resid, 1e-8);
+}
+
+TEST(TreeParallel, LayoutCacheClearedAfterAbort) {
+    const CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(V1, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    layout_factor(s, *ak, V0, c, fk, ws);
+    Control limited = c;
+    limited.max_negative_pivots = 1;
+    EXPECT_EQ(layout_factor(s, *ak, V1, limited, fk, ws).status, FactorStatus::InertiaExceeded);
+    const LayoutRun r = layout_factor(s, *ak, V0, c, fk, ws);
+    EXPECT_EQ(r.reused, 0);
+    EXPECT_LT(r.resid, 1e-10);
+}

@@ -684,6 +684,8 @@ int main(int argc, char **argv) {
         ctrl.parallel_dinv = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_LAZY_DIAG"))
         ctrl.lazy_diag_entries = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_CACHED_SOLVE_LAYOUT"))
+        ctrl.cached_solve_layout = std::atoi(e) != 0;
     // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.

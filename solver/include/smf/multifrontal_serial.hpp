@@ -32,6 +32,7 @@ struct SerialFactorStats {
   int plan_from_realized = 0;
   int factor_store_regathers = 0;  // Info::factor_store_regathers
   int two_by_two_pivots = 0;       // Info::two_by_two_pivots
+  int solve_layout_reused = 0;     // Info::solve_layout_reused
   // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top
   // part (task DAG), 3 the gather of the per-thread factors.
   double subtree_seconds = 0.0;

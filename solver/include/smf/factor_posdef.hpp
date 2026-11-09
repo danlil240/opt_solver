@@ -127,6 +127,9 @@ struct FactorKeep {
   /// last lean indefinite factorization; 0 after any other outcome. A
   /// refactorization of the same analysis skips re-initialising it.
   std::uint64_t setup_analysis = 0;
+  /// Control::cached_solve_layout: the layout cache generation whose
+  /// solve_top_slot this FactorKeep holds (0: none).
+  std::uint64_t top_layout_gen = 0;
   // The solve's thread count: with Control::auto_threads, the solve's cost
   // model (src/parallel/thread_plan.hpp, plan_solve_threads, at the
   // factorization's Control::num_threads); off, the factorization's thread

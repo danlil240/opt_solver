@@ -175,6 +175,9 @@ struct Info {
     int          factor_store_regathers = 0;
     /// 2x2 pivot blocks of the factorization (the count of tag-2 D entries).
     int          two_by_two_pivots      = 0;
+    /// Control::cached_solve_layout: 1 when the solve's top layout (tree, row
+    /// map, thread count) was reused from the previous factorization.
+    int          solve_layout_reused    = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
     /// phases, 0 when serial: the subtrees, the top part, and the gather of
     /// the per-thread factors into one array.
