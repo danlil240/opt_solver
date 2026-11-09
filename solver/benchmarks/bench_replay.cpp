@@ -1,6 +1,7 @@
 #include "adapters/adapter.hpp"
 #include "common/replay_refine.hpp"
 #include "common/replay_steps.hpp"
+#include "common/replay_track.hpp"
 #include "common/result.hpp"
 #include "common/validation.hpp"
 #include "smf/control.hpp"
@@ -628,11 +629,12 @@ int main(int argc, char **argv) {
         }
         ctrl = *plugin_ctrl;
     }
-    // "ipopt" track: the pivot threshold IPOPT itself drives HSL solvers with
-    // (ma27_pivtol / ma57_pivtol / ma97_u default 1e-8), so KKT sequences
-    // captured from IPOPT are factorized the way IPOPT factorizes them.
-    if (track == "ipopt") ctrl.pivot_u = 1e-8;
+    // The track's settings (common/replay_track.hpp; "ipopt": IPOPT's pivot
+    // threshold and the plugin's refactorization estimate).
+    smf::bench::apply_replay_track(ctrl, track);
     if (pivot_u_override >= 0.0) ctrl.pivot_u = pivot_u_override;
+    // SMF_BENCH_EXPECTED_REFACTORS = n (Control::expected_refactors; A/B runs).
+    if (const char *e = std::getenv("SMF_BENCH_EXPECTED_REFACTORS")) ctrl.expected_refactors = std::atoi(e);
     if (scaling_override == "none") ctrl.scaling = smf::ScalingMethod::None;
     else if (scaling_override == "equil") ctrl.scaling = smf::ScalingMethod::Equilibration;
     else if (scaling_override == "matching") ctrl.scaling = smf::ScalingMethod::Matching;
