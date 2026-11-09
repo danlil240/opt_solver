@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -744,7 +745,7 @@ TEST(TreeParallel, DelayBudgetRegionsUnchangedByFrontCosts) {
     Control base;
     base.delay_budget = 20;
     base.num_threads = 4;
-    base.auto_threads = true;
+    base.auto_threads = false;  // same thread count both ways: only the regions could differ
     Solver solver;
     std::vector<std::vector<double>> xs;
     std::vector<Info> infos;
@@ -772,4 +773,63 @@ TEST(TreeParallel, DelayBudgetRegionsUnchangedByFrontCosts) {
     EXPECT_EQ(infos[0].num_negative, infos[1].num_negative);
     EXPECT_EQ(infos[0].num_positive, infos[1].num_positive);
     EXPECT_EQ(xs[0], xs[1]);
+}
+
+namespace {
+// A planned (auto_threads) factorization sequence on one workspace with front
+// costs on: V0 delays little, V1 cascades (cascade_kkt's spread) on the same
+// pattern, so V1's realized fronts are much larger than the analysis says.
+struct ReplanFixture {
+    CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
+    CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    Control ctrl;
+    Solver solver;
+    std::unique_ptr<AnalysisKeep> ak;
+    NumericWorkspace nws;
+    FactorKeep fk;
+    ReplanFixture() {
+        ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+        ctrl.scaling = ScalingMethod::None;
+        ctrl.scale_on_delay_ratio = -1.0;
+        ctrl.num_threads = 8;
+        ctrl.auto_threads = true;
+        ctrl.thread_plan_front_costs = true;
+        ctrl.thread_cost_per_front = 1e5;
+        ctrl.thread_cost_per_front_entry = 10.0;
+        Info info;
+        ak = solver.analyse(V1, ctrl, info);
+    }
+    Info factor(const CscLower &A, Control c) {
+        Info info;
+        solver.factor(*ak, A, c, info, fk, nws);
+        return info;
+    }
+    Info factor(const CscLower &A) { return factor(A, ctrl); }
+};
+}  // namespace
+
+TEST(TreeParallel, ReplansWhenDelaysGrowFronts) {
+    ReplanFixture fx;
+    ASSERT_NE(fx.ak.get(), nullptr);
+    ASSERT_EQ(fx.V0.values.size(), fx.V1.values.size());
+    const Info a = fx.factor(fx.V0);
+    EXPECT_EQ(a.plan_from_realized, 0);
+    const Info b = fx.factor(fx.V1);  // planned before V1's sizes were known
+    EXPECT_EQ(b.plan_from_realized, 0);
+    ASSERT_GT(b.delayed_pivots, 10 * a.delayed_pivots + 100) << "premise: V1 cascades, V0 does not";
+    EXPECT_EQ(fx.factor(fx.V1).plan_from_realized, 1);
+    EXPECT_EQ(fx.factor(fx.V1).plan_from_realized, 0);  // realized total now within 10%
+}
+
+TEST(TreeParallel, PlanCacheSurvivesAbort) {
+    ReplanFixture fx;
+    ASSERT_NE(fx.ak.get(), nullptr);
+    const Info first = fx.factor(fx.V0);
+    Control limited = fx.ctrl;
+    limited.max_negative_pivots = 1;
+    const Info aborted = fx.factor(fx.V1, limited);
+    ASSERT_EQ(aborted.factor_status, FactorStatus::InertiaExceeded);
+    const Info again = fx.factor(fx.V0);
+    EXPECT_EQ(again.plan_from_realized, 0);
+    EXPECT_EQ(again.threads_used, first.threads_used);
 }

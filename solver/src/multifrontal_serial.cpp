@@ -730,6 +730,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.flops += kr.flops;
   st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
+  if (!ws.realized_rows.empty()) {  // Control::thread_plan_front_costs
+    ws.realized_rows[si] = f;
+    ws.realized_pivots[si] = p;
+  }
 
   if (cx.posdef && p < num_elig) {
     for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
@@ -1221,10 +1225,27 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                                  ctrl.thread_split_scaling_cap,
                                  front_costs ? 0.0 : kBudgetRegionMinWork};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
+  // Control::thread_plan_front_costs: the previous successful factorization
+  // of this analysis left its realized front sizes; when their total moved
+  // more than 10% from the cached plan's, the plan is rebuilt from them.
+  const bool realized_ok = front_costs && ws.realized_valid &&
+                           ws.realized_analysis == keep.serial &&
+                           ws.realized_rows.size() == ns;
+  const double plan_total = realized_ok ? ws.realized_total : tree_cost;
+  bool replan_realized = false;
+  if (realized_ok && ctrl.auto_threads && ws.thread_plan.analysis == keep.serial &&
+      ws.thread_plan.front_costs && ws.thread_plan.planned_total > 0.0 &&
+      std::abs(ws.realized_total - ws.thread_plan.planned_total) >
+          0.10 * ws.thread_plan.planned_total)
+    replan_realized = true;
+  if (realized_ok && (replan_realized || ws.thread_plan.from_realized)) {
+    front_cost_model.realized_rows = ws.realized_rows;
+    front_cost_model.realized_pivots = ws.realized_pivots;
+  }
   // Below the plan's floor no partition is built (the budget's: its own).
-  const bool below_min_work = tree_cost < thread_costs.min_work;
+  const bool below_min_work = plan_total < thread_costs.min_work;
   const bool below_budget_min_work = tree_work < kBudgetRegionMinWork;
-  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(tree_cost, thread_costs) &&
+  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(plan_total, thread_costs) &&
       !plan_trace_enabled()) {
     want_threads = 1;
   } else if (ctrl.auto_threads && want_threads > 1) {
@@ -1236,8 +1257,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on ||
         pc.blas_parallel != blas_parallel || pc.tile_min != tile_min ||
         pc.front_costs != front_costs || pc.per_front_entry != front_cost_model.per_front_entry ||
-        pc.per_front != front_cost_model.per_front) {
+        pc.per_front != front_cost_model.per_front || replan_realized) {
       pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
+      pc.planned_total = sums().total;
+      pc.from_realized = replan_realized;
+      st.plan_from_realized = replan_realized ? 1 : 0;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
       pc.per_thread = thread_costs.per_thread;
@@ -1256,6 +1280,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // auto_threads off: the plan is evaluated for SMF_BENCH_PLAN_TRACE only
     // (its terms do not depend on auto_threads) and not used.
     plan_threads(view(), sums(), ctrl.num_threads, thread_costs);
+  }
+  if (front_costs) {
+    ws.realized_valid = false;
+    if (ws.realized_rows.size() != ns) {
+      ws.realized_rows.assign(ns, 0);
+      ws.realized_pivots.assign(ns, 0);
+    }
+  } else if (!ws.realized_rows.empty()) {
+    ws.realized_rows.clear();
+    ws.realized_pivots.clear();
+    ws.realized_valid = false;
   }
   const auto partition = [&](int nthreads, bool budget) {
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
@@ -1817,6 +1852,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     return status;
   }
   fkeep.factor_col_ptr[ns] = static_cast<LongInt>(main.fo);
+  if (front_costs) {
+    double total = 0.0;
+    for (std::size_t si = 0; si < ns; ++si) {
+      const double f = static_cast<double>(ws.realized_rows[si]);
+      total += f * f * static_cast<double>(ws.realized_pivots[si]) +
+               front_cost_model.per_front_entry * f * f + front_cost_model.per_front;
+    }
+    ws.realized_total = total;
+    ws.realized_analysis = keep.serial;
+    ws.realized_valid = true;
+  }
   fv.resize(main.fo);
   sri.resize(main.ro);
   if (!fkeep.solve_subtrees.empty()) {

@@ -27,6 +27,9 @@ struct SerialFactorStats {
   int top_part_queue_pops = 0;
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   int threads_used = 1;  // threads the factorization ran on (1 when serial)
+  // Control::thread_plan_front_costs: the thread plan was rebuilt from the
+  // previous factorization's realized front sizes (Info::plan_from_realized).
+  int plan_from_realized = 0;
   // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top
   // part (task DAG), 3 the gather of the per-thread factors.
   double subtree_seconds = 0.0;
