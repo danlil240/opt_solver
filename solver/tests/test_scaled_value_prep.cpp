@@ -17,6 +17,7 @@
 #include <cstring>
 #include <map>
 #include <span>
+#include <string>
 #include <vector>
 
 using namespace smf;
@@ -116,3 +117,89 @@ void run(double spread, double pivot_u, const char *name) {
 
 TEST(ScaledValuePrep, ThresholdDelaying) { run(1.5, 0.01, "threshold, delaying"); }
 TEST(ScaledValuePrep, IpoptPivotTolerance) { run(0.0, 1e-8, "u = 1e-8, no delays"); }
+
+// Control::parallel_value_prep: mapping the values to the permuted pattern and
+// scaling them run over ranges on the factorization's pool. Every value is
+// computed exactly as by the serial pass and lands in exactly one slot, so the
+// prepared arrays, the scaling and the factorization are bit-for-bit those of
+// one thread.
+namespace {
+CscLower grid_indefinite(int m) {  // 5-point stencil with a sign-alternating diagonal
+    CscLower A;
+    A.n = m * m;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < A.n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back((j % 3 == 0) ? -4.5 : 4.0 + 0.001 * (j % 17));
+        if ((j % m) + 1 < m) {
+            A.row_idx.push_back(j + 1);
+            A.values.push_back(-1.0 - 0.01 * (j % 5));
+        }
+        if (j + m < A.n) {
+            A.row_idx.push_back(j + m);
+            A.values.push_back(-1.0 + 0.02 * (j % 7));
+        }
+        A.col_ptr.push_back(static_cast<Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+struct Prepared {
+    std::vector<double> perm, clean, scale, x;
+    int neg = 0;
+};
+
+Prepared prepare(const CscLower &A, ScalingMethod scaling, bool original_layout, int threads) {
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.scaling = scaling;
+    ctrl.num_threads = threads;
+    ctrl.auto_threads = false;
+    ctrl.parallel_value_prep = threads > 1;
+    ctrl.parallel_value_prep_min_entries = 0;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, ctrl, info);
+    EXPECT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const FactorStatus st = original_layout
+                                ? s.factor(*ak, std::span<const double>(A.values), ctrl, info, fk, ws)
+                                : s.factor(*ak, A, ctrl, info, fk, ws);
+    EXPECT_EQ(st, FactorStatus::Success);
+    Prepared p;
+    p.perm = ws.perm_values;
+    p.clean = ws.clean_values;
+    p.scale = fk.scale;
+    p.neg = info.num_negative;
+    p.x.assign(static_cast<std::size_t>(A.n), 1.0);
+    SolveWorkspace sws;
+    EXPECT_EQ(s.solve(fk, ctrl, info, p.x.data(), static_cast<int>(A.n), 1, sws), 0);
+    return p;
+}
+
+bool same_bits(const std::vector<double> &a, const std::vector<double> &b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+}  // namespace
+
+TEST(ScaledValuePrep, ParallelPrepBitwiseEqualsSerial) {
+    const CscLower mats[] = {opf_like_kkt(3000, 1200, 1), grid_indefinite(370)};
+    for (const CscLower &A : mats) {
+        for (const ScalingMethod sc : {ScalingMethod::Matching, ScalingMethod::None}) {
+            for (const bool orig : {false, true}) {
+                const Prepared one = prepare(A, sc, orig, 1);
+                for (const int t : {2, 8}) {
+                    const Prepared par = prepare(A, sc, orig, t);
+                    const std::string what = "n " + std::to_string(A.n) + " scaling " +
+                                             std::to_string(static_cast<int>(sc)) + " orig " +
+                                             std::to_string(orig) + " threads " + std::to_string(t);
+                    EXPECT_TRUE(same_bits(one.perm, par.perm)) << what;
+                    EXPECT_TRUE(same_bits(one.clean, par.clean)) << what;
+                    EXPECT_TRUE(same_bits(one.scale, par.scale)) << what;
+                    EXPECT_EQ(one.neg, par.neg) << what;
+                }
+            }
+        }
+    }
+}

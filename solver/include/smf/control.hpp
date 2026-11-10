@@ -569,6 +569,12 @@ struct Control {
     // ~1.4 us per front), so 0. PGLib's tiny fronts cost ~6x the big fronts'
     // time per f^2 p unit: the f^2 term prices it.
     bool           thread_plan_front_costs   = true;
+    // parallel_value_prep: with more than one thread and at least
+    // parallel_value_prep_min_entries matrix entries, mapping the values to the
+    // permuted pattern and scaling them run over ranges on the factorization's
+    // pool (bit-for-bit the serial result).
+    bool           parallel_value_prep       = true;
+    std::size_t    parallel_value_prep_min_entries = 100000;
     double         thread_cost_per_front_entry = 45.0;
     double         thread_cost_per_front     = 0.0;
     double         thread_cost_per_thread    = 7e5;

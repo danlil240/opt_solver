@@ -46,6 +46,17 @@ std::atomic<long long> g_dealt_tasks_taken_over{0};
 
 // Per-thread output and scratch of the tree-parallel path, kept in the
 // NumericWorkspace so refactorizations reuse it.
+// A contribution block outside the passes' stacks: a top front's, from the
+// pool (given back once its parent read it), or a subtree root's, in the
+// root arenas (values null, rows unused).
+struct NodeBlock {
+  std::unique_ptr<double[]> values;
+  std::size_t cap = 0;
+  std::vector<Int> rows;
+  const double *v = nullptr;  // the block's values
+  const Int *r = nullptr;     // and row ids
+};
+
 struct TreeParallelBuffers {
   // Reusable, uninitialised contribution-block buffers for the top of the
   // tree: a fresh zero-filled multi-MB allocation per front cost more than
@@ -127,6 +138,10 @@ struct TreeParallelBuffers {
   std::vector<double> budget_view_work;
   std::vector<std::uint8_t> budget_view_split;
   SubtreeSums budget_sums;
+  // The tree-parallel path's per-supernode contribution blocks outside the
+  // passes' stacks, kept between factorizations (a block is read only once
+  // this factorization has written it: cb_owner, reset per call, says so).
+  std::vector<NodeBlock> node_blocks;
 };
 
 namespace {
@@ -172,16 +187,6 @@ struct FrontPass {
   SmallBuf sbuf[2];
 };
 
-// A contribution block outside the passes' stacks: a top front's, from the
-// pool (given back once its parent read it), or a subtree root's, in the
-// root arenas (values null, rows unused).
-struct NodeBlock {
-  std::unique_ptr<double[]> values;
-  std::size_t cap = 0;
-  std::vector<Int> rows;
-  const double *v = nullptr;  // the block's values
-  const Int *r = nullptr;     // and row ids
-};
 
 // The conditional early stop of a work-limited factorization
 // (EarlyWorkStop, Control::scale_on_delay_early_ratio), decided over the
@@ -1453,10 +1458,11 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       P.tiles = &b.tiles;
       passes.push_back(&P);
     }
-    node_blocks.resize(ns);
+    std::vector<NodeBlock> &blocks = ws.tree_par->node_blocks;
+    if (blocks.size() != ns) blocks.resize(ns);
     std::atomic<long long> work_done{0};
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
-                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
+                           fkeep, ws,         passes.data(), front_pass.data(), &blocks, &ws.tree_par->pool,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, tiles_on ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap, &work_done,

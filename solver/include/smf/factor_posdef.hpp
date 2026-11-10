@@ -68,6 +68,11 @@ struct FactorKeep {
   std::vector<Int> solve_top_rows;
   std::vector<Int> solve_top_slot;
   std::vector<Int> solve_top_parent;
+  /// AnalysisKeep::serial of the analysis whose per-analysis setup (perm,
+  /// iperm, pivot_types sized per supernode) this FactorKeep holds from its
+  /// last lean indefinite factorization; 0 after any other outcome. A
+  /// refactorization of the same analysis skips re-initialising it.
+  std::uint64_t setup_analysis = 0;
   // The solve's thread count: with Control::auto_threads, the solve's cost
   // model (src/parallel/thread_plan.hpp, plan_solve_threads, at the
   // factorization's Control::num_threads); off, the factorization's thread

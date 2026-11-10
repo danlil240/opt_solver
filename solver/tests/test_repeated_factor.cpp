@@ -20,6 +20,8 @@
 
 #include "smf/analysis.hpp"
 #include "smf/solver.hpp"
+#include "kkt_test_matrices.hpp"
+#include "smf/workspace.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -296,4 +298,110 @@ TEST(RepeatedFactor, IndefWorkspace_100iters) {
     const double rr = relative_residual(Ap, x.data(), b0.data());
     EXPECT_LT(rr, 1e-9) << "iter=" << iter;
   }
+}
+
+// Per-analysis setup reuse: a FactorKeep that already holds this analysis'
+// setup (FactorKeep::setup_analysis) skips re-initialising what cannot have
+// changed; another analysis, or an error, resets it.
+namespace {
+smf::CscLower grid_kkt_like(int m) {  // 5-point stencil, sign-alternating diagonal
+    smf::CscLower A;
+    A.n = m * m;
+    A.col_ptr.push_back(0);
+    for (int j = 0; j < A.n; ++j) {
+        A.row_idx.push_back(j);
+        A.values.push_back((j % 3 == 0) ? -4.5 : 4.0);
+        if ((j % m) + 1 < m) { A.row_idx.push_back(j + 1); A.values.push_back(-1.0); }
+        if (j + m < A.n) { A.row_idx.push_back(j + m); A.values.push_back(-1.0); }
+        A.col_ptr.push_back(static_cast<smf::Int>(A.row_idx.size()));
+    }
+    return A;
+}
+
+double residual(const smf::CscLower &A, const std::vector<double> &x, const std::vector<double> &b) {
+    std::vector<double> r(b);
+    for (smf::Int j = 0; j < A.n; ++j)
+        for (smf::Int p = A.col_ptr[j]; p < A.col_ptr[j + 1]; ++p) {
+            const smf::Int i = A.row_idx[p];
+            r[i] -= A.values[p] * x[j];
+            if (i != j) r[j] -= A.values[p] * x[i];
+        }
+    double m = 0.0, bm = 0.0;
+    for (std::size_t i = 0; i < r.size(); ++i) { m = std::max(m, std::abs(r[i])); bm = std::max(bm, std::abs(b[i])); }
+    return m / bm;
+}
+}  // namespace
+
+TEST(RepeatedFactor, SetupReuseResetsOnNewAnalysis) {
+    using namespace smf;
+    const CscLower A = grid_kkt_like(120);
+    const CscLower B = opf_like_kkt(2000, 800, 1);
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ctrl.num_threads = 8;
+    ctrl.parallel_value_prep = true;
+    Solver s;
+    Info info;
+    auto akA = s.analyse(A, ctrl, info);
+    auto akB = s.analyse(B, ctrl, info);
+    ASSERT_NE(akA.get(), nullptr);
+    ASSERT_NE(akB.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    SolveWorkspace sws;
+    const auto run = [&](const AnalysisKeep &ak, const CscLower &M) {
+        ASSERT_EQ(s.factor(ak, M, ctrl, info, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(fk.setup_analysis, ak.serial);
+        EXPECT_TRUE(std::equal(fk.perm.begin(), fk.perm.end(), ak.perm.begin(), ak.perm.end()));
+        std::vector<double> b(static_cast<std::size_t>(M.n));
+        for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.01 * static_cast<double>(i)) + 1.0;
+        std::vector<double> x = b;
+        ASSERT_EQ(s.solve(fk, ctrl, info, x.data(), static_cast<int>(M.n), 1, sws), 0);
+        EXPECT_LT(residual(M, x, b), 1e-12);
+    };
+    run(*akA, A);
+    run(*akA, A);
+    run(*akB, B);
+    run(*akA, A);
+    CscLower bad = A;
+    bad.values[3] = std::nan("");
+    EXPECT_NE(s.factor(*akA, bad, ctrl, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(fk.setup_analysis, 0u);
+    run(*akA, A);
+}
+
+// A FactorKeep that went through another factorization path in between (SPD,
+// another analysis with its own permutation, same order) must not keep that
+// permutation for the next refactorization of the first analysis.
+TEST(RepeatedFactor, SetupReuseInvalidatedBySpdFactorization) {
+    using namespace smf;
+    const int m = 60;
+    const CscLower A = grid_kkt_like(m);  // indefinite
+    CscLower B = A;                        // SPD, same order and pattern
+    for (Int j = 0; j < B.n; ++j) B.values[static_cast<std::size_t>(B.col_ptr[j])] = 8.0;
+    Control ci;
+    ci.matrix_type = MatrixType::RealSymmetricIndefinite;
+    ci.ordering = OrderingMethod::METIS;
+    Control cs = ci;
+    cs.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    cs.ordering = OrderingMethod::AMD;  // a different permutation than A's
+    Solver s;
+    Info info;
+    auto akA = s.analyse(A, ci, info);
+    auto akB = s.analyse(B, cs, info);
+    ASSERT_NE(akA.get(), nullptr);
+    ASSERT_NE(akB.get(), nullptr);
+    ASSERT_NE(akA->perm, akB->perm) << "premise: different permutations";
+    FactorKeep fk;
+    NumericWorkspace ws;
+    SolveWorkspace sws;
+    ASSERT_EQ(s.factor(*akA, A, ci, info, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(s.factor(*akB, B, cs, info, fk, ws), FactorStatus::Success);
+    ASSERT_EQ(s.factor(*akA, A, ci, info, fk, ws), FactorStatus::Success);
+    EXPECT_TRUE(std::equal(fk.perm.begin(), fk.perm.end(), akA->perm.begin(), akA->perm.end()));
+    std::vector<double> b(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.01 * static_cast<double>(i)) + 1.0;
+    std::vector<double> x = b;
+    ASSERT_EQ(s.solve(fk, ci, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+    EXPECT_LT(residual(A, x, b), 1e-12);
 }
