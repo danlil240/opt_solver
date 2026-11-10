@@ -6,6 +6,9 @@
 
 #include <algorithm>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace smf {
 
@@ -98,6 +101,19 @@ void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
   }
   if (bounds.back() < f) bounds.push_back(f);
   const int n = static_cast<int>(bounds.size()) - 1;
+#ifdef _OPENMP
+  // On the calling thread's OpenMP team, the one its MKL calls run on (smf's
+  // OpenMP and MKL's intel threading share one runtime): the team is hot
+  // from the front's previous BLAS call and stays so for the next one.
+  // Lending the blocks to the scheduler's workers instead put extra threads
+  // next to MKL's spinning team, and the front's following BLAS calls lost
+  // about what the assembly saved (2026-11-09 acopf profile).
+  (void)helpers;
+#pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
+  for (int b = 0; b < n; ++b)
+    assemble_front_columns(F, f, orig, kids, bounds[static_cast<std::size_t>(b)],
+                           bounds[static_cast<std::size_t>(b) + 1]);
+#else
   std::vector<int> scratch(3 * static_cast<std::size_t>(n), 0);
   int *pending = scratch.data();               // all zero: no predecessors
   int *roots = scratch.data() + n;
@@ -107,6 +123,28 @@ void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
   BlockDag dag(F, f, orig, kids, bounds);
   TileRunner runner;
   runner.run(dag, pending, roots, n, n, ready, ready_lo.data(), nthreads, helpers);
+#endif
+}
+
+void copy_contribution_block(double *dst, const double *cb, std::size_t lda, int q, int nthreads) {
+  // Column jj starts at jj q - jj (jj - 1) / 2 in the packed block.
+  const auto column = [&](int jj) {
+    const std::size_t u = static_cast<std::size_t>(jj);
+    const std::size_t sq = static_cast<std::size_t>(q);
+    const double *src = cb + u * lda + u;
+    std::copy(src, src + (sq - u), dst + u * sq - u * (u - std::size_t{1}) / 2);
+  };
+#ifdef _OPENMP
+  if (nthreads >= 2) {
+    // The calling thread's team, as assemble_front_parallel.
+#pragma omp parallel for schedule(dynamic, 16) num_threads(nthreads)
+    for (int jj = 0; jj < q; ++jj) column(jj);
+    return;
+  }
+#else
+  (void)nthreads;
+#endif
+  for (int jj = 0; jj < q; ++jj) column(jj);
 }
 
 } // namespace smf
