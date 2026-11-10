@@ -1,6 +1,10 @@
 #pragma once
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
+#include "smf/factor_store.hpp"
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include "smf/info.hpp"
 #include "smf/types.hpp"
 #include <utility>
@@ -41,8 +45,11 @@ struct FactorKeep {
   /// the pairs' inverses; every other member is then the reduced matrix's
   /// factor (its order SlackPlan::nr). Null: the matrix's own factor.
   std::shared_ptr<SlackFactor> slack;
-  std::vector<double>
-      factor_values; ///< packed L columns (per supernode, col-major)
+  /// Packed L columns (per supernode, col-major), at factor_col_ptr /
+  /// SolveStep::factor_offset from data(). Tree-parallel factorizations write
+  /// it in per-thread slices (FactorStore), so it may have gaps: size() is the
+  /// extent, used() the entries written.
+  FactorStore<double> factor_values;
   std::vector<LongInt> factor_col_ptr; ///< factor_col_ptr[s] = 64-bit start offset of supernode s
   std::vector<int> perm;           ///< total permutation perm[new] = old
   std::vector<int> iperm;          ///< total inverse permutation iperm[old] = new
@@ -53,9 +60,56 @@ struct FactorKeep {
   // [s][k] = pivot type for fully-summed column k of supernode s:
   //  1 = 1×1 accepted, 2 = first of 2×2, -1 = second of 2×2, 0 = delayed
   std::vector<std::vector<int8_t>> pivot_types; ///< [s][k] = pivot type per supernode column
-  std::vector<DiagSolveEntry> diag_entries; ///< flattened D blocks for solve_diag
+  /// Flattened D blocks for solve_diag, in elimination order. Read it through
+  /// diag(): with Control::lazy_diag_entries a tree-parallel factorization
+  /// leaves the entries in its threads' lists (diag_merge) and diag() merges
+  /// them on first use.
+  mutable std::vector<DiagSolveEntry> diag_entries;
+  /// The pending merge of diag(): each thread's entries (parts) and, in
+  /// elimination order, the [b, e) range of a part that holds each front's.
+  struct DiagMerge {
+    struct Chunk {
+      int part = 0;
+      std::size_t b = 0, e = 0;
+    };
+    std::vector<std::vector<DiagSolveEntry>> parts;
+    std::vector<Chunk> chunks;
+    std::atomic<bool> pending{false};
+    std::unique_ptr<std::mutex> mu = std::make_unique<std::mutex>();
+    DiagMerge() = default;
+    DiagMerge(const DiagMerge &o) : parts(o.parts), chunks(o.chunks), pending(o.pending.load()) {}
+    DiagMerge(DiagMerge &&o) noexcept
+        : parts(std::move(o.parts)), chunks(std::move(o.chunks)), pending(o.pending.load()),
+          mu(std::make_unique<std::mutex>()) {
+      o.pending.store(false);
+    }
+    DiagMerge &operator=(const DiagMerge &o) {
+      if (this != &o) {
+        parts = o.parts;
+        chunks = o.chunks;
+        pending.store(o.pending.load());
+      }
+      return *this;
+    }
+    DiagMerge &operator=(DiagMerge &&o) noexcept {
+      if (this != &o) {
+        parts = std::move(o.parts);
+        chunks = std::move(o.chunks);
+        pending.store(o.pending.load());
+        o.pending.store(false);
+      }
+      return *this;
+    }
+    void reset() noexcept {
+      pending.store(false);
+      chunks.clear();
+    }
+  };
+  mutable DiagMerge diag_merge;
+  /// diag_entries, merged first when a merge is pending (thread-safe).
+  const std::vector<DiagSolveEntry> &diag() const;
   std::vector<SolveStep> solve_steps; ///< flattened front traversal for triangular solves
-  std::vector<Int> solve_row_indices; ///< row indices referenced by solve_steps
+  FactorStore<Int> solve_row_indices; ///< row indices referenced by solve_steps (as factor_values)
   // Tree-parallel factorizations also leave the solve its parallel layout:
   // solve_steps[0, solve_top_begin) is a sequence of complete, independent
   // subtrees (solve_subtrees, [begin, end) step ranges), the rest the top of
@@ -68,6 +122,14 @@ struct FactorKeep {
   std::vector<Int> solve_top_rows;
   std::vector<Int> solve_top_slot;
   std::vector<Int> solve_top_parent;
+  /// AnalysisKeep::serial of the analysis whose per-analysis setup (perm,
+  /// iperm, pivot_types sized per supernode) this FactorKeep holds from its
+  /// last lean indefinite factorization; 0 after any other outcome. A
+  /// refactorization of the same analysis skips re-initialising it.
+  std::uint64_t setup_analysis = 0;
+  /// Control::cached_solve_layout: the layout cache generation whose
+  /// solve_top_slot this FactorKeep holds (0: none).
+  std::uint64_t top_layout_gen = 0;
   // The solve's thread count: with Control::auto_threads, the solve's cost
   // model (src/parallel/thread_plan.hpp, plan_solve_threads, at the
   // factorization's Control::num_threads); off, the factorization's thread

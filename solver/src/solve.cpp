@@ -704,7 +704,7 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
       return kSlackPivotNoise * eps * sf->acc[static_cast<std::size_t>(r)] * s * s;
     };
     Int covered = 0;
-    for (const DiagSolveEntry &e : fkeep.diag_entries) {
+    for (const DiagSolveEntry &e : fkeep.diag()) {
       if (e.tag == 2) {
         covered += 2;
         // Its smaller eigenvalue |det| / lambda_max, from the block normalized by
@@ -984,7 +984,7 @@ int solve_core(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   // Deterministic mode: one thread, the factor's steps in order (postorder).
   const int threads =
       (ctrl.num_threads > 1 && !det &&
-       static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)
+       static_cast<int64_t>(fkeep.factor_values.used()) >= ctrl.solve_parallel_min_entries)
           ? ctrl.num_threads
           : 1;
 

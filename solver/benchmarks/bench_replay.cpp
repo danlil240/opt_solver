@@ -1,6 +1,7 @@
 #include "adapters/adapter.hpp"
 #include "common/replay_refine.hpp"
 #include "common/replay_steps.hpp"
+#include "common/replay_track.hpp"
 #include "common/result.hpp"
 #include "common/validation.hpp"
 #include "smf/control.hpp"
@@ -628,11 +629,13 @@ int main(int argc, char **argv) {
         }
         ctrl = *plugin_ctrl;
     }
-    // "ipopt" track: the pivot threshold IPOPT itself drives HSL solvers with
-    // (ma27_pivtol / ma57_pivtol / ma97_u default 1e-8), so KKT sequences
-    // captured from IPOPT are factorized the way IPOPT factorizes them.
-    if (track == "ipopt") ctrl.pivot_u = 1e-8;
+    // The track's settings (common/replay_track.hpp; "ipopt": IPOPT's pivot
+    // threshold, and for a replayed sequence the plugin's refactorization
+    // estimate).
+    smf::bench::apply_replay_track(ctrl, track, mode == "warm_sequence");
     if (pivot_u_override >= 0.0) ctrl.pivot_u = pivot_u_override;
+    // SMF_BENCH_EXPECTED_REFACTORS = n (Control::expected_refactors; A/B runs).
+    if (const char *e = std::getenv("SMF_BENCH_EXPECTED_REFACTORS")) ctrl.expected_refactors = std::atoi(e);
     if (scaling_override == "none") ctrl.scaling = smf::ScalingMethod::None;
     else if (scaling_override == "equil") ctrl.scaling = smf::ScalingMethod::Equilibration;
     else if (scaling_override == "matching") ctrl.scaling = smf::ScalingMethod::Matching;
@@ -674,6 +677,26 @@ int main(int argc, char **argv) {
     // refines with smf::refine whenever its factor has static pivots.
     if (const char *e = std::getenv("SMF_BENCH_STATIC_PIVOT_TOL")) ctrl.static_pivot_tol = std::atof(e);
     if (const char *e = std::getenv("SMF_BENCH_DELAY_BUDGET")) ctrl.delay_budget = std::atoi(e);
+    if (const char *e = std::getenv("SMF_BENCH_PLAN_FRONT_COSTS"))
+        ctrl.thread_plan_front_costs = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_VALUE_PREP"))
+        ctrl.parallel_value_prep = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_FACTOR_IN_PLACE"))
+        ctrl.factor_in_place = std::atoi(e) != 0;
+    // SMF_BENCH_PARALLEL_ASSEMBLY = 0 | 1, SMF_BENCH_PARALLEL_ASSEMBLY_MIN = rows (8T engine Part 5).
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_ASSEMBLY"))
+        ctrl.parallel_front_assembly = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_ASSEMBLY_MIN"))
+        ctrl.parallel_assembly_min_front = std::atoi(e);
+    // SMF_BENCH_TOP_CRITICAL_SHARES = 0 | 1 (8T engine Part 7).
+    if (const char *e = std::getenv("SMF_BENCH_TOP_CRITICAL_SHARES"))
+        ctrl.top_critical_shares = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_DINV"))
+        ctrl.parallel_dinv = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_LAZY_DIAG"))
+        ctrl.lazy_diag_entries = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_CACHED_SOLVE_LAYOUT"))
+        ctrl.cached_solve_layout = std::atoi(e) != 0;
     // SMF_BENCH_SCALE_ON_DELAY (double; negative = off): Control::scale_on_delay_ratio.
     if (const char *e = std::getenv("SMF_BENCH_SCALE_ON_DELAY")) ctrl.scale_on_delay_ratio = std::atof(e);
     // SMF_BENCH_SCALE_ON_DELAY_NEXT (double; negative = off): Control::scale_on_delay_next_ratio.

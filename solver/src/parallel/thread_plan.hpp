@@ -24,9 +24,14 @@
 
 namespace smf {
 
-// Below this much front work (sum of f^2 p) a tree is not partitioned
-// (one delay-budget region, and no candidate thread count beyond 1).
-inline constexpr double kTreeParallelMinWork = 2e7;
+// Below this much front work (sum of f^2 p) a tree is not partitioned into
+// delay-budget regions (Control::delay_budget >= 0: one region). The regions
+// decide where fronts static-pivot, so they keep this floor and the flops-only
+// view whatever the thread plan does. The thread plan's own floor is
+// ThreadCosts::min_work: this value by default, 0 with
+// Control::thread_plan_front_costs (a tree of many tiny fronts, PGLib's shape,
+// is per-front overhead, not flops: priced, it repays threads).
+inline constexpr double kBudgetRegionMinWork = 2e7;
 
 // Fronts at least this large are factored as 2D tile tasks at the top of the
 // tree (Control::top_tiles): kTopTileMinFront in deterministic mode (whose
@@ -78,15 +83,30 @@ inline constexpr std::uint8_t kSplitBlas = 2;
 // 0.91-0.98x wall at 8T; at 512 cops_elec_200 also moved, 1.17x.
 inline constexpr int kTopBlasMinFront = 1024;
 
+// What a front costs in the thread plan beyond its flops (f^2 p), in the same
+// work units: per_front_entry per front entry (f^2: assembly, extend-add) and
+// per_front per front (fixed overhead). Realized sizes (the previous
+// factorization's front rows and accepted pivots, delays included) replace
+// the analysis' front size and width when given (size ns).
+struct FrontCostModel {
+  double per_front_entry = 0.0;
+  double per_front = 0.0;
+  std::span<const Int> realized_rows;
+  std::span<const Int> realized_pivots;
+};
+
 // The view of keep's assembly tree; fills the buffers it points into.
 // tiles_on: top_tiles_on(...) at more than one thread; tile_min: the tile
 // threshold (top_tile_min_front). blas_parallel: a top
 // front's BLAS calls run on its share of the threads (plan_blas_parallel);
 // false (deterministic mode, sequential MKL, a BLAS without threads) marks
 // no front kSplitBlas, so untiled fronts are priced serial.
+// fc: work[s] = f^2 p + fc.per_front_entry f^2 + fc.per_front (the default:
+// f^2 p alone).
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
                    std::vector<Int> &parent, std::vector<double> &work,
-                   std::vector<std::uint8_t> &split, int tile_min = kTopTileMinFront);
+                   std::vector<std::uint8_t> &split, int tile_min = kTopTileMinFront,
+                   const FrontCostModel &fc = {});
 
 // Whether a factorization's top fronts get parallel BLAS: not in
 // deterministic mode (BLAS on one thread there, multifrontal_serial.cpp),
@@ -180,6 +200,7 @@ struct ThreadCosts {
   double per_top_front = 5e3;           // handing one top-part front between threads
   double per_split_front_thread = 5e5;  // a tile-split front's team set-up, per thread
   int split_cap = 8;                    // threads past which split work stops speeding up (< 1: 1)
+  double min_work = kBudgetRegionMinWork;  // below this total work: no candidate past 1
 };
 struct ThreadPlan {
   int threads = 1;
@@ -208,14 +229,14 @@ ThreadPlan plan_threads(const TreeView &t, SubtreeSums &u, int max_threads, cons
 
 // True when plan_threads picks 1 for every tree of this total work (the sum
 // of f^2 p over its fronts) and every max_threads, so the plan need not be
-// built: below kTreeParallelMinWork (no candidate past 1), or, with no
+// built: below c.min_work (no candidate past 1), or, with no
 // negative cost, at most 4 per_thread. Every T > 1 costs at least
 // sub_total / T + top_total / T + T per_thread = total / T + T per_thread,
 // which reaches total when total <= 4 per_thread (the difference is
 // per_thread (T - 2)^2 / T at total = 4 per_thread), so cost(1) = total is
 // the least (rounding stays far inside the 2% tie band). Below 2^53 the
 // work sums are exact integers in any order, so a total summed in another
-// order than plan_threads' meets kTreeParallelMinWork exactly as its does.
+// order than plan_threads' meets c.min_work exactly as its does.
 bool plan_is_serial(double total, const ThreadCosts &c);
 
 // The candidate thread counts of both models, ascending: 1, 2, 4, 8, ...
@@ -241,11 +262,13 @@ struct FactorPlanTerms {
 };
 
 // Candidate 1 alone when max_threads < 2 or the tree's work is below
-// kTreeParallelMinWork; else one entry per candidate_threads(max_threads).
-std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads);
+// min_work; else one entry per candidate_threads(max_threads).
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads,
+                                               double min_work = kBudgetRegionMinWork);
 // The same with u = subtree_sums(t) (its scratch is used).
 std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, SubtreeSums &u,
-                                               int max_threads);
+                                               int max_threads,
+                                               double min_work = kBudgetRegionMinWork);
 
 // cost(T) of plan_threads from one candidate's terms; < 0 when !ok.
 double factor_plan_cost(const FactorPlanTerms &k, const ThreadCosts &c);

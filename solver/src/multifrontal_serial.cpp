@@ -8,6 +8,9 @@
 #include "parallel/chunk_arena.hpp"
 #include "parallel/tile_tasks.hpp"
 #include "parallel/thread_plan.hpp"
+#include "front_assembly.hpp"
+#include "phase_trace.hpp"
+#include "parallel/par_for.hpp"
 #include "parallel/top_scheduler.hpp"
 
 #include <algorithm>
@@ -45,6 +48,17 @@ std::atomic<long long> g_dealt_tasks_taken_over{0};
 
 // Per-thread output and scratch of the tree-parallel path, kept in the
 // NumericWorkspace so refactorizations reuse it.
+// A contribution block outside the passes' stacks: a top front's, from the
+// pool (given back once its parent read it), or a subtree root's, in the
+// root arenas (values null, rows unused).
+struct NodeBlock {
+  std::unique_ptr<double[]> values;
+  std::size_t cap = 0;
+  std::vector<Int> rows;
+  const double *v = nullptr;  // the block's values
+  const Int *r = nullptr;     // and row ids
+};
+
 struct TreeParallelBuffers {
   // Reusable, uninitialised contribution-block buffers for the top of the
   // tree: a fresh zero-filled multi-MB allocation per front cost more than
@@ -86,8 +100,12 @@ struct TreeParallelBuffers {
   std::unique_ptr<std::atomic<long long>[]> early_works;
   std::size_t early_works_cap = 0;
   struct Thread {
-    std::vector<double> fv, cbv, work;
-    std::vector<Int> sri, cbr, pos, rows, cmap;
+    // This thread's factor values and row ids (one slice each), gathered into
+    // the FactorKeep after the factorization.
+    FactorStore<double> fv;
+    FactorStore<Int> sri;
+    std::vector<double> cbv, work;
+    std::vector<Int> cbr, pos, rows, cmap;
     std::vector<int8_t> tags;
     std::vector<SolveStep> steps;
     std::vector<DiagSolveEntry> diag;
@@ -106,8 +124,16 @@ struct TreeParallelBuffers {
     std::size_t ns = 0;
     int threads = 0;
     bool budget = false;
+    bool front_costs = false;  // Control::thread_plan_front_costs of the task partition
     std::vector<std::pair<std::size_t, std::size_t>> ranges;
     std::vector<std::uint8_t> top;
+    // Control::top_critical_shares: each top front's remaining path cost to
+    // the root (local top order), rebuilt with the partition or when the
+    // plan re-plans from realized sizes.
+    std::vector<double> top_priority;
+    bool priority_ok = false;
+    bool priority_realized = false;  // built from realized front sizes
+    double priority_total = 0.0;     // their realized total (0: symbolic)
   };
   Partition partition;
   // The tree walks of the thread plan and the partition (tree_view's
@@ -118,6 +144,41 @@ struct TreeParallelBuffers {
   std::vector<double> view_work;
   std::vector<std::uint8_t> view_split;
   SubtreeSums sums;
+  // With Control::thread_plan_front_costs the plan's view prices fronts in
+  // time; the delay-budget regions keep this flops-only view (they decide
+  // numerics).
+  std::vector<Int> budget_view_parent;
+  std::vector<double> budget_view_work;
+  std::vector<std::uint8_t> budget_view_split;
+  SubtreeSums budget_sums;
+  // The tree-parallel path's per-supernode contribution blocks outside the
+  // passes' stacks, kept between factorizations (a block is read only once
+  // this factorization has written it: cb_owner, reset per call, says so).
+  std::vector<NodeBlock> node_blocks;
+  // Each supernode's position in the postorder, for the analysis it was
+  // built for (a function of the analysis alone).
+  std::vector<std::size_t> post_pos;
+  std::uint64_t post_pos_analysis = 0;
+  // Control::cached_solve_layout: the last tree-parallel solve layout's top
+  // part (its nodes in postorder and tree), every front's solve step size
+  // (p, f) by supernode (the steps' order follows the threads' tasks, which
+  // varies), the top steps' rows, and what was derived from them. analysis 0:
+  // none. The sizes are kept as an order-independent 64-bit fingerprint of
+  // every (supernode, p, f) (cur_pf_hash: this factorization's): one
+  // comparison instead of an O(ns) array per factorization.
+  struct SolveLayoutCache {
+    std::uint64_t analysis = 0;
+    int threads = 0;
+    std::uint64_t gen = 0;
+    std::vector<Int> top_nodes;
+    std::vector<Int> top_parent;
+    std::uint64_t pf_hash = 0;
+    std::uint64_t cur_pf_hash = 0;
+    std::vector<Int> top_rows;
+    int solve_threads = 1;
+    bool rows_valid = false;
+  };
+  SolveLayoutCache layout;
 };
 
 namespace {
@@ -127,8 +188,8 @@ namespace {
 // the tree-parallel path runs one pass per thread over whole subtrees, then
 // the serial pass over the top of the tree.
 struct FrontPass {
-  std::vector<double> *fv;   // factor values; fronts are assembled in place here
-  std::vector<Int> *sri;     // solve row indices
+  FactorSlice<double> *fv;   // factor values; fronts are assembled in place here
+  FactorSlice<Int> *sri;     // solve row indices
   std::vector<SolveStep> *steps;
   std::vector<DiagSolveEntry> *diag;
   // Tree-parallel only: (front, end offset in *diag) after each front this
@@ -138,6 +199,7 @@ struct FrontPass {
   std::vector<Int> *cbr;     // contribution stack: row ids
   std::vector<Int> *rows;
   std::vector<Int> *cmap;
+  std::vector<AssemblyChild> asm_kids;  // parallel assembly: the children's blocks
   std::vector<int8_t> *tags;
   std::vector<double> *work;
   Int *pos;                  // row -> front position, -1 between fronts
@@ -163,16 +225,6 @@ struct FrontPass {
   SmallBuf sbuf[2];
 };
 
-// A contribution block outside the passes' stacks: a top front's, from the
-// pool (given back once its parent read it), or a subtree root's, in the
-// root arenas (values null, rows unused).
-struct NodeBlock {
-  std::unique_ptr<double[]> values;
-  std::size_t cap = 0;
-  std::vector<Int> rows;
-  const double *v = nullptr;  // the block's values
-  const Int *r = nullptr;     // and row ids
-};
 
 // The conditional early stop of a work-limited factorization
 // (EarlyWorkStop, Control::scale_on_delay_early_ratio), decided over the
@@ -307,6 +359,11 @@ struct FactorContext {
   int posdef_lapack = 0;
   // Tiled fronts' minimum rows (top_tile_min_front).
   int tile_min = kTopTileMinFront;
+  // deterministic_mode(ctrl).
+  bool det = false;
+  // Control::parallel_front_assembly: top fronts of at least this many rows
+  // with a share of 2 or more threads assemble in column blocks; 0 = off.
+  int parallel_asm_min = 0;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -373,6 +430,16 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
   vec.resize(need);
 }
 
+// A factor slice never shrinks here (its size past the pass's fill is the room
+// the next front assembles in); it counts a growth when it moves to private
+// memory (out of its reservation).
+template <class T> void grow(FactorSlice<T> &s, std::size_t need, int64_t &growths) {
+  if (s.size() >= need) return;
+  const bool was = s.detached();
+  if (!s.grow(need)) throw std::bad_alloc();
+  if (s.detached() && (!was || s.size() > need)) ++growths;
+}
+
 // Assemble, factor and store supernode s with pass P (index `me` in
 // cx.passes). Children's contribution blocks are read from whichever pass
 // produced them; with `pop` (postorder passes, where they are the top of the
@@ -381,6 +448,11 @@ template <class Vec> void grow(Vec &vec, std::size_t need, int64_t &growths) {
 // `next` is the front P processes right after s (-1: none or unknown): a
 // small front whose parent it is hands its contribution block over in
 // P.sbuf.
+// Contribution blocks of at least this many rows are copied out on the
+// front's team when it assembled in parallel; smaller ones cost less than
+// waking the team.
+constexpr int kParallelBlockCopyMin = 128;
+
 ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bool pop,
                         BudgetState *bs, const TileCtx *tc = nullptr, Int next = -1) {
   const AnalysisKeep &keep = cx.keep;
@@ -505,6 +577,17 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     Fa = P.sbuf[sb].v;
     lda = static_cast<std::size_t>(small_front_ld(f));
   }
+  // Parallel assembly (Control::parallel_front_assembly) keeps every child's
+  // map at once in P.cmap, and the children's blocks in P.asm_kids.
+  const bool par_asm = cx.parallel_asm_min > 0 && tc != nullptr && tc->nthreads >= 2 &&
+                       f >= cx.parallel_asm_min && !small;
+  if (par_asm) {
+    std::size_t sum_q = 0;
+    for (const Int c : kids) sum_q += static_cast<std::size_t>(std::max<Int>(0, ws.cb_size[static_cast<std::size_t>(c)]));
+    grow(*P.cmap, std::max(sf, sum_q), P.growths);
+    if (P.asm_kids.size() < kids.size()) P.asm_kids.resize(kids.size());
+  }
+  std::vector<AssemblyChild> &asm_kids = P.asm_kids;
 
   // Fallback static pivoting: only where delaying fails. A root has no
   // parent to delay to (its unaccepted columns would be zero pivots), and a
@@ -577,8 +660,58 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // top of P's stack when P made them) are only read here, and nothing is
   // pushed or released before this front's own Schur complement, so a delay
   // budget retry can assemble the front again.
+  // SMF_BENCH_PHASE_TRACE=2: a top front's assembly time (top_asm).
+  const bool asm_lap = tc != nullptr && phase_in_top_front();
   for (;;) {
-    if (small) {
+    const auto asm_t0 = asm_lap ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // Control::parallel_front_assembly: column blocks on the front's share
+    // (front_assembly.hpp), when every child's map increases; the same
+    // values as the loops below, bit for bit.
+    bool assembled = false;
+    if (par_asm) {
+      std::size_t at = 0;
+      bool ok = true;
+      for (std::size_t c = 0; c < kids.size() && ok; ++c) {
+        const std::size_t ci = static_cast<std::size_t>(kids[c]);
+        const Int q = ws.cb_size[ci];
+        AssemblyChild &k = asm_kids[c];
+        k = AssemblyChild{};
+        if (q <= 0) continue;
+        const Int *cr = child_rows(ci);
+        Int *map = cm + at;
+        for (Int t = 0; t < q; ++t) map[t] = pos[cr[t]];
+        ok = child_maps_increasing(std::span<const Int>(map, static_cast<std::size_t>(q)));
+        std::size_t cld = 0;
+        k.values = child_values(ci, cld);
+        k.ld = cld;
+        k.map = map;
+        k.q = q;
+        at += static_cast<std::size_t>(q);
+      }
+      if (ok) {
+        AssemblyOriginal orig;
+        orig.acp = cx.acp;
+        orig.ari = cx.ari;
+        orig.av = cx.av;
+        orig.pos = pos;
+        orig.col_start = sn.col_start;
+        orig.col_end = sn.col_end;
+        assemble_front_parallel(F, f, orig, std::span<const AssemblyChild>(asm_kids.data(), kids.size()),
+                                tc->nthreads, tc->helpers);
+        for (const Int c : kids) {
+          const std::size_t ci = static_cast<std::size_t>(c);
+          if (ws.cb_size[ci] > 0 && pop && ws.cb_owner[ci] == me) {
+            new_cv_top = std::min(new_cv_top, static_cast<std::size_t>(ws.cb_value_off[ci]));
+            new_cr_top = std::min(new_cr_top, static_cast<std::size_t>(ws.cb_row_off[ci]));
+          }
+        }
+        assembled = true;
+        ++st.parallel_assembly_fronts;
+      }
+    }
+    if (assembled) {
+      // done above
+    } else if (small) {
       // The small-front layout: rows [f, fe) zero, and the rows above the
       // diagonal its kernels write (down to the 4-row boundary) finite.
       const std::size_t fe = (sf + 3) & ~std::size_t{3};
@@ -593,14 +726,14 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     }
 
     // Original entries of the pivot columns (lower CSC, so pos[row] >= pos[col]).
-    for (Int j = sn.col_start; j < sn.col_end; ++j) {
+    for (Int j = sn.col_start; j < sn.col_end && !assembled; ++j) {
       double *Fj = Fa + static_cast<std::size_t>(pos[j]) * lda;
       for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) {
         Fj[pos[cx.ari[k]]] += cx.av[k];
       }
     }
 
-    for (const Int c : kids) {
+    for (const Int c : assembled ? std::span<const Int>{} : kids) {
       const std::size_t ci = static_cast<std::size_t>(c);
       const Int q = ws.cb_size[ci];
       if (q <= 0) continue;
@@ -639,6 +772,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
     }
 
+    if (asm_lap)
+      phase_sum_add(PhaseSum::TopAsm,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - asm_t0).count());
     kr = LdltKernelResult{};
     aptp_failed = 0;
     if (aprm != nullptr) {
@@ -721,6 +857,10 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   st.flops += kr.flops;
   st.front_work += static_cast<long long>(num_elig) * f * f;
   st.max_front = std::max(st.max_front, f);
+  if (!ws.realized_rows.empty()) {  // Control::thread_plan_front_costs
+    ws.realized_rows[si] = f;
+    ws.realized_pivots[si] = p;
+  }
 
   if (cx.posdef && p < num_elig) {
     for (int t = 0; t < f; ++t) pos[rows[t]] = -1;
@@ -772,6 +912,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       } else if (tag == 2) {
         P.diag->push_back(DiagSolveEntry{
             2, 0, rows[c], rows[c + 1], Lc[c], Lc[c + 1], Lc[sf + c + 1]});
+        ++st.two_by_two_pivots;
         finite_d = finite_d && is_finite_fast(Lc[c]) && is_finite_fast(Lc[c + 1]) &&
                    is_finite_fast(Lc[sf + c + 1]);
         d10 = Lc[c + 1];
@@ -793,7 +934,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   step.f = f;
   P.steps->push_back(step);
   grow(*P.sri, P.ro + sf, P.growths);
-  std::copy(rows, rows + f, P.sri->begin() + static_cast<std::ptrdiff_t>(P.ro));
+  std::copy(rows, rows + f, P.sri->data() + P.ro);
   P.fo += sf * static_cast<std::size_t>(p_store);
   P.ro += sf;
 
@@ -849,11 +990,19 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       ws.cb_value_off[si] = 0;
       ws.cb_row_off[si] = 0;
     }
-    for (int jj = 0; jj < q; ++jj) {
-      const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
-      if (small) copy_short(src, dst, static_cast<std::size_t>(q - jj));
-      else std::copy(src, src + (q - jj), dst);
-      dst += q - jj;
+    if (small) {
+      for (int jj = 0; jj < q; ++jj) {
+        const double *src = Fa + static_cast<std::size_t>(p + jj) * lda + (p + jj);
+        copy_short(src, dst, static_cast<std::size_t>(q - jj));
+        dst += q - jj;
+      }
+    } else {
+      // A front assembled in parallel copies its block out on the same
+      // team (front_assembly.hpp), when the block is worth splitting.
+      const int copy_threads = par_asm && q >= kParallelBlockCopyMin ? tc->nthreads : 1;
+      copy_contribution_block(dst, Fa + static_cast<std::size_t>(p) * lda + static_cast<std::size_t>(p), lda, q,
+                              copy_threads);
+      dst += sq * (sq + 1) / 2;
     }
     std::copy(rows + p, rows + f, dst_rows);
     ws.cb_size[si] = q;
@@ -869,6 +1018,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
 }
 
 void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
+  to.two_by_two_pivots += from.two_by_two_pivots;
   to.inertia.positive += from.inertia.positive;
   to.inertia.negative += from.inertia.negative;
   to.inertia.zero += from.inertia.zero;
@@ -880,6 +1030,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.top_tile_fronts += from.top_tile_fronts;
   to.posdef_lapack_fronts += from.posdef_lapack_fronts;
   to.top_part_fronts += from.top_part_fronts;
+  to.parallel_assembly_fronts += from.parallel_assembly_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
   to.front_work += from.front_work;
@@ -1001,6 +1152,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // (APTP) kernel lacks TPP's weak-1x1 rule, so those fronts keep the TPP
   // kernel, the same one the 1-thread run uses (ruling R42).
   const bool det = deterministic_mode(ctrl);
+  const int parallel_asm_min =
+      ctrl.parallel_front_assembly ? std::max(2, ctrl.parallel_assembly_min_front) : 0;
   if (det) enable_blas_reproducibility();
   // Control::posdef_front_kernel: deterministic mode keeps the Ldlt kernel,
   // so its factor stays the one every thread count reproduces.
@@ -1042,6 +1195,14 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::size_t pred_factor = 0;
   std::size_t pred_rows = 0;
   double tree_work = 0.0;
+  // tree_work priced as the thread plan prices it (plan_is_serial's total).
+  bool front_costs = ctrl.thread_plan_front_costs;
+  FrontCostModel front_cost_model;
+  if (front_costs) {
+    front_cost_model.per_front_entry = ctrl.thread_cost_per_front_entry;
+    front_cost_model.per_front = ctrl.thread_cost_per_front;
+  }
+  double tree_cost = 0.0;
   ws.cb_value_off.resize(ns);
   ws.cb_row_off.resize(ns);
   ws.cb_size.resize(ns);
@@ -1062,6 +1223,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pred_rows += f;
       const double fd = static_cast<double>(f);
       tree_work += fd * fd * static_cast<double>(p);
+      tree_cost += fd * fd * static_cast<double>(p) +
+                   (front_costs ? front_cost_model.per_front_entry * fd * fd +
+                                      front_cost_model.per_front
+                                : 0.0);
       for (const Int c : keep.children(s)) {
         const std::size_t ci = static_cast<std::size_t>(c);
         if (ws.cb_size[ci] > 0) {
@@ -1085,6 +1250,16 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     reserve_plan(ws.cb_values, vpeak);
     reserve_plan(ws.cb_rows, rpeak);
   }
+  // Front costs price only trees the flops model sends to one thread (below
+  // its floor: many tiny fronts, PGLib's shape). Above it the fitted flops
+  // plan stands: priced, mid-size subtree fronts weighed more than the top's
+  // and the plan took 16 threads, E-cores included on the 12900K
+  // (obstacle_surface_200 +28%, acopf_grid_80 / pde_control_120 +20% at 16T).
+  if (front_costs && tree_work >= kBudgetRegionMinWork) {
+    front_costs = false;
+    front_cost_model = FrontCostModel{};
+    tree_cost = tree_work;
+  }
 
   if (ws.row_pos.size() != n) ws.row_pos.assign(n, -1);
   reserve_plan(ws.front_rows, max_f);
@@ -1092,10 +1267,27 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   reserve_plan(ws.pivot_tags, max_f);
   reserve_plan(ws.kernel_work, max_work);
 
-  auto &fv = fkeep.factor_values;
-  auto &sri = fkeep.solve_row_indices;
-  reserve_plan(fv, pred_factor);
-  reserve_plan(sri, pred_rows);
+  // The FactorKeep's factor: slices reserved for 4x the predicted factor plus
+  // the largest front each (delays grow fronts; past it a slice moves to
+  // private memory). One slice for a serial factorization or one gathered at
+  // the end; with Control::factor_in_place one per thread, reserved once the
+  // thread count is known. An unchanged reservation keeps its committed pages,
+  // so a refactorization neither faults nor zero-fills them again.
+  // SMF_TEST_STORE_SLICE_CAP (tests, read per call) caps the slices.
+  std::size_t fv_cap = 4 * pred_factor + max_f * max_f;
+  std::size_t sri_cap = 4 * pred_rows + max_f;
+  if (const char *cap = std::getenv("SMF_TEST_STORE_SLICE_CAP"); cap != nullptr && *cap != '\0') {
+    fv_cap = std::min<std::size_t>(fv_cap, static_cast<std::size_t>(std::atoll(cap)));
+    sri_cap = std::min<std::size_t>(sri_cap, static_cast<std::size_t>(std::atoll(cap)));
+  }
+  FactorSlice<double> *fv_slice = nullptr;
+  FactorSlice<Int> *sri_slice = nullptr;
+  const auto bind_store = [&](int slices) {
+    fkeep.factor_values.reserve_slices(slices, fv_cap);
+    fkeep.solve_row_indices.reserve_slices(slices, sri_cap);
+    fv_slice = &fkeep.factor_values.slice(0);
+    sri_slice = &fkeep.solve_row_indices.slice(0);
+  };
   fkeep.factor_col_ptr.resize(ns + 1);
   if (!posdef) fkeep.pivot_types.resize(ns);
   fkeep.solve_steps.clear();
@@ -1110,11 +1302,12 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   fkeep.solve_top_rows.clear();
   fkeep.solve_top_parent.clear();
   fkeep.diag_entries.clear();
+  fkeep.diag_merge.reset();
   if (!posdef) fkeep.diag_entries.reserve(n);
 
   FrontPass main;
-  main.fv = &fv;
-  main.sri = &sri;
+  main.fv = nullptr;  // bound with the store (bind_store) once the thread count is known
+  main.sri = nullptr;
   main.steps = &fkeep.solve_steps;
   main.diag = &fkeep.diag_entries;
   main.cbv = &ws.cb_values;
@@ -1150,7 +1343,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // its thread count alone: ws.tree_par->partition keeps it.
   //
   // A tree whose work alone rules out every T > 1 (plan_is_serial: below
-  // kTreeParallelMinWork, or within the per-thread cost) takes the serial
+  // ThreadCosts::min_work, or within the per-thread cost) takes the serial
   // engine without the plan, the tree view or the partition, all of which
   // would come out serial (about 1 ms per analysis on boyd1, ns ~ 90k).
   // The plan trace (SMF_BENCH_PLAN_TRACE) still evaluates the plan.
@@ -1165,7 +1358,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     if (!have_tv) {
       TreeParallelBuffers &b = buffers();
       tv = tree_view(keep, tiles_on, blas_parallel, b.view_parent, b.view_work, b.view_split,
-                     tile_min);
+                     tile_min, front_cost_model);
     }
     have_tv = true;
     return tv;
@@ -1176,12 +1369,58 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     have_sums = true;
     return buffers().sums;
   };
+  // The flops-only view: the delay budget's regions and the task partition
+  // (which fronts form the subtrees and which the top part) use it, whatever
+  // the plan's. Front costs price the thread count only: priced, mid-size
+  // fronts weigh more and the largest-first split moved subtree roots into
+  // the serial top part (obstacle_surface_200: 33 top fronts, not 23, 7.6%
+  // slower at 8 threads).
+  TreeView budget_tv;
+  bool have_budget_tv = false;
+  const auto budget_view = [&]() -> const TreeView & {
+    if (!front_costs) return view();
+    if (!have_budget_tv) {
+      TreeParallelBuffers &b = buffers();
+      budget_tv = tree_view(keep, tiles_on, blas_parallel, b.budget_view_parent,
+                            b.budget_view_work, b.budget_view_split, tile_min);
+      subtree_sums(budget_tv, b.budget_sums);
+    }
+    have_budget_tv = true;
+    return budget_tv;
+  };
+  const auto budget_sums = [&]() -> SubtreeSums & {
+    if (!front_costs) return sums();
+    budget_view();
+    return buffers().budget_sums;
+  };
   const ThreadCosts thread_costs{ctrl.thread_cost_per_thread, ctrl.thread_cost_per_top_front,
                                  ctrl.thread_cost_per_split_front_thread,
-                                 ctrl.thread_split_scaling_cap};
+                                 ctrl.thread_split_scaling_cap,
+                                 // Front costs replace the floor only in the
+                                 // auto plan; a forced thread count keeps it.
+                                 front_costs && ctrl.auto_threads ? 0.0 : kBudgetRegionMinWork};
   int want_threads = ns >= 2 ? ctrl.num_threads : 1;
-  const bool below_min_work = tree_work < kTreeParallelMinWork;
-  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(tree_work, thread_costs) &&
+  // Control::thread_plan_front_costs: the previous successful factorization
+  // of this analysis left its realized front sizes; when their total moved
+  // more than 10% from the cached plan's, the plan is rebuilt from them.
+  const bool realized_ok = front_costs && ws.realized_valid &&
+                           ws.realized_analysis == keep.serial &&
+                           ws.realized_rows.size() == ns;
+  const double plan_total = realized_ok ? ws.realized_total : tree_cost;
+  bool replan_realized = false;
+  if (realized_ok && ctrl.auto_threads && ws.thread_plan.analysis == keep.serial &&
+      ws.thread_plan.front_costs && ws.thread_plan.planned_total > 0.0 &&
+      std::abs(ws.realized_total - ws.thread_plan.planned_total) >
+          0.10 * ws.thread_plan.planned_total)
+    replan_realized = true;
+  if (realized_ok && (replan_realized || ws.thread_plan.from_realized)) {
+    front_cost_model.realized_rows = ws.realized_rows;
+    front_cost_model.realized_pivots = ws.realized_pivots;
+  }
+  // Below the plan's floor no partition is built (the budget's: its own).
+  const bool below_min_work = plan_total < thread_costs.min_work;
+  const bool below_budget_min_work = tree_work < kBudgetRegionMinWork;
+  if (ctrl.auto_threads && want_threads > 1 && plan_is_serial(plan_total, thread_costs) &&
       !plan_trace_enabled()) {
     want_threads = 1;
   } else if (ctrl.auto_threads && want_threads > 1) {
@@ -1191,8 +1430,13 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         pc.per_top_front != thread_costs.per_top_front ||
         pc.per_split_front_thread != thread_costs.per_split_front_thread ||
         pc.split_cap != thread_costs.split_cap || pc.tiles_on != tiles_on ||
-        pc.blas_parallel != blas_parallel || pc.tile_min != tile_min) {
+        pc.blas_parallel != blas_parallel || pc.tile_min != tile_min ||
+        pc.front_costs != front_costs || pc.per_front_entry != front_cost_model.per_front_entry ||
+        pc.per_front != front_cost_model.per_front || replan_realized) {
       pc.threads = plan_threads(view(), sums(), ctrl.num_threads, thread_costs).threads;
+      pc.planned_total = sums().total;
+      pc.from_realized = replan_realized;
+      st.plan_from_realized = replan_realized ? 1 : 0;
       pc.analysis = keep.serial;
       pc.num_threads = ctrl.num_threads;
       pc.per_thread = thread_costs.per_thread;
@@ -1202,6 +1446,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       pc.tiles_on = tiles_on;
       pc.blas_parallel = blas_parallel;
       pc.tile_min = tile_min;
+      pc.front_costs = front_costs;
+      pc.per_front_entry = front_cost_model.per_front_entry;
+      pc.per_front = front_cost_model.per_front;
     }
     want_threads = pc.threads;
   } else if (want_threads > 1 && plan_trace_enabled()) {
@@ -1209,26 +1456,47 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // (its terms do not depend on auto_threads) and not used.
     plan_threads(view(), sums(), ctrl.num_threads, thread_costs);
   }
+  // The previous factorization's realized front sizes, read before this one
+  // starts recording its own (Control::top_critical_shares' priorities; the
+  // top fronts' entries hold them until the top phase runs).
+  const bool crit_shares = ctrl.top_critical_shares && !det;
+  const bool prev_realized = ws.realized_valid && ws.realized_analysis == keep.serial &&
+                             ws.realized_rows.size() == ns && ws.realized_pivots.size() == ns;
+  const double prev_realized_total = ws.realized_total;
+  if (front_costs || crit_shares) {
+    ws.realized_valid = false;
+    if (ws.realized_rows.size() != ns) {
+      ws.realized_rows.assign(ns, 0);
+      ws.realized_pivots.assign(ns, 0);
+    }
+  } else if (!ws.realized_rows.empty()) {
+    ws.realized_rows.clear();
+    ws.realized_pivots.clear();
+    ws.realized_valid = false;
+  }
   const auto partition = [&](int nthreads, bool budget) {
     if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
     auto &pp = ws.tree_par->partition;
     if (pp.analysis != keep.serial || pp.ns != ns || pp.threads != nthreads ||
-        pp.budget != budget) {
+        pp.budget != budget || (!budget && pp.front_costs != front_costs)) {
       pp.analysis = 0;  // until rebuilt
-      pp.ranges = budget
-                      ? partition_subtrees(view(), sums(), nthreads, kTreeParallelMinWork, pp.top)
-                      : partition_tasks(view(), sums(), nthreads, kTreeParallelMinWork, pp.top);
+      pp.ranges = budget ? partition_subtrees(budget_view(), budget_sums(), nthreads,
+                                              kBudgetRegionMinWork, pp.top)
+                         : partition_tasks(budget_view(), budget_sums(), nthreads, thread_costs.min_work,
+                                           pp.top);
       pp.analysis = keep.serial;
       pp.ns = ns;
       pp.threads = nthreads;
       pp.budget = budget;
+      pp.front_costs = front_costs;
+      pp.priority_ok = false;
     }
     return &pp;
   };
   const TreeParallelBuffers::Partition *part = nullptr;
-  // Below kTreeParallelMinWork both partitions are empty: none.
+  // Below its floor a partition is empty: none.
   if (delay_budget >= 0 && ns >= 2) {
-    if (!below_min_work) part = partition(kBudgetNominalThreads, true);
+    if (!below_budget_min_work) part = partition(kBudgetNominalThreads, true);
   } else if (want_threads > 1 && !below_min_work) {
     part = partition(want_threads, false);
   }
@@ -1277,6 +1545,19 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         at >= 9.0e18 ? std::numeric_limits<long long>::max() : static_cast<long long>(at), works);
   }
 
+  const bool in_place = ctrl.factor_in_place && threads > 1;
+  if (!in_place) {
+    bind_store(1);
+    main.fv = fv_slice;
+    main.sri = sri_slice;
+    if (threads <= 1) {
+      int64_t g = 0;
+      grow(*fv_slice, pred_factor, g);
+      grow(*sri_slice, pred_rows, g);
+    }
+  } else {
+    bind_store(threads);
+  }
   if (threads <= 1) {
     if (det_tc != nullptr) {
       if (!ws.tree_par) ws.tree_par = std::make_shared<TreeParallelBuffers>();
@@ -1288,7 +1569,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1299,6 +1580,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     }
     BudgetState budget;  // the running state of the current region
     std::size_t k = 0;
+    phase_mark("mf_setup");
     for (; k < keep.postorder.size(); ++k) {
       const Int sk = keep.postorder[k];
       BudgetState top_state;
@@ -1336,8 +1618,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       b.steps.clear();
       b.diag.clear();
       FrontPass &P = tpass[static_cast<std::size_t>(t)];
-      P.fv = &b.fv;
-      P.sri = &b.sri;
+      if (in_place) {  // the FactorKeep's own slice t: no gather
+        P.fv = &fkeep.factor_values.slice(t);
+        P.sri = &fkeep.solve_row_indices.slice(t);
+      } else {
+        if (b.fv.slices() == 0) {  // once: reserved like the FactorKeep's
+          b.fv.reserve_slices(1, fv_cap);
+          b.sri.reserve_slices(1, sri_cap);
+        }
+        P.fv = &b.fv.slice(0);
+        P.sri = &b.sri.slice(0);
+      }
       P.steps = &b.steps;
       P.diag = &b.diag;
       P.cbv = &b.cbv;
@@ -1350,16 +1641,17 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       P.tiles = &b.tiles;
       passes.push_back(&P);
     }
-    node_blocks.resize(ns);
+    std::vector<NodeBlock> &blocks = ws.tree_par->node_blocks;
+    if (blocks.size() != ns) blocks.resize(ns);
     std::atomic<long long> work_done{0};
     const FactorContext cx{keep, acp,         ari,         av,          prm,      posdef,
-                           fkeep, ws,         passes.data(), front_pass.data(), &node_blocks, &ws.tree_par->pool,
+                           fkeep, ws,         passes.data(), front_pass.data(), &blocks, &ws.tree_par->pool,
                            fallback_static, aptp,             aptp_min_elig, delay_budget,
                            budget_static, tiles_on ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
@@ -1407,6 +1699,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // blocks lived there.
     const std::size_t arena_growths0 =
         ws.tree_par->root_values.growths() + ws.tree_par->root_rows.growths();
+    phase_mark("mf_setup");
     const auto phase1_start = PhaseClock::now();
     // Thread t takes task t first, then the next one left: the heaviest
     // tasks (the first, heaviest first) land on the same passes in every
@@ -1483,6 +1776,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     st.subtree_seconds = seconds_since(phase1_start);
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
                                          ws.tree_par->root_rows.growths() - arena_growths0);
+    phase_mark("mf_p2");
+    phase_sum_discard();  // an earlier factorization that stopped before its flush
     const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)
@@ -1511,11 +1806,60 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       const Int par = keep.supernodes[static_cast<std::size_t>(top_nodes[i])].parent;
       if (par >= 0) top_parent[i] = top_local[static_cast<std::size_t>(par)];
     }
+    // Control::top_critical_shares: each top front's remaining path cost to
+    // the root, f^2 p + c f^2 summed up the tree (realized sizes when the
+    // previous factorization of this analysis left them), cached with the
+    // partition.
+    std::vector<double> top_priority;
+    if (ctrl.top_critical_shares && !det && part != nullptr) {
+      auto &pp = ws.tree_par->partition;
+      if (replan_realized) pp.priority_ok = false;
+      // Realized sizes newly known, or their total moved by more than 10%.
+      if (prev_realized && (!pp.priority_realized ||
+                            std::abs(prev_realized_total - pp.priority_total) > 0.10 * pp.priority_total))
+        pp.priority_ok = false;
+      if (!pp.priority_ok || pp.top_priority.size() != top_nodes.size()) {
+        const bool realized = prev_realized;
+        const double c_entry = ctrl.thread_cost_per_front_entry;
+        const auto cost = [&](std::size_t local) {
+          const std::size_t s = static_cast<std::size_t>(top_nodes[local]);
+          const double f = realized ? static_cast<double>(ws.realized_rows[s])
+                                    : static_cast<double>(keep.front_size(static_cast<Int>(s)));
+          const double p = realized ? static_cast<double>(ws.realized_pivots[s])
+                                    : static_cast<double>(keep.supernodes[s].width());
+          return f * f * p + c_entry * f * f;
+        };
+        pp.priority_realized = realized;
+        pp.priority_total = realized ? prev_realized_total : 0.0;
+        auto &pr = pp.top_priority;
+        pr.assign(top_nodes.size(), -1.0);
+        std::vector<Int> walk;
+        for (std::size_t i = 0; i < top_nodes.size(); ++i) {
+          if (pr[i] >= 0.0) continue;
+          // Up to the first ancestor already known (or the root), then down.
+          Int v = static_cast<Int>(i);
+          while (v >= 0 && pr[static_cast<std::size_t>(v)] < 0.0) {
+            walk.push_back(v);
+            v = top_parent[static_cast<std::size_t>(v)];
+          }
+          double base = v >= 0 ? pr[static_cast<std::size_t>(v)] : 0.0;
+          while (!walk.empty()) {
+            const std::size_t u = static_cast<std::size_t>(walk.back());
+            walk.pop_back();
+            base += cost(u);
+            pr[u] = base;
+          }
+        }
+        pp.priority_ok = true;
+      }
+      top_priority = pp.top_priority;
+      st.top_priority_from_realized = pp.priority_realized ? 1 : 0;
+    }
     // 2D tile tasks (Control::top_tiles): a front given blas_threads threads
     // offers blas_threads - 1 places to the scheduler, taken by the workers
     // that the BLAS-thread budget leaves idle; they run its tasks on serial
     // BLAS.
-    TopScheduler sched(std::move(top_parent), threads);
+    TopScheduler sched(std::move(top_parent), threads, std::move(top_priority));
     // The passes as lanes (PassLanes): a chain of top fronts runs on a pass
     // that already has the room its next front assembles in (factor values
     // past the pass's fill), whichever thread runs it, so the root fronts
@@ -1526,7 +1870,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::vector<int> lane_of(static_cast<std::size_t>(threads), -1);
     const auto lane_room = [&tpass](int l) -> std::size_t {
       const FrontPass &Q = tpass[static_cast<std::size_t>(l)];
-      return Q.fv->size() > Q.fo ? Q.fv->size() - Q.fo : 0;
+      // Committed room: an in-place slice ends a factorization at its fill,
+      // with the room its fronts used still committed (FactorStore::trim).
+      return Q.fv->capacity() > Q.fo ? Q.fv->capacity() - Q.fo : 0;
     };
     // Each top front's pass and step index in it (by local index).
     std::vector<int> top_pass(top_nodes.size(), 0);
@@ -1558,6 +1904,10 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // Deterministic mode: BLAS on one thread whatever the front's
             // share (its tile tasks still recruit blas_threads - 1 helpers).
             BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
+            const PhaseTopFrontScope phase_top;
+            // Control::top_critical_shares: BLAS follows the front's share,
+            // which grows when the scheduler hands it threads that came free.
+            const BlasShareScope share_scope(ctrl.top_critical_shares && !det ? &sched.share(local) : nullptr);
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }
@@ -1620,28 +1970,65 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       }
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
-      const auto phase3_start = PhaseClock::now();
-      grow(fv, main.fo, main.growths);
-      grow(sri, main.ro, main.growths);
-      const bool in_pieces =
-          main.fo * sizeof(double) + main.ro * sizeof(Int) <= kCachedGatherBytes;
-      run_pool([&](int tid) {
-        const std::size_t ti = static_cast<std::size_t>(tid);
-        const FrontPass &P = tpass[ti];
-        assert(P.fo <= P.fv->size() && fbase[ti] + P.fo <= fv.size());
-        assert(P.ro <= P.sri->size() && rbase[ti] + P.ro <= sri.size());
-        gather_copy(P.fv->data(), P.fo, fv.data() + fbase[ti], in_pieces);
-        gather_copy(P.sri->data(), P.ro, sri.data() + rbase[ti], in_pieces);
-      });
-      st.gather_seconds = seconds_since(phase3_start);
+      phase_mark("mf_p3");
+      phase_sum_flush();
+      if (in_place) {
+        // Each slice holds exactly its pass's fill. Attached slices are the
+        // final layout (offsets from the store's base); a slice that moved
+        // to private memory makes the store gather into one array, in slice
+        // order: the prefix-sum bases above.
+        for (int t = 0; t < threads; ++t) {
+          const std::size_t ti = static_cast<std::size_t>(t);
+          fkeep.factor_values.slice(t).grow(tpass[ti].fo);
+          fkeep.solve_row_indices.slice(t).grow(tpass[ti].ro);
+        }
+        if (fkeep.factor_values.all_attached() && fkeep.solve_row_indices.all_attached()) {
+          for (int t = 0; t < threads; ++t) {
+            fbase[static_cast<std::size_t>(t)] = fkeep.factor_values.slice_offset(t);
+            rbase[static_cast<std::size_t>(t)] = fkeep.solve_row_indices.slice_offset(t);
+          }
+          main.fo = fkeep.factor_values.size();
+          main.ro = fkeep.solve_row_indices.size();
+        } else {
+          const auto regather_start = PhaseClock::now();
+          fkeep.factor_values.regather();
+          fkeep.solve_row_indices.regather();
+          ++st.factor_store_regathers;
+          ++main.growths;
+          st.gather_seconds = seconds_since(regather_start);
+        }
+      } else {
+        const auto phase3_start = PhaseClock::now();
+        grow(*fv_slice, main.fo, main.growths);
+        grow(*sri_slice, main.ro, main.growths);
+        double *const fvd = fv_slice->data();
+        Int *const srid = sri_slice->data();
+        const bool in_pieces =
+            main.fo * sizeof(double) + main.ro * sizeof(Int) <= kCachedGatherBytes;
+        run_pool([&](int tid) {
+          const std::size_t ti = static_cast<std::size_t>(tid);
+          const FrontPass &P = tpass[ti];
+          assert(P.fo <= P.fv->size() && fbase[ti] + P.fo <= fv_slice->size());
+          assert(P.ro <= P.sri->size() && rbase[ti] + P.ro <= sri_slice->size());
+          gather_copy(P.fv->data(), P.fo, fvd + fbase[ti], in_pieces);
+          gather_copy(P.sri->data(), P.ro, srid + rbase[ti], in_pieces);
+        });
+        st.gather_seconds = seconds_since(phase3_start);
+      }
+      phase_mark("mf_gathered");
       const auto relocated = [&](int t, SolveStep step) {
         step.factor_offset += static_cast<LongInt>(fbase[static_cast<std::size_t>(t)]);
         step.row_offset += static_cast<LongInt>(rbase[static_cast<std::size_t>(t)]);
         return step;
       };
-      std::vector<std::size_t> post_pos(ns, 0);
-      for (std::size_t k = 0; k < keep.postorder.size(); ++k)
-        post_pos[static_cast<std::size_t>(keep.postorder[k])] = k;
+      TreeParallelBuffers &tbuf = *ws.tree_par;
+      if (tbuf.post_pos_analysis != keep.serial || tbuf.post_pos.size() != ns) {
+        tbuf.post_pos.assign(ns, 0);
+        for (std::size_t k = 0; k < keep.postorder.size(); ++k)
+          tbuf.post_pos[static_cast<std::size_t>(keep.postorder[k])] = k;
+        tbuf.post_pos_analysis = keep.serial;
+      }
+      const std::vector<std::size_t> &post_pos = tbuf.post_pos;
       for (int t = 0; t < threads; ++t) {
         const std::size_t ti = static_cast<std::size_t>(t);
         const auto &steps = *tpass[ti].steps;
@@ -1656,6 +2043,26 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
         add_stats(st, tpass[ti].st);
         main.growths += tpass[ti].growths;
       }
+      if (ctrl.cached_solve_layout && !det) {
+        // Sum of a mixed hash per front: independent of which thread ran it.
+        std::uint64_t h = 0;
+        for (int t = 0; t < threads; ++t) {
+          const FrontPass &P = tpass[static_cast<std::size_t>(t)];
+          const auto &steps = *P.steps;
+          for (std::size_t k = 0; k < P.diag_marks.size() && k < steps.size(); ++k) {
+            std::uint64_t x = static_cast<std::uint64_t>(static_cast<std::uint32_t>(P.diag_marks[k].first)) *
+                                  0x9E3779B97F4A7C15ull ^
+                              (static_cast<std::uint64_t>(static_cast<std::uint32_t>(steps[k].p)) << 32 |
+                               static_cast<std::uint32_t>(steps[k].f));
+            x ^= x >> 31;
+            x *= 0xBF58476D1CE4E5B9ull;
+            x ^= x >> 29;
+            h += x;
+          }
+        }
+        tbuf.layout.cur_pf_hash = h;
+      }
+      phase_mark("mf_steps");
       // D entries in elimination order: fronts by their position in the
       // postorder (children before parents), each front's entries in pivot
       // order. Thread assignment and the top phase's completion order vary
@@ -1676,13 +2083,29 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             b = end;
           }
         }
-        for (const Chunk &c : chunks) {
-          if (c.e == c.b) continue;
-          const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
-          fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
-                                    d.begin() + static_cast<std::ptrdiff_t>(c.e));
+        if (ctrl.lazy_diag_entries) {
+          // Control::lazy_diag_entries: the threads' lists move into the
+          // FactorKeep (their buffers come back next time) and diag() merges
+          // them in this order on first use.
+          auto &m = fkeep.diag_merge;
+          m.parts.resize(static_cast<std::size_t>(threads));
+          for (int t = 0; t < threads; ++t)
+            m.parts[static_cast<std::size_t>(t)].swap(*tpass[static_cast<std::size_t>(t)].diag);
+          m.chunks.clear();
+          for (const Chunk &c : chunks)
+            if (c.e != c.b) m.chunks.push_back({c.pass, c.b, c.e});
+          fkeep.diag_entries.clear();
+          m.pending.store(true, std::memory_order_release);
+        } else {
+          for (const Chunk &c : chunks) {
+            if (c.e == c.b) continue;
+            const auto &d = *tpass[static_cast<std::size_t>(c.pass)].diag;
+            fkeep.diag_entries.insert(fkeep.diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
+                                      d.begin() + static_cast<std::ptrdiff_t>(c.e));
+          }
         }
       }
+      phase_mark("mf_diag");
       if (det) {
         // Deterministic mode: every front's solve step in postorder, the
         // order of the serial factorization, and no parallel solve layout
@@ -1726,11 +2149,32 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                     [](const auto &a, const auto &b) { return a.first > b.first; });
           for (std::size_t i = 0; i < by_work.size(); ++i) fkeep.solve_subtrees[i] = by_work[i].second;
         }
+        // Control::cached_solve_layout: the top steps in postorder (a
+        // topological order, like the completion order), so the top tree
+        // depends on the analysis and the partition alone.
+        if (ctrl.cached_solve_layout)
+          std::sort(done_order.begin(), done_order.end(), [&post_pos](const Done &a, const Done &b) {
+            return post_pos[static_cast<std::size_t>(a.node)] < post_pos[static_cast<std::size_t>(b.node)];
+          });
         for (const Done &d : done_order)
           fkeep.solve_steps.push_back(
               relocated(d.pass, (*tpass[static_cast<std::size_t>(d.pass)].steps)[d.step]));
+        auto &lc = tbuf.layout;
+        bool top_tree_hit = false;
+        if (ctrl.cached_solve_layout) {
+          top_tree_hit = lc.analysis == keep.serial && lc.threads == threads &&
+                         lc.top_nodes.size() == done_order.size() &&
+                         std::equal(done_order.begin(), done_order.end(), lc.top_nodes.begin(),
+                                    [](const Done &d, Int node) { return d.node == node; });
+          if (top_tree_hit) {
+            fkeep.solve_top_parent = lc.top_parent;
+          } else {
+            lc.analysis = 0;
+            lc.rows_valid = false;
+          }
+        }
         // Top-part tree over solve steps (parents are top nodes too).
-        {
+        if (!top_tree_hit) {
           std::vector<Int> top_pos(ns, -1);
           for (std::size_t i = 0; i < done_order.size(); ++i)
             top_pos[static_cast<std::size_t>(done_order[i].node)] = static_cast<Int>(i);
@@ -1739,8 +2183,16 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             const Int par = keep.supernodes[static_cast<std::size_t>(done_order[i].node)].parent;
             fkeep.solve_top_parent[i] = par >= 0 ? top_pos[static_cast<std::size_t>(par)] : -1;
           }
+          if (ctrl.cached_solve_layout) {
+            lc.analysis = keep.serial;
+            lc.threads = threads;
+            lc.top_nodes.resize(done_order.size());
+            for (std::size_t i = 0; i < done_order.size(); ++i) lc.top_nodes[i] = done_order[i].node;
+            lc.top_parent = fkeep.solve_top_parent;
+          }
         }
       }
+      phase_mark("mf_top");
       for (std::size_t si = 0; si < ns; ++si)
         fkeep.factor_col_ptr[si] +=
             static_cast<LongInt>(fbase[static_cast<std::size_t>(front_pass[si] - 1)]);
@@ -1757,12 +2209,68 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     fkeep.solve_threads = 1;
     std::fill(ws.cb_size.begin(), ws.cb_size.end(), Int{0});
     std::fill(ws.cb_delayed.begin(), ws.cb_delayed.end(), Int{0});
+    if (ws.tree_par) {
+      ws.tree_par->layout.analysis = 0;
+      ws.tree_par->layout.rows_valid = false;
+    }
+    if (in_place) {
+      fkeep.factor_values.clear();
+      fkeep.solve_row_indices.clear();
+    }
     return status;
   }
   fkeep.factor_col_ptr[ns] = static_cast<LongInt>(main.fo);
-  fv.resize(main.fo);
-  sri.resize(main.ro);
-  if (!fkeep.solve_subtrees.empty()) {
+  if (front_costs || crit_shares) {
+    // Priced as Control::thread_plan_front_costs prices (the same model with
+    // front costs on), whichever of the two recorded the sizes.
+    double total = 0.0;
+    for (std::size_t si = 0; si < ns; ++si) {
+      const double f = static_cast<double>(ws.realized_rows[si]);
+      total += f * f * static_cast<double>(ws.realized_pivots[si]) +
+               ctrl.thread_cost_per_front_entry * f * f + ctrl.thread_cost_per_front;
+    }
+    ws.realized_total = total;
+    ws.realized_analysis = keep.serial;
+    ws.realized_valid = true;
+  }
+  if (in_place) {
+    fkeep.factor_values.trim();
+    fkeep.solve_row_indices.trim();
+  } else {
+    fv_slice->grow(main.fo);
+    sri_slice->grow(main.ro);
+  }
+  // Control::cached_solve_layout: the top rows, their slots and the solve's
+  // thread count are those of the cached layout when its top tree was reused
+  // and every step's (p, f) and every top step's rows are unchanged.
+  bool layout_reused = false;
+  if (ctrl.cached_solve_layout && !fkeep.solve_subtrees.empty() && ws.tree_par &&
+      ws.tree_par->layout.analysis == keep.serial && ws.tree_par->layout.rows_valid) {
+    auto &lc = ws.tree_par->layout;
+    bool same = lc.pf_hash == lc.cur_pf_hash;
+    std::size_t at = 0;
+    for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin); same && k < fkeep.solve_steps.size(); ++k) {
+      const SolveStep &step = fkeep.solve_steps[k];
+      const Int *rows = fkeep.solve_row_indices.data() + step.row_offset;
+      same = at + static_cast<std::size_t>(step.p) <= lc.top_rows.size() &&
+             std::equal(rows, rows + step.p, lc.top_rows.begin() + static_cast<std::ptrdiff_t>(at));
+      at += static_cast<std::size_t>(step.p);
+    }
+    same = same && at == lc.top_rows.size();
+    if (same) {
+      fkeep.solve_top_rows = lc.top_rows;
+      if (fkeep.top_layout_gen != lc.gen || fkeep.solve_top_slot.size() != n) {
+        fkeep.solve_top_slot.assign(n, -1);
+        for (std::size_t i = 0; i < lc.top_rows.size(); ++i)
+          fkeep.solve_top_slot[static_cast<std::size_t>(lc.top_rows[i])] = static_cast<Int>(i);
+        fkeep.top_layout_gen = lc.gen;
+      }
+      fkeep.solve_threads = lc.solve_threads;
+      layout_reused = true;
+      st.solve_layout_reused = 1;
+    }
+  }
+  if (!fkeep.solve_subtrees.empty() && !layout_reused) {
     // Pivot rows of the top part (delayed subtree pivots included): the
     // parallel forward solve sends subtree updates to them through
     // per-thread buffers.
@@ -1773,7 +2281,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     for (std::size_t k = static_cast<std::size_t>(fkeep.solve_top_begin);
          k < fkeep.solve_steps.size(); ++k) {
       const SolveStep &step = fkeep.solve_steps[k];
-      const Int *rows = sri.data() + step.row_offset;
+      const Int *rows = fkeep.solve_row_indices.data() + step.row_offset;
       for (int i = 0; i < step.p; ++i) {
         fkeep.solve_top_slot[static_cast<std::size_t>(rows[i])] =
             static_cast<Int>(fkeep.solve_top_rows.size());
@@ -1805,8 +2313,28 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     // subtrees)): store what a solve can use.
     fkeep.solve_threads =
         std::min(fkeep.solve_threads, static_cast<int>(fkeep.solve_subtrees.size()));
+    fkeep.top_layout_gen = 0;
+    if (ctrl.cached_solve_layout && ws.tree_par && ws.tree_par->layout.analysis == keep.serial) {
+      static std::atomic<std::uint64_t> next_gen{0};
+      auto &lc = ws.tree_par->layout;
+      lc.pf_hash = lc.cur_pf_hash;
+      lc.top_rows = fkeep.solve_top_rows;
+      lc.solve_threads = fkeep.solve_threads;
+      lc.gen = ++next_gen;
+      lc.rows_valid = true;
+      fkeep.top_layout_gen = lc.gen;
+    }
+    phase_mark("mf_toprows");
   }
-  finish_solve_layout(fkeep, ctrl.small_solve_kernels);
+  if (ctrl.parallel_dinv && threads > 1) {
+    const RangeRunner run = [&](std::size_t n, const std::function<void(std::size_t, std::size_t)> &fn) {
+      parallel_ranges(ws, threads, n, 64, [&](int, std::size_t b, std::size_t e) { fn(b, e); });
+    };
+    finish_solve_layout(fkeep, ctrl.small_solve_kernels, run);
+  } else {
+    finish_solve_layout(fkeep, ctrl.small_solve_kernels);
+  }
+  phase_mark("mf_ret");
   return ErrorCode::Success;
 }
 

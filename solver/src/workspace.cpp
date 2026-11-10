@@ -1,3 +1,4 @@
+#include "parallel/par_for.hpp"
 #include "smf/workspace.hpp"
 #include "smf/solve_pool.hpp"
 
@@ -127,7 +128,7 @@ bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
 
 ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
                                  NumericWorkspace &ws, bool need_clean, double *max_abs,
-                                 bool perm_later) {
+                                 bool perm_later, int threads) {
     if (max_abs != nullptr) *max_abs = 0.0;
     if (ak.n < 0) return ErrorCode::IllegalValue;
     if (ak.n == 0) {
@@ -152,11 +153,25 @@ ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &val
     // range) are included, as before.
     const std::size_t nv = values.size;
     const double *uv = values.data;
+    // threads > 1: per range, then reduced (max and AND are exact in any order).
+    const int T = std::max(1, threads);
+    std::vector<double> range_max(static_cast<std::size_t>(T), 0.0);
+    std::vector<char> range_finite(static_cast<std::size_t>(T), 1);
+    parallel_ranges(ws, T, nv, 0, [&](int tid, std::size_t b, std::size_t e) {
+        double m = 0.0;
+        bool fin = true;
+        for (std::size_t k = b; k < e; ++k) {
+            fin = fin && is_finite_fast(uv[k]);
+            m = std::max(m, std::abs(uv[k]));
+        }
+        range_max[static_cast<std::size_t>(tid)] = m;
+        range_finite[static_cast<std::size_t>(tid)] = fin ? 1 : 0;
+    });
     double vmax = 0.0;
     bool all_finite = true;
-    for (std::size_t k = 0; k < nv; ++k) {
-        all_finite = all_finite && is_finite_fast(uv[k]);
-        vmax = std::max(vmax, std::abs(uv[k]));
+    for (int t = 0; t < T; ++t) {
+        vmax = std::max(vmax, range_max[static_cast<std::size_t>(t)]);
+        all_finite = all_finite && range_finite[static_cast<std::size_t>(t)] != 0;
     }
     if (!all_finite) {
         return ErrorCode::IllegalValue;
@@ -167,15 +182,51 @@ ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &val
         // Only the cleaned copy: the caller scatters its scaled values.
         ws.perm_values.resize(perm_nnz);
         if (via_orig) {
-            ws.clean_values.assign(clean_nnz, 0.0);
             const Int *to_clean = ak.orig_to_clean_idx.data();
+            // One input entry per cleaned slot (the usual case: no duplicate
+            // entries) lets ranges scatter in parallel, each slot added to
+            // its 0.0 once, as the serial loop does.
+            bool injective = false;
+            if (T > 1) {
+                if (ws.orig_clean_injective_analysis != ak.serial) {
+                    std::vector<char> seen(clean_nnz, 0);
+                    bool inj = true;
+                    for (std::size_t k = 0; inj && k < nv; ++k) {
+                        const Int c_slot = to_clean[k];
+                        if (c_slot < 0) continue;
+                        inj = seen[static_cast<std::size_t>(c_slot)] == 0;
+                        seen[static_cast<std::size_t>(c_slot)] = 1;
+                    }
+                    ws.orig_clean_injective = inj;
+                    ws.orig_clean_injective_analysis = ak.serial;
+                }
+                injective = ws.orig_clean_injective;
+            }
+            ws.clean_values.resize(clean_nnz);
             double *cv = ws.clean_values.data();
-            for (std::size_t k = 0; k < nv; ++k) {
-                const Int c_slot = to_clean[k];
-                if (c_slot >= 0) cv[c_slot] += uv[k];
+            if (injective) {
+                parallel_ranges(ws, T, clean_nnz, 0, [&](int, std::size_t b, std::size_t e) {
+                    std::fill(cv + b, cv + e, 0.0);
+                });
+                parallel_ranges(ws, T, nv, 0, [&](int, std::size_t b, std::size_t e) {
+                    for (std::size_t k = b; k < e; ++k) {
+                        const Int c_slot = to_clean[k];
+                        if (c_slot >= 0) cv[c_slot] += uv[k];
+                    }
+                });
+            } else {
+                std::fill(cv, cv + clean_nnz, 0.0);
+                for (std::size_t k = 0; k < nv; ++k) {
+                    const Int c_slot = to_clean[k];
+                    if (c_slot >= 0) cv[c_slot] += uv[k];
+                }
             }
         } else {
-            ws.clean_values.assign(uv, uv + nv);
+            ws.clean_values.resize(nv);
+            double *cv = ws.clean_values.data();
+            parallel_ranges(ws, T, nv, 0, [&](int, std::size_t b, std::size_t e) {
+                std::copy(uv + b, uv + e, cv + b);
+            });
         }
         return ErrorCode::Success;
     }
@@ -203,6 +254,13 @@ ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &val
         if (need_clean) ws.clean_values.assign(uv, uv + nv);
         if (ak.orig_to_perm_idx.empty()) {
             std::copy(uv, uv + nv, pv);
+        } else if (perm_nnz == nv) {
+            // The cleaned pattern has no duplicates: one entry per slot, so
+            // ranges never share a slot (each still adds to its 0.0 as before).
+            const Int *to_perm = ak.orig_to_perm_idx.data();
+            parallel_ranges(ws, T, nv, 0, [&](int, std::size_t b, std::size_t e) {
+                for (std::size_t k = b; k < e; ++k) pv[to_perm[k]] += uv[k];
+            });
         } else {
             const Int *to_perm = ak.orig_to_perm_idx.data();
             for (std::size_t k = 0; k < nv; ++k) pv[to_perm[k]] += uv[k];

@@ -10,7 +10,7 @@ solved accurately; cases accurate on one side only are listed.
 Usage:
   python tools/bench/ab_compare.py --a results/ab/smf --b results/ab/cost \
       --manifest benchmarks/manifests/fronttier.json [--split tuning] \
-      [--metric wall|factor] [--output out.md]
+      [--metric wall|factor|refactor] [--output out.md]
 """
 
 from __future__ import annotations
@@ -54,6 +54,8 @@ def summarize(recs: list[dict[str, Any]]) -> dict[str, Any]:
         "wall": med([score.wall_ms(r) for r in recs]),
         "analyse": med([float(r.get("analyse_ms") or 0.0) for r in recs]),
         "factor": med([float(r.get("factor_ms") or 0.0) for r in recs]),
+        "refactor": med([float(r["refactor_ms"]) for r in recs
+                         if isinstance(r.get("refactor_ms"), (int, float)) and r["refactor_ms"] >= 0]),
         "solve": med([float(r.get("solve_ms") or 0.0) + float(r.get("refine_ms") or 0.0)
                       for r in recs]),
         "rss": med([float(r["peak_rss_bytes"]) for r in recs
@@ -73,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--b", required=True, help="candidate records (file or directory)")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--split", default="all", choices=["tuning", "heldout", "all"])
-    ap.add_argument("--metric", default="wall", choices=["wall", "factor", "analyse", "solve"])
+    ap.add_argument("--metric", default="wall", choices=["wall", "factor", "refactor", "analyse", "solve"])
     ap.add_argument("--shift-ms", type=float, default=score.DEFAULT_SHIFT_MS)
     ap.add_argument("--output", default=None)
     args = ap.parse_args(argv)
@@ -81,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     manifest = json.loads(pathlib.Path(args.manifest).read_text(encoding="utf-8"))
     meta = score.manifest_case_index(manifest["cases"])
     A, B = collect(pathlib.Path(args.a)), collect(pathlib.Path(args.b))
+
+    def num(x: Any) -> str:
+        return f"{x:.2f}" if isinstance(x, (int, float)) and x == x else "n/a"
 
     rows = []
     for key in sorted(set(A) & set(B), key=lambda k: (k[2], k[0], k[1])):
@@ -106,10 +111,10 @@ def main(argv: list[str] | None = None) -> int:
         rr = (b["rss"] / a["rss"]) if a["rss"] and b["rss"] else math.nan
         lines.append(
             f"| {key[0]} | {TRACK_LABEL.get(key[1], key[1][:5])} | {key[2]} | {c.get('class')} | {c.get('split')} | "
-            f"{a[m]:.2f} | {b[m]:.2f} | {ratio:.3f} | {a['factor']:.2f} | {b['factor']:.2f} | "
+            f"{num(a[m])} | {num(b[m])} | {ratio:.3f} | {a['factor']:.2f} | {b['factor']:.2f} | "
             f"{fr:.3f} | {a['delays']}>{b['delays']} | {er:.3f} | {flr:.3f} | {rr:.3f} | "
             f"{'y' if a['ok'] else 'N'}/{'y' if b['ok'] else 'N'} |")
-        if a["ok"] and b["ok"]:
+        if a["ok"] and b["ok"] and a[m] and b[m]:  # a missing timing (no refactorization): n/a
             for g in ((key[2], c.get("class"), c.get("split")), (key[2], "all", c.get("split"))):
                 groups[g].append((b[m], a[m]))
         elif a["ok"] != b["ok"]:

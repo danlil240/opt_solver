@@ -332,6 +332,10 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_part_queue_pops = 0;
   info.posdef_lapack_fronts = 0;
   info.threads_used = 1;
+  info.plan_from_realized = 0;
+  info.factor_store_regathers = 0;
+  info.two_by_two_pivots = 0;
+  info.solve_layout_reused = 0;
   info.subtree_seconds = 0.0;
   info.top_seconds = 0.0;
   info.gather_seconds = 0.0;
@@ -378,6 +382,8 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   fkeep.band_kd = 0;
   fkeep.band_factor.clear();
   fkeep.scale.clear();
+  // Its own permutation: the lean indefinite path's setup no longer stands.
+  fkeep.setup_analysis = 0;
   fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
   fkeep.iperm.assign(keep.iperm.begin(), keep.iperm.end());
   fkeep.num_perm.resize(static_cast<std::size_t>(n));
@@ -442,7 +448,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
     if (ps != FactorStatus::Success)
       return fail(ps, ErrorCode::NotPositiveDefinite);
     info.actual_factor_entries =
-        static_cast<LongInt>(fkeep.factor_values.size());
+        static_cast<LongInt>(fkeep.factor_values.used());
     build_solve_steps(keep, ctrl, fkeep);
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -460,11 +466,14 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);
 
-  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.used());
   info.parallel_subtrees = st.parallel_subtrees;
   info.top_part_fronts = st.top_part_fronts;
   info.top_part_queue_pops = st.top_part_queue_pops;
   info.threads_used = st.threads_used;
+  info.solve_layout_reused = st.solve_layout_reused;
+  info.two_by_two_pivots = st.two_by_two_pivots;
+  info.factor_store_regathers = st.factor_store_regathers;
   info.subtree_seconds = st.subtree_seconds;
   info.top_seconds = st.top_seconds;
   info.gather_seconds = st.gather_seconds;

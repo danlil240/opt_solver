@@ -36,10 +36,22 @@ namespace smf {
 // children have completed. Ready nodes share `threads` BLAS threads: a node
 // taken while k others are ready gets max(1, free / (k + 1)), and the sum of
 // the shares of running nodes never exceeds `threads`.
+//
+// With priorities (Control::top_critical_shares, 8T engine Part 7; one value
+// per node, its remaining path cost to the root):
+// - the ready list is taken highest priority first (ties: the higher id);
+// - a node taken with F free threads among the ready set R (itself
+//   included; a continuation counts the listed nodes and itself) starts with
+//   clamp(floor(F * p / sum_R p), 1, max(1, F - (|R| - 1))): every other
+//   ready node can still get one;
+// - threads freed while nothing is ready go to the running node with the
+//   highest priority: its share (share(node), an atomic the front's BLAS
+//   calls follow) grows, and finish() returns its current share.
 class TopScheduler final : public TileHelpers {
 public:
   // parent[i]: parent of local node i (-1: root); pending counts derive from it.
-  TopScheduler(std::vector<Int> parent, int threads);
+  // priority: empty (equal shares, LIFO list) or one value per node.
+  TopScheduler(std::vector<Int> parent, int threads, std::vector<double> priority = {});
   TopScheduler(const TopScheduler &) = delete;
   TopScheduler &operator=(const TopScheduler &) = delete;
 
@@ -63,6 +75,12 @@ public:
   int queue_pops() const { return queue_pops_; }
   bool stopped() const { return stopped_.load(std::memory_order_acquire); }
 
+  // The live BLAS share of a node while run(node, ...) runs (with
+  // priorities it grows when threads come free).
+  const std::atomic<int> &share(Int node) const { return share_[static_cast<std::size_t>(node)]; }
+  // Threads held by running nodes (threads - free). For tests.
+  int shares_in_use();
+
 private:
   // What an idle worker gets: a node and its BLAS-thread share, a tile job
   // to help (a slot already taken), or neither (all done, or stopped).
@@ -78,6 +96,14 @@ private:
   // its share, or -1.
   Int finish(Int node, int tid, bool ok, int &threads);
 
+  // Under mtx_, with priorities: the start share of a node of priority p
+  // taken with the listed nodes still ready, and the grant of free threads
+  // to the highest-priority running node when nothing is listed.
+  int start_share(double p) const;
+  void grant_free();
+  void push_ready(Int v);
+  Int pop_ready();
+
   bool runnable_hint() const;  // lock-free, for spinning
   bool runnable() const;       // under mtx_
   void publish();              // under mtx_: refresh the lock-free mirrors
@@ -85,7 +111,12 @@ private:
 
   std::vector<Int> parent_;
   std::vector<Int> pending_;   // children not completed yet
-  std::vector<Int> ready_;     // shared list (LIFO): initially ready nodes only
+  std::vector<Int> ready_;     // shared list (LIFO, or a max-heap on priority): initially ready nodes only
+  std::vector<double> prio_;   // empty: no priorities
+  double ready_prio_ = 0.0;    // sum of the listed nodes' priorities
+  std::vector<std::atomic<int>> share_;  // per node: its BLAS share while it runs
+  std::vector<Int> running_;   // with priorities: the nodes running now
+  int threads_ = 1;
   std::vector<std::pair<TileRunner *, int>> offers_;  // (job, slots left), newest last
   std::vector<std::pair<Int, int>> completed_;
   int free_ = 0;               // BLAS threads not held by running nodes

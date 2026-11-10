@@ -54,6 +54,11 @@ struct NumericWorkspace {
     std::vector<double> slack_values;
     std::vector<double> clean_values;
     std::vector<double> perm_values;
+    /// Control::parallel_value_prep: whether the analysis' original-to-
+    /// cleaned map hits every cleaned slot at most once (no duplicate input
+    /// entries), so its scatter can run over ranges; checked once per analysis.
+    std::uint64_t orig_clean_injective_analysis = 0;
+    bool orig_clean_injective = false;
     std::vector<double> front_scratch;
     std::vector<Int> row_map_scratch;
     std::vector<FrontResult> node_results;
@@ -91,9 +96,23 @@ struct NumericWorkspace {
         bool tiles_on = false;        ///< top_tiles_on(): which fronts are split
         bool blas_parallel = false;   ///< plan_blas_parallel(): untiled fronts' BLAS threads
         int tile_min = 0;             ///< top_tile_min_front(): tiled fronts' minimum rows
+        bool front_costs = false;     ///< Control::thread_plan_front_costs
+        double per_front_entry = 0.0; ///< Control::thread_cost_per_front_entry (when front_costs)
+        double per_front = 0.0;       ///< Control::thread_cost_per_front (when front_costs)
+        double planned_total = 0.0;   ///< the plan's tree total (its view's work units)
+        bool from_realized = false;   ///< planned from realized_rows / realized_pivots
         int threads = 1;              ///< the plan
     };
     ThreadPlanCache thread_plan;
+    /// Control::thread_plan_front_costs: each front's rows (delayed rows
+    /// included) and accepted pivots in the last factorization, and that
+    /// factorization's tree total priced as the plan prices it. Valid only
+    /// after a factorization of `realized_analysis` that succeeded.
+    std::vector<Int> realized_rows;
+    std::vector<Int> realized_pivots;
+    double realized_total = 0.0;
+    std::uint64_t realized_analysis = 0;
+    bool realized_valid = false;
 
     int warmup_calls = 0;
     int64_t front_heap_allocations_last_call = 0;
@@ -125,9 +144,14 @@ bool resolve_factor_values(const AnalysisKeep &ak, const CscLower &updated,
 /// does not fit the layout; `max_abs` (optional) receives max |value|.
 /// `perm_later` (with need_clean): the caller rebuilds ws.perm_values from
 /// ws.clean_values (the scaled factorizations), so it is only sized here.
+/// `threads` > 1 (Control::parallel_value_prep): the passes whose every entry
+/// goes to one slot run over ranges on ws's pool (the finiteness and max pass,
+/// the plain copy, a one-to-one scatter); the result is bit-for-bit the
+/// serial one. Scatters that may sum duplicates stay serial.
 ErrorCode map_values_to_permuted(const AnalysisKeep &ak, const FactorValues &values,
                                  NumericWorkspace &ws, bool need_clean = true,
-                                 double *max_abs = nullptr, bool perm_later = false);
+                                 double *max_abs = nullptr, bool perm_later = false,
+                                 int threads = 1);
 
 /// Scatter `updated` values (original or cleaned pattern) into
 /// ws.perm_values (permuted pattern) and, when `need_clean`, ws.clean_values.

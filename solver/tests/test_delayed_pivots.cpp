@@ -999,3 +999,57 @@ TEST(DelayedPivots, SmallFrontPathMatchesGeneric) {
     }
     EXPECT_GT(retries, 0);
 }
+
+
+// Control::parallel_front_assembly (8T engine Part 5) with a delay budget: a
+// front whose delays overshoot the budget is assembled again and refactored
+// static; with parallel assembly the factor and solution are bit for bit
+// those without it (deterministic mode, 8 threads).
+TEST(TreeParallel, ParallelAssemblyWithDelayBudget) {
+    const CscLower A = delayed_kkt3d(22, 1000, 8.0);
+    struct Run {
+        std::vector<double> factor, x;
+        int negative = 0, retries = 0, asm_fronts = 0, statics = 0;
+    };
+    const auto run = [&](bool on) {
+        Control c = budget_control();
+        c.delay_budget = 25;
+        c.deterministic = true;
+        c.num_threads = 8;
+        c.auto_threads = false;
+        c.parallel_front_assembly = on;
+        c.parallel_assembly_min_front = 64;
+        Solver s;
+        Info info;
+        auto ak = s.analyse(A, c, info);
+        Run r;
+        if (!ak) return r;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        if (s.factor(*ak, A, c, info, fk, ws) != FactorStatus::Success) return r;
+        for (const SolveStep &st : fk.solve_steps) {
+            const double *p = fk.factor_values.data() + st.factor_offset;
+            r.factor.insert(r.factor.end(), p, p + static_cast<std::ptrdiff_t>(st.p) * st.f);
+        }
+        r.negative = info.num_negative;
+        r.retries = info.delay_budget_retries;
+        r.statics = info.static_pivots;
+        r.asm_fronts = info.parallel_assembly_fronts;
+        r.x.resize(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < r.x.size(); ++i) r.x[i] = std::sin(0.01 * static_cast<double>(i)) + 1.0;
+        EXPECT_EQ(s.solve(fk, c, info, r.x.data(), static_cast<int>(A.n), 1), 0);
+        return r;
+    };
+    const Run off = run(false);
+    const Run on = run(true);
+    ASSERT_FALSE(off.factor.empty());
+    ASSERT_FALSE(on.factor.empty());
+    EXPECT_GT(on.asm_fronts, 0) << "premise: parallel assembly ran";
+    EXPECT_GT(on.retries + on.statics, 0) << "premise: the budget acted";
+    EXPECT_EQ(on.retries, off.retries);
+    EXPECT_EQ(on.negative, off.negative);
+    ASSERT_EQ(on.factor.size(), off.factor.size());
+    EXPECT_EQ(std::memcmp(on.factor.data(), off.factor.data(), on.factor.size() * sizeof(double)), 0);
+    ASSERT_EQ(on.x.size(), off.x.size());
+    EXPECT_EQ(std::memcmp(on.x.data(), off.x.data(), on.x.size() * sizeof(double)), 0);
+}

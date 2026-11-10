@@ -1,6 +1,10 @@
 #include "smf/ldlt_kernel.hpp"
 #include "smf/dense_kernel.hpp"
 
+#include "phase_trace.hpp"
+
+#include <chrono>
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -585,6 +589,16 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
     // and are saved (unscaled) in W; the trailing triangle is then updated
     // with one lower-only GEMM per panel.
     double *W = work;
+    // SMF_BENCH_PHASE_TRACE=2 on a top front: time since the last lap goes to
+    // a kernel sum (top_panel / top_defer / top_schur).
+    const bool lap_on = phase_in_top_front();
+    auto lap_t = lap_on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const auto lap = [&](PhaseSum slot) {
+        if (!lap_on) return;
+        const auto t = std::chrono::steady_clock::now();
+        phase_sum_add(slot, std::chrono::duration<double>(t - lap_t).count());
+        lap_t = t;
+    };
     // Plain threshold pivoting first passes over the columns once, without
     // searching outside the panel. The children's delayed columns come
     // first in the front and mostly fail again; searching every remaining
@@ -620,7 +634,9 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                 }
                 apply_pivot(pc, F, f, k, rows, tags, W, k - ps, pl, prm, res);
             }
+            lap(PhaseSum::TopPanel);
             deferred_update(F, f, ps, k, pl, num_elig, W);
+            lap(PhaseSum::TopDefer);
             if (stalled && k != k_paired) {
                 // order: (failed column, partner) row ids, distinct partners.
                 Int order[128];
@@ -670,6 +686,7 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                     sym_swap(F, sf, f, k + t, live - mv + t, rows, nullptr, 0);
                 live -= m;
             }
+            lap(PhaseSum::TopPanel);
         }
     }
     while (k < num_elig) {
@@ -684,7 +701,9 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
             }
             apply_pivot(pc, F, f, k, rows, tags, W, k - ps, pl, prm, res);
         }
+        lap(PhaseSum::TopPanel);
         deferred_update(F, f, ps, k, pl, num_elig, W);
+        lap(PhaseSum::TopDefer);
 
         if (stalled && k < num_elig) {
             // The whole trailing matrix is current now: search every
@@ -699,10 +718,14 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                 as_zero = static_counts_as_zero(raised, prm);
             }
             apply_pivot(pc, F, f, k, rows, tags, W, 0, ss, prm, res, as_zero);
+            lap(PhaseSum::TopPanel);
             deferred_update(F, f, ss, k, k, num_elig, W);
+            lap(PhaseSum::TopDefer);
         }
     }
+    lap(PhaseSum::TopPanel);
     schur_update(F, f, first, k, num_elig, tags);
+    lap(PhaseSum::TopSchur);
     res.num_accepted = k;
     return res;
 }

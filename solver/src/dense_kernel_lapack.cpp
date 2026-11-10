@@ -1,4 +1,5 @@
 #include "smf/dense_kernel.hpp"
+#include "smf/blas_thread_guard.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -441,6 +442,7 @@ int smf_dpbtrf_lower(double *AB, int n, int kd, int ldab) {
 
 void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
                                      const double *L, int ldl, int ldb) {
+    blas_follow_share();
   if (n_rows <= 0 || k <= 0) return;
   if (k <= 8 && n_rows * k <= 128) {
     for (int j = 0; j < k; ++j) {
@@ -502,6 +504,7 @@ int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
 
 void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
                      int ldc) {
+    blas_follow_share();
   if (k <= 0 || n_cols <= 0) return;
   if (n_cols <= 8 && k * n_cols <= 128) {
     for (int p = 0; p < n_cols; ++p) {
@@ -525,18 +528,21 @@ void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
 
 void smf_dgemm(double *C, int m, int n, int k, const double *A, int lda,
                const double *B, int ldb, int ldc, double alpha, double beta) {
+    blas_follow_share();
   cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m, n, k, alpha, A, lda,
               B, ldb, beta, C, ldc);
 }
 
 void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
                   const double *B, int ldb, int ldc, double alpha, double beta) {
+    blas_follow_share();
   cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m, n, k, alpha, A, lda,
               B, ldb, beta, C, ldc);
 }
 
 void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
                              const double *B, int ldb, int ldc) {
+    blas_follow_share();
   if (m <= 0 || k <= 0) return;
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
 #if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
@@ -560,6 +566,7 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
 
 void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
                              const double *B, int ldb, int ldc) {
+    blas_follow_share();
   if (m <= 0 || k <= 0) return;
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
 #if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
@@ -708,6 +715,7 @@ void smf_dtrmm_left_lower(double *B, int m, int n, const double *L, int ldl,
 
 void smf_dgemm_tn(double *C, int m, int n, int k, const double *A, int lda,
                   const double *B, int ldb, int ldc, double alpha, double beta) {
+    blas_follow_share();
   if (m <= 0 || n <= 0) return;
   cblas_dgemm(CblasColMajor, CblasTrans, CblasNoTrans, m, n, k, alpha, A, lda,
               B, ldb, beta, C, ldc);
@@ -715,6 +723,7 @@ void smf_dgemm_tn(double *C, int m, int n, int k, const double *A, int lda,
 
 void smf_dtrsm_left_lower(double *B, int m, int n, const double *L, int ldl,
                           int ldb, bool trans, bool unit) {
+    blas_follow_share();
   if (m <= 0 || n <= 0) return;
   cblas_dtrsm(CblasColMajor, CblasLeft, CblasLower,
               trans ? CblasTrans : CblasNoTrans, unit ? CblasUnit : CblasNonUnit,

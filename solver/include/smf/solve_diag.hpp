@@ -1,4 +1,6 @@
 #pragma once
+#include <cstddef>
+#include <functional>
 #include "smf/control.hpp"
 #include "smf/factor_posdef.hpp"
 #include "smf/info.hpp"
@@ -28,7 +30,14 @@ inline constexpr double kInvDiagMaxCond = 1e4;
 /// scale-on-delay probe) takes the same path as every later one. Both stay
 /// clear without Control::small_solve_kernels. build_inverse_diag clears
 /// them for a factor the solve refuses.
-void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels);
+// Runs fn(begin, end) over ranges covering [0, n) (in parallel, or once as
+// fn(0, n)): how finish_solve_layout spreads per-step work over a pool.
+using RangeRunner = std::function<void(std::size_t n,
+                                       const std::function<void(std::size_t, std::size_t)> &fn)>;
+// run (Control::parallel_dinv): the D^-1 table is filled over ranges of solve
+// steps; bit-for-bit the serial build (every step's entries are its own).
+void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels,
+                         const RangeRunner &run = {});
 
 /// Fill fkeep.inv_diag / inv_diag_offset with L11^-1 of every solve step of
 /// at least kInvDiagMinPivots pivots (ctrl.cache_inverse_diag), or clear

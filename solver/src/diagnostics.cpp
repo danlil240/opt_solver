@@ -3,7 +3,7 @@
 namespace smf {
 
 LongInt count_factor_entries(const FactorKeep &fkeep) {
-  return static_cast<LongInt>(fkeep.factor_values.size());
+  return static_cast<LongInt>(fkeep.factor_values.used());
 }
 
 double count_flops(const AnalysisKeep &keep) {

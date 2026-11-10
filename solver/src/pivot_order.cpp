@@ -23,7 +23,7 @@ RealizedOrder realized_pivot_order(const AnalysisKeep &ak, const FactorKeep &fk)
     }
     return fk.perm[static_cast<std::size_t>(piv)];
   };
-  for (const DiagSolveEntry &e : fk.diag_entries) {
+  for (const DiagSolveEntry &e : fk.diag()) {
     if (e.was_zero) {
       zeros.push_back(orig(e.row0));
     } else if (e.tag == 2) {

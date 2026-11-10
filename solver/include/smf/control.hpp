@@ -555,6 +555,64 @@ struct Control {
     // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
     // per_thread 5e5-7e5 with per_split_front_thread 2e5-5e5 at a cap of
     // 7-8 all lie within about 3% of that loss.
+    // thread_plan_front_costs: the thread plan prices each front as
+    // f^2 p + thread_cost_per_front_entry f^2 + thread_cost_per_front (work
+    // units of f^2 p: assembly and fixed overhead on top of the flops), and
+    // has no work floor (kBudgetRegionMinWork stays the delay-budget regions'
+    // floor, which decide numerics). Off: flops alone above a 2e7 floor.
+    // Fitted 2026-11-09 on 1-thread per-front traces (12900K, probe build of
+    // probe/front-trace-8t, every front): the 8 PR #64 cases plus the board's
+    // 66 ipopt-track cases, 25.0M fronts (results/remote/e8t_fronts_8,
+    // e8t_fronts_ipopt; tools/bench/fit_front_costs.py, relative error, R2
+    // 0.947): t = a f^2 p + b f^2 + c gives b / a = 45. The fixed cost per
+    // front (c) is below what the traces resolve (their own print cost is
+    // ~1.4 us per front), so 0. PGLib's tiny fronts cost ~6x the big fronts'
+    // time per f^2 p unit: the f^2 term prices it.
+    bool           thread_plan_front_costs   = true;
+    // parallel_value_prep: with more than one thread and at least
+    // parallel_value_prep_min_entries matrix entries, mapping the values to the
+    // permuted pattern and scaling them run over ranges on the factorization's
+    // pool (bit-for-bit the serial result).
+    bool           parallel_value_prep       = true;
+    // factor_in_place: the tree-parallel factorization's threads write the
+    // factor and its row ids straight into per-thread slices of the
+    // FactorKeep's FactorStore (no gather copy); a slice that outgrows its
+    // reservation falls back to the gather (Info::factor_store_regathers).
+    bool           factor_in_place           = true;
+    // parallel_dinv: after a tree-parallel factorization the solve's D^-1
+    // table is built over ranges of solve steps on the factorization's pool
+    // (bit-for-bit the serial build).
+    bool           parallel_dinv             = true;
+    // lazy_diag_entries: a tree-parallel factorization leaves FactorKeep's D
+    // entries in its threads' lists; FactorKeep::diag() merges them into
+    // elimination order on first use (Info::two_by_two_pivots counts the 2x2
+    // blocks without it).
+    bool           lazy_diag_entries         = true;
+    // cached_solve_layout: the top of a tree-parallel factorization's solve
+    // takes its steps in postorder (not completion order), so its tree, row
+    // map and thread count are kept per analysis and reused while every
+    // step's size and the top steps' rows are unchanged
+    // (Info::solve_layout_reused).
+    bool           cached_solve_layout       = true;
+    // parallel_front_assembly (8T engine Part 5): a top front of at least
+    // parallel_assembly_min_front rows with a BLAS share of 2 or more is
+    // assembled in column blocks on the share's threads (the calling
+    // thread's OpenMP team, which its MKL calls use), and copies its
+    // contribution block out there too; bit for bit the serial assembly
+    // (Info::parallel_assembly_fronts). On from 256 rows: 8T refactorization
+    // geomean 0.948 over the PR #64 cases (512: 0.971, 1024: 0.978).
+    bool           parallel_front_assembly   = true;
+    int            parallel_assembly_min_front = 256;
+    // top_critical_shares (8T engine Part 7): top fronts are taken by their
+    // remaining path cost to the root (f^2 p + thread_cost_per_front_entry f^2
+    // summed up the tree, realized sizes when known), start with a share in
+    // proportion to it among the ready fronts, and threads that come free
+    // while nothing is ready go to the running front with the highest cost,
+    // whose next BLAS call uses them. Not in deterministic mode.
+    bool           top_critical_shares       = true;
+    std::size_t    parallel_value_prep_min_entries = 100000;
+    double         thread_cost_per_front_entry = 45.0;
+    double         thread_cost_per_front     = 0.0;
     double         thread_cost_per_thread    = 7e5;
     double         thread_cost_per_top_front = 5e3;
     // Per tile-split top front and thread (team set-up and barriers). 5e5,

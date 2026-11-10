@@ -228,6 +228,86 @@ TEST(TopScheduler, ChainEndFollowsEachChain) {
     }
 }
 
+// Control::top_critical_shares (8T engine Part 7): with priorities (the
+// remaining path cost to the root), ready nodes are taken highest first, a
+// node starts with a share in proportion to its priority among the ready
+// ones, and threads freed while nothing is ready go to the running node with
+// the highest priority.
+TEST(TopScheduler, PriorityPicksHighestReadyFirst) {
+    const std::vector<Int> parent = {4, 4, 4, 4, -1};
+    TopScheduler sched(parent, 1, {1.0, 5.0, 3.0, 2.0, 9.0});
+    SolvePool pool(1);
+    pool.run([&](int tid) { sched.work(tid, [&](Int, int, int) { return true; }); });
+    const auto &done = sched.completed();
+    ASSERT_EQ(done.size(), 5u);
+    const Int want[5] = {1, 2, 3, 0, 4};
+    for (int k = 0; k < 5; ++k) EXPECT_EQ(done[static_cast<std::size_t>(k)].first, want[k]) << k;
+}
+
+TEST(TopScheduler, StartShareFollowsPriority) {
+    const std::vector<Int> parent = {3, 3, 3, -1};
+    TopScheduler sched(parent, T, {6.0, 1.0, 1.0, 8.0});
+    std::atomic<int> first_node{-1}, first_share{0};
+    SolvePool pool(1);
+    pool.run([&](int tid) {
+        sched.work(tid, [&](Int v, int blas_threads, int) {
+            int none = -1;
+            if (first_node.compare_exchange_strong(none, static_cast<int>(v))) first_share.store(blas_threads);
+            return true;
+        });
+    });
+    EXPECT_EQ(first_node.load(), 0);
+    EXPECT_EQ(first_share.load(), 6);  // floor(8 * 6 / 8), at most 8 - 2 so the other two get one each
+}
+
+TEST(TopScheduler, FreedThreadsGrowTheRunningFront) {
+    const std::vector<Int> parent = {2, 2, -1};
+    TopScheduler sched(parent, T, {10.0, 1.0, 11.0});
+    std::atomic<int> start0{0}, grown0{0};
+    SolvePool pool(2);
+    pool.run([&](int tid) {
+        sched.work(tid, [&](Int v, int blas_threads, int) {
+            if (v != 0) return true;
+            start0.store(blas_threads);
+            const auto t0 = std::chrono::steady_clock::now();
+            while (sched.share(0).load() != T && std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2)) {
+            }
+            grown0.store(sched.share(0).load());
+            return true;
+        });
+    });
+    EXPECT_EQ(start0.load(), 7);  // floor(8 * 10 / 11), at most 8 - 1
+    EXPECT_EQ(grown0.load(), T);  // node 1's thread came back to it
+    expect_topological(sched, parent);
+}
+
+TEST(TopScheduler, GrantRacingFinishKeepsBudget) {
+    std::mt19937 rng(11);
+    SolvePool pool(T);
+    for (int trial = 0; trial < 200; ++trial) {
+        const Int n = std::uniform_int_distribution<Int>(1, 2000)(rng);
+        std::vector<Int> parent(static_cast<std::size_t>(n), -1);
+        for (Int i = 0; i + 1 < n; ++i)
+            parent[static_cast<std::size_t>(i)] = std::uniform_int_distribution<Int>(i + 1, n - 1)(rng);
+        std::vector<double> prio(static_cast<std::size_t>(n));
+        for (double &p : prio) p = std::uniform_real_distribution<double>(0.0, 100.0)(rng);
+        TopScheduler sched(parent, T, prio);
+        std::atomic<int> over{0}, bad_share{0};
+        pool.run([&](int tid) {
+            sched.work(tid, [&](Int v, int blas_threads, int) {
+                if (blas_threads < 1 || blas_threads > T) bad_share.fetch_add(1);
+                if (sched.shares_in_use() > T) over.fetch_add(1);
+                if (sched.share(v).load() < 1) bad_share.fetch_add(1);
+                return true;
+            });
+        });
+        ASSERT_EQ(over.load(), 0) << "trial " << trial;
+        ASSERT_EQ(bad_share.load(), 0) << "trial " << trial;
+        ASSERT_EQ(sched.shares_in_use(), 0) << "trial " << trial;
+        expect_topological(sched, parent);
+    }
+}
+
 namespace {
 
 // Rooms of 8 lanes, as PassLanes::pick reads them.

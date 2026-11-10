@@ -164,8 +164,27 @@ struct Info {
     /// ready list; the others were continued by the thread that factored
     /// their last child (a chain runs on one thread).
     int          top_part_queue_pops    = 0;
+    /// Control::parallel_front_assembly: top fronts assembled in column
+    /// blocks on several threads.
+    int          parallel_assembly_fronts = 0;
+    /// Control::top_critical_shares: 1 when this factorization's top-front
+    /// priorities came from realized front sizes (an earlier factorization of
+    /// this analysis), 0 from the symbolic sizes.
+    int          top_priority_from_realized = 0;
     /// Threads the factorization ran on (1 = serial).
     int          threads_used           = 1;
+    /// Control::thread_plan_front_costs: 1 when this factorization's thread
+    /// plan was rebuilt from the previous factorization's realized front sizes
+    /// (delays included), its total having moved more than 10% from the plan's.
+    int          plan_from_realized     = 0;
+    /// Control::factor_in_place: 1 when a slice outgrew its reservation (or
+    /// none could be reserved) and the factor was gathered into one array.
+    int          factor_store_regathers = 0;
+    /// 2x2 pivot blocks of the factorization (the count of tag-2 D entries).
+    int          two_by_two_pivots      = 0;
+    /// Control::cached_solve_layout: 1 when the solve's top layout (tree, row
+    /// map, thread count) was reused from the previous factorization.
+    int          solve_layout_reused    = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
     /// phases, 0 when serial: the subtrees, the top part, and the gather of
     /// the per-thread factors into one array.

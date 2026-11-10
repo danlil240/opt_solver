@@ -130,6 +130,7 @@ TEST(Refinement, StagnationIsNotSuccess) {
 
     // Also test stagnation when FactorKeep is deliberately corrupted so solve corrections do not improve x:
     FactorKeep fk_bad = fk;
+    (void)fk_bad.diag();  // merge a pending lazy merge before editing the entries
     for (auto &de : fk_bad.diag_entries) {
         de.d00 = 1e20;
         de.d10 = 0.0;

@@ -730,8 +730,7 @@ extern "C"
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
                          ctrl ? ctrl->scaling : -1, unit_scale ? "unit" : computed_scaling ? "out" : (reuse_scaling ? "in" : "-"),
                          ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
-                         static_cast<int>(std::count_if(fk.diag_entries.begin(), fk.diag_entries.end(),
-                                                        [](const auto& de) { return de.tag == 2; })),
+                         si.two_by_two_pivots,
                          aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
                          ist.reanalyses_tried, ist.reanalyses_adopted, reverted_before);
         }
@@ -793,12 +792,9 @@ extern "C"
             return;
         }
 
-        int two_count = 0;
-        for (const auto &de : fk.diag_entries)
-        {
-            if (de.tag == 2)
-                ++two_count;
-        }
+        // Counted by the factorization (Control::lazy_diag_entries leaves the
+        // D entries unmerged until a solve needs them).
+        const int two_count = si.two_by_two_pivots;
 
         fw->num_neg = num_neg;
         fw->num_two = two_count;
@@ -948,7 +944,7 @@ extern "C"
         {
             const smf::InertiaCounts in = session.inertia();
             fw->num_neg = in.negative;
-            const auto& de = session.factor_keep().diag_entries;
+            const auto& de = session.factor_keep().diag();
             fw->num_two = static_cast<int>(std::count_if(de.begin(), de.end(), [](const auto& d) { return d.tag == 2; }));
             fw->aborted = false;
             if (g_stats.trace)

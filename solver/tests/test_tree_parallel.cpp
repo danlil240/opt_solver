@@ -4,6 +4,7 @@
 // by the same code on the same data), solutions to rounding.
 
 #include "../benchmarks/common/validation.hpp"
+#include "kkt_test_matrices.hpp"
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
@@ -20,7 +21,9 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <memory>
 #include <random>
 #include <string>
 #include <thread>
@@ -733,4 +736,454 @@ TEST(TreeParallel, TwoWorkspacesConcurrently) {
     t1.join();
     t2.join();
     EXPECT_EQ(bad.load(), 0);
+}
+
+// Control::thread_plan_front_costs prices the thread plan in time, but the
+// delay budget's regions (which decide where fronts static-pivot) keep the
+// flops-only view and the 2e7 floor: the factorization is the same either way.
+TEST(TreeParallel, DelayBudgetRegionsUnchangedByFrontCosts) {
+    const CscLower A = cascade_kkt(40, 600, 4.1, 3.0);
+    Control base;
+    base.delay_budget = 20;
+    base.num_threads = 4;
+    base.auto_threads = false;  // same thread count both ways: only the regions could differ
+    base.deterministic = true;  // bitwise comparable (BLAS shares vary with scheduling otherwise)
+    Solver solver;
+    std::vector<std::vector<double>> xs;
+    std::vector<Info> infos;
+    for (const bool costs : {false, true}) {
+        Control ctrl = base;
+        ctrl.thread_plan_front_costs = costs;
+        ctrl.thread_cost_per_front = 1e5;
+        ctrl.thread_cost_per_front_entry = 10.0;
+        Info info;
+        auto ak = solver.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        NumericWorkspace nws;
+        SolveWorkspace sws;
+        FactorKeep fk;
+        const FactorStatus st = solver.factor(*ak, A, ctrl, info, fk, nws);
+        ASSERT_TRUE(st == FactorStatus::Success || st == FactorStatus::Singular);
+        std::vector<double> x(static_cast<std::size_t>(A.n));
+        for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+        EXPECT_EQ(solver.solve(fk, ctrl, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+        xs.push_back(x);
+        infos.push_back(info);
+    }
+    EXPECT_EQ(infos[0].delayed_pivots, infos[1].delayed_pivots);
+    EXPECT_EQ(infos[0].static_pivots, infos[1].static_pivots);
+    EXPECT_EQ(infos[0].num_negative, infos[1].num_negative);
+    EXPECT_EQ(infos[0].num_positive, infos[1].num_positive);
+    EXPECT_EQ(xs[0], xs[1]);
+}
+
+namespace {
+// A planned (auto_threads) factorization sequence on one workspace with front
+// costs on: V0 delays little, V1 cascades (cascade_kkt's spread) on the same
+// pattern, so V1's realized fronts are much larger than the analysis says.
+struct ReplanFixture {
+    CscLower V0 = cascade_kkt(20, 150, 2.5, 0.0);  // below the flops floor: front costs plan it
+    CscLower V1 = cascade_kkt(20, 150, 2.5, 1.5);
+    Control ctrl;
+    Solver solver;
+    std::unique_ptr<AnalysisKeep> ak;
+    NumericWorkspace nws;
+    FactorKeep fk;
+    ReplanFixture() {
+        ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+        ctrl.scaling = ScalingMethod::None;
+        ctrl.scale_on_delay_ratio = -1.0;
+        ctrl.num_threads = 8;
+        ctrl.auto_threads = true;
+        ctrl.thread_plan_front_costs = true;  // the fitted per-entry cost (a constant per
+                                              // front would hide the delays' growth)
+        Info info;
+        ak = solver.analyse(V1, ctrl, info);
+        if (ak) EXPECT_LT(info.predicted_flops, 2e7) << "premise: below the flops floor";
+    }
+    Info factor(const CscLower &A, Control c) {
+        Info info;
+        solver.factor(*ak, A, c, info, fk, nws);
+        return info;
+    }
+    Info factor(const CscLower &A) { return factor(A, ctrl); }
+};
+}  // namespace
+
+TEST(TreeParallel, ReplansWhenDelaysGrowFronts) {
+    ReplanFixture fx;
+    ASSERT_NE(fx.ak.get(), nullptr);
+    ASSERT_EQ(fx.V0.values.size(), fx.V1.values.size());
+    const Info a = fx.factor(fx.V0);
+    EXPECT_EQ(a.plan_from_realized, 0);
+    const Info b = fx.factor(fx.V1);  // planned before V1's sizes were known
+    EXPECT_EQ(b.plan_from_realized, 0);
+    ASSERT_GT(b.delayed_pivots, 10 * a.delayed_pivots + 100) << "premise: V1 cascades, V0 does not";
+    EXPECT_EQ(fx.factor(fx.V1).plan_from_realized, 1);
+    EXPECT_EQ(fx.factor(fx.V1).plan_from_realized, 0);  // realized total now within 10%
+}
+
+TEST(TreeParallel, PlanCacheSurvivesAbort) {
+    ReplanFixture fx;
+    ASSERT_NE(fx.ak.get(), nullptr);
+    const Info first = fx.factor(fx.V0);
+    Control limited = fx.ctrl;
+    limited.max_negative_pivots = 1;
+    const Info aborted = fx.factor(fx.V1, limited);
+    ASSERT_EQ(aborted.factor_status, FactorStatus::InertiaExceeded);
+    const Info again = fx.factor(fx.V0);
+    EXPECT_EQ(again.plan_from_realized, 0);
+    EXPECT_EQ(again.threads_used, first.threads_used);
+}
+
+// Control::thread_plan_front_costs prices the thread count only: the task
+// partition (which fronts form the subtrees and which the serial top part)
+// stays the flops one. Priced, mid-size fronts weigh more and the largest-
+// first split moved subtree roots into the top part (obstacle_surface_200:
+// 33 top fronts instead of 23, 7.6% slower at 8 threads).
+TEST(TreeParallel, FrontCostsKeepTheFlopsPartition) {
+    const CscLower A = grid_kkt(200, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;  // the same thread count both ways
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    int top[2] = {0, 0};
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        ASSERT_GT(fi.threads_used, 1) << "premise: tree-parallel";
+        top[costs ? 1 : 0] = fi.top_part_fronts;
+    }
+    EXPECT_EQ(top[0], top[1]);
+}
+
+// A forced thread count (auto_threads off) keeps the flops floor: a tree
+// below it stays serial with front costs on, as with them off.
+TEST(TreeParallel, ForcedThreadsKeepTheFloorWithFrontCosts) {
+  // Sizes up to just under the floor, where priced work passes it first.
+  for (const int g : {40, 80, 110, 130, 150, 170}) {
+    const CscLower A = grid_kkt(g, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    if (i.predicted_flops >= 2e7) continue;  // above the floor
+    ASSERT_GE(ak->num_supernodes(), 2) << "premise: a tree to split";
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        EXPECT_EQ(fi.threads_used, 1) << "grid " << g << " flops " << i.predicted_flops
+                                      << " front costs " << costs;
+    }
+  }
+}
+
+// Front costs price only trees the flops model sent to one thread (below its
+// 2e7 floor: PGLib's shape). Above it the fitted flops plan stands: priced,
+// mid-size subtree fronts weighed more than the top's and the plan took 16
+// threads, E-cores included on the 12900K (obstacle_surface_200 +28%,
+// acopf_grid_80 / pde_control_120 +20% at 16T).
+TEST(TreeParallel, FrontCostsLeaveTreesAboveTheFloorAlone) {
+    const CscLower A = grid_kkt(200, 7);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 16;
+    c.auto_threads = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    ASSERT_GE(i.predicted_flops, 2e7) << "premise: above the flops floor";
+    int threads[2] = {0, 0};
+    for (const bool costs : {false, true}) {
+        Control cc = c;
+        cc.thread_plan_front_costs = costs;
+        cc.thread_cost_per_front_entry = 1e4;  // strong pricing: any effect shows
+        FactorKeep fk;
+        NumericWorkspace ws;
+        Info fi;
+        ASSERT_EQ(s.factor(*ak, A, cc, fi, fk, ws), FactorStatus::Success);
+        threads[costs ? 1 : 0] = fi.threads_used;
+    }
+    EXPECT_EQ(threads[0], threads[1]);
+}
+
+namespace {
+// Control::cached_solve_layout on one FactorKeep and workspace: the top of the
+// solve in postorder, its tree and row map reused while nothing moved.
+struct LayoutRun {
+    int reused = -1;
+    std::vector<Int> top_parent;
+    double resid = 1.0;
+    FactorStatus status = FactorStatus::Success;
+};
+LayoutRun layout_factor(const Solver &s, const AnalysisKeep &ak, const CscLower &A, Control c,
+                        FactorKeep &fk, NumericWorkspace &ws) {
+    LayoutRun r;
+    Info info;
+    r.status = s.factor(ak, A, c, info, fk, ws);
+    if (r.status != FactorStatus::Success) return r;
+    r.reused = info.solve_layout_reused;
+    r.top_parent = fk.solve_top_parent;
+    std::vector<double> x(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    const std::vector<double> b = x;
+    SolveWorkspace sws;
+    EXPECT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+    r.resid = smf::bench::validate(A, b, x, 1).eta_inf;
+    return r;
+}
+}  // namespace
+
+TEST(TreeParallel, LayoutCacheReusedOnUnchangedSequence) {
+    const CscLower A = grid_kkt(200, 7);  // indefinite: the multifrontal engine's layout
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(A, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const LayoutRun a = layout_factor(s, *ak, A, c, fk, ws);
+    ASSERT_FALSE(a.top_parent.empty()) << "premise: a parallel solve layout";
+    const LayoutRun b = layout_factor(s, *ak, A, c, fk, ws);
+    const LayoutRun d = layout_factor(s, *ak, A, c, fk, ws);
+    EXPECT_EQ(a.reused, 0);
+    EXPECT_EQ(b.reused, 1);
+    EXPECT_EQ(d.reused, 1);
+    EXPECT_EQ(a.top_parent, b.top_parent);
+    EXPECT_EQ(a.top_parent, d.top_parent);
+    for (const LayoutRun *r : {&a, &b, &d}) EXPECT_LT(r->resid, 1e-12);
+    FactorKeep other;  // a FactorKeep the cache did not fill still solves
+    const LayoutRun e = layout_factor(s, *ak, A, c, other, ws);
+    EXPECT_LT(e.resid, 1e-12);
+}
+
+TEST(TreeParallel, LayoutCacheRebuiltWhenDelaysMoveRows) {
+    const CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(V1, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    const LayoutRun a = layout_factor(s, *ak, V0, c, fk, ws);
+    const LayoutRun b = layout_factor(s, *ak, V1, c, fk, ws);
+    const LayoutRun d = layout_factor(s, *ak, V1, c, fk, ws);
+    ASSERT_FALSE(a.top_parent.empty()) << "premise: a parallel solve layout";
+    EXPECT_EQ(b.reused, 0);
+    EXPECT_EQ(d.reused, 1);
+    EXPECT_LT(a.resid, 1e-10);
+    EXPECT_LT(b.resid, 1e-8);
+    EXPECT_LT(d.resid, 1e-8);
+}
+
+TEST(TreeParallel, LayoutCacheClearedAfterAbort) {
+    const CscLower V0 = cascade_kkt(90, 300, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(90, 300, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.cached_solve_layout = true;
+    Solver s;
+    Info i;
+    auto ak = s.analyse(V1, c, i);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    layout_factor(s, *ak, V0, c, fk, ws);
+    Control limited = c;
+    limited.max_negative_pivots = 1;
+    EXPECT_EQ(layout_factor(s, *ak, V1, limited, fk, ws).status, FactorStatus::InertiaExceeded);
+    const LayoutRun r = layout_factor(s, *ak, V0, c, fk, ws);
+    EXPECT_EQ(r.reused, 0);
+    EXPECT_LT(r.resid, 1e-10);
+}
+
+
+// Control::parallel_front_assembly (8T engine Part 5): large top fronts
+// assembled in column blocks on their share's threads give the serial
+// assembly's values bit for bit, so in deterministic mode the factor and the
+// solution are identical with it on and off, at every thread count.
+namespace {
+struct AsmRun {
+    FactorStatus status = FactorStatus::Success;
+    std::vector<double> factor, x;
+    int negative = 0;
+    int asm_fronts = 0;
+    int retries = 0;
+};
+AsmRun factor_with_assembly(const CscLower &A, Control c, bool on) {
+    c.parallel_front_assembly = on;
+    c.parallel_assembly_min_front = 64;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    AsmRun r;
+    if (!ak) {
+        r.status = FactorStatus::Singular;
+        return r;
+    }
+    FactorKeep fk;
+    NumericWorkspace ws;
+    r.status = s.factor(*ak, A, c, info, fk, ws);
+    if (r.status != FactorStatus::Success) return r;
+    r.factor = factor_in_step_order(fk);
+    r.negative = info.num_negative;
+    r.asm_fronts = info.parallel_assembly_fronts;
+    r.retries = info.delay_budget_retries;
+    r.x.resize(static_cast<std::size_t>(A.n));
+    for (std::size_t i = 0; i < r.x.size(); ++i) r.x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+    SolveWorkspace sws;
+    if (s.solve(fk, c, info, r.x.data(), static_cast<int>(A.n), 1, sws) != 0) r.status = FactorStatus::Singular;
+    return r;
+}
+bool bits_equal(const std::vector<double> &a, const std::vector<double> &b) {
+    return a.size() == b.size() && (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+}
+}  // namespace
+
+TEST(TreeParallel, ParallelAssemblyBitwiseInDeterministicMode) {
+    const CscLower mats[] = {grid_kkt(200, 7), opf_like_kkt(20000, 8000, 3)};
+    for (const CscLower &A : mats) {
+        for (const int t : {2, 4, 8}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.deterministic = true;
+            c.num_threads = t;
+            c.auto_threads = false;
+            const AsmRun off = factor_with_assembly(A, c, false);
+            const AsmRun on = factor_with_assembly(A, c, true);
+            ASSERT_EQ(off.status, FactorStatus::Success);
+            ASSERT_EQ(on.status, FactorStatus::Success);
+            EXPECT_EQ(off.asm_fronts, 0);
+            EXPECT_GT(on.asm_fronts, 0) << "n " << A.n << ", " << t << " threads: no front assembled in parallel";
+            EXPECT_EQ(on.negative, off.negative);
+            EXPECT_TRUE(bits_equal(on.factor, off.factor)) << "n " << A.n << ", " << t << " threads";
+            EXPECT_TRUE(bits_equal(on.x, off.x)) << "n " << A.n << ", " << t << " threads";
+        }
+    }
+}
+
+// Parallel assembly is on by default from 256 rows (8T sweep 2026-11-09,
+// with the assembly on the caller's OpenMP team: refactorization geomean
+// 0.948 over the PR #64 cases): a default 8-thread factorization of a KKT
+// with large top fronts assembles some of them in parallel.
+TEST(TreeParallel, ParallelAssemblyOnByDefault) {
+    EXPECT_TRUE(Control{}.parallel_front_assembly);
+    EXPECT_EQ(Control{}.parallel_assembly_min_front, 256);
+    const CscLower A = opf_like_kkt(20000, 8000, 3);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(A, c, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_GT(info.parallel_assembly_fronts, 0);
+}
+
+// Control::top_critical_shares (8T engine Part 7): top fronts by remaining
+// path cost, freed threads to the running front on the critical path. The
+// factorization and solve stay as accurate as without it.
+TEST(TreeParallel, CriticalSharesSolveCorrectly) {
+    const CscLower mats[] = {grid_kkt(200, 7), opf_like_kkt(20000, 8000, 3)};
+    for (const CscLower &A : mats) {
+        int neg[2] = {0, 0}, tops[2] = {0, 0};
+        double omega[2] = {0.0, 0.0};
+        for (const bool on : {false, true}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.num_threads = 8;
+            c.auto_threads = false;
+            c.top_critical_shares = on;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            ASSERT_EQ(s.factor(*ak, A, c, info, fk, ws), FactorStatus::Success);
+            ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+            neg[on ? 1 : 0] = info.num_negative;
+            tops[on ? 1 : 0] = info.top_part_fronts;
+            std::vector<double> b(static_cast<std::size_t>(A.n)), x;
+            for (std::size_t i = 0; i < b.size(); ++i) b[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+            x = b;
+            ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1), 0);
+            const auto val = smf::bench::validate(A, b, x, 1);
+            EXPECT_LT(val.eta_inf, 1e-12) << "n " << A.n << " on " << on;
+            omega[on ? 1 : 0] = val.omega;
+        }
+        // As accurate as without it (rounding differs with the BLAS shares).
+        EXPECT_LE(omega[1], 10.0 * omega[0] + 1e-15) << "n " << A.n << " omega off " << omega[0] << " on " << omega[1];
+        EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
+        EXPECT_EQ(tops[0], tops[1]) << "n " << A.n;
+    }
+}
+
+// Control::top_critical_shares: the priorities of a refactorization come from
+// the previous factorization's realized front sizes (delays grow fronts),
+// also on trees above the work floor, where the thread plan keeps the
+// symbolic flops view.
+TEST(TreeParallel, CriticalSharesUseRealizedSizes) {
+    const CscLower V0 = cascade_kkt(40, 600, 2.5, 0.0);
+    const CscLower V1 = cascade_kkt(40, 600, 2.5, 1.5);
+    Control c;
+    c.matrix_type = MatrixType::RealSymmetricIndefinite;
+    c.scaling = ScalingMethod::None;
+    c.scale_on_delay_ratio = -1.0;
+    c.num_threads = 8;
+    c.auto_threads = false;
+    c.top_critical_shares = true;
+    Solver s;
+    Info info;
+    auto ak = s.analyse(V1, c, info);
+    ASSERT_NE(ak.get(), nullptr);
+    FactorKeep fk;
+    NumericWorkspace ws;
+    ASSERT_EQ(s.factor(*ak, V0, c, info, fk, ws), FactorStatus::Success);
+    ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+    EXPECT_EQ(info.top_priority_from_realized, 0) << "nothing realized yet";
+    ASSERT_EQ(s.factor(*ak, V1, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.top_priority_from_realized, 1) << "V0's realized sizes were known";
+    const int delays_v1 = info.delayed_pivots;
+    ASSERT_EQ(s.factor(*ak, V1, c, info, fk, ws), FactorStatus::Success);
+    EXPECT_EQ(info.top_priority_from_realized, 1);
+    EXPECT_GT(delays_v1, 0) << "premise: V1 delays";
 }

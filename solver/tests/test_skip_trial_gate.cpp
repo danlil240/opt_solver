@@ -150,6 +150,18 @@ Run run(const CscLower &A, const Control &c) {
     return r;
 }
 
+// The factor's values front by front, in solve-step order (postorder in
+// deterministic mode): independent of where each thread's slice landed in
+// the array, which varies with the dynamic task assignment.
+std::vector<double> factor_by_steps(const FactorKeep &fk) {
+    std::vector<double> v;
+    for (const SolveStep &st : fk.solve_steps) {
+        const double *p = fk.factor_values.data() + st.factor_offset;
+        v.insert(v.end(), p, p + static_cast<std::ptrdiff_t>(st.p) * st.f);
+    }
+    return v;
+}
+
 // Bitwise the same analysis and factorization.
 void expect_same(const Run &a, const Run &b, const char *what) {
     EXPECT_EQ(b.ia.matching_trial, a.ia.matching_trial) << what;
@@ -168,7 +180,7 @@ void expect_same(const Run &a, const Run &b, const char *what) {
     EXPECT_EQ(b.ifac.num_negative, a.ifac.num_negative) << what;
     EXPECT_EQ(b.ifac.num_zero, a.ifac.num_zero) << what;
     EXPECT_EQ(b.ifac.delay_rescales, a.ifac.delay_rescales) << what;
-    EXPECT_EQ(b.fk.factor_values, a.fk.factor_values) << what;
+    EXPECT_EQ(factor_by_steps(b.fk), factor_by_steps(a.fk)) << what;
     EXPECT_EQ(b.x, a.x) << what;
 }
 

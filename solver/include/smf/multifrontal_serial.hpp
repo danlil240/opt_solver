@@ -25,8 +25,16 @@ struct SerialFactorStats {
   // Subtree engine: top fronts taken from the scheduler's shared ready list;
   // the others were continued by the thread that factored their last child.
   int top_part_queue_pops = 0;
+  int parallel_assembly_fronts = 0;  // Info::parallel_assembly_fronts
+  int top_priority_from_realized = 0;  // Info::top_priority_from_realized
   int small_front_handovers = 0;  // contribution blocks handed to the parent in a small-front buffer
   int threads_used = 1;  // threads the factorization ran on (1 when serial)
+  // Control::thread_plan_front_costs: the thread plan was rebuilt from the
+  // previous factorization's realized front sizes (Info::plan_from_realized).
+  int plan_from_realized = 0;
+  int factor_store_regathers = 0;  // Info::factor_store_regathers
+  int two_by_two_pivots = 0;       // Info::two_by_two_pivots
+  int solve_layout_reused = 0;     // Info::solve_layout_reused
   // Subtree engine phases in seconds (0 when serial): 1 the subtrees, 2 the top
   // part (task DAG), 3 the gather of the per-thread factors.
   double subtree_seconds = 0.0;
