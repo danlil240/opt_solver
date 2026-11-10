@@ -2,8 +2,8 @@
 
 IPOPT KKT sequences recorded by the `smf_ma97` plugin on problems of Mittelmann's AMPL-NLP benchmark.
 Manifest: `benchmarks/manifests/mittelmann_kkt.json`. The matrix files derive from Mittelmann's models and are
-**not committed** (this folder ignores everything but this file); they live on the i9-12900K under
-`C:\smfkit\smfbench\benchmarks\fixtures\mittelmann_kkt\`.
+**not committed** (this folder ignores everything but this file); they exist only in this folder of the benchmark
+machine's checkout.
 
 | case | n | nnz (lower) | factorizations | size | what it shows |
 |---|---:|---:|---:|---:|---|
@@ -21,16 +21,16 @@ about 17 Jacobian entries each).
 
 ## Recreate a capture
 
-On the 12900K, with the NLP kit in `C:\smfkit\nlp` (`nl\<problem>.nl` made by
-`benchmarks/fixtures/mittelmann_nlp/mod2nl.py` from Mittelmann's models):
+On the benchmark machine, from the folder that holds the Mittelmann NLP harness (`nlp_run.py` of
+`benchmarks/fixtures/mittelmann_nlp/`, the `.nl` files made by `mod2nl.py` from Mittelmann's models, and a config
+that points at IPOPT and the plugin):
 
 ```bat
-cd /d C:\smfkit\nlp
 set SMF_PLUGIN_STATS=2
-set SMF_KKT_DUMP_DIR=C:\smfkit\runs\qcap1\kkt
+set SMF_KKT_DUMP_DIR=<run dir>\kkt
 set SMF_KKT_DUMP_MAX=200
 mkdir %SMF_KKT_DUMP_DIR%
-C:\smfkit\python\python.exe nlp_run.py --config cfg_main.json --only smf8 --problems "qcqp1500-1c" --nl-dir C:\smfkit\nlp\nl --out C:\smfkit\runs\qcap1\records.jsonl
+python nlp_run.py --config <config>.json --only smf8 --problems "qcqp1500-1c" --nl-dir nl --out <run dir>\records.jsonl
 ```
 
 Run one problem and one solver configuration per capture (a second process would append to the same files).
