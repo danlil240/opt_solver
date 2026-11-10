@@ -285,7 +285,7 @@ run_smf_profile(const smf::CscLower &A, const std::vector<double> &b, double piv
 
     profile.nsteps = static_cast<int>(ak->supernodes.size());
     profile.maxfront = info.max_front_size;
-    profile.factor_values = static_cast<long long>(fk.factor_values.size());
+    profile.factor_values = static_cast<long long>(fk.factor_values.used());
     for (const auto &sn : ak->supernodes)
     {
         const int width = sn.width();

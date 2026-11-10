@@ -444,7 +444,7 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
     if (ps != FactorStatus::Success)
       return fail(ps, ErrorCode::NotPositiveDefinite);
     info.actual_factor_entries =
-        static_cast<LongInt>(fkeep.factor_values.size());
+        static_cast<LongInt>(fkeep.factor_values.used());
     build_solve_steps(keep, ctrl, fkeep);
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
@@ -462,11 +462,12 @@ FactorStatus factor_posdef(const AnalysisKeep &keep, const FactorValues &values,
   if (serr != ErrorCode::Success)
     return fail(FactorStatus::NotPositiveDefinite, serr);
 
-  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.size());
+  info.actual_factor_entries = static_cast<LongInt>(fkeep.factor_values.used());
   info.parallel_subtrees = st.parallel_subtrees;
   info.top_part_fronts = st.top_part_fronts;
   info.top_part_queue_pops = st.top_part_queue_pops;
   info.threads_used = st.threads_used;
+  info.factor_store_regathers = st.factor_store_regathers;
   info.subtree_seconds = st.subtree_seconds;
   info.top_seconds = st.top_seconds;
   info.gather_seconds = st.gather_seconds;

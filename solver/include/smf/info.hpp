@@ -170,6 +170,9 @@ struct Info {
     /// plan was rebuilt from the previous factorization's realized front sizes
     /// (delays included), its total having moved more than 10% from the plan's.
     int          plan_from_realized     = 0;
+    /// Control::factor_in_place: 1 when a slice outgrew its reservation (or
+    /// none could be reserved) and the factor was gathered into one array.
+    int          factor_store_regathers = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
     /// phases, 0 when serial: the subtrees, the top part, and the gather of
     /// the per-thread factors into one array.

@@ -1,6 +1,7 @@
 #pragma once
 #include "smf/analysis.hpp"
 #include "smf/control.hpp"
+#include "smf/factor_store.hpp"
 #include "smf/info.hpp"
 #include "smf/types.hpp"
 #include <utility>
@@ -41,8 +42,11 @@ struct FactorKeep {
   /// the pairs' inverses; every other member is then the reduced matrix's
   /// factor (its order SlackPlan::nr). Null: the matrix's own factor.
   std::shared_ptr<SlackFactor> slack;
-  std::vector<double>
-      factor_values; ///< packed L columns (per supernode, col-major)
+  /// Packed L columns (per supernode, col-major), at factor_col_ptr /
+  /// SolveStep::factor_offset from data(). Tree-parallel factorizations write
+  /// it in per-thread slices (FactorStore), so it may have gaps: size() is the
+  /// extent, used() the entries written.
+  FactorStore<double> factor_values;
   std::vector<LongInt> factor_col_ptr; ///< factor_col_ptr[s] = 64-bit start offset of supernode s
   std::vector<int> perm;           ///< total permutation perm[new] = old
   std::vector<int> iperm;          ///< total inverse permutation iperm[old] = new
@@ -55,7 +59,7 @@ struct FactorKeep {
   std::vector<std::vector<int8_t>> pivot_types; ///< [s][k] = pivot type per supernode column
   std::vector<DiagSolveEntry> diag_entries; ///< flattened D blocks for solve_diag
   std::vector<SolveStep> solve_steps; ///< flattened front traversal for triangular solves
-  std::vector<Int> solve_row_indices; ///< row indices referenced by solve_steps
+  FactorStore<Int> solve_row_indices; ///< row indices referenced by solve_steps (as factor_values)
   // Tree-parallel factorizations also leave the solve its parallel layout:
   // solve_steps[0, solve_top_begin) is a sequence of complete, independent
   // subtrees (solve_subtrees, [begin, end) step ranges), the rest the top of

@@ -984,7 +984,7 @@ int solve_core(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   // Deterministic mode: one thread, the factor's steps in order (postorder).
   const int threads =
       (ctrl.num_threads > 1 && !det &&
-       static_cast<int64_t>(fkeep.factor_values.size()) >= ctrl.solve_parallel_min_entries)
+       static_cast<int64_t>(fkeep.factor_values.used()) >= ctrl.solve_parallel_min_entries)
           ? ctrl.num_threads
           : 1;
 
