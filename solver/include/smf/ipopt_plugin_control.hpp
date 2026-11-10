@@ -233,9 +233,19 @@ inline SlackElimination plugin_slack_elimination()
     return m;
 }
 
+/// The refactorization count the plugin tells the analysis to expect
+/// (Control::expected_refactors): IPOPT refactors its KKT pattern at least
+/// once per iteration, which pays for a costlier ordering (the compressed
+/// METIS trial, the matching resume). 25: about the lower quartile of the
+/// Mittelmann AMPL-NLP runs' iteration counts (21; median 55) and the median
+/// of the PR #64 probe runs' factorizations (24.5). At 10, acopf_grid_160's
+/// analysis kept compressed AMD (4.35 GF); from 12 it takes compressed METIS
+/// (2.90 GF, 8T refactorization 34.7 -> 26.0 ms).
+inline constexpr int kIpoptExpectedRefactors = 25;
+
 /// Apply one MA97 control block to `ctrl`, as the plugin does at every
 /// analyse, factor and solve call: the mapped fields above plus the plugin's
-/// fixed settings (expected_refactors = 10, Control::delay_budget =
+/// fixed settings (expected_refactors = kIpoptExpectedRefactors, Control::delay_budget =
 /// `delay_budget`; the plugin passes -1 except through its test seam;
 /// Control::num_threads = `num_threads`, or plugin_num_threads() when it is
 /// <= 0, as the plugin passes; Control::pivoting = `pivoting`, or
@@ -263,9 +273,7 @@ inline bool apply_ma97_options(Control &out_ctrl, const Ma97Options &opt, int de
     out_ctrl.solve_multifrontal_forward = (opt.solve_mf != 0);
     out_ctrl.continue_on_singular = (opt.action == 0);
     out_ctrl.print_level = opt.print_level;
-    // MA97 callers (IPOPT) refactor one pattern every iteration, which pays
-    // for a costlier ordering.
-    out_ctrl.expected_refactors = 10;
+    out_ctrl.expected_refactors = kIpoptExpectedRefactors;
     // No delay budget: delays are never traded for static pivots (inexact
     // inertia), except through the plugin's test seam.
     out_ctrl.delay_budget = delay_budget;

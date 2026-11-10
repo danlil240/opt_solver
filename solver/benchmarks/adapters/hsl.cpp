@@ -533,7 +533,7 @@ public:
     void configure(const Control &ctrl, const std::string &) override {
         ctrl_ = ctrl;
         ctrl_.continue_on_singular = true;
-        ctrl_.expected_refactors = 10;
+        ctrl_.expected_refactors = kIpoptExpectedRefactors;
     }
 
     Outcome analyse(const CscLower &A) override {

@@ -2,6 +2,7 @@
 #include "../benchmarks/common/ipopt_dynamic_scaling.hpp"
 #include "../benchmarks/common/replay_refine.hpp"
 #include "../benchmarks/common/replay_steps.hpp"
+#include "../benchmarks/common/replay_track.hpp"
 #include "../benchmarks/common/validation.hpp"
 #include "smf/ipopt_plugin_control.hpp"
 
@@ -187,13 +188,39 @@ TEST(BenchmarkAdapters, ParseIpmStatic) {
     EXPECT_FALSE(parse_ipm_static("reg").has_value());
 }
 
+TEST(BenchmarkAdapters, IpoptTrackFactorizesLikeThePlugin) {
+    // bench_replay --track ipopt: IPOPT's pivot threshold; a replayed IPOPT
+    // sequence (warm_sequence) is also analysed for the plugin's
+    // refactorization estimate (which steers the analysis: the compressed
+    // METIS trial, the matching resume), as the plugin would analyse it.
+    Control c;
+    smf::bench::apply_replay_track(c, "ipopt", /*sequence=*/true);
+    EXPECT_EQ(c.pivot_u, 1e-8);
+    EXPECT_EQ(c.expected_refactors, kIpoptExpectedRefactors);
+    EXPECT_EQ(c.expected_refactors, ipopt_plugin_control()->expected_refactors);
+    // One cold factorization is analysed for one factorization.
+    Control one;
+    smf::bench::apply_replay_track(one, "ipopt", /*sequence=*/false);
+    EXPECT_EQ(one.pivot_u, 1e-8);
+    EXPECT_EQ(one.expected_refactors, Control{}.expected_refactors);
+    // Other tracks keep the library's defaults.
+    Control r;
+    smf::bench::apply_replay_track(r, "recommended", /*sequence=*/true);
+    EXPECT_EQ(r.pivot_u, Control{}.pivot_u);
+    EXPECT_EQ(r.expected_refactors, Control{}.expected_refactors);
+}
+
 TEST(BenchmarkAdapters, IpoptPluginControlDefaults) {
     // The Control the MA97 plugin factorizes with under IPOPT's defaults
     // (bench_replay --track ipopt-plugin).
     const auto ctrl = ipopt_plugin_control();
     ASSERT_TRUE(ctrl.has_value());
     EXPECT_EQ(ctrl->matrix_type, MatrixType::RealSymmetricIndefinite);
-    EXPECT_EQ(ctrl->expected_refactors, 10);
+    // An IPOPT run refactors its pattern once per iteration or more: 25 is
+    // about the lower quartile of the Mittelmann AMPL-NLP runs' iterations
+    // (21) and the median of the PR #64 probe runs' factorizations (24.5).
+    EXPECT_EQ(kIpoptExpectedRefactors, 25);
+    EXPECT_EQ(ctrl->expected_refactors, kIpoptExpectedRefactors);
     EXPECT_EQ(ctrl->ordering, OrderingMethod::AutoParallel);
     EXPECT_EQ(ctrl->scaling, ScalingMethod::None);
     EXPECT_EQ(ctrl->pivot_u, 1e-8);
