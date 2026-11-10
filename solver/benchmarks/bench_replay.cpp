@@ -680,6 +680,11 @@ int main(int argc, char **argv) {
         ctrl.parallel_value_prep = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_FACTOR_IN_PLACE"))
         ctrl.factor_in_place = std::atoi(e) != 0;
+    // SMF_BENCH_PARALLEL_ASSEMBLY = 0 | 1, SMF_BENCH_PARALLEL_ASSEMBLY_MIN = rows (8T engine Part 5).
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_ASSEMBLY"))
+        ctrl.parallel_front_assembly = std::atoi(e) != 0;
+    if (const char *e = std::getenv("SMF_BENCH_PARALLEL_ASSEMBLY_MIN"))
+        ctrl.parallel_assembly_min_front = std::atoi(e);
     if (const char *e = std::getenv("SMF_BENCH_PARALLEL_DINV"))
         ctrl.parallel_dinv = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_LAZY_DIAG"))

@@ -332,6 +332,12 @@ target_link_libraries(test_top_scheduler PRIVATE smf GTest::gtest_main)
 add_test(NAME TopScheduler COMMAND test_top_scheduler)
 set_tests_properties(TopScheduler PROPERTIES TIMEOUT 120)
 
+# Column-block assembly of a front (8T engine Part 5).
+add_executable(test_front_assembly test_front_assembly.cpp)
+target_include_directories(test_front_assembly PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_front_assembly PRIVATE smf GTest::gtest_main)
+add_test(NAME FrontAssembly COMMAND test_front_assembly)
+
 # Thread-count model and tree partition of the subtree-parallel factorization.
 add_executable(test_thread_plan test_thread_plan.cpp)
 target_include_directories(test_thread_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
@@ -541,6 +547,7 @@ add_test(NAME ScaledValuePrep COMMAND test_scaled_value_prep)
 
 # SMF_BENCH_PHASE_TRACE marks (own executable: the environment is read once).
 add_executable(test_phase_trace test_phase_trace.cpp)
+target_include_directories(test_phase_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_phase_trace PRIVATE smf GTest::gtest_main)
 add_test(NAME PhaseTrace COMMAND test_phase_trace)
 

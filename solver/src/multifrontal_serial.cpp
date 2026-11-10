@@ -8,6 +8,7 @@
 #include "parallel/chunk_arena.hpp"
 #include "parallel/tile_tasks.hpp"
 #include "parallel/thread_plan.hpp"
+#include "front_assembly.hpp"
 #include "phase_trace.hpp"
 #include "parallel/par_for.hpp"
 #include "parallel/top_scheduler.hpp"
@@ -191,6 +192,7 @@ struct FrontPass {
   std::vector<Int> *cbr;     // contribution stack: row ids
   std::vector<Int> *rows;
   std::vector<Int> *cmap;
+  std::vector<AssemblyChild> asm_kids;  // parallel assembly: the children's blocks
   std::vector<int8_t> *tags;
   std::vector<double> *work;
   Int *pos;                  // row -> front position, -1 between fronts
@@ -350,6 +352,11 @@ struct FactorContext {
   int posdef_lapack = 0;
   // Tiled fronts' minimum rows (top_tile_min_front).
   int tile_min = kTopTileMinFront;
+  // deterministic_mode(ctrl).
+  bool det = false;
+  // Control::parallel_front_assembly: top fronts of at least this many rows
+  // with a share of 2 or more threads assemble in column blocks; 0 = off.
+  int parallel_asm_min = 0;
 };
 
 // The contribution block of a subtree root (its parent is in the top part)
@@ -558,6 +565,17 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     Fa = P.sbuf[sb].v;
     lda = static_cast<std::size_t>(small_front_ld(f));
   }
+  // Parallel assembly (Control::parallel_front_assembly) keeps every child's
+  // map at once in P.cmap, and the children's blocks in P.asm_kids.
+  const bool par_asm = cx.parallel_asm_min > 0 && tc != nullptr && tc->nthreads >= 2 &&
+                       f >= cx.parallel_asm_min && !small;
+  if (par_asm) {
+    std::size_t sum_q = 0;
+    for (const Int c : kids) sum_q += static_cast<std::size_t>(std::max<Int>(0, ws.cb_size[static_cast<std::size_t>(c)]));
+    grow(*P.cmap, std::max(sf, sum_q), P.growths);
+    if (P.asm_kids.size() < kids.size()) P.asm_kids.resize(kids.size());
+  }
+  std::vector<AssemblyChild> &asm_kids = P.asm_kids;
 
   // Fallback static pivoting: only where delaying fails. A root has no
   // parent to delay to (its unaccepted columns would be zero pivots), and a
@@ -630,8 +648,58 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
   // top of P's stack when P made them) are only read here, and nothing is
   // pushed or released before this front's own Schur complement, so a delay
   // budget retry can assemble the front again.
+  // SMF_BENCH_PHASE_TRACE=2: a top front's assembly time (top_asm).
+  const bool asm_lap = tc != nullptr && phase_in_top_front();
   for (;;) {
-    if (small) {
+    const auto asm_t0 = asm_lap ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    // Control::parallel_front_assembly: column blocks on the front's share
+    // (front_assembly.hpp), when every child's map increases; the same
+    // values as the loops below, bit for bit.
+    bool assembled = false;
+    if (par_asm) {
+      std::size_t at = 0;
+      bool ok = true;
+      for (std::size_t c = 0; c < kids.size() && ok; ++c) {
+        const std::size_t ci = static_cast<std::size_t>(kids[c]);
+        const Int q = ws.cb_size[ci];
+        AssemblyChild &k = asm_kids[c];
+        k = AssemblyChild{};
+        if (q <= 0) continue;
+        const Int *cr = child_rows(ci);
+        Int *map = cm + at;
+        for (Int t = 0; t < q; ++t) map[t] = pos[cr[t]];
+        ok = child_maps_increasing(std::span<const Int>(map, static_cast<std::size_t>(q)));
+        std::size_t cld = 0;
+        k.values = child_values(ci, cld);
+        k.ld = cld;
+        k.map = map;
+        k.q = q;
+        at += static_cast<std::size_t>(q);
+      }
+      if (ok) {
+        AssemblyOriginal orig;
+        orig.acp = cx.acp;
+        orig.ari = cx.ari;
+        orig.av = cx.av;
+        orig.pos = pos;
+        orig.col_start = sn.col_start;
+        orig.col_end = sn.col_end;
+        assemble_front_parallel(F, f, orig, std::span<const AssemblyChild>(asm_kids.data(), kids.size()),
+                                tc->nthreads, tc->helpers);
+        for (const Int c : kids) {
+          const std::size_t ci = static_cast<std::size_t>(c);
+          if (ws.cb_size[ci] > 0 && pop && ws.cb_owner[ci] == me) {
+            new_cv_top = std::min(new_cv_top, static_cast<std::size_t>(ws.cb_value_off[ci]));
+            new_cr_top = std::min(new_cr_top, static_cast<std::size_t>(ws.cb_row_off[ci]));
+          }
+        }
+        assembled = true;
+        ++st.parallel_assembly_fronts;
+      }
+    }
+    if (assembled) {
+      // done above
+    } else if (small) {
       // The small-front layout: rows [f, fe) zero, and the rows above the
       // diagonal its kernels write (down to the 4-row boundary) finite.
       const std::size_t fe = (sf + 3) & ~std::size_t{3};
@@ -646,14 +714,14 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     }
 
     // Original entries of the pivot columns (lower CSC, so pos[row] >= pos[col]).
-    for (Int j = sn.col_start; j < sn.col_end; ++j) {
+    for (Int j = sn.col_start; j < sn.col_end && !assembled; ++j) {
       double *Fj = Fa + static_cast<std::size_t>(pos[j]) * lda;
       for (Int k = cx.acp[j]; k < cx.acp[j + 1]; ++k) {
         Fj[pos[cx.ari[k]]] += cx.av[k];
       }
     }
 
-    for (const Int c : kids) {
+    for (const Int c : assembled ? std::span<const Int>{} : kids) {
       const std::size_t ci = static_cast<std::size_t>(c);
       const Int q = ws.cb_size[ci];
       if (q <= 0) continue;
@@ -692,6 +760,9 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
     }
 
+    if (asm_lap)
+      phase_sum_add(PhaseSum::TopAsm,
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - asm_t0).count());
     kr = LdltKernelResult{};
     aptp_failed = 0;
     if (aprm != nullptr) {
@@ -939,6 +1010,7 @@ void add_stats(SerialFactorStats &to, const SerialFactorStats &from) {
   to.top_tile_fronts += from.top_tile_fronts;
   to.posdef_lapack_fronts += from.posdef_lapack_fronts;
   to.top_part_fronts += from.top_part_fronts;
+  to.parallel_assembly_fronts += from.parallel_assembly_fronts;
   to.small_front_handovers += from.small_front_handovers;
   to.flops += from.flops;
   to.front_work += from.front_work;
@@ -1060,6 +1132,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   // (APTP) kernel lacks TPP's weak-1x1 rule, so those fronts keep the TPP
   // kernel, the same one the 1-thread run uses (ruling R42).
   const bool det = deterministic_mode(ctrl);
+  const int parallel_asm_min =
+      ctrl.parallel_front_assembly ? std::max(2, ctrl.parallel_assembly_min_front) : 0;
   if (det) enable_blas_reproducibility();
   // Control::posdef_front_kernel: deterministic mode keeps the Ldlt kernel,
   // so its factor stays the one every thread count reproduces.
@@ -1467,7 +1541,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            budget_static, det_tc != nullptr ? &tile_aprm : nullptr,
                            ctrl.small_front_kernels, work_cap,
                            nullptr, nullptr, nullptr, nullptr, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min};
     // The budget regions in postorder: subtree ranges are contiguous.
     std::vector<std::size_t> region_end;  // per postorder index: its subtree's last, or npos
     constexpr std::size_t npos = static_cast<std::size_t>(-1);
@@ -1549,7 +1623,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
                            ctrl.small_front_kernels, work_cap, &work_done,
                            top.empty() ? nullptr : top.data(), &ws.tree_par->root_values,
                            &ws.tree_par->root_rows, early_gate ? &*early_gate : nullptr,
-                           posdef_lapack, tile_min};
+                           posdef_lapack, tile_min, det, parallel_asm_min};
     // `failed` doubles as the stop flag: every thread polls it before each
     // front. With the limit armed, the threads add each front's negative
     // pivots to one shared count; the add that takes it past the limit
@@ -1675,6 +1749,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     main.growths += static_cast<int64_t>(ws.tree_par->root_values.growths() +
                                          ws.tree_par->root_rows.growths() - arena_growths0);
     phase_mark("mf_p2");
+    phase_sum_discard();  // an earlier factorization that stopped before its flush
     const auto phase2_start = PhaseClock::now();
     std::vector<std::size_t> phase1_steps(static_cast<std::size_t>(threads));
     for (int t = 0; t < threads; ++t)
@@ -1718,7 +1793,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     std::vector<int> lane_of(static_cast<std::size_t>(threads), -1);
     const auto lane_room = [&tpass](int l) -> std::size_t {
       const FrontPass &Q = tpass[static_cast<std::size_t>(l)];
-      return Q.fv->size() > Q.fo ? Q.fv->size() - Q.fo : 0;
+      // Committed room: an in-place slice ends a factorization at its fill,
+      // with the room its fronts used still committed (FactorStore::trim).
+      return Q.fv->capacity() > Q.fo ? Q.fv->capacity() - Q.fo : 0;
     };
     // Each top front's pass and step index in it (by local index).
     std::vector<int> top_pass(top_nodes.size(), 0);
@@ -1750,6 +1827,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // Deterministic mode: BLAS on one thread whatever the front's
             // share (its tile tasks still recruit blas_threads - 1 helpers).
             BlasThreadGuard blas(det ? 1 : blas_threads, ctrl.mkl_blocktime_ms);
+            const PhaseTopFrontScope phase_top;
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }
@@ -1813,6 +1891,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
       main.fo = fbase[static_cast<std::size_t>(threads)];
       main.ro = rbase[static_cast<std::size_t>(threads)];
       phase_mark("mf_p3");
+      phase_sum_flush();
       if (in_place) {
         // Each slice holds exactly its pass's fill. Attached slices are the
         // final layout (offsets from the store's base); a slice that moved

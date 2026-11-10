@@ -54,3 +54,13 @@ def test_warmup_files_ignored(tmp_path):
     slow = [ln.replace("t=1.0001000", "t=1.9") for ln in LINES]
     (tmp_path / "phase_caseA_T8_w.txt").write_text("\n".join(slow), encoding="utf-8")
     assert phase_split.medians(tmp_path)[("caseA", 8)]["fi_entry->fi_mapped"] == pytest.approx(0.175)
+
+
+def test_sum_lines_join_their_factorization():
+    lines = ["# seg fi_entry t=1.000", "# seg mf_p2 t=1.001", "# sum top_asm s=0.0005",
+             "# sum top_panel s=0.0002", "# seg mf_p3 t=1.004", "# seg fi_end t=1.005",
+             "# seg fi_entry t=2.000", "# seg fi_end t=2.001"]
+    out = phase_split.split(lines)
+    assert out[0]["sum:top_asm"] == pytest.approx(0.5)
+    assert out[0]["sum:top_panel"] == pytest.approx(0.2)
+    assert "sum:top_asm" not in out[1]

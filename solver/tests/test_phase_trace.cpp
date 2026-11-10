@@ -3,6 +3,7 @@
 // once per process, so this executable sets it before anything factors.
 
 #include "kkt_test_matrices.hpp"
+#include "phase_trace.hpp"
 #include "smf/control.hpp"
 #include "smf/info.hpp"
 #include "smf/solver.hpp"
@@ -54,9 +55,9 @@ template <class F> std::string capture_stderr(F &&fn) {
 
 TEST(PhaseTrace, MarksInOrderWhenOn) {
 #ifdef _WIN32
-    _putenv_s("SMF_BENCH_PHASE_TRACE", "1");
+    _putenv_s("SMF_BENCH_PHASE_TRACE", "2");  // level 2: marks plus kernel sums
 #else
-    setenv("SMF_BENCH_PHASE_TRACE", "1", 1);
+    setenv("SMF_BENCH_PHASE_TRACE", "2", 1);
 #endif
     const CscLower A = opf_like_kkt(20000, 8000, 1);
     for (const int threads : {1, 4}) {
@@ -86,3 +87,70 @@ TEST(PhaseTrace, MarksInOrderWhenOn) {
         }
     }
 }
+
+// SMF_BENCH_PHASE_TRACE=2: after mf_p3 the factorization prints the top
+// fronts' kernel time, `# sum <slot> s=<seconds>` for top_asm, top_panel,
+// top_defer and top_schur, and the large top fronts' assembly and TPP panels
+// are counted in them.
+TEST(PhaseTrace, KernelSumsAtLevelTwo) {
+#ifdef _WIN32
+    _putenv_s("SMF_BENCH_PHASE_TRACE", "2");
+#else
+    setenv("SMF_BENCH_PHASE_TRACE", "2", 1);
+#endif
+    const CscLower A = opf_like_kkt(20000, 8000, 1);
+    Control ctrl;
+    ctrl.num_threads = 4;
+    ctrl.auto_threads = false;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    FactorKeep fk;
+    FactorStatus st = FactorStatus::Success;
+    const std::string err = capture_stderr([&] { st = solver.factor(*ak, A, ctrl, info, fk, nws); });
+    ASSERT_EQ(st, FactorStatus::Success);
+    ASSERT_GT(info.top_part_fronts, 0) << "premise: a top part";
+    const std::size_t p3 = err.find("# seg mf_p3 t=");
+    ASSERT_NE(p3, std::string::npos);
+    for (const char *slot : {"top_asm", "top_panel", "top_defer", "top_schur"}) {
+        const std::string key = std::string("# sum ") + slot + " s=";
+        const std::size_t k = err.find(key, p3);
+        ASSERT_NE(k, std::string::npos) << "sum " << slot << " missing after mf_p3 in\n" << err;
+        const double v = std::atof(err.c_str() + k + key.size());
+        EXPECT_GE(v, 0.0) << slot;
+        if (std::string(slot) == "top_asm" || std::string(slot) == "top_panel") EXPECT_GT(v, 0.0) << slot;
+    }
+}
+
+// A factorization that stops in the top phase (an inertia or work limit)
+// skips the flush after mf_p3; its sums must not be printed with the next
+// factorization's. A stale 5 s left in top_asm is gone by the next flush.
+TEST(PhaseTrace, TopPhaseStartDiscardsStaleSums) {
+#ifdef _WIN32
+    _putenv_s("SMF_BENCH_PHASE_TRACE", "2");
+#else
+    setenv("SMF_BENCH_PHASE_TRACE", "2", 1);
+#endif
+    ASSERT_EQ(phase_trace_level(), 2);
+    const CscLower A = opf_like_kkt(20000, 8000, 1);
+    Control ctrl;
+    ctrl.num_threads = 4;
+    ctrl.auto_threads = false;
+    Solver solver;
+    Info info;
+    auto ak = solver.analyse(A, ctrl, info);
+    ASSERT_NE(ak.get(), nullptr);
+    NumericWorkspace nws;
+    FactorKeep fk;
+    phase_sum_add(PhaseSum::TopAsm, 5.0);  // what an aborted top phase leaves
+    FactorStatus st = FactorStatus::Success;
+    const std::string err = capture_stderr([&] { st = solver.factor(*ak, A, ctrl, info, fk, nws); });
+    ASSERT_EQ(st, FactorStatus::Success);
+    const std::string key = "# sum top_asm s=";
+    const std::size_t k = err.find(key);
+    ASSERT_NE(k, std::string::npos);
+    EXPECT_LT(std::atof(err.c_str() + k + key.size()), 1.0) << "a stale sum was printed with this factorization";
+}
+

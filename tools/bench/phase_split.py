@@ -2,7 +2,8 @@
 """Segment times of smf factorizations from SMF_BENCH_PHASE_TRACE=1 output.
 
 The library prints `# seg <name> t=<seconds>` at fixed points of a factorization (solver/src/phase_trace.hpp);
-a factorization starts at `fi_entry`. Each factorization gives the time between consecutive marks it reached
+a factorization starts at `fi_entry`. With SMF_BENCH_PHASE_TRACE=2 it also prints
+`# sum <name> s=<seconds>` (top-front kernel time summed over the factorization), kept as "sum:<name>" (ms). Each factorization gives the time between consecutive marks it reached
 ("<a>-><b>", ms) and its total ("fi_entry-><last>").
 
   python tools/bench/phase_split.py <dir of phase_<case>_T<threads>_<trial>.txt files> [--segments a->b,...]
@@ -20,21 +21,29 @@ import statistics
 import sys
 
 MARK = re.compile(r"^# seg (\S+) t=([0-9.eE+-]+)\s*$")
+# Kernel sums of a factorization (SMF_BENCH_PHASE_TRACE=2), printed at mf_p3.
+SUM = re.compile(r"^# sum (\S+) s=([0-9.eE+-]+)\s*$")
 FILE = re.compile(r"^phase_(.+)_T(\d+)_([^_]+)\.txt$")
 
 
 def split(lines: list[str]) -> list[dict[str, float]]:
     out: list[dict[str, float]] = []
     marks: list[tuple[str, float]] = []
+    sums: dict[str, float] = {}
 
     def close() -> None:
         if len(marks) < 2:
             return
         d = {f"{a}->{b}": (tb - ta) * 1e3 for (a, ta), (b, tb) in zip(marks, marks[1:])}
         d[f"{marks[0][0]}->{marks[-1][0]}"] = (marks[-1][1] - marks[0][1]) * 1e3
+        d.update(sums)
         out.append(d)
 
     for ln in lines:
+        sm = SUM.match(ln.strip())
+        if sm:
+            sums[f"sum:{sm.group(1)}"] = sums.get(f"sum:{sm.group(1)}", 0.0) + float(sm.group(2)) * 1e3
+            continue
         m = MARK.match(ln.strip())
         if not m:
             continue
@@ -42,6 +51,7 @@ def split(lines: list[str]) -> list[dict[str, float]]:
         if name == "fi_entry" and marks:
             close()
             marks = []
+            sums = {}
         marks.append((name, t))
     close()
     return out

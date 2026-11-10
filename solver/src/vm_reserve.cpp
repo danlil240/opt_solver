@@ -2,6 +2,7 @@
 
 #include "vm_reserve.hpp"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -17,6 +18,7 @@
 
 namespace smf {
 namespace {
+std::atomic<long long> g_decommit_bytes{0};
 bool fail_reserve_hook() noexcept {
 #ifdef _WIN32
   char *e = nullptr;
@@ -41,7 +43,9 @@ bool vm_commit(void *p, std::size_t bytes) noexcept {
   return bytes == 0 || VirtualAlloc(p, bytes, MEM_COMMIT, PAGE_READWRITE) != nullptr;
 }
 void vm_decommit(void *p, std::size_t bytes) noexcept {
-  if (bytes != 0) VirtualFree(p, bytes, MEM_DECOMMIT);
+  if (bytes == 0) return;
+  VirtualFree(p, bytes, MEM_DECOMMIT);
+  g_decommit_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
 }
 void vm_release(void *p, std::size_t) noexcept {
   if (p != nullptr) VirtualFree(p, 0, MEM_RELEASE);
@@ -69,6 +73,7 @@ void vm_decommit(void *p, std::size_t bytes) noexcept {
   if (bytes == 0) return;
   madvise(p, bytes, MADV_DONTNEED);
   mprotect(p, bytes, PROT_NONE);
+  g_decommit_bytes.fetch_add(static_cast<long long>(bytes), std::memory_order_relaxed);
 }
 void vm_release(void *p, std::size_t bytes) noexcept {
   if (p != nullptr) munmap(p, bytes);
@@ -76,5 +81,7 @@ void vm_release(void *p, std::size_t bytes) noexcept {
 std::size_t vm_granule() noexcept { return static_cast<std::size_t>(sysconf(_SC_PAGESIZE)); }
 std::size_t vm_page() noexcept { return static_cast<std::size_t>(sysconf(_SC_PAGESIZE)); }
 #endif
+
+long long vm_decommit_bytes() noexcept { return g_decommit_bytes.load(std::memory_order_relaxed); }
 
 } // namespace smf
