@@ -247,3 +247,18 @@ TEST(FactorStore, OutgrownSliceAfterRegatherFollowsRealizedSize) {
     }
     EXPECT_TRUE(s.all_attached());
 }
+
+// A new request (another analysis) right after a factorization whose slice
+// outgrew its reservation starts from its own size: the old outgrowth belongs
+// to the previous analysis and is not carried over.
+TEST(FactorStore, NewRequestIgnoresStillDetachedOutgrowth) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(1, 1000));
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    ASSERT_TRUE(s.slice(0).detached());
+    ASSERT_TRUE(s.reserve_slices(1, 2000));  // new analysis, old slice still detached
+    ASSERT_TRUE(s.slice(0).grow(2000));
+    EXPECT_FALSE(s.slice(0).detached());
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    EXPECT_TRUE(s.slice(0).detached());  // not a 125000-element reservation
+}

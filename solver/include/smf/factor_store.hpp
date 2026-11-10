@@ -169,9 +169,14 @@ public:
   // factor time). Another request (a new analysis) starts from its own size.
   bool reserve_slices(int slices, std::size_t slice_capacity) {
     const int k = std::max(1, slices);
-    if (slice_capacity != requested_) floor_ = 0;
-    requested_ = slice_capacity;
-    floor_ = std::max(floor_, outgrown());
+    // Outgrowth counts only for the request it happened under: a slice still
+    // detached from another analysis says nothing about this one.
+    if (slice_capacity == requested_) {
+      floor_ = std::max(floor_, outgrown());
+    } else {
+      floor_ = 0;
+      requested_ = slice_capacity;
+    }
     slice_capacity = std::max(slice_capacity, floor_);
     if (base_ != nullptr && k == static_cast<int>(slices_.size()) && slice_capacity == cap_) {
       for (std::size_t t = 0; t < slices_.size(); ++t) {
