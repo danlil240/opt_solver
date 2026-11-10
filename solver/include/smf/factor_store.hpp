@@ -151,6 +151,8 @@ public:
     std::swap(range_bytes_, o.range_bytes_);
     std::swap(stride_, o.stride_);
     std::swap(cap_, o.cap_);
+    std::swap(requested_, o.requested_);
+    std::swap(floor_, o.floor_);
     slices_.swap(o.slices_);
   }
 
@@ -158,8 +160,19 @@ public:
   // unchanged layout keeps its reservation and committed pages. false: the
   // reservation failed; the slices then grow in private memory (regather()
   // makes them one array).
+  //
+  // A slice that outgrew its reservation (delays grew the factor past the
+  // prediction) raises the next reservation of the same request to the size
+  // it reached plus a quarter, so the next factorizations stay in the range
+  // and reuse its committed pages instead of detaching to fresh private
+  // memory each time (qcqp1000-2c: 1M entries predicted, 32M realized, +8%
+  // factor time). Another request (a new analysis) starts from its own size.
   bool reserve_slices(int slices, std::size_t slice_capacity) {
     const int k = std::max(1, slices);
+    if (slice_capacity != requested_) floor_ = 0;
+    requested_ = slice_capacity;
+    floor_ = std::max(floor_, outgrown());
+    slice_capacity = std::max(slice_capacity, floor_);
     if (base_ != nullptr && k == static_cast<int>(slices_.size()) && slice_capacity == cap_) {
       for (std::size_t t = 0; t < slices_.size(); ++t) {
         auto &s = slices_[t];
@@ -207,6 +220,8 @@ public:
   // One contiguous slice holding every slice's values in slice order.
   void regather() {
     const std::size_t total = used();
+    const std::size_t requested = requested_;
+    const std::size_t floor = std::max(floor_, outgrown());
     FactorStore out;
     if (!out.reserve_slices(1, total)) { /* private memory: still one slice */ }
     out.slice(0).grow(total);
@@ -216,6 +231,8 @@ public:
       at += s.size_;
     }
     swap(out);
+    requested_ = requested;  // the realized size outlives the one-array copy
+    floor_ = floor;
   }
 
   // The base offsets count from: the range's start, except for a one-slice
@@ -358,6 +375,17 @@ public:
   }
 
 private:
+  // Reservation floor from slices that outgrew theirs: the largest size such
+  // a slice reached this factorization (or in its trim window), plus a quarter.
+  std::size_t outgrown() const noexcept {
+    std::size_t n = 0;
+    for (const auto &s : slices_) {
+      if (!s.detached_) continue;
+      n = std::max({n, s.peak_, s.size_});
+      for (const std::size_t r : s.recent_) n = std::max(n, r);
+    }
+    return n == 0 ? 0 : n + n / 4;
+  }
   void one_slice() {
     if (slices_.size() > 1) regather();
   }
@@ -388,6 +416,8 @@ private:
         slices_[t].grow(src.size_);
         if (src.size_ > 0) std::memcpy(slices_[t].base_, src.base_, src.size_ * sizeof(T));
       }
+      requested_ = o.requested_;
+      floor_ = o.floor_;
       return;
     }
     // No range for the copy (or none in the source): one private block of
@@ -402,12 +432,16 @@ private:
       const std::size_t at = (o.base_ != nullptr && !src.detached_) ? o.stride_ * t : 0;
       std::memcpy(slices_[0].base_ + at, src.base_, src.size_ * sizeof(T));
     }
+    requested_ = o.requested_;
+    floor_ = o.floor_;
   }
 
   T *base_ = nullptr;
   std::size_t range_bytes_ = 0;
   std::size_t stride_ = 0;  // elements between slice starts
-  std::size_t cap_ = 0;     // elements per slice (as asked)
+  std::size_t cap_ = 0;     // elements per slice (as reserved)
+  std::size_t requested_ = 0;  // slice capacity last asked of reserve_slices
+  std::size_t floor_ = 0;      // realized-size floor for that request (outgrown())
   std::vector<FactorSlice<T>> slices_;
 };
 
