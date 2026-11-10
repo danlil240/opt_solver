@@ -96,8 +96,8 @@ void check_factor_identity(const CscLower& A, const FactorKeep& fk) {
 
     // Reconstruct block-diagonal D exclusively from fk.diag_entries
     std::vector<double> D(static_cast<std::size_t>(n * n), 0.0);
-    ASSERT_FALSE(fk.diag_entries.empty());
-    for (const auto& de : fk.diag_entries) {
+    ASSERT_FALSE(fk.diag().empty());
+    for (const auto& de : fk.diag()) {
         if (de.tag == 1) {
             D[static_cast<std::size_t>(de.row0 * n + de.row0)] = de.d00;
             EXPECT_DOUBLE_EQ(L[static_cast<std::size_t>(de.row0 * n + de.row0)], 1.0);

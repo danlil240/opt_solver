@@ -704,7 +704,7 @@ static bool factor_slack(const Solver &solver, const AnalysisKeep &ak, std::vect
       return kSlackPivotNoise * eps * sf->acc[static_cast<std::size_t>(r)] * s * s;
     };
     Int covered = 0;
-    for (const DiagSolveEntry &e : fkeep.diag_entries) {
+    for (const DiagSolveEntry &e : fkeep.diag()) {
       if (e.tag == 2) {
         covered += 2;
         // Its smaller eigenvalue |det| / lambda_max, from the block normalized by

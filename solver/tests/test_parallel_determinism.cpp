@@ -19,6 +19,7 @@
 #include "smf/solve_sparse_fwd.hpp"
 #include "smf/solver.hpp"
 #include "smf/workspace.hpp"
+#include "kkt_test_matrices.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -436,7 +437,7 @@ DetRun det_run(const DetCase &c, int threads, int caller_blas = 0, int blocktime
         BlasThreadGuard blas(caller_blas > 0 ? caller_blas : threads);
         EXPECT_EQ(solver.solve(fk, ctrl, info, std::span<double>(r.xm), kNrhs, n, sws), 0);
     }
-    for (const DiagSolveEntry &e : fk.diag_entries) {
+    for (const DiagSolveEntry &e : fk.diag()) {
         r.d.push_back(e.d00);
         r.d.push_back(e.d10);
         r.d.push_back(e.d11);
@@ -1119,7 +1120,7 @@ PluginDetRun plugin_det_run(const CscLower &A, int threads, bool auto_threads) {
             }
             EXPECT_EQ(total, static_cast<LongInt>(fk.factor_values.used())) << "blocks do not tile L";
         }
-        for (const DiagSolveEntry &e : fk.diag_entries) {
+        for (const DiagSolveEntry &e : fk.diag()) {
             r.d.push_back(e.d00);
             r.d.push_back(e.d10);
             r.d.push_back(e.d11);
@@ -1237,4 +1238,51 @@ TEST(ParallelDeterminism, MklBlocktimeKnobBitwise) {
     std::printf("[MklBlocktimeKnobBitwise] %d applications on %zu thread(s), all restored\n",
                 g_bt_knob_sets, g_bt_setters.size());
     EXPECT_GE(g_bt_setters.size(), 1u);
+}
+
+// Deterministic mode with every 8-thread engine Stage 1 part on (thread plan
+// priced in time, parallel value prep, factor in place, parallel D^-1, lazy D
+// entries, cached solve layout): 1 and 8 threads give bitwise the same
+// solutions and inertia over a refactorization sequence.
+TEST(ParallelDeterminism, Engine8tStage1PartsOn) {
+    const CscLower mats[] = {opf_like_kkt(20000, 8000, 1), cascade_kkt(40, 600, 2.5, 1.5)};
+    for (const CscLower &A : mats) {
+        std::vector<double> xs[2];
+        int neg[2] = {0, 0};
+        for (const int t : {1, 8}) {
+            Control c;
+            c.matrix_type = MatrixType::RealSymmetricIndefinite;
+            c.deterministic = true;
+            c.num_threads = t;
+            c.thread_plan_front_costs = true;
+            c.parallel_value_prep = true;
+            c.factor_in_place = true;
+            c.parallel_dinv = true;
+            c.lazy_diag_entries = true;
+            c.cached_solve_layout = true;
+            Solver s;
+            Info info;
+            auto ak = s.analyse(A, c, info);
+            ASSERT_NE(ak.get(), nullptr);
+            FactorKeep fk;
+            NumericWorkspace ws;
+            SolveWorkspace sws;
+            std::vector<double> v = A.values;
+            std::vector<double> &out = xs[t == 1 ? 0 : 1];
+            for (int it = 0; it < 3; ++it) {
+                for (std::size_t p = 0; p < v.size(); ++p)
+                    v[p] = A.values[p] * (1.0 + 1e-3 * it * std::sin(0.37 * static_cast<double>(p)));
+                const FactorStatus st = s.factor(*ak, std::span<const double>(v), c, info, fk, ws);
+                ASSERT_TRUE(st == FactorStatus::Success || st == FactorStatus::Singular);
+                neg[t == 1 ? 0 : 1] += info.num_negative;
+                std::vector<double> x(static_cast<std::size_t>(A.n));
+                for (std::size_t i = 0; i < x.size(); ++i) x[i] = std::sin(0.013 * static_cast<double>(i)) + 0.5;
+                ASSERT_EQ(s.solve(fk, c, info, x.data(), static_cast<int>(A.n), 1, sws), 0);
+                out.insert(out.end(), x.begin(), x.end());
+            }
+        }
+        EXPECT_EQ(neg[0], neg[1]) << "n " << A.n;
+        ASSERT_EQ(xs[0].size(), xs[1].size());
+        EXPECT_EQ(std::memcmp(xs[0].data(), xs[1].data(), xs[0].size() * sizeof(double)), 0) << "n " << A.n;
+    }
 }

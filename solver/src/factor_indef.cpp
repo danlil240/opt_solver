@@ -263,6 +263,7 @@ bool finalize_factor_from_front_results(
   }
 
   fkeep.diag_entries.clear();
+  fkeep.diag_merge.reset();
   fkeep.inline_d = false;
   fkeep.diag_entries.reserve(static_cast<std::size_t>(n));
   for (int s = 0; s < ns; ++s) {
@@ -279,6 +280,7 @@ bool finalize_factor_from_front_results(
       entry.d10 = db.d10;
       entry.d11 = db.d11;
       fkeep.diag_entries.push_back(entry);
+      if (entry.tag == 2) ++info.two_by_two_pivots;
     }
   }
 
@@ -375,6 +377,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   info.top_part_fronts = 0;
   info.top_part_queue_pops = 0;
   info.threads_used = 1;
+  info.plan_from_realized = 0;
+  info.factor_store_regathers = 0;
+  info.two_by_two_pivots = 0;
+  info.solve_layout_reused = 0;
   info.subtree_seconds = 0.0;
   info.top_seconds = 0.0;
   info.gather_seconds = 0.0;
@@ -657,6 +663,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
       info.top_part_fronts = st.top_part_fronts;
       info.top_part_queue_pops = st.top_part_queue_pops;
       info.threads_used = st.threads_used;
+      info.solve_layout_reused = st.solve_layout_reused;
+      info.two_by_two_pivots = st.two_by_two_pivots;
       info.factor_store_regathers = st.factor_store_regathers;
       info.plan_from_realized = st.plan_from_realized;
       info.subtree_seconds = st.subtree_seconds;
@@ -683,6 +691,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.top_part_fronts = st.top_part_fronts;
     info.top_part_queue_pops = st.top_part_queue_pops;
     info.threads_used = st.threads_used;
+    info.solve_layout_reused = st.solve_layout_reused;
+    info.two_by_two_pivots = st.two_by_two_pivots;
     info.factor_store_regathers = st.factor_store_regathers;
     info.plan_from_realized = st.plan_from_realized;
     info.subtree_seconds = st.subtree_seconds;
@@ -720,6 +730,8 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     info.top_part_fronts = st.top_part_fronts;
     info.top_part_queue_pops = st.top_part_queue_pops;
     info.threads_used = st.threads_used;
+    info.solve_layout_reused = st.solve_layout_reused;
+    info.two_by_two_pivots = st.two_by_two_pivots;
     info.factor_store_regathers = st.factor_store_regathers;
     info.plan_from_realized = st.plan_from_realized;
     info.subtree_seconds = st.subtree_seconds;

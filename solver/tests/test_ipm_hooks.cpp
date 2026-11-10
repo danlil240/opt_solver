@@ -981,7 +981,7 @@ TEST(IpmHooks, FallbackReplacesRootZeroPivot) {
     ASSERT_TRUE(is_permutation_of_n(ro.perm, 3));
     EXPECT_EQ(ro.zero_pivots, 0);
     bool found = false;
-    for (const DiagSolveEntry &e : on.fk.diag_entries) {
+    for (const DiagSolveEntry &e : on.fk.diag()) {
         if (on.ak->perm[static_cast<std::size_t>(e.row0)] != 0) continue;
         found = true;
         EXPECT_EQ(e.was_zero, 0);

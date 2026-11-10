@@ -942,7 +942,7 @@ TEST(SlackElimination, InertiaGuardPivotMapOnTreeParallel) {
     const Int nr = ak->slack->nr;
     std::vector<int> hit(static_cast<std::size_t>(nr), 0);
     int differ = 0;
-    for (const DiagSolveEntry &e : fk.diag_entries) {
+    for (const DiagSolveEntry &e : fk.diag()) {
         for (int k = 0; k < (e.tag == 2 ? 2 : 1); ++k) {
             const Int piv = k == 0 ? e.row0 : e.row1;
             ASSERT_GE(piv, 0);

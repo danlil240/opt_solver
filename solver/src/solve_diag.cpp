@@ -5,6 +5,7 @@
 #include "smf/pivoting.hpp"
 
 #include <algorithm>
+#include <mutex>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -45,7 +46,7 @@ bool inverse_well_conditioned(const double *L, std::ptrdiff_t f, const double *X
 // a zero or non-finite 1x1 pivot and a singular 2x2 block give 0. The 2x2
 // inverse is solve_2x2_scaled's scaled Cramer rule with the right-hand
 // side left out: [c, -b; -b, a] / det_s / s.
-void build_inline_dinv(FactorKeep &fkeep, bool usable) {
+void build_inline_dinv(FactorKeep &fkeep, bool usable, const RangeRunner &run = {}) {
   if (!usable || fkeep.is_posdef || !fkeep.inline_d || fkeep.solve_steps.empty() ||
       fkeep.use_banded_spd || fkeep.factor_values.empty()) {
     fkeep.dinv.clear();
@@ -72,50 +73,57 @@ void build_inline_dinv(FactorKeep &fkeep, bool usable) {
   fkeep.dinv_offset.resize(ns);
   LongInt off = 0;
   for (std::size_t k = 0; k < ns; ++k) {
-    const SolveStep &st = fkeep.solve_steps[k];
     fkeep.dinv_offset[k] = off;
-    const int p = st.p;
-    const std::ptrdiff_t f = st.f;
-    const double *L = fkeep.factor_values.data() + st.factor_offset;
-    double *d = fkeep.dinv.data() + 3 * off;
-    std::int8_t *kind = fkeep.dinv_kind.data() + off;
-    for (int c = 0; c < p;) {
-      const double d00 = L[c * f + c];
-      if (c + 1 < p) {
-        const double d10 = L[(c + 1) * f + c];
-        if (d10 != 0.0) {
-          const double d11 = L[(c + 1) * f + c + 1];
-          double sc = 0.0;
-          const double det_s = scaled_det_2x2(d00, d10, d11, sc);
-          double *e = d + 3 * c;
-          if (sc == 0.0 || !std::isfinite(det_s) || det_s == 0.0) {
-            e[0] = e[1] = e[2] = 0.0;
-          } else {
-            e[0] = (d11 / sc) / det_s / sc;
-            e[1] = -(d10 / sc) / det_s / sc;
-            e[2] = (d00 / sc) / det_s / sc;
-          }
-          e[3] = e[4] = e[5] = 0.0;
-          kind[c] = 2;
-          kind[c + 1] = 0;
-          c += 2;
-          continue;
-        }
-      }
-      double *e = d + 3 * c;
-      e[0] = (d00 == 0.0 || !is_finite_fast(d00)) ? 0.0 : 1.0 / d00;
-      e[1] = e[2] = 0.0;
-      kind[c] = 1;
-      ++c;
-    }
-    off += p;
+    off += fkeep.solve_steps[k].p;
   }
+  const auto fill = [&fkeep](std::size_t k0, std::size_t k1) {
+    for (std::size_t k = k0; k < k1; ++k) {
+      const SolveStep &st = fkeep.solve_steps[k];
+      const LongInt off = fkeep.dinv_offset[k];
+      const int p = st.p;
+      const std::ptrdiff_t f = st.f;
+      const double *L = fkeep.factor_values.data() + st.factor_offset;
+      double *d = fkeep.dinv.data() + 3 * off;
+      std::int8_t *kind = fkeep.dinv_kind.data() + off;
+      for (int c = 0; c < p;) {
+        const double d00 = L[c * f + c];
+        if (c + 1 < p) {
+          const double d10 = L[(c + 1) * f + c];
+          if (d10 != 0.0) {
+            const double d11 = L[(c + 1) * f + c + 1];
+            double sc = 0.0;
+            const double det_s = scaled_det_2x2(d00, d10, d11, sc);
+            double *e = d + 3 * c;
+            if (sc == 0.0 || !std::isfinite(det_s) || det_s == 0.0) {
+              e[0] = e[1] = e[2] = 0.0;
+            } else {
+              e[0] = (d11 / sc) / det_s / sc;
+              e[1] = -(d10 / sc) / det_s / sc;
+              e[2] = (d00 / sc) / det_s / sc;
+            }
+            e[3] = e[4] = e[5] = 0.0;
+            kind[c] = 2;
+            kind[c + 1] = 0;
+            c += 2;
+            continue;
+          }
+        }
+        double *e = d + 3 * c;
+        e[0] = (d00 == 0.0 || !is_finite_fast(d00)) ? 0.0 : 1.0 / d00;
+        e[1] = e[2] = 0.0;
+        kind[c] = 1;
+        ++c;
+      }
+    }
+  };
+  if (run) run(ns, fill);
+  else fill(0, ns);
 }
 
 } // namespace
 
-void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels) {
-  build_inline_dinv(fkeep, small_solve_kernels);
+void finish_solve_layout(FactorKeep &fkeep, bool small_solve_kernels, const RangeRunner &run) {
+  build_inline_dinv(fkeep, small_solve_kernels, run);
   // No step reaches kInvDiagMinPivots: none can have a cached L11^-1 either.
   fkeep.solve_small_fronts =
       small_solve_kernels && !fkeep.solve_steps.empty() &&
@@ -207,12 +215,30 @@ void build_inverse_diag(FactorKeep &fkeep, const Control &ctrl, Info &info) {
   info.factor_seconds += info.inverse_diag_seconds;
 }
 
+const std::vector<DiagSolveEntry> &FactorKeep::diag() const {
+  if (!diag_merge.pending.load(std::memory_order_acquire)) return diag_entries;
+  std::lock_guard<std::mutex> lk(*diag_merge.mu);
+  if (diag_merge.pending.load(std::memory_order_relaxed)) {
+    std::size_t total = 0;
+    for (const auto &c : diag_merge.chunks) total += c.e - c.b;
+    diag_entries.clear();
+    diag_entries.reserve(total);
+    for (const auto &c : diag_merge.chunks) {
+      const auto &d = diag_merge.parts[static_cast<std::size_t>(c.part)];
+      diag_entries.insert(diag_entries.end(), d.begin() + static_cast<std::ptrdiff_t>(c.b),
+                          d.begin() + static_cast<std::ptrdiff_t>(c.e));
+    }
+    diag_merge.pending.store(false, std::memory_order_release);
+  }
+  return diag_entries;
+}
+
 void solve_diag(const FactorKeep &fkeep, double *x, int n) {
   (void)n;
   if (fkeep.is_posdef)
     return;
-  if (!fkeep.diag_entries.empty()) {
-    for (const DiagSolveEntry &entry : fkeep.diag_entries) {
+  if (!fkeep.diag().empty()) {
+    for (const DiagSolveEntry &entry : fkeep.diag()) {
       if (entry.tag == 1) {
         if (entry.d00 == 0.0 || !is_finite_fast(entry.d00)) {
           x[entry.row0] = 0.0;
