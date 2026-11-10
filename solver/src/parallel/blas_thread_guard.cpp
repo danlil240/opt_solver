@@ -151,6 +151,10 @@ std::mutex &blas_guard_mutex() {
 // BLAS-thread accounting (blas_threads_active): this thread's count, the
 // sum over threads, and its peak.
 thread_local int tl_counted = 0;
+// BlasShareScope: the share this thread's BLAS calls follow, and the count
+// last set from it (0: none yet).
+thread_local const std::atomic<int> *tl_share = nullptr;
+thread_local int tl_share_set = 0;
 std::atomic<int> g_active{0};
 std::atomic<int> g_peak{0};
 
@@ -168,8 +172,12 @@ BlasThreadGuard::BlasThreadGuard(int n_threads) noexcept
 }
 
 BlasThreadGuard::BlasThreadGuard(int n_threads, int blocktime_ms) noexcept
-    : saved_threads_(1), prev_setting_(0), prev_counted_(tl_counted)
+    : saved_threads_(1), prev_setting_(0), prev_counted_(tl_counted),
+      prev_share_(tl_share), prev_share_set_(tl_share_set)
 {
+    // A nested guard suspends the enclosing BlasShareScope.
+    tl_share = nullptr;
+    tl_share_set = 0;
     const int requested = (n_threads > 0) ? n_threads : 1;
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
@@ -198,6 +206,36 @@ BlasThreadGuard::~BlasThreadGuard() noexcept
     }
     count_change(prev_counted_ - tl_counted);
     tl_counted = prev_counted_;
+    tl_share = prev_share_;
+    tl_share_set = prev_share_set_;
+}
+
+BlasShareScope::BlasShareScope(const std::atomic<int> *share) noexcept
+    : prev_share_(tl_share), prev_set_(tl_share_set)
+{
+    tl_share = share;
+    tl_share_set = share != nullptr ? tl_counted : 0;
+}
+
+BlasShareScope::~BlasShareScope() noexcept
+{
+    tl_share = prev_share_;
+    tl_share_set = prev_set_;
+}
+
+void blas_follow_share() noexcept
+{
+    const std::atomic<int> *s = tl_share;
+    if (s == nullptr) return;
+    const int v = s->load(std::memory_order_acquire);
+    if (v <= 0 || v == tl_share_set) return;
+    {
+        std::lock_guard<std::mutex> lock(blas_guard_mutex());
+        blas_set_num_threads(v);
+    }
+    tl_share_set = v;
+    count_change(v - tl_counted);
+    tl_counted = v;
 }
 
 BlasIdleScope::BlasIdleScope() noexcept : prev_counted_(tl_counted)

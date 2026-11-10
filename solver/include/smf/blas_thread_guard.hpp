@@ -13,6 +13,7 @@
 // Usage for a large front (parallel BLAS):
 //   smf::BlasThreadGuard _g(control.num_threads);
 
+#include <atomic>
 #include <optional>
 
 namespace smf {
@@ -96,7 +97,31 @@ private:
     int prev_setting_; // what the destructor restores (MKL: the previous local setting, 0 = none)
     int prev_counted_; // this thread's counted BLAS threads before the guard
     int prev_blocktime_ = -1; // blocktime the destructor restores (-1: not changed)
+    const std::atomic<int> *prev_share_ = nullptr; // BlasShareScope suspended while the guard lives
+    int prev_share_set_ = 0;
 };
+
+/// Control::top_critical_shares (8T engine Part 7): while it lives,
+/// blas_follow_share() on this thread sets the BLAS thread count (MKL: the
+/// thread's local setting) to *share whenever that differs from the last
+/// value set, and counts it in blas_threads_active(). The front's share grows
+/// when the top-part scheduler hands it threads that came free; its next BLAS
+/// call uses them. Lives inside a BlasThreadGuard, whose destructor restores
+/// the setting; a BlasThreadGuard nested inside the scope (serial BLAS of tile
+/// or lookahead tasks) suspends following until it ends. null: no effect.
+class BlasShareScope {
+public:
+    explicit BlasShareScope(const std::atomic<int> *share) noexcept;
+    ~BlasShareScope() noexcept;
+    BlasShareScope(const BlasShareScope&)            = delete;
+    BlasShareScope& operator=(const BlasShareScope&) = delete;
+private:
+    const std::atomic<int> *prev_share_;
+    int prev_set_;
+};
+/// Applies this thread's BlasShareScope (see there); one thread-local load
+/// without one. The smf BLAS-3 wrappers call it first thing.
+void blas_follow_share() noexcept;
 
 /// Accounting only (the BLAS setting is untouched): this thread counts no
 /// BLAS threads while the scope lives, e.g. a pool worker between tasks

@@ -685,6 +685,9 @@ int main(int argc, char **argv) {
         ctrl.parallel_front_assembly = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_PARALLEL_ASSEMBLY_MIN"))
         ctrl.parallel_assembly_min_front = std::atoi(e);
+    // SMF_BENCH_TOP_CRITICAL_SHARES = 0 | 1 (8T engine Part 7).
+    if (const char *e = std::getenv("SMF_BENCH_TOP_CRITICAL_SHARES"))
+        ctrl.top_critical_shares = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_PARALLEL_DINV"))
         ctrl.parallel_dinv = std::atoi(e) != 0;
     if (const char *e = std::getenv("SMF_BENCH_LAZY_DIAG"))
