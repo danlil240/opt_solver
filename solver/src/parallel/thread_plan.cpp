@@ -269,16 +269,20 @@ bool plan_blas_parallel(bool deterministic) {
 
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,
                    std::vector<Int> &parent, std::vector<double> &work,
-                   std::vector<std::uint8_t> &split, int tile_min) {
+                   std::vector<std::uint8_t> &split, int tile_min, const FrontCostModel &fc) {
   const std::size_t ns = keep.supernodes.size();
   parent.resize(ns);
   work.resize(ns);
   split.resize(ns);
+  const bool realized = fc.realized_rows.size() == ns && fc.realized_pivots.size() == ns;
   for (std::size_t s = 0; s < ns; ++s) {
-    const Int f = keep.front_size(static_cast<Int>(s));
+    const Int f = realized ? fc.realized_rows[s] : keep.front_size(static_cast<Int>(s));
     const double fd = static_cast<double>(f);
+    const double p = static_cast<double>(realized ? fc.realized_pivots[s] : keep.supernodes[s].width());
     parent[s] = keep.supernodes[s].parent;
-    work[s] = fd * fd * static_cast<double>(keep.supernodes[s].width());
+    work[s] = fd * fd * p;
+    if (fc.per_front_entry != 0.0 || fc.per_front != 0.0)
+      work[s] += fc.per_front_entry * fd * fd + fc.per_front;
     split[s] = tiles_front(tiles_on, static_cast<int>(f), tile_min) ? kSplitTiles
                : blas_parallel && f >= kTopBlasMinFront   ? kSplitBlas
                                                           : 0;
@@ -518,18 +522,19 @@ std::vector<int> candidate_threads(int max_threads) {
   return out;
 }
 
-std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads) {
+std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, int max_threads,
+                                               double min_work) {
   SubtreeSums u;
   subtree_sums(t, u);
-  return factor_plan_terms(t, u, max_threads);
+  return factor_plan_terms(t, u, max_threads, min_work);
 }
 
 std::vector<FactorPlanTerms> factor_plan_terms(const TreeView &t, SubtreeSums &u,
-                                               int max_threads) {
+                                               int max_threads, double min_work) {
   const double total = u.total;
   std::vector<FactorPlanTerms> out(1);
   out[0].total = total;
-  if (max_threads < 2 || total < kTreeParallelMinWork || !(total > 0.0)) return out;
+  if (max_threads < 2 || total < min_work || !(total > 0.0)) return out;
   std::vector<Range> ranges;
   for (const int T : candidate_threads(max_threads)) {
     if (T == 1) continue;
@@ -599,7 +604,7 @@ bool plan_trace_enabled() {
 }
 
 bool plan_is_serial(double total, const ThreadCosts &c) {
-  if (total < kTreeParallelMinWork || !(total > 0.0)) return true;
+  if (total < c.min_work || !(total > 0.0)) return true;
   const bool no_negative =
       c.per_thread >= 0.0 && c.per_top_front >= 0.0 && c.per_split_front_thread >= 0.0;
   return no_negative && total <= 4.0 * c.per_thread;
@@ -612,7 +617,7 @@ ThreadPlan plan_threads(const TreeView &t, int max_threads, const ThreadCosts &c
 }
 
 ThreadPlan plan_threads(const TreeView &t, SubtreeSums &u, int max_threads, const ThreadCosts &c) {
-  const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, u, max_threads);
+  const std::vector<FactorPlanTerms> terms = factor_plan_terms(t, u, max_threads, c.min_work);
   std::vector<std::pair<int, double>> costs;
   costs.reserve(terms.size());
   for (const auto &k : terms) costs.emplace_back(k.threads, factor_plan_cost(k, c));

@@ -91,9 +91,23 @@ struct NumericWorkspace {
         bool tiles_on = false;        ///< top_tiles_on(): which fronts are split
         bool blas_parallel = false;   ///< plan_blas_parallel(): untiled fronts' BLAS threads
         int tile_min = 0;             ///< top_tile_min_front(): tiled fronts' minimum rows
+        bool front_costs = false;     ///< Control::thread_plan_front_costs
+        double per_front_entry = 0.0; ///< Control::thread_cost_per_front_entry (when front_costs)
+        double per_front = 0.0;       ///< Control::thread_cost_per_front (when front_costs)
+        double planned_total = 0.0;   ///< the plan's tree total (its view's work units)
+        bool from_realized = false;   ///< planned from realized_rows / realized_pivots
         int threads = 1;              ///< the plan
     };
     ThreadPlanCache thread_plan;
+    /// Control::thread_plan_front_costs: each front's rows (delayed rows
+    /// included) and accepted pivots in the last factorization, and that
+    /// factorization's tree total priced as the plan prices it. Valid only
+    /// after a factorization of `realized_analysis` that succeeded.
+    std::vector<Int> realized_rows;
+    std::vector<Int> realized_pivots;
+    double realized_total = 0.0;
+    std::uint64_t realized_analysis = 0;
+    bool realized_valid = false;
 
     int warmup_calls = 0;
     int64_t front_heap_allocations_last_call = 0;

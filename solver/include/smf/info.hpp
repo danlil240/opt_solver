@@ -166,6 +166,10 @@ struct Info {
     int          top_part_queue_pops    = 0;
     /// Threads the factorization ran on (1 = serial).
     int          threads_used           = 1;
+    /// Control::thread_plan_front_costs: 1 when this factorization's thread
+    /// plan was rebuilt from the previous factorization's realized front sizes
+    /// (delays included), its total having moved more than 10% from the plan's.
+    int          plan_from_realized     = 0;
     /// Subtree-parallel engine (parallel_subtrees > 0), wall seconds of its
     /// phases, 0 when serial: the subtrees, the top part, and the gather of
     /// the per-thread factors into one array.

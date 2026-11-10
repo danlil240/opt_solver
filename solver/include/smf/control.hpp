@@ -555,6 +555,22 @@ struct Control {
     // 8-thread-max pick by more than 5%: 1 (ncvxqp7 ipopt, 1.051, noise).
     // per_thread 5e5-7e5 with per_split_front_thread 2e5-5e5 at a cap of
     // 7-8 all lie within about 3% of that loss.
+    // thread_plan_front_costs: the thread plan prices each front as
+    // f^2 p + thread_cost_per_front_entry f^2 + thread_cost_per_front (work
+    // units of f^2 p: assembly and fixed overhead on top of the flops), and
+    // has no work floor (kBudgetRegionMinWork stays the delay-budget regions'
+    // floor, which decide numerics). Off: flops alone above a 2e7 floor.
+    // Fitted 2026-11-09 on 1-thread per-front traces (12900K, probe build of
+    // probe/front-trace-8t, every front): the 8 PR #64 cases plus the board's
+    // 66 ipopt-track cases, 25.0M fronts (results/remote/e8t_fronts_8,
+    // e8t_fronts_ipopt; tools/bench/fit_front_costs.py, relative error, R2
+    // 0.947): t = a f^2 p + b f^2 + c gives b / a = 45. The fixed cost per
+    // front (c) is below what the traces resolve (their own print cost is
+    // ~1.4 us per front), so 0. PGLib's tiny fronts cost ~6x the big fronts'
+    // time per f^2 p unit: the f^2 term prices it.
+    bool           thread_plan_front_costs   = true;
+    double         thread_cost_per_front_entry = 45.0;
+    double         thread_cost_per_front     = 0.0;
     double         thread_cost_per_thread    = 7e5;
     double         thread_cost_per_top_front = 5e3;
     // Per tile-split top front and thread (team set-up and barriers). 5e5,
