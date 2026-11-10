@@ -9,6 +9,7 @@
 #include "smf/scaling.hpp"
 #include "smf/threading.hpp"
 #include "smf/workspace.hpp"
+#include "phase_trace.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -354,6 +355,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
                           FactorKeep &fkeep, NumericWorkspace &ws, double work_limit,
                           const EarlyWorkStop &early) {
   const auto t0 = std::chrono::steady_clock::now();
+  phase_mark("fi_entry");
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
   info.delayed_pivots = 0;
@@ -420,6 +422,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   const bool scaled = scaling != ScalingMethod::None && keep.n > 0;
   const ErrorCode map_err = map_values_to_permuted(
       keep, values, ws, scaling != ScalingMethod::None, &matrix_max_abs, scaled);
+  phase_mark("fi_mapped");
   if (map_err != ErrorCode::Success) {
     fkeep.factor_values.clear();
     fkeep.status = FactorStatus::Singular;
@@ -504,6 +507,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     if (to_perm == nullptr) ws.perm_values = ws.clean_values;
     if (direct || to_perm == nullptr) scaled_max_abs = vmax;
   }
+  phase_mark("fi_scaled");
 
   fkeep.n = keep.n;
   fkeep.perm.assign(keep.perm.begin(), keep.perm.end());
@@ -587,6 +591,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
     // kDelayBudgetStaticTol * max|A| (sqrt(eps) scale, as MA57).
     const double budget_static_pivot =
         ctrl.delay_budget >= 0 ? kDelayBudgetStaticTol * matrix_max_abs : 0.0;
+    phase_mark("fi_call");
     const ErrorCode err = multifrontal_factor_serial(
         keep, ap_col_ptr.data(), ap_row_idx.data(), ws.perm_values.data(), ctrl,
         eff_small, static_pivot, fallback_static_pivot, budget_static_pivot, /*posdef=*/false,
@@ -684,6 +689,7 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
         sizeof(double));
 
     ++ws.warmup_calls;
+    phase_mark("fi_end");
     const auto t1 = std::chrono::steady_clock::now();
     info.factor_seconds = std::chrono::duration<double>(t1 - t0).count();
     fkeep.status =

@@ -86,14 +86,21 @@ def find_replay_binary(build_dir: pathlib.Path, explicit_binary: Optional[str]) 
     return None
 
 
-def replay_override_args(case: dict) -> List[str]:
+def replay_override_args(case: dict, seq_steps: Optional[str] = None,
+                         ordering: Optional[str] = None) -> List[str]:
     """Per-case bench_replay overrides. The `ipopt` track only implies u = 1e-8;
     a case may additionally pin the smf ordering via a per-case "ordering"
     field (ad-hoc experiments only: the front-tier manifest carries no pin, so
-    smf runs its plugin-equivalent defaults on the ipopt track, ruling R41)."""
+    smf runs its plugin-equivalent defaults on the ipopt track, ruling R41).
+    run.py's --ordering (all cases) wins over the per-case field, and
+    --seq-steps N|all replaces bench_replay's default of 5 replayed steps on
+    recorded sequences (e.g. `all` to time a whole IPOPT run's factorizations)."""
     args: List[str] = []
-    if case.get("ordering"):
-        args += ["--ordering", str(case["ordering"])]
+    pin = ordering or case.get("ordering")
+    if pin:
+        args += ["--ordering", str(pin)]
+    if seq_steps and case.get("seq_values_path"):
+        args += ["--seq-steps", str(seq_steps)]
     return args
 
 
@@ -121,6 +128,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                              "its ipopt entry when it has one (per-case ordering pins dropped). "
                              "ipopt-plugin = smf with the IPOPT plugin's Control (smf only; other "
                              "solvers are skipped). See tools/bench/tracks.md")
+    parser.add_argument("--seq-steps", default=None,
+                        help="N|all: recorded factorizations bench_replay replays per warm sequence "
+                             "(bench_replay's default is 5 evenly spaced steps)")
+    parser.add_argument("--ordering", default=None,
+                        choices=("amd", "metis", "matching", "auto", "auto_parallel"),
+                        help="pin smf's ordering for every case (experiments only; wins over a per-case pin)")
     parser.add_argument("--runner", choices=("native", "wsl"), default="native",
                         help="'wsl' runs the Linux-only solvers (ssids) through WSL2 via run_wsl.py; "
                              "the others stay native")
@@ -252,7 +265,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         cmd.extend(["--mtype", exported_mtype])
                     if case.get("seq_values_path"):
                         cmd.extend(["--seq-values", str(case["seq_values_path"])])
-                    cmd.extend(replay_override_args(case))
+                    cmd.extend(replay_override_args(case, args.seq_steps, args.ordering))
                     if is_warmup:
                         cmd.append("--warmup")
                     t0 = time.perf_counter()

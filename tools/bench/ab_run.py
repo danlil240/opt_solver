@@ -73,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--binary", default=None)
     ap.add_argument("--build-dir", default="build")
     ap.add_argument("--timeout", type=float, default=180.0)
+    ap.add_argument("--seq-steps", default=None,
+                    help="passed to run.py: replayed factorizations per sequence (N or all)")
     ap.add_argument("--track-override", default=None, choices=score.OVERRIDE_TRACKS,
                     help="passed to run.py: run each case once on this track (smf only)")
     args = ap.parse_args(argv)
@@ -114,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
                         cmd += ["--binary", binary]
                     if args.track_override:
                         cmd += ["--track-override", args.track_override]
+                    if args.seq_steps:
+                        cmd += ["--seq-steps", str(args.seq_steps)]
                     env = dict(os.environ)
                     env.update({k: v for k, v in venv.items() if k != AB_BINARY_KEY})
                     subprocess.run(cmd, env=env, creationflags=priority,

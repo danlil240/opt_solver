@@ -477,6 +477,7 @@ add_library(smf STATIC
     src/ldlt_kernel.cpp
     src/ldlt_aptp.cpp
     src/multifrontal_serial.cpp
+    src/phase_trace.cpp
     src/factor_stack.cpp
     src/pivoting.cpp
     src/factor_posdef.cpp

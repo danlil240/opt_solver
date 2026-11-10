@@ -239,3 +239,54 @@ class ScoreAndCompareTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AbSeqStepsTests(unittest.TestCase):
+    def test_seq_steps_passed_to_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": CASES}))
+            calls = []
+
+            def fake(cmd, **kw):
+                calls.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0)
+
+            with mock.patch.object(ab_run.subprocess, "run", fake):
+                ab_run.main(["--manifest", str(manifest), "--output", str(td / "o"),
+                             "--variant", "A=X=1", "--variant", "B=X=2", "--rounds", "1",
+                             "--cases", "a", "--seq-steps", "all"])
+            self.assertEqual(len(calls), 2)
+            for cmd in calls:
+                self.assertEqual(cmd[cmd.index("--seq-steps") + 1], "all")
+
+    def test_refactor_metric_summarized(self):
+        r = rec("a", 10.0)
+        r["refactor_ms"] = 2.5
+        self.assertEqual(ab_compare.summarize([r])["refactor"], 2.5)
+
+
+class AbCompareMissingRefactorTests(unittest.TestCase):
+    def test_refactor_metric_tolerates_missing_timings(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": CASES}))
+            for side, refac in (("a", 2.0), ("b", None)):
+                d = td / side
+                d.mkdir()
+                rows = []
+                for m in ("a", "b"):
+                    r = rec(m, 10.0, track="recommended")
+                    if refac is not None and m == "a":
+                        r["refactor_ms"] = refac
+                    rows.append(json.dumps(r))
+                (d / "records.jsonl").write_text("\n".join(rows))
+            out = td / "out.md"
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = ab_compare.main(["--a", str(td / "a"), "--b", str(td / "b"), "--manifest", str(manifest),
+                                      "--metric", "refactor", "--output", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertIn("n/a", out.read_text())
