@@ -476,6 +476,56 @@ TEST(BenchmarkAdapters, Ma97ScalingCallMatchesPlugin) {
     r = ma97_scaling_call(c, false, unit.data(), 4);
     EXPECT_FALSE(r.reuse || r.computed || r.unit_scale);
     EXPECT_EQ(c.scaling, ScalingMethod::None);
+    // MC64 request after a rejected matching, but the analysis' unscaled
+    // factorizations cascade: honoured.
+    c.scaling = ScalingMethod::Matching;
+    r = ma97_scaling_call(c, true, unit.data(), 4, true);
+    EXPECT_FALSE(r.unit_scale);
+    EXPECT_TRUE(r.computed);
+    EXPECT_TRUE(r.cascade_honoured);
+    EXPECT_EQ(c.scaling, ScalingMethod::Matching);
+    // The cascade flag changes nothing else: an accepted matching's request,
+    // a reuse call.
+    c.scaling = ScalingMethod::Matching;
+    r = ma97_scaling_call(c, false, nullptr, 4, true);
+    EXPECT_TRUE(r.computed);
+    EXPECT_FALSE(r.cascade_honoured);
+    c.scaling = ScalingMethod::None;
+    r = ma97_scaling_call(c, true, s.data(), 4, true);
+    EXPECT_TRUE(r.reuse);
+    EXPECT_FALSE(r.computed || r.cascade_honoured || r.unit_scale);
+}
+
+TEST(BenchmarkAdapters, Ma97CascadeStateRemembersACascade) {
+    Ma97CascadeState st;
+    EXPECT_FALSE(st.cascade());
+    // Delays that inflate the fronts a few times over are no cascade.
+    st.after_factor(8.0e6, 1.0e6, false);
+    EXPECT_DOUBLE_EQ(st.last_work_ratio, 8.0);
+    EXPECT_FALSE(st.cascade());
+    // At kPluginCascadeWorkRatio times the delay-free work they are.
+    st.after_factor(kPluginCascadeWorkRatio * 1.0e6, 1.0e6, false);
+    EXPECT_TRUE(st.cascade());
+    // The answer follows the latest factorization until a request is honoured...
+    st.after_factor(1.0e6, 1.0e6, false);
+    EXPECT_FALSE(st.cascade());
+    // ...and stays once one was: the scaled factorizations no longer cascade.
+    st.after_factor(40.0e6, 1.0e6, false);
+    st.after_factor(1.0e6, 1.0e6, true);
+    EXPECT_TRUE(st.honoured);
+    st.after_factor(1.0e6, 1.0e6, false);
+    EXPECT_TRUE(st.cascade());
+    // No delay-free work (an empty analysis): no ratio.
+    Ma97CascadeState empty;
+    empty.after_factor(5.0, 0.0, false);
+    EXPECT_DOUBLE_EQ(empty.last_work_ratio, 0.0);
+    // The delay-free work is computed once per analysis (its serial).
+    int computed = 0;
+    const auto work = [&computed] { return 100.0 * ++computed; };
+    EXPECT_DOUBLE_EQ(empty.free_work_of(7, work), 100.0);
+    EXPECT_DOUBLE_EQ(empty.free_work_of(7, work), 100.0);
+    EXPECT_DOUBLE_EQ(empty.free_work_of(8, work), 200.0);
+    EXPECT_EQ(computed, 2);
 }
 
 TEST(BenchmarkAdapters, IpoptDynamicScalingStateMachine) {

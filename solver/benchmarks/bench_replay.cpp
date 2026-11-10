@@ -942,6 +942,7 @@ int main(int argc, char **argv) {
         double seq_delay_try_ms = 0.0;       // summed over the steps, like seq_delay_rescales
         double seq_delay_matching_ms = 0.0;
         int seq_skip_trial_rescues = 0;
+        int seq_mc64_cascade_scales = -1;  // ipopt-plugin track only
         int seq_slack_armed = 0;
         int seq_slack_fallbacks = 0;
         int seq_static_fallbacks = 0;
@@ -972,6 +973,9 @@ int main(int argc, char **argv) {
                 seq_delay_try_ms += adapter->stats().delay_try_ms;
                 seq_delay_matching_ms += adapter->stats().delay_matching_ms;
                 seq_skip_trial_rescues += adapter->stats().skip_trial_rescues;
+                if (adapter->stats().mc64_answer >= 0)
+                    seq_mc64_cascade_scales =
+                        std::max(seq_mc64_cascade_scales, 0) + (adapter->stats().mc64_answer == 3 ? 1 : 0);
                 seq_slack_armed += adapter->stats().slack_armed;
                 seq_slack_fallbacks += adapter->stats().slack_fallbacks;
                 seq_static_fallbacks += adapter->stats().static_fallback;
@@ -1020,13 +1024,14 @@ int main(int argc, char **argv) {
                 }
                 if (!ipm_static.empty() || print_steps) {
                     const auto fst = adapter->stats();
-                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f static_fb=%d static_rej=%d growth=%.3g refine=%d omega0=%.3g\n", step,
+                    std::fprintf(stderr, "step %d (stored %zu): static=%d delays=%d rescaled=%d early=%d inertia=%d/%d/%d factor_ms=%.3f threads=%d subtrees=%d top=%d pops=%d sub_ms=%.3f top_ms=%.3f gather_ms=%.3f solve_threads=%d try_ms=%.3f match_ms=%.3f static_fb=%d static_rej=%d growth=%.3g refine=%d omega0=%.3g work=%.2f mc64=%d entries=%lld flops=%.4e\n", step,
                                  recorded ? picks[static_cast<std::size_t>(step)] : static_cast<std::size_t>(step),
                                  fst.static_pivots, fst.delayed_pivots, fst.delay_rescales, fst.delay_early_stops, fst.inertia_pos,
                                  fst.inertia_neg, fst.inertia_zero, fst.factor_ms, fst.threads_used,
                                  fst.parallel_subtrees, fst.top_part_fronts, fst.top_part_queue_pops, fst.subtree_ms, fst.top_ms,
                                  fst.gather_ms, fst.solve_threads, fst.delay_try_ms, fst.delay_matching_ms,
-                                 fst.static_fallback, fst.static_rejects, fst.pivot_growth, fst.refine_iterations, fst.refine_omega_start);
+                                 fst.static_fallback, fst.static_rejects, fst.pivot_growth, fst.refine_iterations, fst.refine_omega_start,
+                                 fst.work_ratio, fst.mc64_answer, static_cast<long long>(fst.factor_entries), fst.flops);
                 }
             }
             if (!ipm_static.empty() && out_s != smf::bench::Outcome::Success) {
@@ -1075,6 +1080,7 @@ int main(int argc, char **argv) {
             rec.trial_skipped = st.trial_skipped;
             rec.gate_flops_per_row = st.trial_skipped >= 0 ? st.gate_flops_per_row : -1.0;
             rec.skip_trial_rescues = seq_skip_trial_rescues;
+            rec.mc64_cascade_scales = seq_mc64_cascade_scales;
             rec.slack_armed = seq_slack_armed;
             rec.slack_fallbacks = seq_slack_fallbacks;
             rec.refine_iterations = st.refine_iterations;

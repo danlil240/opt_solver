@@ -13,6 +13,8 @@
 #include "smf/threading.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -375,6 +377,78 @@ inline bool plugin_mc64_always()
     return always;
 }
 
+/// An MC64 request that follows a rejected matching ordering is honoured
+/// after a delay cascade: a factorization of this analysis whose front work
+/// (Info::front_work) reached this many times the delay-free work
+/// (delay_free_front_work). 16 is Control::scale_on_delay_ratio's limit (easy
+/// cases stay below 9, cascades start at 28). Mittelmann qcqp1500-1c through
+/// IPOPT: the slack diagonals grow to 1e8..1e16 from iteration 70, every
+/// inequality multiplier's pivot -1/Sigma then fails the u = 1e-8 test and
+/// is delayed into the dense top front (498 -> 10494 delays, 4.4M -> 144M
+/// factor entries, 0.03 -> 7 s per factorization). IPOPT asks for MC64 four
+/// times there; answered with the unit scale the cascade stayed to the end.
+inline constexpr double kPluginCascadeWorkRatio = 16.0;
+
+/// The cascade ratio in force: kPluginCascadeWorkRatio, or
+/// SMF_PLUGIN_MC64_RATIO (a positive number, for experiments; read once per
+/// process). SMF_PLUGIN_MC64=never: infinity, every request after a rejected
+/// matching ordering gets the unit scale (the behaviour before the rule).
+inline double plugin_mc64_cascade_ratio()
+{
+    static const double ratio = [] {
+        const char *m = std::getenv("SMF_PLUGIN_MC64");
+        if (m != nullptr && std::strcmp(m, "never") == 0)
+            return HUGE_VAL;
+        const char *v = std::getenv("SMF_PLUGIN_MC64_RATIO");
+        const double r = (v != nullptr && *v != '\0') ? std::atof(v) : 0.0;
+        return r > 0.0 ? r : kPluginCascadeWorkRatio;
+    }();
+    return ratio;
+}
+
+/// What the plugin remembers per analysis (MA97 akeep) to answer MC64
+/// requests that follow a rejected matching ordering: whether unscaled
+/// factorizations of it cascade. Shared with bench_replay's ipopt-plugin
+/// track.
+struct Ma97CascadeState {
+    /// Front work over delay-free work of the latest factorization that ran
+    /// to the end (0 before the first).
+    double last_work_ratio = 0.0;
+    /// An MC64 request was honoured after a cascade: later requests are
+    /// honoured too. The scale IPOPT reuses goes stale as the iterates move,
+    /// and a unit answer then would drop the scaling and restart the cascade.
+    bool honoured = false;
+
+    /// The delay-free front work of the analysis with serial
+    /// `free_work_serial` (AnalysisKeep::serial; 0: none yet).
+    std::uint64_t free_work_serial = 0;
+    double free_work = 0.0;
+
+    bool cascade() const { return honoured || last_work_ratio >= plugin_mc64_cascade_ratio(); }
+
+    /// The delay-free front work of the analysis with this serial:
+    /// `compute()` (delay_free_front_work of it), called once per analysis.
+    template <class Compute> double free_work_of(std::uint64_t serial, Compute &&compute)
+    {
+        if (serial != free_work_serial)
+        {
+            free_work = compute();
+            free_work_serial = serial;
+        }
+        return free_work;
+    }
+
+    /// After a factorization that ran to the end (ok or singular):
+    /// `front_work` is its Info::front_work, `free_work` the analysis'
+    /// delay_free_front_work(); `request_honoured`: it answered an MC64
+    /// request made after a rejected matching ordering with a computed scale.
+    void after_factor(double front_work, double free_work, bool request_honoured)
+    {
+        last_work_ratio = free_work > 0.0 ? front_work / free_work : 0.0;
+        honoured = honoured || request_honoured;
+    }
+};
+
 /// SMF_STALE_SCALE_RETRY (default 1): a factor made singular by a reused
 /// scale is refactored once with a fresh matching scaling (read once per
 /// process).
@@ -391,22 +465,31 @@ inline bool plugin_stale_scale_retry()
 /// to `ctrl` (the Control after apply_ma97_options for this call):
 ///  - unit_scale: an MC64 request (Matching) after the analysis rejected the
 ///    matching ordering is answered with no scaling, and the unit scale is
-///    handed back (unless plugin_mc64_always());
+///    handed back (unless plugin_mc64_always(), or `cascade`);
 ///  - computed: the factorization computes a scaling, handed back in `scale`;
 ///  - reuse: no scaling requested and the caller passed a non-unit `scale`
 ///    (IPOPT's "reuse" strategies): ctrl.scaling = UserSupplied, and the
-///    caller sets the session's user scale to `scale`.
+///    caller sets the session's user scale to `scale`;
+///  - cascade_honoured: an MC64 request after a rejected matching ordering
+///    that is honoured because of `cascade` (computed is set too).
 /// `matching_rejected`: an analysis exists and its matching_rejected is set.
+/// `cascade`: Ma97CascadeState::cascade() of this analysis: its unscaled
+/// factorizations cascade, so IPOPT's request is honoured although the
+/// matching ordering was rejected.
 struct Ma97ScalingCall {
     bool unit_scale = false;
     bool computed = false;
     bool reuse = false;
+    bool cascade_honoured = false;
 };
 
-inline Ma97ScalingCall ma97_scaling_call(Control &ctrl, bool matching_rejected, const double *scale, int n)
+inline Ma97ScalingCall ma97_scaling_call(Control &ctrl, bool matching_rejected, const double *scale, int n,
+                                         bool cascade = false)
 {
     Ma97ScalingCall r;
-    r.unit_scale = !plugin_mc64_always() && ctrl.scaling == ScalingMethod::Matching && matching_rejected;
+    const bool rejected_request = ctrl.scaling == ScalingMethod::Matching && matching_rejected;
+    r.unit_scale = rejected_request && !plugin_mc64_always() && !cascade;
+    r.cascade_honoured = rejected_request && !plugin_mc64_always() && cascade;
     if (r.unit_scale)
         ctrl.scaling = ScalingMethod::None;
     r.computed = ctrl.scaling != ScalingMethod::None;

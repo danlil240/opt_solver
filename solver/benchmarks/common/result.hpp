@@ -101,6 +101,10 @@ struct RunRecord {
     int trial_skipped = -1;
     double gate_flops_per_row = -1.0;
     int skip_trial_rescues = -1;
+    // smf on the ipopt-plugin track: MC64 requests honoured because of a
+    // delay cascade (Ma97CascadeState), summed over a warm sequence's steps;
+    // -1 = not reported.
+    int mc64_cascade_scales = -1;
     // smf only, Control::slack_elimination: factorizations through the slack
     // plan, and ones that tried it and took the full matrix (summed over a
     // warm sequence's steps; -1 = not reported).

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "suite": "mittelmann_kkt",
+  "note": "IPOPT KKT sequences captured by the smf_ma97 plugin (SMF_KKT_DUMP_DIR) on Mittelmann AMPL-NLP problems. The matrix files derive from Mittelmann's models and are not committed: recreate them with benchmarks/fixtures/mittelmann_kkt/README.md.",
+  "tracks": {
+    "ipopt": "pivot u = 1e-8 (bench_replay track); run smf with --track-override ipopt-plugin for the plugin's Control"
+  },
+  "solvers": ["smf", "ma57", "mkl_pardiso", "ma27", "ma97", "mumps"],
+  "required_baselines": [],
+  "cases": [
+    {
+      "matrix_id": "qcqp1500-1c",
+      "sequence_id": "qcqp1500-1c",
+      "family_id": "mittelmann_kkt",
+      "mtx_path": "benchmarks/fixtures/mittelmann_kkt/qcqp1500-1c/qcqp1500-1c.mtx",
+      "seq_values_path": "benchmarks/fixtures/mittelmann_kkt/qcqp1500-1c/qcqp1500-1c.mtx.vals",
+      "n": 22016,
+      "nnz_lower": 649570,
+      "source": "IPOPT 3.14.20 + smf_ma97 (main 63bdc35, 8 threads): Optimal Solution Found. in 99 iterations",
+      "ipopt_status": "Optimal Solution Found.",
+      "ipopt_iterations": 99,
+      "expected_outcome": "Success",
+      "matrix_type": "indefinite",
+      "mode": "warm_sequence",
+      "class": "dense_hessian_kkt",
+      "split": "tuning",
+      "track": "ipopt"
+    }
+  ]
+}
