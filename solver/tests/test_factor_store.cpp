@@ -206,3 +206,59 @@ TEST(FactorStore, TrimKeepsRoomUsedWithinTheWindow) {
     s.trim();
     EXPECT_LE(s.committed_bytes(), 16 * kMiB + 2 * kMiB) << "room older than the window is released";
 }
+
+// Delays can grow the factor far past the reservation made from the analysis
+// prediction (qcqp1000-2c: 1M predicted, 32M realized). The next
+// factorization of the same analysis reserves from the size the slice
+// reached, so it stays in the range (pages committed once) instead of
+// detaching to fresh private memory every time.
+TEST(FactorStore, OutgrownReservationFollowsRealizedSize) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(1, 1000));
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    ASSERT_TRUE(s.slice(0).detached());
+    ASSERT_TRUE(s.reserve_slices(1, 1000));  // next factorization, same analysis
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    EXPECT_FALSE(s.slice(0).detached());
+    const double *base = s.data();
+    ASSERT_TRUE(s.reserve_slices(1, 1000));  // and the one after: reservation kept
+    EXPECT_EQ(s.data(), base);
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    EXPECT_FALSE(s.slice(0).detached());
+    EXPECT_EQ(s.data(), base);
+    ASSERT_TRUE(s.reserve_slices(1, 2000));  // a new analysis: back to its prediction
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    EXPECT_TRUE(s.slice(0).detached());
+}
+
+// The same when the outgrown slice was one of an in-place factorization's
+// slices and the factor was regathered into one array.
+TEST(FactorStore, OutgrownSliceAfterRegatherFollowsRealizedSize) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(4, 1000));
+    ASSERT_TRUE(s.slice(2).grow(50000));
+    ASSERT_TRUE(s.slice(2).detached());
+    s.regather();
+    ASSERT_EQ(s.slices(), 1);
+    ASSERT_TRUE(s.reserve_slices(4, 1000));
+    for (int t = 0; t < 4; ++t) {
+        ASSERT_TRUE(s.slice(t).grow(50000));
+        EXPECT_FALSE(s.slice(t).detached()) << t;
+    }
+    EXPECT_TRUE(s.all_attached());
+}
+
+// A new request (another analysis) right after a factorization whose slice
+// outgrew its reservation starts from its own size: the old outgrowth belongs
+// to the previous analysis and is not carried over.
+TEST(FactorStore, NewRequestIgnoresStillDetachedOutgrowth) {
+    FactorStore<double> s;
+    ASSERT_TRUE(s.reserve_slices(1, 1000));
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    ASSERT_TRUE(s.slice(0).detached());
+    ASSERT_TRUE(s.reserve_slices(1, 2000));  // new analysis, old slice still detached
+    ASSERT_TRUE(s.slice(0).grow(2000));
+    EXPECT_FALSE(s.slice(0).detached());
+    ASSERT_TRUE(s.slice(0).grow(100000));
+    EXPECT_TRUE(s.slice(0).detached());  // not a 125000-element reservation
+}
