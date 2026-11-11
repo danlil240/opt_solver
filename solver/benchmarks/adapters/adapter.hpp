@@ -65,6 +65,12 @@ struct AdapterStats {
     int trial_skipped = -1;
     double gate_flops_per_row = 0.0;
     int skip_trial_rescues = 0;
+    // ipopt-plugin track (IPOPT's dynamic scaling emulated): the last
+    // factor's front work over the delay-free work (Ma97CascadeState), IPOPT's
+    // MC64 request on it (0 none, 1 answered with the unit scale, 2 computed,
+    // 3 computed because of a delay cascade; -1 = not reported).
+    double work_ratio = 0.0;
+    int mc64_answer = -1;
     // smf adapters, Control::slack_elimination: the last factor ran through
     // the slack plan (0/1), or tried it and took the full matrix (0/1).
     int slack_armed = 0;

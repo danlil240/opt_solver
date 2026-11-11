@@ -14,6 +14,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/control.hpp"
 #include "smf/csc_matrix.hpp"
+#include "smf/factor_indef.hpp"
 #include "smf/info.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
@@ -102,6 +103,7 @@ struct PluginSession
 {
     bool last_call_was_factor = false; // no solve since this session's previous factorization => IPOPT inertia correction
     long last_factor_id = 0;           // trace id of this session's latest factorization
+    smf::Ma97CascadeState cascade;     // do this analysis' unscaled factorizations cascade (MC64 requests)
 };
 
 // The IpmSession owns the analysis, the factor and the workspaces. akeep and
@@ -598,8 +600,15 @@ extern "C"
         // and passes back. Patterns the analysis did not try the matching on
         // (n below its minimum, no zero/small diagonal) keep the matching
         // scaling, which helps there (COPS elec / chain iteration counts).
+        // Exception: a delay cascade. IPOPT asks for MC64 when the delays
+        // jump; when the latest factorization's front work also reached
+        // kPluginCascadeWorkRatio times the delay-free work (or an earlier
+        // request of this analysis was honoured for that), the unscaled
+        // factorization has stopped working and the request is honoured
+        // (Ma97CascadeState; Mittelmann qcqp1500-1c: 0.03 -> 7 s per
+        // factorization without it).
         // SMF_PLUGIN_MC64=always restores the matching scaling on every
-        // request.
+        // request, =never the unit answer after every rejected ordering.
         // Known limitation: a request on the very first factorization (no
         // analysis yet; the analysis is deferred into session.factor below)
         // still gets the matching scaling. IPOPT's default ma97_scaling
@@ -619,7 +628,8 @@ extern "C"
                               (ak->ctrl.scaling == smf::ScalingMethod::Matching
                                    ? smf::slack_full_analysis(*analysed).matching_rejected
                                    : analysed->matching_rejected);
-        const smf::Ma97ScalingCall scaling_call = smf::ma97_scaling_call(ak->ctrl, rejected, scale, ak->n);
+        const smf::Ma97ScalingCall scaling_call =
+            smf::ma97_scaling_call(ak->ctrl, rejected, scale, ak->n, ak->state->cascade.cascade());
         const bool unit_scale = scaling_call.unit_scale;
         bool computed_scaling = scaling_call.computed;
         const bool reuse_scaling = scaling_call.reuse;
@@ -701,6 +711,16 @@ extern "C"
         fw->generation = session.factor_generation();
         fw->aborted = false;
         PluginSession& state = *ak->state;
+        // Work of the factorization that ran, over the delay-free work: the
+        // next MC64 request's cascade test.
+        const double work_ratio_before = state.cascade.last_work_ratio;
+        if (status == smf::IpmFactorStatus::Ok || status == smf::IpmFactorStatus::Singular)
+        {
+            const smf::AnalysisKeep& fak = *session.analysis_keep();
+            const double free_work =
+                state.cascade.free_work_of(fak.serial, [&fak] { return smf::delay_free_front_work(fak); });
+            state.cascade.after_factor(si.front_work, free_work, scaling_call.cascade_honoured && computed_scaling);
+        }
         if (g_stats.enabled)
             state.last_factor_id = g_stats.add_factor(
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s);
@@ -713,6 +733,9 @@ extern "C"
         // (IPOPT's restoration phase included) starts at corr=0.
         // abort=1: stopped on wrong inertia (partial counts); skipped = the
         // predicted flops of the fronts it did not factor; flops = actual.
+        // work = front work over the delay-free work (prev: of the session's
+        // previous factorization, what an MC64 request here was judged on);
+        // scale=out-cascade: an MC64 request honoured after a delay cascade.
         // ra=tried/adopted/reverted: the session's re-analysis counts, tried
         // and adopted including this factorization, reverted as of its start,
         // so adopted > reverted exactly when it ran on a re-analysed order
@@ -723,15 +746,19 @@ extern "C"
             std::fprintf(stderr,
                          "[smf_ma97] factor %ld: corr=%d delays=%d static=%d pos=%d neg=%d zero=%d L=%lld t=%.6f "
                          "scaling=%d scale=%s u=%.1e ordering=%d(req %d) nemin=%d two=%d abort=%d flops=%.6e "
-                         "skipped=%.6e ra=%d/%d/%d\n",
+                         "skipped=%.6e work=%.2f(prev %.2f) ra=%d/%d/%d\n",
                          state.last_factor_id, state.last_call_was_factor ? 1 : 0, si.delayed_pivots,
                          si.static_pivots, pd ? ak->n : si.num_positive, pd ? 0 : si.num_negative,
                          pd ? 0 : si.num_zero, static_cast<long long>(si.actual_factor_entries),
                          std::chrono::duration<double>(std::chrono::steady_clock::now() - t_factor).count() - analyse_s,
-                         ctrl ? ctrl->scaling : -1, unit_scale ? "unit" : computed_scaling ? "out" : (reuse_scaling ? "in" : "-"),
+                         ctrl ? ctrl->scaling : -1,
+                         unit_scale ? "unit"
+                                    : computed_scaling ? (scaling_call.cascade_honoured ? "out-cascade" : "out")
+                                                       : (reuse_scaling ? "in" : "-"),
                          ctrl ? ctrl->u : 0.0, si.ordering_used, ctrl ? ctrl->ordering : -1, ak->ctrl.nemin,
                          si.two_by_two_pivots,
                          aborted ? 1 : 0, si.actual_flops, aborted ? si.aborted_flops_skipped : 0.0,
+                         state.cascade.last_work_ratio, work_ratio_before,
                          ist.reanalyses_tried, ist.reanalyses_adopted, reverted_before);
         }
         state.last_call_was_factor = true;

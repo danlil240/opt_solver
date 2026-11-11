@@ -1,6 +1,7 @@
 #include "adapter.hpp"
 #include "../common/ipopt_dynamic_scaling.hpp"
 #include "smf/slack_elimination.hpp"
+#include "smf/factor_indef.hpp"
 #include "smf/ipm_session.hpp"
 #include "smf/ipopt_plugin_control.hpp"
 #include "smf/refinement.hpp"
@@ -546,6 +547,7 @@ public:
         stats_.analyse_ms = ms_since(t0, Clock::now());
         analysed_ = false;
         ipopt_dyn_.reset();
+        cascade_ = Ma97CascadeState{};
         if (ec != ErrorCode::Success) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "smf::IpmSession::analyse failed";
@@ -582,8 +584,9 @@ public:
                                                         ? slack_full_analysis(*ak).matching_rejected
                                                         : ak->matching_rejected);
             call = ma97_scaling_call(c, rejected, ipopt_dyn_.scale(),
-                                     static_cast<int>(pattern_->n));
+                                     static_cast<int>(pattern_->n), cascade_.cascade());
         }
+        const bool mc64_request = ipopt_scaling_ && ipopt_dyn_.mc64_requested();
         // A computed scale is passed back (the plugin): not through the slack plan.
         if (call.computed) c.slack_elimination = SlackElimination::Off;
         session_.set_control(c);
@@ -608,9 +611,18 @@ public:
         }
         const double ms = ms_since(t0, Clock::now());
         const Info &info = session_.info();
-        if (ipopt_scaling_)
+        if (ipopt_scaling_) {
             ipopt_dyn_.after_factor(st, call, session_.factor_keep().scale, static_cast<int>(info.delayed_pivots),
                                     static_cast<int>(pattern_->n));
+            // The plugin's cascade memory (smf_ma97_plugin.cpp, ma97_factor_d).
+            if ((st == IpmFactorStatus::Ok || st == IpmFactorStatus::Singular) && session_.analysis_keep() != nullptr) {
+                const AnalysisKeep &fak = *session_.analysis_keep();
+                const double free_work = cascade_.free_work_of(fak.serial, [&fak] { return delay_free_front_work(fak); });
+                cascade_.after_factor(info.front_work, free_work, call.cascade_honoured && call.computed);
+            }
+            stats_.work_ratio = cascade_.last_work_ratio;
+            stats_.mc64_answer = !mc64_request ? 0 : call.unit_scale ? 1 : call.cascade_honoured ? 3 : 2;
+        }
         // The first factor() runs the deferred analysis: count it as analysis.
         const double analyse_ms = analysed_ ? 0.0 : 1e3 * info.analyse_seconds;
         analysed_ = analysed_ || session_.analysis_keep() != nullptr;
@@ -691,6 +703,7 @@ private:
     std::string label_ = "IpmSession";
     bool ipopt_scaling_ = false;   // emulate IPOPT's dynamic scaling (ipopt-plugin)
     IpoptDynamicScaling ipopt_dyn_;  // IPOPT's side: MC64 requests and the scale it holds
+    Ma97CascadeState cascade_;       // the plugin's side: do unscaled factorizations cascade
     IpmSession session_;
     const CscLower *pattern_ = nullptr;
     bool analysed_ = false;

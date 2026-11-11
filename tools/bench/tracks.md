@@ -46,6 +46,14 @@ never`; `solver/benchmarks/common/ipopt_dynamic_scaling.hpp`):
 The plugin's answer to each call is its own per-call decision,
 `smf::ma97_scaling_call()` (unit scale after a rejected matching ordering,
 reuse of a passed-back scale), followed by its stale-scale retry.
+Exception to the unit answer: a delay cascade (`smf::Ma97CascadeState`).
+When the factorization before the request did at least 16 times the
+delay-free front work, the request is honoured with the matching scaling,
+and so is every later request of that analysis. `--print-steps` shows
+`work=` (that ratio) and `mc64=` (0 no request, 1 unit answer, 2 computed,
+3 computed after a cascade); records carry `mc64_cascade_scales`.
+`SMF_PLUGIN_MC64=never` keeps the unit answer, `=always` honours every
+request, `SMF_PLUGIN_MC64_RATIO=<x>` changes the limit.
 
 Limits:
 - The "next factorization" is the next *replayed* step. The default

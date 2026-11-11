@@ -799,6 +799,182 @@ TEST(Ma97PluginRuntime, Mc64RequestAfterRejectedMatchingReturnsUnitScale) {
     for (double s : mc64) EXPECT_GT(s, 0.0);
 }
 
+namespace {
+
+// An inequality-constrained KKT in IPOPT's augmented form, 0-based lower CSC,
+// unknowns x (nx), slacks s (m), multipliers lambda (m):
+//   [ H        .      J^T ]
+//   [ .      Sigma    -I  ]
+//   [ J       -I       0  ]
+// H dense and diagonally dominant, constraint k on four x. The structure of
+// Mittelmann's qcqp problems: AMD eliminates each slack and then its
+// multiplier (pivot -1/Sigma_k), and the x block is one dense top front.
+struct SlackKkt {
+    int n = 0;
+    int nx = 0;
+    int m = 0;
+    std::vector<int> ptr, row;
+    std::vector<double> val;
+    std::vector<int> sigma_at;  // entry of Sigma_k in val
+    SlackKkt(int nx_, int m_) : n(nx_ + 2 * m_), nx(nx_), m(m_), sigma_at(static_cast<std::size_t>(m_)) {
+        std::vector<std::vector<std::pair<int, double>>> cols(static_cast<std::size_t>(n));
+        for (int j = 0; j < nx; ++j) {
+            cols[j].push_back({j, 4.0 + 0.01 * (j % 5)});
+            for (int i = j + 1; i < nx; ++i) cols[j].push_back({i, ((i + j) % 3 == 0 ? -1.0 : 0.5) / nx});
+        }
+        for (int k = 0; k < m; ++k) {
+            const int s = nx + k, lam = nx + m + k;
+            for (int t = 0; t < 4; ++t) cols[(5 * k + 7 * t) % nx].push_back({lam, t % 2 == 0 ? 1.0 : -0.5});
+            cols[s].push_back({s, 1.0});
+            cols[s].push_back({lam, -1.0});
+        }
+        ptr.push_back(0);
+        for (int j = 0; j < n; ++j) {
+            auto &col = cols[static_cast<std::size_t>(j)];
+            std::sort(col.begin(), col.end());
+            for (const auto &[i, x] : col) {
+                if (j >= nx && j < nx + m && i == j)
+                    sigma_at[static_cast<std::size_t>(j - nx)] = static_cast<int>(row.size());
+                row.push_back(i);
+                val.push_back(x);
+            }
+            ptr.push_back(static_cast<int>(row.size()));
+        }
+    }
+    // Sigma_k = sigma (1 + (k mod 3) / 2) for the first `count` constraints.
+    void set_sigma(double sigma, int count) {
+        for (int k = 0; k < count; ++k)
+            val[static_cast<std::size_t>(sigma_at[static_cast<std::size_t>(k)])] = sigma * (1.0 + 0.5 * (k % 3));
+    }
+    std::vector<double> rhs_of_ones() const {
+        std::vector<double> b(static_cast<std::size_t>(n), 0.0);
+        for (int j = 0; j < n; ++j)
+            for (int p = ptr[j]; p < ptr[j + 1]; ++p) {
+                b[row[p]] += val[p];
+                if (row[p] != j) b[j] += val[p];
+            }
+        return b;
+    }
+    // Componentwise backward error of x for A x = b: max_i |b - A x|_i / (|A| |x| + |b|)_i.
+    // `residual`: b - A x.
+    double omega(const std::vector<double> &x, const std::vector<double> &b, std::vector<double> &residual) const {
+        std::vector<double> d(static_cast<std::size_t>(n), 0.0);
+        std::vector<double> &r = residual;
+        r = b;
+        for (int j = 0; j < n; ++j)
+            for (int p = ptr[j]; p < ptr[j + 1]; ++p) {
+                const int i = row[p];
+                r[i] -= val[p] * x[j];
+                d[i] += std::abs(val[p] * x[j]);
+                if (i != j) {
+                    r[j] -= val[p] * x[i];
+                    d[j] += std::abs(val[p] * x[i]);
+                }
+            }
+        double w = 0.0;
+        for (int i = 0; i < n; ++i) w = std::max(w, std::abs(r[i]) / (d[i] + std::abs(b[i])));
+        return w;
+    }
+};
+
+} // namespace
+
+// A delay cascade makes the plugin honour IPOPT's MC64 request although the
+// analysis rejected the matching ordering (Ma97CascadeState). Slack
+// diagonals of 1e12 leave their multipliers the pivot -1e-12 against O(1)
+// Jacobian entries: these fail the u = 1e-8 test and are delayed into the
+// dense top front. IPOPT's next call asks for MC64: the scale handed back is
+// the matching's, the delays are gone, and the reused scale keeps them away.
+// Before the cascade the same request gets the unit scale.
+TEST(Ma97PluginRuntime, Mc64RequestAfterDelayCascadeIsHonoured) {
+    PluginSymbols sym;
+    ASSERT_TRUE(sym.load());
+
+    // n = 10020: above the analysis' minimum for the auto matching trial, so
+    // the matching is tried (or its trial skipped) and rejected.
+    SlackKkt kkt(100, 4960);
+    const int hot = 1200;  // constraints whose slack diagonal blows up
+    const int n = kkt.n;
+    ma97_control_d ctrl{};
+    sym.default_control(&ctrl);
+    ctrl.f_arrays = 0;
+    ctrl.u = 1e-8;  // IPOPT's ma97_u
+    void *akeep = nullptr;
+    void *fkeep = nullptr;
+    ma97_info_d info{};
+    sym.analyse(1, n, kkt.ptr.data(), kkt.row.data(), nullptr, &akeep, &ctrl, &info, nullptr);
+    ASSERT_EQ(info.flag, 0);
+    std::vector<double> scale(static_cast<std::size_t>(n), -3.0);
+    // Factors with MA97 scaling = `scaling`, checks the inertia and the
+    // backward error of a solve with up to three refinement steps (IPOPT
+    // refines every solve). A matching-scaled factor that pivots a
+    // multiplier right after its slack forms H + J^T Sigma J: its unrefined
+    // backward error is about eps * Sigma (3e-4 to 1e-3 here), where the
+    // delayed, unscaled factor reaches 1e-15. Refinement gains a factor of
+    // 100 to 300 per step; the bound below is the benchmark's accuracy gate.
+    const auto factor = [&](int scaling, double *sc, const char *what) {
+        ctrl.scaling = scaling;
+        sym.factor(4, kkt.ptr.data(), kkt.row.data(), kkt.val.data(), &akeep, &fkeep, &ctrl, &info, sc);
+        ctrl.scaling = 0;
+        ASSERT_EQ(info.flag, 0) << what;
+        EXPECT_EQ(info.num_neg, kkt.m) << what;
+        const std::vector<double> b = kkt.rhs_of_ones();
+        std::vector<double> x = b;
+        ma97_info_d sinfo{};
+        sym.solve(0, 1, x.data(), n, &akeep, &fkeep, &ctrl, &sinfo);
+        ASSERT_EQ(sinfo.flag, 0) << what;
+        std::vector<double> r;
+        const double omega0 = kkt.omega(x, b, r);
+        double omega = omega0;
+        int steps = 0;
+        for (; steps < 3 && omega > 1e-14; ++steps) {
+            sym.solve(0, 1, r.data(), n, &akeep, &fkeep, &ctrl, &sinfo);
+            ASSERT_EQ(sinfo.flag, 0) << what;
+            for (int i = 0; i < n; ++i) x[static_cast<std::size_t>(i)] += r[static_cast<std::size_t>(i)];
+            omega = kkt.omega(x, b, r);
+        }
+        std::printf("[cascade] %-28s delays %5d entries %9ld omega %.2e -> %.2e (%d refinement steps)\n", what,
+                    info.num_delay, info.num_factor, omega0, omega, steps);
+        EXPECT_LT(omega0, 1e-2) << what;
+        EXPECT_LT(omega, 1e-8) << what;
+    };
+    const auto is_unit = [&] { return std::all_of(scale.begin(), scale.end(), [](double s) { return s == 1.0; }); };
+
+    // Benign values: no delays, and an MC64 request gets the unit scale.
+    factor(0, nullptr, "benign, unscaled");
+    ASSERT_NE(info.ordering, 5) << "the matching ordering was adopted: no rejection to test";
+    EXPECT_EQ(info.num_delay, 0);
+    const long benign_entries = info.num_factor;
+    factor(1, scale.data(), "benign, MC64 request");
+    EXPECT_TRUE(is_unit());
+
+    // Slack diagonals of 1e12: their multipliers are delayed into the top front.
+    kkt.set_sigma(1e12, hot);
+    factor(0, scale.data(), "cascade, unscaled");
+    EXPECT_GE(info.num_delay, hot / 2);
+    EXPECT_GT(info.num_factor, 4 * benign_entries);
+
+    // IPOPT's request now is honoured: a matching scale, and no cascade.
+    factor(1, scale.data(), "cascade, MC64 request");
+    EXPECT_FALSE(is_unit());
+    for (double s : scale) EXPECT_GT(s, 0.0);
+    EXPECT_LT(info.num_delay, hot / 20);
+    EXPECT_LT(info.num_factor, 2 * benign_entries);
+
+    // The scale passed back (reuse), then moved values under it.
+    factor(0, scale.data(), "cascade, reused scale");
+    EXPECT_LT(info.num_delay, hot / 20);
+    kkt.set_sigma(3e12, hot);
+    factor(0, scale.data(), "moved values, reused scale");
+    EXPECT_LT(info.num_delay, hot / 20);
+    // A later request is honoured too (the first one was).
+    std::fill(scale.begin(), scale.end(), -3.0);
+    factor(1, scale.data(), "second MC64 request");
+    EXPECT_FALSE(is_unit());
+
+    sym.finalise(&akeep, &fkeep);
+}
+
 // ---------------------------------------------------------------------------
 // Task 17: PGLib AC-OPF IPOPT captures replayed through the plugin.
 // ---------------------------------------------------------------------------
