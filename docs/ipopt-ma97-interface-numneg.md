@@ -3,7 +3,7 @@
 IPOPT loads smf through its HSL MA97 interface (`linear_solver ma97` with `hsllib`). That interface has a bug
 that makes IPOPT choose between two strategies by chance at the start of a solve. It is IPOPT's bug, not
 smf's: the real HSL MA97 goes through the same code. Present in IPOPT 3.14.19 and on the `stable/3.14` and
-`master` branches as of 2026-11-12; no upstream report was found.
+`master` branches as of 2026-11-12. Reported upstream as [coin-or/Ipopt#870](https://github.com/coin-or/Ipopt/issues/870).
 
 Patch: [`tools/ipopt/ma97-numneg.patch`](../tools/ipopt/ma97-numneg.patch) (two lines, against 3.14.19).
 
