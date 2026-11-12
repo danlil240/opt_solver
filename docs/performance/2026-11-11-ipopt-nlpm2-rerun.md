@@ -16,7 +16,8 @@ inertia, so the value was set before IPOPT first read it
 (`python tools/bench/ipopt_numneg_exposure.py <run>/logs/smf8`). The iteration-count luck
 described below (qcqp1500-1nc) is therefore not that bug. What remains of it here is deterministic and small:
 after a factorization with too few negative eigenvalues IPOPT perturbs instead of first asking for better
-quality, on 7 factorizations in total (NARX_CFy 1, WM_CFy 4, dtoc2 2). Not re-measured with a patched IPOPT.
+quality, on one factorization in the whole run (NARX_CFy, the second of 1613). Not re-measured with a patched
+IPOPT.
 
 ## Result: 1.27 -> 1.18 against POUNCE, nothing lost
 
