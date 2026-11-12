@@ -36,6 +36,7 @@ The options most people touch:
 | `SMF_BUILD_C_API` | OFF | Build the C ABI wrapper (`smf_c.h`) |
 | `SMF_BUILD_BENCHMARKS` | ON | Build the benchmark drivers in `solver/benchmarks/` |
 | `SMF_SANITIZE` | OFF | Build with address and UB sanitizers |
+| `SMF_MARCH` | `native` | GCC/Clang `-march=` value. `native` needs the build machine's CPU at run time; use `x86-64-v3` (AVX2 + FMA) for a library that runs elsewhere |
 
 `solver/README.md` has the full option list and dependency notes.
 
@@ -57,6 +58,8 @@ solver.solve(fkeep, ctrl, info, b.data(), n);    // b is overwritten with x
 ```
 
 To use smf from IPOPT, build the plugin and point IPOPT's `hsllib` option at `libsmf_ma97` (`smf_ma97.dll` on Windows) with `linear_solver ma97`.
+
+Stock IPOPT (3.14.19 and its master branch) has a bug in its MA97 interface: at the start of a solve it can read an uninitialised value and then pick its strategy by chance, so the same problem can take a different number of iterations from one run to the next. It affects HSL MA97 and smf alike. [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md) has the details and a two-line patch for IPOPT.
 
 ### Fast mode (opt-in static pivoting)
 
