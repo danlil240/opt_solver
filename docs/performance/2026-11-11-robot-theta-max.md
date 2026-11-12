@@ -10,8 +10,9 @@ failures are what keeps IPOPT+smf behind POUNCE (1.18 with POUNCE = 1; see
 
 **Note added 2026-11-12:** this run used stock IPOPT, whose MA97 interface (the one smf is loaded through) can
 pick its strategy at the start of a solve on an uninitialised value (`docs/ipopt-ma97-interface-numneg.md`).
-Iteration-count differences that this note calls luck may come from that bug; nothing here was re-measured with
-a patched IPOPT.
+The plugin trace of the full-set run `nlpx1` shows that no problem was exposed: on all 45 the first factorization
+has the right inertia (`python tools/bench/ipopt_numneg_exposure.py <run>/logs/smf8`). The
+iteration-count luck mentioned below is therefore not that bug. Not re-measured with a patched IPOPT.
 
 ## Cause: the filter's constraint-violation cap
 

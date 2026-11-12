@@ -10,8 +10,9 @@ Cross-day comparison: treat differences under ~5% on one problem as noise.
 
 **Note added 2026-11-12:** this run used stock IPOPT, whose MA97 interface (the one smf is loaded through) can
 pick its strategy at the start of a solve on an uninitialised value (`docs/ipopt-ma97-interface-numneg.md`).
-Iteration-count differences that this note calls luck may come from that bug; nothing here was re-measured with
-a patched IPOPT.
+This run has no plugin trace, so it cannot be checked directly. The next run of the same set with the trace on
+(`nlpm2`, `2026-11-11-ipopt-nlpm2-rerun.md`) shows no problem exposed: on all 45 the first factorization has the
+right inertia. Not re-measured with a patched IPOPT.
 
 ## Result: better, no new failures
 

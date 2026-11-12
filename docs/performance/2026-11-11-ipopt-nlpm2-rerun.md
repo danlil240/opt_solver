@@ -11,8 +11,12 @@ run `nlp1`, so the comparison with POUNCE is cross-day.
 
 **Note added 2026-11-12:** this run used stock IPOPT, whose MA97 interface (the one smf is loaded through) can
 pick its strategy at the start of a solve on an uninitialised value (`docs/ipopt-ma97-interface-numneg.md`).
-Iteration-count differences that this note calls luck may come from that bug; nothing here was re-measured with
-a patched IPOPT.
+The plugin trace of this run shows that no problem was exposed: on all 45 the first factorization has the right
+inertia, so the value was set before IPOPT first read it
+(`python tools/bench/ipopt_numneg_exposure.py <run>/logs/smf8`). The iteration-count luck
+described below (qcqp1500-1nc) is therefore not that bug. What remains of it here is deterministic and small:
+after a factorization with too few negative eigenvalues IPOPT perturbs instead of first asking for better
+quality, on 7 factorizations in total (NARX_CFy 1, WM_CFy 4, dtoc2 2). Not re-measured with a patched IPOPT.
 
 ## Result: 1.27 -> 1.18 against POUNCE, nothing lost
 
