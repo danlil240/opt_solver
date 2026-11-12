@@ -65,7 +65,16 @@ else()
         add_compile_options(-O1 -fno-omit-frame-pointer -fsanitize=address,undefined)
         add_link_options(-fsanitize=address,undefined)
     else()
-        add_compile_options(-O3 -march=native)
+        # Instruction set of the build. "native" ties the binaries to the CPU
+        # of the build machine (on an AVX-512 machine they then need AVX-512).
+        # A library that runs elsewhere, e.g. the IPOPT plugin inside a
+        # container image, wants a fixed level such as x86-64-v3 (AVX2 + FMA,
+        # the level of the MSVC build above).
+        set(SMF_MARCH "native" CACHE STRING "GCC/Clang -march= value for smf code (e.g. native, x86-64-v3)")
+        if(NOT SMF_MARCH)
+            message(FATAL_ERROR "smf: SMF_MARCH is empty; give a -march value (native, x86-64-v3, ...)")
+        endif()
+        add_compile_options(-O3 -march=${SMF_MARCH})
     endif()
 endif()
 
@@ -681,6 +690,9 @@ endif()
 message(STATUS "")
 message(STATUS "smf ${PROJECT_VERSION} configuration summary")
 message(STATUS "  C++ standard  : ${CMAKE_CXX_STANDARD}")
+if(NOT MSVC AND NOT SMF_SANITIZE)
+    message(STATUS "  -march        : ${SMF_MARCH}")
+endif()
 message(STATUS "  OpenMP        : ${SMF_ENABLE_OPENMP}")
 message(STATUS "  MKL           : ${SMF_USE_MKL}")
 message(STATUS "  AMD found     : ${SMF_HAS_AMD}")

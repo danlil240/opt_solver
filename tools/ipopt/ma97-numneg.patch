@@ -1,0 +1,25 @@
+diff --git a/src/Algorithm/LinearSolvers/IpMa97SolverInterface.cpp b/src/Algorithm/LinearSolvers/IpMa97SolverInterface.cpp
+index 02f41ffcf..6a61ecf9d 100644
+--- a/src/Algorithm/LinearSolvers/IpMa97SolverInterface.cpp
++++ b/src/Algorithm/LinearSolvers/IpMa97SolverInterface.cpp
+@@ -776,6 +776,7 @@ ESymSolverStatus Ma97SolverInterface::MultiSolve(
+                         "In Ma97SolverInterface::Factorization: Unhandled error. info.flag = %d\n", info.flag);
+          return SYMSOLVER_FATAL_ERROR;
+       }
++      numneg_ = info.num_neg;
+       if( check_NegEVals && info.num_neg != numberOfNegEVals )
+       {
+          Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
+diff --git a/src/Algorithm/LinearSolvers/IpMa97SolverInterface.hpp b/src/Algorithm/LinearSolvers/IpMa97SolverInterface.hpp
+index 12a79bbe8..70502ae20 100644
+--- a/src/Algorithm/LinearSolvers/IpMa97SolverInterface.hpp
++++ b/src/Algorithm/LinearSolvers/IpMa97SolverInterface.hpp
+@@ -125,7 +125,7 @@ private:
+ 
+    int ndim_;            ///< Number of dimensions
+    Number* val_;         ///< Storage for variables
+-   int numneg_;          ///< Number of negative pivots in last factorization
++   int numneg_ = 0;          ///< Number of negative pivots in last factorization
+    int numdelay_;        ///< Number of delayed pivots last time we scaled
+    void* akeep_;         ///< Stores pointer to factors (only understood Fortran code!)
+    void* fkeep_;         ///< Stores pointer to factors (only understood Fortran code!)
