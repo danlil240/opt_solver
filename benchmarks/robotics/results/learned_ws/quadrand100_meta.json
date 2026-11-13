@@ -1,0 +1,20 @@
+{
+ "problem": "quadrand",
+ "N": 100,
+ "solver": "mumps",
+ "ntrain": 240,
+ "ntest": 60,
+ "workers": 4,
+ "seed": 0,
+ "nx": 1613,
+ "ng": 3576,
+ "cold_phase_s": 134.39927552799986,
+ "train_ok": 240,
+ "train_total": 240,
+ "mlp_train_mse_std": 0.0013512235341513437,
+ "mlp_train_s": 68.35929996799996,
+ "mlp_infer_ms_median": 0.1842079999505586,
+ "knn_guess_rms_sd": 1.2781665053775666,
+ "mlp_guess_rms_sd": 1.1516816907563399,
+ "warm_phase_s": 455.6489995979998
+}

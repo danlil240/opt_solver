@@ -1,0 +1,20 @@
+{
+ "problem": "truck",
+ "N": 100,
+ "solver": "mumps",
+ "ntrain": 240,
+ "ntest": 60,
+ "workers": 4,
+ "seed": 0,
+ "nx": 807,
+ "ng": 18206,
+ "cold_phase_s": NaN,
+ "warm_phase_s": NaN,
+ "train_ok": 236,
+ "train_total": 240,
+ "mlp_train_mse_std": 0.0008238091085921262,
+ "mlp_train_s": 29.803775792000124,
+ "mlp_infer_ms_median": 0.12701399964498705,
+ "knn_guess_rms_sd": 0.32566371512513853,
+ "mlp_guess_rms_sd": 0.35873484262346744
+}
