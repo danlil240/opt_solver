@@ -1,0 +1,88 @@
+Attached Mass (kg): 3.0
+Benchmark: motion
+Dataset: all
+Dynamics Enabled: true
+Energy (J): 72.29043335837136
+Energy (J) 75th: 92.03485098785805
+Energy (J) 95th: 142.8266111504088
+Energy (J) 98th: 168.6009645642862
+Energy (J) Max: 228.40559731394947
+Energy (J) Median: 66.9081125747338
+Energy (J) Std: 36.994451088185194
+Jerk: 195.0333989431726
+Jerk 75th: 232.83274841308594
+Jerk 95th: 365.5439086914063
+Jerk 98th: 416.1133239746095
+Jerk Max: 498.5030517578125
+Jerk Median: 180.84352111816406
+Jerk Std: 84.89942677909865
+Motion Time (s): 1.471507324910702
+Motion Time (s) 75th: 1.6796224880963564
+Motion Time (s) 95th: 2.3573217529803516
+Motion Time (s) 98th: 3.199187183380128
+Motion Time (s) Max: 7.494540624320507
+Motion Time (s) Median: 1.4054963756352663
+Motion Time (s) Std: 0.5642265959846703
+Orientation Error (deg): 0.0005666224503151371
+Orientation Error (deg) 75th: 1.0555689200378997e-05
+Orientation Error (deg) 95th: 2.2361551955847325e-05
+Orientation Error (deg) 98th: 0.00034206097835020655
+Orientation Error (deg) Max: 0.34749601258644797
+Orientation Error (deg) Median: 7.424334290283103e-06
+Orientation Error (deg) Std: 0.010080321294443475
+Path Length (rad.): 3.312088951381934
+Path Length (rad.) 75th: 4.051319122314453
+Path Length (rad.) 95th: 5.165148687362672
+Path Length (rad.) 98th: 5.9644891166687035
+Path Length (rad.) Max: 10.417317390441895
+Path Length (rad.) Median: 3.3796024322509766
+Path Length (rad.) Std: 1.2215740415074903
+Planning Time: 0.037142749930000385
+Planning Time 75th: 0.038409871757030485
+Planning Time 95th: 0.050759384107589726
+Planning Time 98th: 0.07476655805110934
+Planning Time Max: 0.2900566364526749
+Planning Time Median: 0.03479091167449951
+Planning Time Std: 0.01409290500325324
+Position Error (mm): 0.014630485743692904
+Position Error (mm) 75th: 0.00021950781103896588
+Position Error (mm) 95th: 0.004108547864234435
+Position Error (mm) 98th: 0.04659043479477987
+Position Error (mm) Max: 4.5671914704144
+Position Error (mm) Median: 0.00012287812012345967
+Position Error (mm) Std: 0.18894523000256877
+RRT Calls: 216
+RRT Invoked Problems: 71
+RRT Successful Problems: 65
+RRT Time (s): 0.01642298099860339
+RRT Time (s) 75th: 0.013712112016975881
+RRT Time (s) 95th: 0.023065535947680474
+RRT Time (s) 98th: 0.04860120277404784
+RRT Time (s) Max: 0.4145086441040039
+RRT Time (s) Median: 0.008311327934265136
+RRT Time (s) Std: 0.04832004171227066
+RRT Time Per Call (s): 0.008577371380936269
+RRT Time Per Call (s) 75th: 0.00838102388381958
+RRT Time Per Call (s) 95th: 0.01833463954925537
+RRT Time Per Call (s) 98th: 0.02430060138702392
+RRT Time Per Call (s) Max: 0.13816954803466797
+RRT Time Per Call (s) Median: 0.006346325397491455
+RRT Time Per Call (s) Std: 0.01620047005133749
+Solve Time: 0.018962925102906408
+Solve Time 75th: 0.020533119916915893
+Solve Time 95th: 0.03013148441910744
+Solve Time 98th: 0.043127362682819415
+Solve Time Max: 0.15022073632478714
+Solve Time Median: 0.017514528036117555
+Solve Time Std: 0.008925528384514912
+Success: 99.72972972972973
+Successful Problems: 2583
+TimeOpt Enabled: true
+"Torque (N\xB7m)": 65.4577981598971
+"Torque (N\xB7m) 75th": 78.05189047637309
+"Torque (N\xB7m) 95th": 96.37387788552029
+"Torque (N\xB7m) 98th": 103.70652579432044
+"Torque (N\xB7m) Max": 125.1284444885459
+"Torque (N\xB7m) Median": 65.3315714574655
+"Torque (N\xB7m) Std": 18.40539043453704
+Total Problems: 2590
