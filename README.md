@@ -61,6 +61,8 @@ solver.solve(fkeep, ctrl, info, b.data(), n);    // b is overwritten with x
 
 IPOPT has no plugin interface for third-party linear solvers, but it can load the HSL solvers from a shared library at run time. `libsmf_ma97` (`smf_ma97.dll` on Windows) exports the MA97 C interface, so an unmodified IPOPT loads it in place of HSL MA97. That includes the IPOPT inside CasADi. No HSL licence is needed.
 
+> **This does not work with an IPOPT that has the full HSL library compiled in.** If your IPOPT was built against a complete CoinHSL, it has no `hsllib` option and cannot load smf. See [IPOPT with the full HSL library](#ipopt-with-the-full-hsl-library) below.
+
 1. Build and install smf. The plugin is built by default (`SMF_BUILD_MA97_PLUGIN=ON`) and installed next to the library.
 2. Set two IPOPT options: `linear_solver` to `ma97` and `hsllib` to the plugin. Give `hsllib` a full path, or a bare name that the loader can find (`LD_LIBRARY_PATH` on Linux, `PATH` on Windows).
 
@@ -100,10 +102,35 @@ Plugin settings come from environment variables, each read once per process:
 
 IPOPT's `ma97_*` options (ordering, scaling, pivot threshold) reach smf as they would reach MA97.
 
-Two things to know about IPOPT itself:
+#### IPOPT with the full HSL library
 
-- **`No such IPOPT option: hsllib`.** IPOPT offers `hsllib` only when at least one HSL solver is not linked into it. An IPOPT built against a full CoinHSL (MA27, MA57, MA77, MA86, MA97 and MC68 all linked) has no such option and cannot load smf. Use an IPOPT built without HSL or with part of it, for example MA27 alone, or the IPOPT in the CasADi wheels.
-- **Run-to-run differences.** Stock IPOPT (3.14.19 and its master branch) has a bug in its MA97 interface: at the start of a solve it can read an uninitialised value and then pick its strategy by chance, so the same problem can take a different number of iterations from one run to the next. It affects HSL MA97 and smf alike. [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md) has the details and a two-line patch for IPOPT.
+smf cannot be loaded by an IPOPT that was built against a complete CoinHSL, that is, with MA27, MA57, MA77, MA86, MA97 and MC68 all compiled in. The solve stops before it starts with:
+
+```
+No such IPOPT option: hsllib
+```
+
+The reason is in IPOPT, not in smf:
+
+- IPOPT decides at build time which HSL solvers are linked in. For a linked solver it calls the linked code directly and never looks for a library.
+- The `hsllib` option, and the run-time loader behind it, exist only when at least one HSL solver is missing from the build. With every solver linked, IPOPT does not register the option at all.
+- So with the full library `linear_solver ma97` always means the HSL MA97 inside that IPOPT, and there is no option that points it elsewhere.
+
+Seen with IPOPT 3.14.19 built from source against CoinHSL 2024.05.15 on Ubuntu 22.04.
+
+What works instead:
+
+| IPOPT build | Loads smf |
+|---|---|
+| Without HSL (for example the IPOPT in the CasADi wheels, which comes with MUMPS) | yes |
+| With part of HSL, for example MA27 alone | yes |
+| With the full CoinHSL | no |
+
+If you want both HSL and smf, build CoinHSL for IPOPT with MA27 only (remove the other solvers' directories from the CoinHSL source before building it) and link IPOPT against that. MA27 is then built in, smf loads through `hsllib`, and the real HSL MA97 can still be used by pointing `hsllib` at a separately built full `libcoinhsl`. That is the setup this project's Linux comparison of smf, MA27 and HSL MA97 ran on. From IPOPT's source, leaving out any one HSL solver should be enough to keep `hsllib`; only the MA27-only build was tested.
+
+#### Run-to-run differences
+
+Stock IPOPT (3.14.19 and its master branch) has a bug in its MA97 interface: at the start of a solve it can read an uninitialised value and then pick its strategy by chance, so the same problem can take a different number of iterations from one run to the next. It affects HSL MA97 and smf alike. [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md) has the details and a two-line patch for IPOPT.
 
 ### Fast mode (opt-in static pivoting)
 
