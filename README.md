@@ -63,6 +63,81 @@ solver.solve(fkeep, ctrl, info, b.data(), n);    // b is overwritten with x
 - **Stock IPOPT drop-in (`ma97` shim):** Point IPOPT's `hsllib` option at `libsmf_ma97` (`smf_ma97.dll` on Windows) with `linear_solver ma97`. Note that stock IPOPT 3.14.19's `Ma97SolverInterface` has an uninitialized `numneg_` bug affecting both HSL MA97 and the shim; see [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md).
 - **Packaging recipes:** Ready-to-use recipes live under [`packaging/conda-forge/`](packaging/conda-forge/) (`libsmf` + `ipopt-feedstock`), [`packaging/ipopt_jll/`](packaging/ipopt_jll/) (`smf_jll` / `Ipopt_jll` BinaryBuilder), and [`packaging/python/`](packaging/python/) (`smf-solver` for `cyipopt` and `CasADi`).
 
+#### The stock IPOPT drop-in in detail
+
+Stock IPOPT has no plugin interface for third-party linear solvers, but it can load the HSL solvers from a shared library at run time. `libsmf_ma97` (`smf_ma97.dll` on Windows) exports the MA97 C interface, so an unmodified IPOPT loads it in place of HSL MA97. That includes the IPOPT inside CasADi. No HSL licence is needed.
+
+> **This does not work with an IPOPT that has the full HSL library compiled in.** If your IPOPT was built against a complete CoinHSL, it has no `hsllib` option and cannot load the plugin. Use the native `linear_solver=smf` interface above, or see [IPOPT with the full HSL library](#ipopt-with-the-full-hsl-library) below.
+
+1. Build and install smf. The plugin is built by default (`SMF_BUILD_MA97_PLUGIN=ON`) and installed next to the library.
+2. Set two IPOPT options: `linear_solver` to `ma97` and `hsllib` to the plugin. Give `hsllib` a full path, or a bare name that the loader can find (`LD_LIBRARY_PATH` on Linux, `PATH` on Windows).
+
+In an `ipopt.opt` file:
+
+```
+linear_solver ma97
+hsllib /usr/local/lib/libsmf_ma97.so
+```
+
+From C++:
+
+```cpp
+app->Options()->SetStringValue("linear_solver", "ma97");
+app->Options()->SetStringValue("hsllib", "/usr/local/lib/libsmf_ma97.so");
+```
+
+From CasADi (Python; the C++ and MATLAB option dictionaries take the same keys):
+
+```python
+solver = casadi.nlpsol("solver", "ipopt", nlp, {
+    "ipopt.linear_solver": "ma97",
+    "ipopt.hsllib": "/usr/local/lib/libsmf_ma97.so",
+})
+```
+
+To check that smf is the solver in use, run with the environment variable `SMF_PLUGIN_STATS=1`. The plugin then prints its call counts and times to stderr, on lines that start with `[smf_ma97]`.
+
+Plugin settings come from environment variables, each read once per process:
+
+| Variable | What it does |
+|---|---|
+| `SMF_NUM_THREADS` | Thread count. Unset: `OMP_NUM_THREADS`, else the machine's performance cores |
+| `SMF_PIVOTING=static` | Fast mode, see below |
+| `SMF_SLACK_ELIM=on` | Slack-pair elimination, see below |
+| `SMF_PLUGIN_STATS=1` | Call statistics on stderr (`2`: one line per factorization) |
+
+IPOPT's `ma97_*` options (ordering, scaling, pivot threshold) reach smf as they would reach MA97.
+
+#### IPOPT with the full HSL library
+
+The plugin cannot be loaded by an IPOPT that was built against a complete CoinHSL, that is, with MA27, MA57, MA77, MA86, MA97 and MC68 all compiled in. The solve stops before it starts with:
+
+```
+No such IPOPT option: hsllib
+```
+
+The reason is in IPOPT, not in smf:
+
+- IPOPT decides at build time which HSL solvers are linked in. For a linked solver it calls the linked code directly and never looks for a library.
+- The `hsllib` option, and the run-time loader behind it, exist only when at least one HSL solver is missing from the build. With every solver linked, IPOPT does not register the option at all.
+- So with the full library `linear_solver ma97` always means the HSL MA97 inside that IPOPT, and there is no option that points it elsewhere.
+
+Seen with IPOPT 3.14.19 built from source against CoinHSL 2024.05.15 on Ubuntu 22.04.
+
+Which IPOPT builds load the plugin:
+
+| IPOPT build | Loads `libsmf_ma97` |
+|---|---|
+| Without HSL (for example the IPOPT in the CasADi wheels, which comes with MUMPS) | yes |
+| With part of HSL, for example MA27 alone | yes |
+| With the full CoinHSL | no (use the native interface) |
+
+If you want both the full HSL and smf in one IPOPT, patch IPOPT with the native interface ([`tools/ipopt/smf-linear-solver/`](tools/ipopt/smf-linear-solver/)): it does not go through `hsllib`. To stay on an unpatched IPOPT, build CoinHSL for IPOPT with MA27 only (remove the other solvers' directories from the CoinHSL source before building it) and link IPOPT against that. MA27 is then built in, the plugin loads through `hsllib`, and the real HSL MA97 can still be used by pointing `hsllib` at a separately built full `libcoinhsl`. That is the setup this project's Linux comparison of smf, MA27 and HSL MA97 ran on. From IPOPT's source, leaving out any one HSL solver should be enough to keep `hsllib`; only the MA27-only build was tested.
+
+#### Run-to-run differences
+
+Stock IPOPT (3.14.19 and its master branch) has a bug in its MA97 interface: at the start of a solve it can read an uninitialised value and then pick its strategy by chance, so the same problem can take a different number of iterations from one run to the next. It affects HSL MA97 and the plugin alike; the native interface does not go through that code. [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md) has the details and a two-line patch for IPOPT.
+
 ### Fast mode (opt-in static pivoting)
 
 The default is threshold pivoting (`smf::Pivoting::Threshold`): delayed pivots, the scale-on-delay rescue and exact inertia. That default is the accurate mode, and every number under "Where it stands" is measured with it.
