@@ -1909,6 +1909,7 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
             // Control::top_critical_shares: BLAS follows the front's share,
             // which grows when the scheduler hands it threads that came free.
             const BlasShareScope share_scope(ctrl.top_critical_shares && !det ? &sched.share(local) : nullptr);
+            const TopHelpersScope helpers_scope(&sched);
             const TileCtx tc{blas_threads, &sched};
             e = process_front(cx, P, 1 + lane, s, false, budget_regions ? &top_state : nullptr, &tc);
           }

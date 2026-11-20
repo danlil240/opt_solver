@@ -2,6 +2,7 @@
 #include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 
+#include "parallel/tile_tasks.hpp"
 #include "phase_trace.hpp"
 
 #include <chrono>
@@ -26,7 +27,6 @@ namespace smf {
 
 namespace {
 
-#if defined(_OPENMP) && defined(SMF_USE_MKL) && (SMF_USE_MKL)
 // Partition columns [0, m) whose column j has height M - j (M >= m > 0) into
 // up to max_strips equal-area column strips.
 inline int equal_area_strips(int m, int M, int max_strips, int bounds[65]) noexcept {
@@ -50,7 +50,6 @@ inline int equal_area_strips(int m, int M, int max_strips, int bounds[65]) noexc
     bounds[nstrips] = m;
     return nstrips;
 }
-#endif
 
 // std::max({a, b, c}) without the initializer_list (MSVC lowers that to a
 // vectorized max_element call): same result, NaN handling included.
@@ -697,7 +696,6 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
     const int m = e - c0;
     if (jb <= 0 || m <= 0) return;
     const std::size_t sf = static_cast<std::size_t>(f);
-#if defined(_OPENMP) && defined(SMF_USE_MKL) && (SMF_USE_MKL)
     {
         const int nt = blas_current_share();
         const int M = f - c0;
@@ -705,35 +703,45 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
             int bounds[65];
             const int nstrips = equal_area_strips(m, M, nt, bounds);
             if (nstrips >= 2) {
+                const auto run_strip = [&](int s) {
+                    const int j0 = bounds[s];
+                    const int j1 = bounds[s + 1];
+                    const int w = j1 - j0;
+                    const int col = c0 + j0;
+                    const int H = f - col;
+                    double *C = F + static_cast<std::size_t>(col) * sf + col;
+                    const double *A = F + static_cast<std::size_t>(p0) * sf + col;
+                    const double *B = W + col;
+                    if (2 * w < H) {
+                        smf_dgemm_nt_seq(C, H, w, jb, A, f, B, f, f, -1.0, 1.0);
+                    } else {
+                        smf_dgemmt_lower_nt_sub_seq(C, w, jb, A, f, B, f, f);
+                        if (H > w) {
+                            smf_dgemm_nt_seq(C + w, H - w, w, jb, A + w, f, B, f, f, -1.0, 1.0);
+                        }
+                    }
+                };
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+                if (TileHelpers *h = current_top_helpers()) {
+                    BlasSerialPinScope pin_blas;
+                    parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                    return;
+                }
+#endif
+#if defined(_OPENMP)
+                BlasSerialPinScope pin_blas;
 #pragma omp parallel num_threads(nstrips)
                 {
                     const int prev_blas = blas_local_set_seq();
                     const int tid = omp_get_thread_num();
-                    if (tid < nstrips) {
-                        const int j0 = bounds[tid];
-                        const int j1 = bounds[tid + 1];
-                        const int w = j1 - j0;
-                        const int col = c0 + j0;
-                        const int H = f - col;
-                        double *C = F + static_cast<std::size_t>(col) * sf + col;
-                        const double *A = F + static_cast<std::size_t>(p0) * sf + col;
-                        const double *B = W + col;
-                        if (2 * w < H) {
-                            smf_dgemm_nt_seq(C, H, w, jb, A, f, B, f, f, -1.0, 1.0);
-                        } else {
-                            smf_dgemmt_lower_nt_sub_seq(C, w, jb, A, f, B, f, f);
-                            if (H > w) {
-                                smf_dgemm_nt_seq(C + w, H - w, w, jb, A + w, f, B, f, f, -1.0, 1.0);
-                            }
-                        }
-                    }
+                    if (tid < nstrips) run_strip(tid);
                     blas_local_restore(prev_blas);
                 }
                 return;
+#endif
             }
         }
     }
-#endif
     smf_dgemmt_lower_nt_sub(F + c0 * sf + c0, m, jb, F + p0 * sf + c0, f, W + c0, f, f);
     const int r = f - e;
     if (r > 0)
@@ -834,24 +842,15 @@ void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags,
             else ++c1;
         }
         const int kc = c1 - c0;
-#if defined(_OPENMP) && defined(SMF_USE_MKL) && (SMF_USE_MKL)
-        const int nt = blas_current_share();
-        if (nt >= 2 && q >= 64 && static_cast<long long>(q) * q * kc >= 262144LL) {
-            int bounds[65];
-            const int nstrips = equal_area_strips(q, q, nt, bounds);
-            if (nstrips >= 2) {
-#pragma omp parallel num_threads(nstrips)
-                {
-                    const int prev_blas = blas_local_set_seq();
-#pragma omp for schedule(static)
-                    for (int t = 0; t < kc; ++t) {
-                        fill_ld_column(F, sf, e, q, tags, c0 + t,
-                                       buf + static_cast<std::size_t>(t) * sq);
-                    }
-                    const int tid = omp_get_thread_num();
-                    if (tid < nstrips) {
-                        const int j0 = bounds[tid];
-                        const int j1 = bounds[tid + 1];
+        {
+            const int nt = blas_current_share();
+            if (nt >= 2 && q >= 64 && static_cast<long long>(q) * q * kc >= 262144LL) {
+                int bounds[65];
+                const int nstrips = equal_area_strips(q, q, nt, bounds);
+                if (nstrips >= 2) {
+                    const auto run_strip = [&](int s) {
+                        const int j0 = bounds[s];
+                        const int j1 = bounds[s + 1];
                         const int w = j1 - j0;
                         const int H = q - j0;
                         double *C = F + static_cast<std::size_t>(e + j0) * sf + (e + j0);
@@ -865,14 +864,51 @@ void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags,
                                 smf_dgemm_nt_seq(C + w, H - w, w, kc, A + w, f, B, q, f, -1.0, 1.0);
                             }
                         }
+                    };
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+                    if (TileHelpers *h = current_top_helpers()) {
+                        BlasSerialPinScope pin_blas;
+                        if (static_cast<long long>(kc) * q >= 16384LL && kc >= 8) {
+                            const int nfill = std::min(nstrips, kc);
+                            parallel_for_helpers(nfill, nfill, h, [&](int s) {
+                                const int t0 = (kc * s) / nfill;
+                                const int t1 = (kc * (s + 1)) / nfill;
+                                for (int t = t0; t < t1; ++t) {
+                                    fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                                   buf + static_cast<std::size_t>(t) * sq);
+                                }
+                            });
+                        } else {
+                            for (int t = 0; t < kc; ++t) {
+                                fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                               buf + static_cast<std::size_t>(t) * sq);
+                            }
+                        }
+                        parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                        c0 = c1;
+                        continue;
                     }
-                    blas_local_restore(prev_blas);
+#endif
+#if defined(_OPENMP)
+                    BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+                    {
+                        const int prev_blas = blas_local_set_seq();
+#pragma omp for schedule(static)
+                        for (int t = 0; t < kc; ++t) {
+                            fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                           buf + static_cast<std::size_t>(t) * sq);
+                        }
+                        const int tid = omp_get_thread_num();
+                        if (tid < nstrips) run_strip(tid);
+                        blas_local_restore(prev_blas);
+                    }
+                    c0 = c1;
+                    continue;
+#endif
                 }
-                c0 = c1;
-                continue;
             }
         }
-#endif
         for (int t = 0; t < kc; ++t) {
             fill_ld_column(F, sf, e, q, tags, c0 + t,
                            buf + static_cast<std::size_t>(t) * sq);
@@ -1089,14 +1125,113 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
     return res;
 }
 
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+namespace {
+void posdef_dtrsm_omp(double *B, int n_rows, int k, const double *L, int ldl, int ldb, int nt) {
+    if (n_rows <= 0 || k <= 0) return;
+    if (nt >= 2 && n_rows >= 64 && static_cast<long long>(n_rows) * k * k >= 65536LL) {
+        const int nstrips = std::min({nt, 64, std::max(1, n_rows / 16)});
+        if (nstrips >= 2) {
+            const auto run_strip = [&](int s) {
+                const int r0 = (n_rows * s) / nstrips;
+                const int r1 = (n_rows * (s + 1)) / nstrips;
+                if (r1 > r0) {
+                    smf_dtrsm_right_lower_transpose_seq(B + r0, r1 - r0, k, L, ldl, ldb);
+                }
+            };
+            if (TileHelpers *h = current_top_helpers()) {
+                BlasSerialPinScope pin_blas;
+                parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                return;
+            }
+#if defined(_OPENMP)
+            BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+            {
+                const int tid = omp_get_thread_num();
+                if (tid < nstrips) run_strip(tid);
+            }
+            return;
+#endif
+        }
+    }
+    smf_dtrsm_right_lower_transpose(B, n_rows, k, L, ldl, ldb);
+}
+
+void posdef_dsyrk_omp(double *C, int m, const double *A, int k, int lda, int ldc, int nt) {
+    if (m <= 0 || k <= 0) return;
+    if (nt >= 2 && m >= 64 && static_cast<long long>(m) * m * k >= 262144LL) {
+        int bounds[65];
+        const int nstrips = equal_area_strips(m, m, nt, bounds);
+        if (nstrips >= 2) {
+            const std::size_t sldc = static_cast<std::size_t>(ldc);
+            const auto run_strip = [&](int s) {
+                const int j0 = bounds[s];
+                const int j1 = bounds[s + 1];
+                const int w = j1 - j0;
+                const int H = m - j0;
+                double *Cj = C + static_cast<std::size_t>(j0) * sldc + j0;
+                const double *Aj = A + j0;
+                smf_dsyrk_lower_seq(Cj, w, Aj, k, lda, ldc);
+                if (H > w) {
+                    smf_dgemm_nt_seq(Cj + w, H - w, w, k, Aj + w, lda, Aj, lda, ldc, -1.0, 1.0);
+                }
+            };
+            if (TileHelpers *h = current_top_helpers()) {
+                BlasSerialPinScope pin_blas;
+                parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                return;
+            }
+#if defined(_OPENMP)
+            BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+            {
+                const int tid = omp_get_thread_num();
+                if (tid < nstrips) run_strip(tid);
+            }
+            return;
+#endif
+        }
+    }
+    smf_dsyrk_lower(C, m, A, k, lda, ldc);
+}
+
+int posdef_dpotrf_omp(double *A, int n, int lda, int nt) {
+    if (nt < 2 || n < 256) return smf_dpotrf_lower(A, n, lda);
+    constexpr int kNb = 128;
+    const std::size_t slda = static_cast<std::size_t>(lda);
+    BlasSerialPinScope pin_blas;
+    for (int j = 0; j < n; j += kNb) {
+        const int jb = std::min(kNb, n - j);
+        double *Ajj = A + static_cast<std::size_t>(j) * slda + j;
+        const int info = smf_dpotrf_lower(Ajj, jb, lda);
+        if (info != 0) return info > 0 ? j + info : info;
+        const int rem = n - (j + jb);
+        if (rem > 0) {
+            double *A21 = Ajj + jb;
+            double *A22 = A + static_cast<std::size_t>(j + jb) * slda + (j + jb);
+            posdef_dtrsm_omp(A21, rem, jb, Ajj, lda, lda, nt);
+            posdef_dsyrk_omp(A22, rem, A21, jb, lda, lda, nt);
+        }
+    }
+    return 0;
+}
+} // namespace
+#endif
+
 LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8_t *tags) {
     LdltKernelResult res;
     const int p = num_elig;
     if (p <= 0) return res;
     const std::size_t sf = static_cast<std::size_t>(f);
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+    const int nt = blas_current_share();
+    const int info = posdef_dpotrf_omp(F, p, f, nt);
+#else
     // dpotrf stops at the first leading minor whose pivot is not > 0 (or is
     // NaN); info = that column + 1. The columns before it are factored.
     const int info = smf_dpotrf_lower(F, p, f);
+#endif
     int ok = info == 0 ? p : (info > 0 ? info - 1 : 0);
     // ldlt_factor_front also rejects an infinite pivot, which dpotrf takes
     // (sqrt(inf) = inf); the pivots before it are finite and positive.
@@ -1117,8 +1252,14 @@ LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8
     const int q = f - p;
     if (q > 0) {
         // L21 = A21 L11^-T, then S = A22 - L21 L21^T (lower).
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+        const int nt2 = blas_current_share();
+        posdef_dtrsm_omp(F + p, q, p, F, f, f, nt2);
+        posdef_dsyrk_omp(F + static_cast<std::size_t>(p) * sf + p, q, F + p, p, f, f, nt2);
+#else
         smf_dtrsm_right_lower_transpose(F + p, q, p, F, f, f);
         smf_dsyrk_lower(F + static_cast<std::size_t>(p) * sf + p, q, F + p, p, f, f);
+#endif
     }
     return res;
 }

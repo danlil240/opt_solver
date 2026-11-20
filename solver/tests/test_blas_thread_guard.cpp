@@ -356,3 +356,41 @@ TEST(BlasShare, FollowsAGrowingShare) {
     EXPECT_EQ(smf::blas_max_threads(), before);
     EXPECT_EQ(smf::blas_threads_active(), 0);
 }
+
+// BlasSerialPinScope: on process-wide BLAS backends (OpenBLAS), pins BLAS to 1
+// thread while concurrent workers enter BlasThreadGuard / BlasShareScope, tracks
+// per-thread shares via blas_current_share(), and restores the caller's BLAS
+// thread count cleanly on exit. On MKL, it is a harmless no-op.
+TEST(BlasSerialPin, PinsProcessWideAndPreservesCallerOnConcurrentGuards) {
+    const int original = get_blas_threads();
+    {
+        smf::BlasThreadGuard caller(4);
+        const int caller_threads = smf::blas_max_threads();
+        {
+            smf::BlasSerialPinScope pin;
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+            EXPECT_TRUE(smf::blas_is_pinned_serial());
+            EXPECT_EQ(smf::blas_max_threads(), 1);
+#else
+            EXPECT_FALSE(smf::blas_is_pinned_serial());
+#endif
+            std::atomic<int> bad{0};
+            std::vector<std::thread> ts;
+            for (int t = 0; t < 4; ++t) {
+                ts.emplace_back([&, t] {
+                    const int want = t + 2;
+                    smf::BlasThreadGuard wg(want);
+                    if (smf::blas_current_share() != want) ++bad;
+                    std::atomic<int> share{want + 1};
+                    smf::BlasShareScope ss(&share);
+                    if (smf::blas_current_share() != want + 1) ++bad;
+                });
+            }
+            for (auto &th : ts) th.join();
+            EXPECT_EQ(bad.load(), 0);
+        }
+        EXPECT_EQ(smf::blas_max_threads(), caller_threads)
+            << "BlasSerialPinScope did not restore caller's BLAS thread count";
+    }
+    EXPECT_EQ(get_blas_threads(), original);
+}

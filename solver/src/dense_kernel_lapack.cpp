@@ -211,6 +211,16 @@ void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
   smf_dgemmt_lower_nt_sub(C, m, k, A, lda, B, ldb, ldc);
 }
 
+void smf_dtrsm_right_lower_transpose_seq(double *B, int n_rows, int k,
+                                         const double *L, int ldl, int ldb) {
+  smf_dtrsm_right_lower_transpose(B, n_rows, k, L, ldl, ldb);
+}
+
+void smf_dsyrk_lower_seq(double *C, int k, const double *A, int n_cols, int lda,
+                         int ldc) {
+  smf_dsyrk_lower(C, k, A, n_cols, lda, ldc);
+}
+
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
   if (beta == 0.0) {
@@ -551,6 +561,47 @@ void smf_dgemm_nt(double *C, int m, int n, int k, const double *A, int lda,
               B, ldb, beta, C, ldc);
 }
 
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+// Recursive triangle-split GEMM for lower-triangle updates on non-MKL BLAS
+// (OpenBLAS's cblas_dgemmt is significantly slower than its cblas_dgemm
+// microkernel, and Apple Accelerate / Netlib lack cblas_dgemmt altogether).
+// Splits m x m into a full-efficiency rectangular bottom-left GEMM plus two
+// half-size lower triangles down to kLeaf = 48.
+static void dgemmt_lower_nt_rec(double *C, int m, int k, const double *A, int lda,
+                                const double *B, int ldb, int ldc) {
+  constexpr int kLeaf = 48;
+  if (m <= kLeaf) {
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m, m, k, -1.0,
+                A, lda, B, ldb, 1.0, C, ldc);
+    return;
+  }
+  const int m1 = m / 2;
+  const int m2 = m - m1;
+  cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m2, m1, k, -1.0,
+              A + m1, lda, B, ldb, 1.0, C + m1, ldc);
+  dgemmt_lower_nt_rec(C, m1, k, A, lda, B, ldb, ldc);
+  dgemmt_lower_nt_rec(C + static_cast<std::size_t>(m1) * ldc + m1, m2, k,
+                      A + m1, lda, B + m1, ldb, ldc);
+}
+
+static void dgemmt_lower_nn_rec(double *C, int m, int k, const double *A, int lda,
+                                const double *B, int ldb, int ldc) {
+  constexpr int kLeaf = 48;
+  if (m <= kLeaf) {
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m, m, k, -1.0,
+                A, lda, B, ldb, 1.0, C, ldc);
+    return;
+  }
+  const int m1 = m / 2;
+  const int m2 = m - m1;
+  cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m2, m1, k, -1.0,
+              A + m1, lda, B, ldb, 1.0, C + m1, ldc);
+  dgemmt_lower_nn_rec(C, m1, k, A, lda, B, ldb, ldc);
+  dgemmt_lower_nn_rec(C + static_cast<std::size_t>(m1) * ldc + m1, m2, k,
+                      A + m1, lda, B + static_cast<std::size_t>(m1) * ldb, ldb, ldc);
+}
+#endif
+
 void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
                              const double *B, int ldb, int ldc) {
     blas_follow_share();
@@ -564,14 +615,7 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
                A, lda, B, ldb, 1.0, C, ldc);
 #endif
 #else
-  // Column-blocked GEMM: only the upper half of each diagonal block is wasted.
-  constexpr int kBlock = 64;
-  for (int j0 = 0; j0 < m; j0 += kBlock) {
-    const int nc = std::min(kBlock, m - j0);
-    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m - j0, nc, k, -1.0,
-                A + j0, lda, B + j0, ldb, 1.0,
-                C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
-  }
+  dgemmt_lower_nt_rec(C, m, k, A, lda, B, ldb, ldc);
 #endif
 }
 
@@ -588,14 +632,7 @@ void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
                A, lda, B, ldb, 1.0, C, ldc);
 #endif
 #else
-  // Column-blocked GEMM: only the upper half of each diagonal block is wasted.
-  constexpr int kBlock = 64;
-  for (int j0 = 0; j0 < m; j0 += kBlock) {
-    const int nc = std::min(kBlock, m - j0);
-    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m - j0, nc, k, -1.0,
-                A + j0, lda, B + static_cast<std::size_t>(j0) * ldb, ldb, 1.0,
-                C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
-  }
+  dgemmt_lower_nn_rec(C, m, k, A, lda, B, ldb, ldc);
 #endif
 }
 
@@ -619,14 +656,22 @@ void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
                A, lda, B, ldb, 1.0, C, ldc);
 #endif
 #else
-  constexpr int kBlock = 64;
-  for (int j0 = 0; j0 < m; j0 += kBlock) {
-    const int nc = std::min(kBlock, m - j0);
-    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m - j0, nc, k, -1.0,
-                A + j0, lda, B + j0, ldb, 1.0,
-                C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
-  }
+  dgemmt_lower_nt_rec(C, m, k, A, lda, B, ldb, ldc);
 #endif
+}
+
+void smf_dtrsm_right_lower_transpose_seq(double *B, int n_rows, int k,
+                                         const double *L, int ldl, int ldb) {
+  if (n_rows <= 0 || k <= 0) return;
+  cblas_dtrsm(CblasColMajor, CblasRight, CblasLower, CblasTrans, CblasNonUnit,
+              n_rows, k, 1.0, L, ldl, B, ldb);
+}
+
+void smf_dsyrk_lower_seq(double *C, int k, const double *A, int n_cols, int lda,
+                         int ldc) {
+  if (k <= 0 || n_cols <= 0) return;
+  cblas_dsyrk(CblasColMajor, CblasLower, CblasNoTrans, k, n_cols, -1.0, A, lda,
+              1.0, C, ldc);
 }
 
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,

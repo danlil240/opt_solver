@@ -99,6 +99,38 @@ private:
     int prev_blocktime_ = -1; // blocktime the destructor restores (-1: not changed)
     const std::atomic<int> *prev_share_ = nullptr; // BlasShareScope suspended while the guard lives
     int prev_share_set_ = 0;
+    bool touched_blas_ = false; // whether this guard actually mutated the backend BLAS thread count
+};
+
+/// RAII scope that pins a process-wide BLAS backend (e.g. OpenBLAS) to 1
+/// thread for the duration of a multi-threaded smf region (SolvePool::run,
+/// OpenMP column-strip updates). While active, nested BlasThreadGuard and
+/// BlasShareScope instances still track per-thread shares (tl_counted /
+/// blas_current_share()) without touching openblas_set_num_threads(),
+/// eliminating process-wide thread-count races and pthread thrashing.
+/// No-op on backends with real thread-local control (Intel MKL).
+class BlasSerialPinScope {
+public:
+    BlasSerialPinScope() noexcept;
+    ~BlasSerialPinScope() noexcept;
+    BlasSerialPinScope(const BlasSerialPinScope&)            = delete;
+    BlasSerialPinScope& operator=(const BlasSerialPinScope&) = delete;
+};
+
+/// True while a BlasSerialPinScope holds a process-wide BLAS backend at 1
+/// thread (always false on MKL).
+bool blas_is_pinned_serial() noexcept;
+
+/// Accounting-only serial scope for SolvePool worker threads on process-wide
+/// BLAS backends (sets tl_counted = 1 without touching openblas_set_num_threads).
+class BlasWorkerSerialScope {
+public:
+    BlasWorkerSerialScope() noexcept;
+    ~BlasWorkerSerialScope() noexcept;
+    BlasWorkerSerialScope(const BlasWorkerSerialScope&)            = delete;
+    BlasWorkerSerialScope& operator=(const BlasWorkerSerialScope&) = delete;
+private:
+    int prev_counted_;
 };
 
 /// Control::top_critical_shares (8T engine Part 7): while it lives,
