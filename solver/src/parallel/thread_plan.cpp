@@ -264,7 +264,15 @@ bool top_tiles_on(const Control &ctrl, bool posdef, double static_pivot, double 
 }
 
 bool plan_blas_parallel(bool deterministic) {
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
   return !deterministic && blas_max_threads() > 1;
+#else
+  // Non-MKL builds parallelize large untiled fronts cooperatively across the
+  // SolvePool workers (StripJob / parallel_for_helpers) with BLAS pinned to
+  // 1 thread, so intra-front parallelism works even on single-threaded BLAS
+  // (libopenblas-serial, Apple Accelerate, Netlib).
+  return !deterministic && (blas_max_threads() > 1 || blas_current_share() > 1);
+#endif
 }
 
 TreeView tree_view(const AnalysisKeep &keep, bool tiles_on, bool blas_parallel,

@@ -764,7 +764,12 @@ TEST(ThreadPlan, BlasPricingFollowsBlasThreads)
             // What the factor call holds; plan_blas_parallel reads the
             // calling thread's BLAS setting, so it is checked under it.
             BlasThreadGuard g(8);
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
             blas_threads = !deterministic_mode(c) && blas_max_threads() > 1;
+#else
+            blas_threads = !deterministic_mode(c) &&
+                           (blas_max_threads() > 1 || blas_current_share() > 1);
+#endif
             EXPECT_EQ(plan_blas_parallel(deterministic_mode(c)), blas_threads);
         }
         const int want = blas_threads ? blas_pick : serial_pick;

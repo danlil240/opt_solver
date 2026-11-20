@@ -7,6 +7,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -291,13 +292,14 @@ inline int RUN_ALL_TESTS() {
 }
 
 #define SMF_GTEST_CLASS_NAME_(suite, name) suite##_##name##_Test
+#define SMF_GTEST_REG_NAME_(suite, name) suite##_##name##_Test_reg_
 
 #define TEST(suite, name)                                                                          \
     class SMF_GTEST_CLASS_NAME_(suite, name) : public ::testing::Test {                            \
     public:                                                                                        \
         void TestBody() override;                                                                  \
     };                                                                                             \
-    static int SMF_GTEST_CLASS_NAME_(suite, name)##_reg_ = ::testing::register_test(               \
+    static int SMF_GTEST_REG_NAME_(suite, name) = ::testing::register_test(                        \
         #suite, #name, []() -> ::testing::Test* { return new SMF_GTEST_CLASS_NAME_(suite, name)(); }); \
     void SMF_GTEST_CLASS_NAME_(suite, name)::TestBody()
 
@@ -306,7 +308,7 @@ inline int RUN_ALL_TESTS() {
     public:                                                                                        \
         void TestBody() override;                                                                  \
     };                                                                                             \
-    static int SMF_GTEST_CLASS_NAME_(fixture, name)##_reg_ = ::testing::register_test(             \
+    static int SMF_GTEST_REG_NAME_(fixture, name) = ::testing::register_test(                      \
         #fixture, #name, []() -> ::testing::Test* { return new SMF_GTEST_CLASS_NAME_(fixture, name)(); }); \
     void SMF_GTEST_CLASS_NAME_(fixture, name)::TestBody()
 

@@ -67,6 +67,8 @@ public:
   // TileHelpers: a running front lends `slots` places to idle workers.
   void offer(TileRunner &job, int slots) override;
   void withdraw(TileRunner &job) override;
+  void offer_helper(HelperJob &job, int slots) override;
+  void withdraw_helper(HelperJob &job) override;
 
   // Completion order (topological), and how many nodes were taken from the
   // shared ready list rather than continued by the thread that readied them.
@@ -87,7 +89,7 @@ private:
   struct Task {
     Int node = -1;
     int threads = 0;
-    TileRunner *job = nullptr;
+    HelperJob *job = nullptr;
   };
 
   Task acquire();
@@ -117,7 +119,7 @@ private:
   std::vector<std::atomic<int>> share_;  // per node: its BLAS share while it runs
   std::vector<Int> running_;   // with priorities: the nodes running now
   int threads_ = 1;
-  std::vector<std::pair<TileRunner *, int>> offers_;  // (job, slots left), newest last
+  std::vector<std::pair<HelperJob *, int>> offers_;  // (job, slots left), newest last
   std::vector<std::pair<Int, int>> completed_;
   int free_ = 0;               // BLAS threads not held by running nodes
   int remaining_ = 0;          // nodes not completed

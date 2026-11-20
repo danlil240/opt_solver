@@ -109,4 +109,16 @@ private:
 };
 
 } // namespace smf::bench
+#else
+#include <cstdio>
+namespace smf::bench {
+class Sampler {
+public:
+    void start() {}
+    void stop() {}
+    void report(bool /*by_line*/, int /*top*/ = 40) const {
+        std::printf("---- sampler unavailable on non-Windows ----\n");
+    }
+};
+} // namespace smf::bench
 #endif

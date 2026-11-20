@@ -13,6 +13,18 @@
 
 namespace smf {
 
+namespace {
+thread_local TileHelpers *tl_top_helpers = nullptr;
+} // namespace
+
+TileHelpers *current_top_helpers() noexcept { return tl_top_helpers; }
+
+TopHelpersScope::TopHelpersScope(TileHelpers *h) noexcept : prev_(tl_top_helpers) {
+    tl_top_helpers = h;
+}
+
+TopHelpersScope::~TopHelpersScope() noexcept { tl_top_helpers = prev_; }
+
 // ---------------------------------------------------------------------------
 // TileRunner
 // ---------------------------------------------------------------------------

@@ -208,6 +208,51 @@ TEST(BLASWrap, DtrsvLT) {
     EXPECT_LT(std::sqrt(residual), 1e-14) << "dtrsv_lower_transpose residual too large";
 }
 
+TEST(BLASWrap, DgemmtLowerNtAndNn) {
+    for (const int M : {7, 80}) {
+        const int K = 13;
+        const int ldc = M + 3;
+        std::vector<double> A(static_cast<std::size_t>(M) * K);
+        std::vector<double> B_nt(static_cast<std::size_t>(M) * K);
+        std::vector<double> B_nn(static_cast<std::size_t>(K) * M);
+        for (int j = 0; j < K; ++j) {
+            for (int i = 0; i < M; ++i) {
+                A[static_cast<std::size_t>(j) * M + i] = 0.01 * (i + 1) - 0.02 * (j + 1);
+                B_nt[static_cast<std::size_t>(j) * M + i] = -0.015 * (i + 2) + 0.03 * (j + 1);
+                B_nn[static_cast<std::size_t>(i) * K + j] = B_nt[static_cast<std::size_t>(j) * M + i];
+            }
+        }
+        constexpr double kSentinel = 12345.6789;
+        std::vector<double> C_nt(static_cast<std::size_t>(ldc) * M, kSentinel);
+        std::vector<double> C_nn(static_cast<std::size_t>(ldc) * M, kSentinel);
+        std::vector<double> C_seq(static_cast<std::size_t>(ldc) * M, kSentinel);
+        for (int j = 0; j < M; ++j) {
+            for (int i = j; i < M; ++i) {
+                const double init = 0.5 * (i - j) + 1.0;
+                cm(C_nt.data(), ldc, i, j) = init;
+                cm(C_nn.data(), ldc, i, j) = init;
+                cm(C_seq.data(), ldc, i, j) = init;
+            }
+        }
+        smf::smf_dgemmt_lower_nt_sub(C_nt.data(), M, K, A.data(), M, B_nt.data(), M, ldc);
+        smf::smf_dgemmt_lower_nn_sub(C_nn.data(), M, K, A.data(), M, B_nn.data(), K, ldc);
+        smf::smf_dgemmt_lower_nt_sub_seq(C_seq.data(), M, K, A.data(), M, B_nt.data(), M, ldc);
+
+        for (int j = 0; j < M; ++j) {
+            for (int i = j; i < M; ++i) {
+                double expected = 0.5 * (i - j) + 1.0;
+                for (int p = 0; p < K; ++p) {
+                    expected -= A[static_cast<std::size_t>(p) * M + i] *
+                                B_nt[static_cast<std::size_t>(p) * M + j];
+                }
+                EXPECT_NEAR(cm(C_nt.data(), ldc, i, j), expected, 1e-11);
+                EXPECT_NEAR(cm(C_nn.data(), ldc, i, j), expected, 1e-11);
+                EXPECT_NEAR(cm(C_seq.data(), ldc, i, j), expected, 1e-11);
+            }
+        }
+    }
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
