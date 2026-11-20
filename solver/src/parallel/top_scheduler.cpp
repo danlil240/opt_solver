@@ -212,14 +212,25 @@ Int TopScheduler::finish(Int node, int tid, bool ok, int &threads) {
 }
 
 void TopScheduler::offer(TileRunner &job, int slots) {
+  offer_helper(job, slots);
+}
+
+void TopScheduler::withdraw(TileRunner &job) {
+  withdraw_helper(job);
+}
+
+void TopScheduler::offer_helper(HelperJob &job, int slots) {
   if (slots <= 0) return;
   std::lock_guard<std::mutex> lk(mtx_);
   offers_.emplace_back(&job, slots);
   publish();
-  wake_one_if_runnable();
+  if (sleepers_ > 0) {
+    if (slots > 1) cv_.notify_all();
+    else cv_.notify_one();
+  }
 }
 
-void TopScheduler::withdraw(TileRunner &job) {
+void TopScheduler::withdraw_helper(HelperJob &job) {
   std::lock_guard<std::mutex> lk(mtx_);
   for (std::size_t i = 0; i < offers_.size(); ++i)
     if (offers_[i].first == &job) {

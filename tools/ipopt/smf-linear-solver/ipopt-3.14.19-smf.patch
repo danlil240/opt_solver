@@ -1,0 +1,1058 @@
+diff --git a/configure.ac b/configure.ac
+index 57da418..b4c4e83 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -226,6 +226,16 @@ if test $checkpardisomkl = yes ; then
+ fi
+ AM_CONDITIONAL([HAVE_PARDISO_MKL],[test "$have_pardiso_mkl" = yes])
+ 
++#######
++# SMF #
++#######
++
++if test $precision$intsize = double32 ; then
++  AC_COIN_CHK_PKG(Smf,[IpoptLib],[smf])
++else
++  AM_CONDITIONAL([COIN_HAS_SMF],[false])
++fi
++
+ #########
+ # SPRAL #
+ #########
+diff --git a/src/Algorithm/IpAlgBuilder.cpp b/src/Algorithm/IpAlgBuilder.cpp
+index 042b2c8..e56bfd3 100644
+--- a/src/Algorithm/IpAlgBuilder.cpp
++++ b/src/Algorithm/IpAlgBuilder.cpp
+@@ -59,6 +59,9 @@
+ #include "IpMa97SolverInterface.hpp"
+ #include "IpMc19TSymScalingMethod.hpp"
+ #include "IpPardisoSolverInterface.hpp"
++#ifndef IPOPT_SINGLE
++#include "IpSmfSolverInterface.hpp"
++#endif
+ #ifdef IPOPT_HAS_PARDISO_MKL
+ # include "IpPardisoMKLSolverInterface.hpp"
+ #endif
+@@ -195,6 +198,19 @@ void AlgorithmBuilder::RegisterOptions(
+       descrs.push_back("use the Wsmp package");
+    }
+ 
++   if( availablesolvers & IPOPTLINEARSOLVER_SMF )
++   {
++      options.push_back("smf");
++      if( availablesolverslinked & IPOPTLINEARSOLVER_SMF )
++      {
++         descrs.push_back("use the smf sparse symmetric multifrontal solver");
++      }
++      else
++      {
++         descrs.push_back("load the smf sparse symmetric multifrontal solver from user-provided library at runtime");
++      }
++   }
++
+    if( availablesolvers & IPOPTLINEARSOLVER_MUMPS )
+    {
+       options.push_back("mumps");
+@@ -229,6 +245,10 @@ void AlgorithmBuilder::RegisterOptions(
+    {
+       defaultsolver = "wsmp";
+    }
++   else if( availablesolverslinked & IPOPTLINEARSOLVER_SMF )
++   {
++      defaultsolver = "smf";
++   }
+    else if( availablesolverslinked & IPOPTLINEARSOLVER_MUMPS )
+    {
+       defaultsolver = "mumps";
+@@ -316,6 +336,16 @@ void AlgorithmBuilder::RegisterOptions(
+ #endif
+       "*", "Any acceptable filename (may contain path, too)");
+ 
++   if( (availablesolverslinked ^ availablesolvers) & IPOPTLINEARSOLVER_SMF )
++      roptions->AddStringOption1(
++         "smflib", "Name of library containing smf C ABI routines (libsmf_c) for load at runtime",
++#if defined(_WIN32) && defined(_MSC_VER)
++         "smf_c.dll",
++#else
++         "libsmf_c." IPOPT_SHAREDLIBEXT,
++#endif
++         "*", "Any acceptable filename (may contain path, too)");
++
+    roptions->SetRegisteringCategory("NLP Scaling");
+ 
+    options.clear();
+@@ -465,6 +495,19 @@ SmartPtr<SymLinearSolver> AlgorithmBuilder::SymLinearSolverFactory(
+    {
+       SolverInterface = new PardisoSolverInterface(GetPardisoLoader(options, prefix));
+    }
++#ifndef IPOPT_SINGLE
++   else if( linear_solver == "smf" )
++   {
++      SolverInterface = new SmfSolverInterface(
++#ifdef IPOPT_HAS_SMF
++         NULL
++#else
++         GetSmfLoader(options, prefix)
++#endif
++      );
++      linear_solver = SmfSolverInterface::GetName();
++   }
++#endif
+ #endif
+ 
+ #ifdef IPOPT_HAS_PARDISO_MKL
+@@ -1170,4 +1213,19 @@ SmartPtr<LibraryLoader> AlgorithmBuilder::GetPardisoLoader(
+    return pardisoloader;
+ }
+ 
++SmartPtr<LibraryLoader> AlgorithmBuilder::GetSmfLoader(
++   const OptionsList& options,
++   const std::string& prefix
++)
++{
++   if( !IsValid(smfloader) )
++   {
++      std::string libname;
++      options.GetStringValue("smflib", libname, prefix);
++      smfloader = new LibraryLoader(libname);
++   }
++
++   return smfloader;
++}
++
+ } // namespace
+diff --git a/src/Algorithm/IpAlgBuilder.hpp b/src/Algorithm/IpAlgBuilder.hpp
+index 9965bd6..7253930 100644
+--- a/src/Algorithm/IpAlgBuilder.hpp
++++ b/src/Algorithm/IpAlgBuilder.hpp
+@@ -349,6 +349,12 @@ protected:
+       const std::string& prefix
+    );
+ 
++   /// Gives Library Loader for smf shared C ABI library (libsmf_c).
++   SmartPtr<LibraryLoader> GetSmfLoader(
++      const OptionsList& options,
++      const std::string& prefix
++   );
++
+ private:
+    /**@name Default Compiler Generated Methods
+     * (Hidden to avoid implicit creation/calling).
+@@ -412,6 +418,8 @@ private:
+    SmartPtr<LibraryLoader> hslloader;
+    /// loader of Pardiso library (at runtime)
+    SmartPtr<LibraryLoader> pardisoloader;
++   /// loader of smf library (at runtime)
++   SmartPtr<LibraryLoader> smfloader;
+ 
+ };
+ } // namespace Ipopt
+diff --git a/src/Algorithm/LinearSolvers/IpLinearSolvers.c b/src/Algorithm/LinearSolvers/IpLinearSolvers.c
+index 12858a4..c9b626e 100644
+--- a/src/Algorithm/LinearSolvers/IpLinearSolvers.c
++++ b/src/Algorithm/LinearSolvers/IpLinearSolvers.c
+@@ -60,6 +60,10 @@ IpoptLinearSolver IpoptGetAvailableLinearSolvers(
+    solvers |= IPOPTLINEARSOLVER_MUMPS;
+ #endif
+ 
++#if !defined(IPOPT_SINGLE) && !defined(IPOPT_INT64) && defined(IPOPT_HAS_SMF)
++   solvers |= IPOPTLINEARSOLVER_SMF;
++#endif
++
+ #if defined(IPOPT_HAS_LINEARSOLVERLOADER)
+    if( !buildinonly )
+    {
+@@ -71,6 +75,9 @@ IpoptLinearSolver IpoptGetAvailableLinearSolvers(
+       solvers |= IPOPTLINEARSOLVER_MA97;
+       solvers |= IPOPTLINEARSOLVER_MC19;
+       solvers |= IPOPTLINEARSOLVER_PARDISO;
++#ifndef IPOPT_SINGLE
++      solvers |= IPOPTLINEARSOLVER_SMF;
++#endif
+ #endif
+    }
+ #else
+diff --git a/src/Algorithm/LinearSolvers/IpLinearSolvers.h b/src/Algorithm/LinearSolvers/IpLinearSolvers.h
+index 3cb57be..689492b 100644
+--- a/src/Algorithm/LinearSolvers/IpLinearSolvers.h
++++ b/src/Algorithm/LinearSolvers/IpLinearSolvers.h
+@@ -21,6 +21,7 @@
+ #define IPOPTLINEARSOLVER_SPRAL   0x100u
+ #define IPOPTLINEARSOLVER_WSMP    0x200u
+ #define IPOPTLINEARSOLVER_MUMPS   0x400u
++#define IPOPTLINEARSOLVER_SMF     0x800u
+ 
+ #ifdef __cplusplus
+ extern "C"
+diff --git a/src/Algorithm/LinearSolvers/IpLinearSolversRegOp.cpp b/src/Algorithm/LinearSolvers/IpLinearSolversRegOp.cpp
+index 465cfe3..34a6013 100644
+--- a/src/Algorithm/LinearSolvers/IpLinearSolversRegOp.cpp
++++ b/src/Algorithm/LinearSolvers/IpLinearSolversRegOp.cpp
+@@ -17,6 +17,9 @@
+ #include "IpMa97SolverInterface.hpp"
+ #include "IpMa28TDependencyDetector.hpp"
+ #include "IpPardisoSolverInterface.hpp"
++#ifndef IPOPT_SINGLE
++#include "IpSmfSolverInterface.hpp"
++#endif
+ #ifdef IPOPT_HAS_PARDISO_MKL
+ #include "IpPardisoMKLSolverInterface.hpp"
+ #endif
+@@ -89,6 +92,13 @@ void RegisterOptions_LinearSolvers(
+       roptions->SetRegisteringCategory("Pardiso (pardiso-project.org) Linear Solver");
+       PardisoSolverInterface::RegisterOptions(roptions);
+    }
++#ifndef IPOPT_SINGLE
++   if( availablesolvers & IPOPTLINEARSOLVER_SMF )
++   {
++      roptions->SetRegisteringCategory("SMF Linear Solver");
++      SmfSolverInterface::RegisterOptions(roptions);
++   }
++#endif
+ #endif
+ 
+ #ifdef IPOPT_HAS_PARDISO_MKL
+diff --git a/src/Algorithm/LinearSolvers/IpSmfSolverInterface.cpp b/src/Algorithm/LinearSolvers/IpSmfSolverInterface.cpp
+new file mode 100755
+index 0000000..8cd68a3
+--- /dev/null
++++ b/src/Algorithm/LinearSolvers/IpSmfSolverInterface.cpp
+@@ -0,0 +1,491 @@
++// Copyright (C) 2026 smf authors
++// All Rights Reserved.
++// This code is published under the Eclipse Public License.
++
++#include "IpoptConfig.h"
++#include "IpSmfSolverInterface.hpp"
++
++#include <cmath>
++#include <cstring>
++
++namespace Ipopt
++{
++
++SmfSolverInterface::SmfSolverInterface(
++   SmartPtr<LibraryLoader> smfloader
++)
++   : ndim_(0),
++     val_(NULL),
++     numneg_(0),
++     numdelay_(0),
++     session_(NULL),
++     pivtol_changed_(false),
++     dynamic_active_(false),
++     rescale_(false),
++     scaling_(NULL),
++     umax_(1e-4),
++     scaling_mode_(SCALE_MODE_AUTO),
++     smfloader_(smfloader),
++     smf_c_abi_version_fn_(NULL),
++     smf_version_fn_(NULL),
++     smf_blas_backend_fn_(NULL),
++     smf_ipm_default_control_fn_(NULL),
++     smf_ipm_create_fn_(NULL),
++     smf_ipm_analyse_fn_(NULL),
++     smf_ipm_factor_fn_(NULL),
++     smf_ipm_solve_fn_(NULL),
++     smf_ipm_free_fn_(NULL)
++{
++   std::memset(&control_, 0, sizeof(control_));
++}
++
++SmfSolverInterface::~SmfSolverInterface()
++{
++   if( session_ != NULL && smf_ipm_free_fn_ != NULL )
++   {
++      smf_ipm_free_fn_(&session_);
++   }
++   delete[] val_;
++   delete[] scaling_;
++}
++
++std::string SmfSolverInterface::GetName()
++{
++#ifdef IPOPT_HAS_SMF
++   std::string name = "smf";
++   if( const char* ver = smf_version() )
++   {
++      name += " ";
++      name += ver;
++   }
++   if( const char* blas = smf_blas_backend() )
++   {
++      name += " (";
++      name += blas;
++      name += ")";
++   }
++   return name;
++#else
++   return "smf";
++#endif
++}
++
++void SmfSolverInterface::LoadFunctions()
++{
++   if( smf_ipm_factor_fn_ != NULL )
++   {
++      return;
++   }
++
++#ifdef IPOPT_HAS_SMF
++   smf_c_abi_version_fn_       = &::smf_c_abi_version;
++   smf_version_fn_             = &::smf_version;
++   smf_blas_backend_fn_        = &::smf_blas_backend;
++   smf_ipm_default_control_fn_ = &::smf_ipm_default_control;
++   smf_ipm_create_fn_          = &::smf_ipm_create;
++   smf_ipm_analyse_fn_         = &::smf_ipm_analyse;
++   smf_ipm_factor_fn_          = &::smf_ipm_factor;
++   smf_ipm_solve_fn_           = &::smf_ipm_solve;
++   smf_ipm_free_fn_            = &::smf_ipm_free;
++#else
++   DBG_ASSERT(IsValid(smfloader_));
++   smf_c_abi_version_fn_ = reinterpret_cast<IPOPT_DECL_SMF_C_ABI_VERSION(*)>(
++      smfloader_->loadSymbol("smf_c_abi_version"));
++   smf_version_fn_ = reinterpret_cast<IPOPT_DECL_SMF_VERSION(*)>(
++      smfloader_->loadSymbol("smf_version"));
++   smf_blas_backend_fn_ = reinterpret_cast<IPOPT_DECL_SMF_BLAS_BACKEND(*)>(
++      smfloader_->loadSymbol("smf_blas_backend"));
++   smf_ipm_default_control_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_DEFAULT_CONTROL(*)>(
++      smfloader_->loadSymbol("smf_ipm_default_control"));
++   smf_ipm_create_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_CREATE(*)>(
++      smfloader_->loadSymbol("smf_ipm_create"));
++   smf_ipm_analyse_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_ANALYSE(*)>(
++      smfloader_->loadSymbol("smf_ipm_analyse"));
++   smf_ipm_factor_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_FACTOR(*)>(
++      smfloader_->loadSymbol("smf_ipm_factor"));
++   smf_ipm_solve_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_SOLVE(*)>(
++      smfloader_->loadSymbol("smf_ipm_solve"));
++   smf_ipm_free_fn_ = reinterpret_cast<IPOPT_DECL_SMF_IPM_FREE(*)>(
++      smfloader_->loadSymbol("smf_ipm_free"));
++#endif
++
++   const int abi = smf_c_abi_version_fn_();
++   if( abi != SMF_C_ABI_VERSION )
++   {
++      THROW_EXCEPTION(DYNAMIC_LIBRARY_FAILURE,
++         "smf C ABI version mismatch: loaded library reports incompatible ABI version.");
++   }
++}
++
++void SmfSolverInterface::RegisterOptions(
++   SmartPtr<RegisteredOptions> roptions
++)
++{
++   roptions->AddBoundedNumberOption(
++      "smf_u",
++      "Pivoting threshold for smf.",
++      0.0, false,
++      0.5, false,
++      1e-8,
++      "Threshold parameter u for numerical pivoting in smf LDL^T factorization.");
++
++   roptions->AddBoundedNumberOption(
++      "smf_umax",
++      "Maximum pivoting threshold for smf.",
++      0.0, false,
++      0.5, false,
++      1e-4,
++      "Upper bound on smf_u when Ipopt requests higher factorization quality.");
++
++   roptions->AddLowerBoundedNumberOption(
++      "smf_small",
++      "Zero-pivot threshold for smf.",
++      0.0, true,
++      1e-20,
++      "Pivots with absolute value smaller than smf_small are treated as zero.");
++
++   roptions->AddLowerBoundedIntegerOption(
++      "smf_nemin",
++      "Supernode amalgamation threshold for smf.",
++      1,
++      8,
++      "Two assembly-tree nodes are merged if both have fewer than smf_nemin eliminations.");
++
++   roptions->AddStringOption4(
++      "smf_ordering",
++      "Fill-reducing ordering method for smf.",
++      "auto",
++      "auto", "Automatic AMD / METIS / Parallel ND / Matching selection",
++      "amd", "SuiteSparse Approximate Minimum Degree",
++      "metis", "METIS nested dissection",
++      "matching", "Matching-based AMD ordering");
++
++   roptions->AddStringOption5(
++      "smf_scaling",
++      "Scaling strategy for smf.",
++      "auto",
++      "auto", "Native smf unscaled-first with scale-on-delay rescue",
++      "dynamic", "Start unscaled, switch to reused MC64 matching on high delays or quality increase",
++      "none", "Disable scaling",
++      "matching", "Always apply MC64-style max-product matching scaling",
++      "equilibration", "Apply Ruiz equilibration scaling");
++
++   roptions->AddLowerBoundedIntegerOption(
++      "smf_num_threads",
++      "Number of worker threads for smf (0 = automatic).",
++      0,
++      0,
++      "0 uses SMF_NUM_THREADS, else OMP_NUM_THREADS, else allowed performance cores.");
++
++   roptions->AddStringOption2(
++      "smf_pivoting",
++      "Pivoting mode for smf.",
++      "threshold",
++      "threshold", "Accurate threshold pivoting with delayed pivots and exact inertia",
++      "static", "Opt-in fast static pivoting (falls back via honest-inertia guard when perturbed)");
++
++   roptions->AddStringOption3(
++      "smf_slack_elimination",
++      "Inequality slack-pair 2x2 pre-elimination for smf.",
++      "off",
++      "off", "Disable slack-pair elimination",
++      "on", "Enable slack-pair elimination when eligible",
++      "auto", "Enable automatically when slack pairs exceed share threshold");
++
++   roptions->AddStringOption2(
++      "smf_deterministic",
++      "Bitwise-deterministic mode across thread counts for smf.",
++      "no",
++      "no", "Default parallel execution",
++      "yes", "Deterministic orderings, inertia, factors, and solves");
++
++   roptions->AddIntegerOption(
++      "smf_print_level",
++      "Diagnostic print level for smf (<= 0 silent).",
++      -1);
++}
++
++bool SmfSolverInterface::InitializeImpl(
++   const OptionsList& options,
++   const std::string& prefix
++)
++{
++   LoadFunctions();
++   smf_ipm_default_control_fn_(&control_);
++
++   options.GetNumericValue("smf_u", control_.u, prefix);
++   options.GetNumericValue("smf_umax", umax_, prefix);
++   options.GetNumericValue("smf_small", control_.small, prefix);
++   options.GetIntegerValue("smf_nemin", control_.nemin, prefix);
++   options.GetIntegerValue("smf_num_threads", control_.num_threads, prefix);
++   options.GetIntegerValue("smf_print_level", control_.print_level, prefix);
++
++   std::string opt;
++   options.GetStringValue("smf_ordering", opt, prefix);
++   if( opt == "amd" )
++   {
++      control_.ordering = SMF_ORDER_AMD;
++   }
++   else if( opt == "metis" )
++   {
++      control_.ordering = SMF_ORDER_METIS;
++   }
++   else if( opt == "matching" )
++   {
++      control_.ordering = SMF_ORDER_MATCHING;
++   }
++   else
++   {
++      control_.ordering = SMF_ORDER_AUTO;
++   }
++
++   options.GetStringValue("smf_scaling", opt, prefix);
++   if( opt == "dynamic" )
++   {
++      scaling_mode_ = SCALE_MODE_DYNAMIC;
++      control_.scaling = SMF_SCALE_NONE;
++   }
++   else if( opt == "none" )
++   {
++      scaling_mode_ = SCALE_MODE_NONE;
++      control_.scaling = SMF_SCALE_NONE;
++   }
++   else if( opt == "matching" )
++   {
++      scaling_mode_ = SCALE_MODE_MATCHING;
++      control_.scaling = SMF_SCALE_MATCHING;
++   }
++   else if( opt == "equilibration" )
++   {
++      scaling_mode_ = SCALE_MODE_EQUILIBRATION;
++      control_.scaling = SMF_SCALE_EQUILIBRATION;
++   }
++   else
++   {
++      scaling_mode_ = SCALE_MODE_AUTO;
++      control_.scaling = SMF_SCALE_AUTO;
++   }
++
++   options.GetStringValue("smf_pivoting", opt, prefix);
++   control_.pivoting = (opt == "static") ? SMF_PIVOTING_STATIC : SMF_PIVOTING_THRESHOLD;
++
++   options.GetStringValue("smf_slack_elimination", opt, prefix);
++   if( opt == "on" )
++   {
++      control_.slack_elimination = SMF_SLACK_ON;
++   }
++   else if( opt == "auto" )
++   {
++      control_.slack_elimination = SMF_SLACK_AUTO;
++   }
++   else
++   {
++      control_.slack_elimination = SMF_SLACK_OFF;
++   }
++
++   options.GetStringValue("smf_deterministic", opt, prefix);
++   control_.deterministic = (opt == "yes") ? 1 : 0;
++
++   control_.continue_on_singular = 1;
++   control_.honest_inertia = 1;
++
++   numneg_ = 0;
++   numdelay_ = 0;
++   pivtol_changed_ = false;
++   dynamic_active_ = false;
++   rescale_ = false;
++
++   if( Jnlst().ProduceOutput(J_DETAILED, J_LINEAR_ALGEBRA) )
++   {
++      Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++         "smf linear solver initialized: version=%s backend=%s threads=%d u=%.2e\n",
++         smf_version_fn_(), smf_blas_backend_fn_(), control_.num_threads, control_.u);
++   }
++
++   return true;
++}
++
++ESymSolverStatus SmfSolverInterface::InitializeStructure(
++   Index        dim,
++   Index        nonzeros,
++   const Index* ia,
++   const Index* ja
++)
++{
++   ndim_ = dim;
++
++   delete[] val_;
++   val_ = new Number[nonzeros];
++
++   delete[] scaling_;
++   scaling_ = NULL;
++   if( scaling_mode_ == SCALE_MODE_DYNAMIC )
++   {
++      scaling_ = new double[dim];
++      for( int i = 0; i < dim; ++i )
++      {
++         scaling_[i] = 1.0;
++      }
++   }
++
++   if( session_ != NULL )
++   {
++      smf_ipm_free_fn_(&session_);
++   }
++   if( smf_ipm_create_fn_(&session_) != SMF_OK || session_ == NULL )
++   {
++      Jnlst().Printf(J_ERROR, J_LINEAR_ALGEBRA,
++         "smf: failed to create IPM session.\n");
++      return SYMSOLVER_FATAL_ERROR;
++   }
++
++   smf_ipm_info_t info;
++   /* Deferred analysis (values == NULL) so smf's matching trial sees real KKT values
++    * on the first factorization call. */
++   const int rc = smf_ipm_analyse_fn_(session_, dim, ia, ja, NULL, &control_, &info);
++   if( rc != SMF_OK )
++   {
++      Jnlst().Printf(J_ERROR, J_LINEAR_ALGEBRA,
++         "smf: symbolic analysis failed with status %d.\n", rc);
++      return SYMSOLVER_FATAL_ERROR;
++   }
++
++   numneg_ = 0;
++   numdelay_ = 0;
++   dynamic_active_ = false;
++   rescale_ = false;
++   pivtol_changed_ = false;
++
++   return SYMSOLVER_SUCCESS;
++}
++
++ESymSolverStatus SmfSolverInterface::MultiSolve(
++   bool         new_matrix,
++   const Index* /*ia*/,
++   const Index* /*ja*/,
++   Index        nrhs,
++   Number*      rhs_vals,
++   bool         check_NegEVals,
++   Index        numberOfNegEVals
++)
++{
++   smf_ipm_info_t info;
++
++   if( new_matrix || pivtol_changed_ )
++   {
++      smf_ipm_control_t fc = control_;
++      double* scale_ptr = NULL;
++
++      if( scaling_mode_ == SCALE_MODE_DYNAMIC )
++      {
++         if( dynamic_active_ )
++         {
++            scale_ptr = scaling_;
++            if( rescale_ )
++            {
++               fc.scaling = SMF_SCALE_MATCHING;
++               rescale_ = false;
++            }
++            else
++            {
++               fc.scaling = SMF_SCALE_NONE;
++            }
++         }
++         else
++         {
++            fc.scaling = SMF_SCALE_NONE;
++         }
++      }
++
++      const int rc = smf_ipm_factor_fn_(session_, SMF_INDEF, val_, &fc, &info, scale_ptr);
++
++      /* Always update numneg_ BEFORE inertia checks (immune to coin-or/Ipopt#870). */
++      numneg_ = info.num_neg;
++      numdelay_ = info.num_delay;
++      pivtol_changed_ = false;
++
++      if( rc == SMF_ERR_SINGULAR || rc == SMF_ERR_INEXACT_INERTIA )
++      {
++         Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++            "smf: matrix singular or inexact inertia (rc=%d, zero=%d, static=%d).\n",
++            rc, info.num_zero, info.static_pivots);
++         return SYMSOLVER_SINGULAR;
++      }
++      if( rc == SMF_ERR_WRONG_INERTIA )
++      {
++         return SYMSOLVER_WRONG_INERTIA;
++      }
++      if( rc != SMF_OK )
++      {
++         Jnlst().Printf(J_ERROR, J_LINEAR_ALGEBRA,
++            "smf: factorization failed with status %d.\n", rc);
++         return SYMSOLVER_FATAL_ERROR;
++      }
++
++      if( scaling_mode_ == SCALE_MODE_DYNAMIC && !dynamic_active_ &&
++          info.num_delay > static_cast<int>(0.05 * ndim_) )
++      {
++         dynamic_active_ = true;
++         rescale_ = true;
++      }
++
++      if( check_NegEVals && numberOfNegEVals != numneg_ )
++      {
++         Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++            "smf: wrong inertia (expected %d negative eigenvalues, got %d).\n",
++            numberOfNegEVals, numneg_);
++         return SYMSOLVER_WRONG_INERTIA;
++      }
++   }
++
++   const int rc = smf_ipm_solve_fn_(session_, SMF_SOLVE_FULL, nrhs, rhs_vals, ndim_, &control_, &info);
++   if( rc != SMF_OK )
++   {
++      Jnlst().Printf(J_ERROR, J_LINEAR_ALGEBRA,
++         "smf: solve failed with status %d.\n", rc);
++      return SYMSOLVER_FATAL_ERROR;
++   }
++
++   return SYMSOLVER_SUCCESS;
++}
++
++bool SmfSolverInterface::IncreaseQuality()
++{
++   if( scaling_mode_ == SCALE_MODE_DYNAMIC && !dynamic_active_ )
++   {
++      dynamic_active_ = true;
++      rescale_ = true;
++      pivtol_changed_ = true;
++      Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++         "smf: activating dynamic matching scaling to increase solution quality.\n");
++      return true;
++   }
++
++   if( control_.u < umax_ )
++   {
++      const double next_u = (control_.u <= 0.0) ? Min(umax_, 1e-8)
++                                                : Min(umax_, std::pow(control_.u, 0.75));
++      if( next_u > control_.u )
++      {
++         Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++            "smf: increasing pivot threshold smf_u from %.2e to %.2e.\n",
++            control_.u, next_u);
++         control_.u = next_u;
++         pivtol_changed_ = true;
++         return true;
++      }
++   }
++
++   if( scaling_mode_ == SCALE_MODE_DYNAMIC && !rescale_ )
++   {
++      rescale_ = true;
++      pivtol_changed_ = true;
++      Jnlst().Printf(J_DETAILED, J_LINEAR_ALGEBRA,
++         "smf: triggering fresh matching scaling to increase solution quality.\n");
++      return true;
++   }
++
++   return false;
++}
++
++} // namespace Ipopt
+diff --git a/src/Algorithm/LinearSolvers/IpSmfSolverInterface.hpp b/src/Algorithm/LinearSolvers/IpSmfSolverInterface.hpp
+new file mode 100755
+index 0000000..15d465c
+--- /dev/null
++++ b/src/Algorithm/LinearSolvers/IpSmfSolverInterface.hpp
+@@ -0,0 +1,261 @@
++// Copyright (C) 2026 smf authors
++// All Rights Reserved.
++// This code is published under the Eclipse Public License.
++
++#ifndef __IPSMFSOLVERINTERFACE_HPP__
++#define __IPSMFSOLVERINTERFACE_HPP__
++
++#include "IpSparseSymLinearSolverInterface.hpp"
++#include "IpLibraryLoader.hpp"
++#include "IpTypes.h"
++
++#include <stdint.h>
++#include <string>
++
++#ifdef IPOPT_HAS_SMF
++extern "C"
++{
++#include "smf/smf_c.h"
++}
++#else
++/* Self-contained ABI v1 definitions matching smf/smf_c.h for runtime dlopen via smflib. */
++#ifdef __cplusplus
++extern "C"
++{
++#endif
++
++#define SMF_C_ABI_VERSION        1
++#define SMF_OK                   0
++#define SMF_ERR_INVALID_ARG      1
++#define SMF_ERR_SINGULAR         2
++#define SMF_ERR_INTERNAL         3
++#define SMF_ERR_WRONG_INERTIA    4
++#define SMF_ERR_INEXACT_INERTIA  5
++
++#define SMF_POSDEF               0
++#define SMF_INDEF                1
++
++#define SMF_SOLVE_FULL           0
++#define SMF_SOLVE_FORWARD        1
++#define SMF_SOLVE_DIAGONAL       2
++#define SMF_SOLVE_BACKWARD       3
++
++#define SMF_PIVOTING_THRESHOLD   0
++#define SMF_PIVOTING_STATIC      1
++
++#define SMF_ORDER_AUTO           0
++#define SMF_ORDER_AMD            1
++#define SMF_ORDER_METIS          2
++#define SMF_ORDER_MATCHING       3
++
++#define SMF_SCALE_NONE           0
++#define SMF_SCALE_MATCHING       1
++#define SMF_SCALE_EQUILIBRATION  2
++#define SMF_SCALE_AUTO           3
++
++#define SMF_SLACK_OFF            0
++#define SMF_SLACK_ON             1
++#define SMF_SLACK_AUTO           2
++
++typedef struct smf_ipm_session_s* smf_ipm_session_t;
++
++typedef struct
++{
++   int    abi_version;
++   int    struct_size;
++   int    ordering;
++   int    scaling;
++   int    pivoting;
++   int    slack_elimination;
++   int    nemin;
++   int    num_threads;
++   int    deterministic;
++   int    continue_on_singular;
++   int    honest_inertia;
++   int    print_level;
++   double u;
++   double small;
++   double multiplier;
++   int    reserved_i[8];
++   double reserved_d[8];
++} smf_ipm_control_t;
++
++typedef struct
++{
++   int     struct_size;
++   int     status;
++   int     num_pos;
++   int     num_neg;
++   int     num_zero;
++   int     matrix_rank;
++   int     num_delay;
++   int     num_two;
++   int     maxfront;
++   int     maxsupernode;
++   int     maxdepth;
++   int     num_sup;
++   int     ordering_used;
++   int     inertia_exact;
++   int     threads_used;
++   int     static_pivots;
++   int64_t num_factor;
++   int64_t num_flops;
++   double  analyse_seconds;
++   double  factor_seconds;
++   double  solve_seconds;
++   int     reserved_i[8];
++   double  reserved_d[8];
++} smf_ipm_info_t;
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* IPOPT_HAS_SMF */
++
++#define IPOPT_DECL_SMF_C_ABI_VERSION(x)       int (x)(void)
++#define IPOPT_DECL_SMF_VERSION(x)             const char* (x)(void)
++#define IPOPT_DECL_SMF_BLAS_BACKEND(x)        const char* (x)(void)
++#define IPOPT_DECL_SMF_IPM_DEFAULT_CONTROL(x) void (x)(smf_ipm_control_t* ctrl)
++#define IPOPT_DECL_SMF_IPM_CREATE(x)          int (x)(smf_ipm_session_t* out)
++#define IPOPT_DECL_SMF_IPM_ANALYSE(x)         int (x)(smf_ipm_session_t session, int n, const int* col_ptr, const int* row_idx, const double* values, const smf_ipm_control_t* ctrl, smf_ipm_info_t* info)
++#define IPOPT_DECL_SMF_IPM_FACTOR(x)          int (x)(smf_ipm_session_t session, int mtype, const double* values, const smf_ipm_control_t* ctrl, smf_ipm_info_t* info, double* scale)
++#define IPOPT_DECL_SMF_IPM_SOLVE(x)           int (x)(smf_ipm_session_t session, int job, int nrhs, double* rhs, int ldx, const smf_ipm_control_t* ctrl, smf_ipm_info_t* info)
++#define IPOPT_DECL_SMF_IPM_FREE(x)            void (x)(smf_ipm_session_t* session)
++
++namespace Ipopt
++{
++
++/** Native interface to the smf sparse symmetric multifrontal linear solver.
++ *
++ * Uses 0-based upper-triangular CSR (CSR_Format_0_Offset), which is identical
++ * to smf's 0-based lower-triangular CSC with zero index translation or sorting.
++ * Supports both compile-time linking (IPOPT_HAS_SMF) and runtime loading via
++ * the smflib option (independent of hsllib / CoinHSL).
++ */
++class SmfSolverInterface: public SparseSymLinearSolverInterface
++{
++private:
++   enum ScalingMode
++   {
++      SCALE_MODE_AUTO,
++      SCALE_MODE_DYNAMIC,
++      SCALE_MODE_NONE,
++      SCALE_MODE_MATCHING,
++      SCALE_MODE_EQUILIBRATION
++   };
++
++   int               ndim_;
++   Number*           val_;
++   int               numneg_;
++   int               numdelay_;
++   smf_ipm_session_t session_;
++   bool              pivtol_changed_;
++   bool              dynamic_active_;
++   bool              rescale_;
++   double*           scaling_;
++
++   /* Options */
++   smf_ipm_control_t control_;
++   double            umax_;
++   ScalingMode       scaling_mode_;
++
++   /* Library loader and resolved function pointers */
++   SmartPtr<LibraryLoader> smfloader_;
++
++   IPOPT_DECL_SMF_C_ABI_VERSION(*smf_c_abi_version_fn_);
++   IPOPT_DECL_SMF_VERSION(*smf_version_fn_);
++   IPOPT_DECL_SMF_BLAS_BACKEND(*smf_blas_backend_fn_);
++   IPOPT_DECL_SMF_IPM_DEFAULT_CONTROL(*smf_ipm_default_control_fn_);
++   IPOPT_DECL_SMF_IPM_CREATE(*smf_ipm_create_fn_);
++   IPOPT_DECL_SMF_IPM_ANALYSE(*smf_ipm_analyse_fn_);
++   IPOPT_DECL_SMF_IPM_FACTOR(*smf_ipm_factor_fn_);
++   IPOPT_DECL_SMF_IPM_SOLVE(*smf_ipm_solve_fn_);
++   IPOPT_DECL_SMF_IPM_FREE(*smf_ipm_free_fn_);
++
++   void LoadFunctions();
++
++public:
++   explicit SmfSolverInterface(
++      SmartPtr<LibraryLoader> smfloader = NULL
++   );
++
++   ~SmfSolverInterface();
++
++   static void RegisterOptions(
++      SmartPtr<RegisteredOptions> roptions
++   );
++
++   /// Name reported in IPOPT's startup banner ("Linear solver: ...").
++   static std::string GetName();
++
++   bool InitializeImpl(
++      const OptionsList& options,
++      const std::string& prefix
++   );
++
++   /** @name Methods for requesting solution of the linear system. */
++   ///@{
++   ESymSolverStatus InitializeStructure(
++      Index        dim,
++      Index        nonzeros,
++      const Index* ia,
++      const Index* ja
++   );
++
++   Number* GetValuesArrayPtr()
++   {
++      return val_;
++   }
++
++   ESymSolverStatus MultiSolve(
++      bool         new_matrix,
++      const Index* ia,
++      const Index* ja,
++      Index        nrhs,
++      Number*      rhs_vals,
++      bool         check_NegEVals,
++      Index        numberOfNegEVals
++   );
++
++   Index NumberOfNegEVals() const
++   {
++      return numneg_;
++   }
++   ///@}
++
++   /** @name Options of Linear solver */
++   ///@{
++   bool IncreaseQuality();
++
++   bool ProvidesInertia() const
++   {
++      return true;
++   }
++
++   EMatrixFormat MatrixFormat() const
++   {
++      return CSR_Format_0_Offset;
++   }
++   ///@}
++
++   /** @name Methods related to the detection of linearly dependent rows */
++   ///@{
++   bool ProvidesDegeneracyDetection() const
++   {
++      return false;
++   }
++
++   ESymSolverStatus DetermineDependentRows(
++      const Index*      /*ia*/,
++      const Index*      /*ja*/,
++      std::list<Index>& /*c_deps*/
++   )
++   {
++      return SYMSOLVER_FATAL_ERROR;
++   }
++   ///@}
++};
++
++} // namespace Ipopt
++
++#endif /* __IPSMFSOLVERINTERFACE_HPP__ */
+diff --git a/src/Makefile.am b/src/Makefile.am
+index e7950df..6738df1 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -197,7 +197,8 @@ libipopt_la_SOURCES += \
+   Algorithm/LinearSolvers/IpMa77SolverInterface.cpp \
+   Algorithm/LinearSolvers/IpMa86SolverInterface.cpp \
+   Algorithm/LinearSolvers/IpMa97SolverInterface.cpp \
+-  Algorithm/LinearSolvers/IpPardisoSolverInterface.cpp
++  Algorithm/LinearSolvers/IpPardisoSolverInterface.cpp \
++  Algorithm/LinearSolvers/IpSmfSolverInterface.cpp
+ 
+ if HAVE_MA28
+   libipopt_la_SOURCES += Algorithm/LinearSolvers/IpMa28TDependencyDetector.cpp
+diff --git a/src/Makefile.in b/src/Makefile.in
+index 6efb9db..2c027da 100644
+--- a/src/Makefile.in
++++ b/src/Makefile.in
+@@ -106,7 +106,8 @@ host_triplet = @host@
+ @IPOPT_INT64_FALSE@  Algorithm/LinearSolvers/IpMa77SolverInterface.cpp \
+ @IPOPT_INT64_FALSE@  Algorithm/LinearSolvers/IpMa86SolverInterface.cpp \
+ @IPOPT_INT64_FALSE@  Algorithm/LinearSolvers/IpMa97SolverInterface.cpp \
+-@IPOPT_INT64_FALSE@  Algorithm/LinearSolvers/IpPardisoSolverInterface.cpp
++@IPOPT_INT64_FALSE@  Algorithm/LinearSolvers/IpPardisoSolverInterface.cpp \
++  Algorithm/LinearSolvers/IpSmfSolverInterface.cpp
+ 
+ @HAVE_MA28_TRUE@@IPOPT_INT64_FALSE@am__append_3 = Algorithm/LinearSolvers/IpMa28TDependencyDetector.cpp
+ @HAVE_MA28_TRUE@@IPOPT_INT64_FALSE@@IPOPT_SINGLE_TRUE@am__append_4 = Algorithm/LinearSolvers/IpMa28sPartition.F
+@@ -181,7 +182,8 @@ am__dirstamp = $(am__leading_dot)dirstamp
+ @IPOPT_INT64_FALSE@	Algorithm/LinearSolvers/IpMa77SolverInterface.lo \
+ @IPOPT_INT64_FALSE@	Algorithm/LinearSolvers/IpMa86SolverInterface.lo \
+ @IPOPT_INT64_FALSE@	Algorithm/LinearSolvers/IpMa97SolverInterface.lo \
+-@IPOPT_INT64_FALSE@	Algorithm/LinearSolvers/IpPardisoSolverInterface.lo
++@IPOPT_INT64_FALSE@	Algorithm/LinearSolvers/IpPardisoSolverInterface.lo \
++	Algorithm/LinearSolvers/IpSmfSolverInterface.lo
+ @HAVE_MA28_TRUE@@IPOPT_INT64_FALSE@am__objects_3 = Algorithm/LinearSolvers/IpMa28TDependencyDetector.lo
+ @HAVE_MA28_TRUE@@IPOPT_INT64_FALSE@@IPOPT_SINGLE_TRUE@am__objects_4 = Algorithm/LinearSolvers/IpMa28sPartition.lo
+ @HAVE_MA28_TRUE@@IPOPT_INT64_FALSE@@IPOPT_SINGLE_FALSE@am__objects_5 = Algorithm/LinearSolvers/IpMa28Partition.lo
+@@ -375,6 +377,7 @@ am__depfiles_remade = Algorithm/$(DEPDIR)/IpAdaptiveMuUpdate.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpMumpsSolverInterface.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoMKLSolverInterface.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoSolverInterface.Plo \
++	Algorithm/LinearSolvers/$(DEPDIR)/IpSmfSolverInterface.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpSlackBasedTSymScalingMethod.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpSpralSolverInterface.Plo \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/IpTSymDependencyDetector.Plo \
+@@ -1229,6 +1232,9 @@ Algorithm/LinearSolvers/IpMa97SolverInterface.lo:  \
+ Algorithm/LinearSolvers/IpPardisoSolverInterface.lo:  \
+ 	Algorithm/LinearSolvers/$(am__dirstamp) \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/$(am__dirstamp)
++Algorithm/LinearSolvers/IpSmfSolverInterface.lo:  \
++	Algorithm/LinearSolvers/$(am__dirstamp) \
++	Algorithm/LinearSolvers/$(DEPDIR)/$(am__dirstamp)
+ Algorithm/LinearSolvers/IpMa28TDependencyDetector.lo:  \
+ 	Algorithm/LinearSolvers/$(am__dirstamp) \
+ 	Algorithm/LinearSolvers/$(DEPDIR)/$(am__dirstamp)
+@@ -1396,6 +1402,7 @@ distclean-compile:
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpMumpsSolverInterface.Plo@am__quote@ # am--include-marker
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoMKLSolverInterface.Plo@am__quote@ # am--include-marker
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoSolverInterface.Plo@am__quote@ # am--include-marker
++@AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpSmfSolverInterface.Plo@am__quote@ # am--include-marker
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpSlackBasedTSymScalingMethod.Plo@am__quote@ # am--include-marker
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpSpralSolverInterface.Plo@am__quote@ # am--include-marker
+ @AMDEP_TRUE@@am__include@ @am__quote@Algorithm/LinearSolvers/$(DEPDIR)/IpTSymDependencyDetector.Plo@am__quote@ # am--include-marker
+@@ -1811,6 +1818,7 @@ distclean: distclean-recursive
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpMumpsSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoMKLSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoSolverInterface.Plo
++	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSmfSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSlackBasedTSymScalingMethod.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSpralSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpTSymDependencyDetector.Plo
+@@ -1985,6 +1993,7 @@ maintainer-clean: maintainer-clean-recursive
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpMumpsSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoMKLSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpPardisoSolverInterface.Plo
++	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSmfSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSlackBasedTSymScalingMethod.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpSpralSolverInterface.Plo
+ 	-rm -f Algorithm/LinearSolvers/$(DEPDIR)/IpTSymDependencyDetector.Plo

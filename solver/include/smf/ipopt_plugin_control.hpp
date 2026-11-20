@@ -345,24 +345,26 @@ inline IpmControl ipopt_plugin_ipm_control()
         const char *v = std::getenv(name);
         return v != nullptr && *v != '\0' && std::atoi(v) != 0;
     };
-    static const bool abort_on = flag("SMF_IPM_ABORT");
-    static const bool reanalyse_on = flag("SMF_IPM_REANALYSE");
-    static const StaticMode static_mode = [] {
+    const auto read_ipm = [&] {
+        const bool abort_on = flag("SMF_IPM_ABORT");
+        IpmControl ipm;
+        ipm.learn_inertia = abort_on;
+        ipm.abort_on_wrong_inertia = abort_on;
+        ipm.reanalyse = flag("SMF_IPM_REANALYSE");
         const char *v = std::getenv("SMF_IPM_STATIC");
         if (v != nullptr && std::strcmp(v, "fallback") == 0)
-            return StaticMode::Fallback;
-        if (v != nullptr && std::strcmp(v, "regularized") == 0)
-            return StaticMode::Regularized;
-        return StaticMode::Off;
-    }();
-    static const bool static_zero = flag("SMF_IPM_STATIC_ZERO");
-    IpmControl ipm;
-    ipm.learn_inertia = abort_on;
-    ipm.abort_on_wrong_inertia = abort_on;
-    ipm.reanalyse = reanalyse_on;
-    ipm.static_mode = static_mode;
-    ipm.static_as_zero = static_zero;
-    return ipm;
+            ipm.static_mode = StaticMode::Fallback;
+        else if (v != nullptr && std::strcmp(v, "regularized") == 0)
+            ipm.static_mode = StaticMode::Regularized;
+        else
+            ipm.static_mode = StaticMode::Off;
+        ipm.static_as_zero = flag("SMF_IPM_STATIC_ZERO");
+        return ipm;
+    };
+    if (flag("SMF_PLUGIN_UNLOAD"))
+        return read_ipm();
+    static const IpmControl cached = read_ipm();
+    return cached;
 }
 
 /// SMF_PLUGIN_MC64=always: the plugin answers every MC64 request (scaling =

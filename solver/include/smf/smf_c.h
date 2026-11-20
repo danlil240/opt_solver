@@ -2,18 +2,55 @@
  * @file smf_c.h
  * @brief Pure C ABI for the smf sparse symmetric solver.
  *
- * Gate: compiled only when SMF_BUILD_C_API=1 is defined.
+ * Provides two layers:
+ *  1. Simple handle API (smf_analyse / smf_factor / smf_solve / smf_inertia)
+ *     for one-off sparse symmetric solves.
+ *  2. Versioned interior-point session API (smf_ipm_*) backed by
+ *     smf::IpmSession, designed for direct integration with IPOPT
+ *     (linear_solver=smf), MadNLP, CasADi, Julia, and Python bindings.
+ *
  * All integer indices are 0-based.  All dense arrays are column-major.
  */
 #pragma once
-
-#ifdef SMF_BUILD_C_API
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include <stdint.h>
+
+/* -------------------------------------------------------------------------
+ * Symbol visibility / DLL export
+ * ------------------------------------------------------------------------- */
+#if defined(_WIN32) || defined(__CYGWIN__)
+#  if defined(SMF_C_EXPORTS)
+#    define SMF_C_API __declspec(dllexport)
+#  elif defined(SMF_C_SHARED)
+#    define SMF_C_API __declspec(dllimport)
+#  else
+#    define SMF_C_API
+#  endif
+#elif defined(__GNUC__) || defined(__clang__)
+#  define SMF_C_API __attribute__((visibility("default")))
+#else
+#  define SMF_C_API
+#endif
+
+/** Current C ABI version (bumped only on breaking struct/signature changes). */
+#define SMF_C_ABI_VERSION 1
+
+/* -------------------------------------------------------------------------
+ * Version & build introspection
+ * ------------------------------------------------------------------------- */
+
+/** Returns SMF_C_ABI_VERSION that this library was compiled with. */
+SMF_C_API int smf_c_abi_version(void);
+
+/** Returns a static null-terminated library version string (e.g. "0.1.0"). */
+SMF_C_API const char* smf_version(void);
+
+/** Returns a static null-terminated BLAS backend string (e.g. "openblas", "mkl"). */
+SMF_C_API const char* smf_blas_backend(void);
 
 /* -------------------------------------------------------------------------
  * Opaque handles
@@ -25,36 +62,60 @@ typedef struct smf_analysis_s* smf_analysis_t;
 /** Opaque handle returned by smf_factor(). */
 typedef struct smf_factor_s*   smf_factor_t;
 
+/** Opaque handle returned by smf_ipm_create() for repeated KKT solves. */
+typedef struct smf_ipm_session_s* smf_ipm_session_t;
+
 /* -------------------------------------------------------------------------
  * Error codes  (match smf::ErrorCode integer values where applicable)
  * ------------------------------------------------------------------------- */
 
-#define SMF_OK               0   /**< Success                          */
-#define SMF_ERR_INVALID_ARG  1   /**< Null pointer or bad argument     */
-#define SMF_ERR_SINGULAR     2   /**< Matrix is singular               */
-#define SMF_ERR_INTERNAL     3   /**< Unexpected internal error        */
+#define SMF_OK                   0   /**< Success                                          */
+#define SMF_ERR_INVALID_ARG      1   /**< Null pointer or bad argument                     */
+#define SMF_ERR_SINGULAR         2   /**< Matrix is singular or not positive definite      */
+#define SMF_ERR_INTERNAL         3   /**< Unexpected internal error                        */
+#define SMF_ERR_WRONG_INERTIA    4   /**< Factor aborted early after exceeding target negs */
+#define SMF_ERR_INEXACT_INERTIA  5   /**< Static pivot perturbed inertia; regularize       */
 
 /* -------------------------------------------------------------------------
- * Matrix type  (passed to smf_factor)
+ * Matrix type  (passed to smf_factor / smf_ipm_factor)
  * ------------------------------------------------------------------------- */
 
 #define SMF_POSDEF    0   /**< Real symmetric positive-definite */
 #define SMF_INDEF     1   /**< Real symmetric indefinite        */
 
 /* -------------------------------------------------------------------------
- * Solve job  (passed to smf_solve)
+ * Solve job  (passed to smf_solve / smf_ipm_solve)
  * ------------------------------------------------------------------------- */
 
 #define SMF_SOLVE_FULL     0   /**< Full AX = B solve                       */
 #define SMF_SOLVE_FORWARD  1   /**< Forward sweep only   (PLX = SB)         */
+#define SMF_SOLVE_DIAGONAL 2   /**< Diagonal solve only  (DX = B)           */
 #define SMF_SOLVE_BACKWARD 3   /**< Backward sweep only  ((PL)^T S^{-1}X=B) */
 
 /* -------------------------------------------------------------------------
- * Pivoting policy  (passed to smf_set_pivoting)
+ * Pivoting policy  (passed to smf_set_pivoting / smf_ipm_control_t)
  * ------------------------------------------------------------------------- */
 
 #define SMF_PIVOTING_THRESHOLD 0   /**< Default: accurate threshold pivoting   */
-#define SMF_PIVOTING_STATIC    1   /**< Opt-in fast mode: static pivoting       */
+#define SMF_PIVOTING_STATIC    1   /**< Opt-in fast mode: static pivoting      */
+
+/* -------------------------------------------------------------------------
+ * Ordering / scaling / slack options (smf_ipm_control_t)
+ * ------------------------------------------------------------------------- */
+
+#define SMF_ORDER_AUTO     0   /**< AutoParallel (AMD / METIS / ParallelND / Matching) */
+#define SMF_ORDER_AMD      1   /**< Approximate Minimum Degree                         */
+#define SMF_ORDER_METIS    2   /**< METIS nested dissection                            */
+#define SMF_ORDER_MATCHING 3   /**< Matching-based AMD ordering                        */
+
+#define SMF_SCALE_NONE          0   /**< No scaling (or reuse caller-supplied scale[]) */
+#define SMF_SCALE_MATCHING      1   /**< MC64-style max-product matching scaling       */
+#define SMF_SCALE_EQUILIBRATION 2   /**< Ruiz equilibration scaling                    */
+#define SMF_SCALE_AUTO          3   /**< Native smf scale-on-delay / analysis policy   */
+
+#define SMF_SLACK_OFF   0   /**< Disable slack-pair elimination */
+#define SMF_SLACK_ON    1   /**< Always try slack-pair elimination when eligible */
+#define SMF_SLACK_AUTO  2   /**< Enable when slack pairs exceed share threshold  */
 
 /* -------------------------------------------------------------------------
  * Inertia descriptor
@@ -75,6 +136,9 @@ typedef struct {
  * Compressed-sparse-column descriptor for a symmetric matrix stored as the
  * *lower triangle* (row_idx[k] >= column index for every entry).
  * All indices are 0-based.
+ *
+ * Note: For a symmetric matrix, 0-based lower-triangular CSC is identical to
+ * 0-based upper-triangular CSR (IPOPT's CSR_Format_0_Offset).
  */
 typedef struct {
     int           n;        /**< Matrix order (number of rows/columns)   */
@@ -84,140 +148,149 @@ typedef struct {
 } smf_csc_t;
 
 /* -------------------------------------------------------------------------
- * API functions
+ * Simple C API functions
+ * ------------------------------------------------------------------------- */
+
+SMF_C_API int  smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
+SMF_C_API int  smf_set_pivoting(smf_analysis_t analysis, int pivoting);
+SMF_C_API int  smf_factor(smf_analysis_t analysis,
+                          const double*  values,
+                          int            mtype,
+                          smf_factor_t*  out);
+SMF_C_API int  smf_solve(smf_analysis_t analysis,
+                         smf_factor_t   factor,
+                         int            nrhs,
+                         double*        rhs,
+                         int            job);
+SMF_C_API int  smf_inertia(smf_factor_t factor, smf_inertia_t* inertia);
+SMF_C_API void smf_free_analysis(smf_analysis_t* handle);
+SMF_C_API void smf_free_factor(smf_factor_t* handle);
+
+/* -------------------------------------------------------------------------
+ * Interior-point session C API (smf_ipm_*)
  * ------------------------------------------------------------------------- */
 
 /**
- * @brief Analyse the sparsity pattern of A (symbolic phase).
- *
- * @param csc   Pointer to a CSC descriptor (lower triangle, 0-based).
- *              Must not be NULL; col_ptr, row_idx, and values must be valid.
- * @param out   On success, *out is set to a newly allocated analysis handle.
- *              Must not be NULL.
- * @return SMF_OK, SMF_ERR_INVALID_ARG, or SMF_ERR_INTERNAL.
+ * Control parameters for smf_ipm_* calls.
+ * Always initialize with smf_ipm_default_control() before modifying fields.
  */
-int smf_analyse(const smf_csc_t* csc, smf_analysis_t* out);
+typedef struct {
+    int    abi_version;          /**< Set to SMF_C_ABI_VERSION by default_control   */
+    int    struct_size;          /**< Set to sizeof(smf_ipm_control_t)              */
+    int    ordering;             /**< SMF_ORDER_* (default: SMF_ORDER_AUTO)         */
+    int    scaling;              /**< SMF_SCALE_* (default: SMF_SCALE_AUTO)         */
+    int    pivoting;             /**< SMF_PIVOTING_* (default: THRESHOLD)           */
+    int    slack_elimination;    /**< SMF_SLACK_* (default: SMF_SLACK_OFF)          */
+    int    nemin;                /**< Supernode amalgamation threshold (default: 8) */
+    int    num_threads;          /**< 0 = auto (SMF_NUM_THREADS/OMP/P-cores), >=1   */
+    int    deterministic;        /**< 0 = default, 1 = bitwise deterministic        */
+    int    continue_on_singular; /**< 1 = continue past zero pivots (default: 1)    */
+    int    honest_inertia;       /**< 1 = return SMF_ERR_INEXACT_INERTIA if static  */
+    int    print_level;          /**< <= 0 silent                                   */
+    double u;                    /**< Pivot threshold in [0, 0.5] (default: 1e-8)   */
+    double small;                /**< Zero-pivot threshold (default: 1e-20)         */
+    double multiplier;           /**< Factor memory multiplier (default: 1.2)       */
+    int    reserved_i[8];        /**< Reserved for future ABI-compatible fields     */
+    double reserved_d[8];        /**< Reserved for future ABI-compatible fields     */
+} smf_ipm_control_t;
 
 /**
- * @brief Choose the pivoting policy of the SMF_INDEF factorizations made
- *        from this analysis (smf::Control::pivoting).
- *
- * @param analysis  Handle from smf_analyse().  Must not be NULL.
- * @param pivoting  SMF_PIVOTING_THRESHOLD (the default) or
- *                  SMF_PIVOTING_STATIC.
- * @return SMF_OK or SMF_ERR_INVALID_ARG.
- *
- * SMF_PIVOTING_THRESHOLD is the default and the accurate mode: threshold
- * pivoting with delayed pivots and the scale-on-delay rescue, exact inertia.
- *
- * SMF_PIVOTING_STATIC is an opt-in FAST MODE, PARDISO-like static pivoting:
- * no pivot is delayed, and a pivot below 1e-8 * max|A| is raised to that
- * value (perturbed). It disables the delay / scale-on-delay rescue.
- * Accuracy is NOT guaranteed on hard indefinite systems, and when a pivot
- * was perturbed smf_inertia() reports the inertia of the PERTURBED matrix
- * (each raised pivot by its perturbed sign, one raised from an exact zero
- * as positive, as PARDISO counts it), which can mislead an interior-point
- * method's inertia correction. Every SMF_SOLVE_FULL smf_solve() with a
- * factor that forced or perturbed a pivot is iteratively refined against
- * the factored values, to a componentwise backward error of 1e-10 where
- * refinement reaches it (smf::Control::refine_omega_target); a factor that
- * forced none is a threshold factorization and is not refined.
- *
- * Affects the smf_factor() calls made after it; existing factors keep the
- * policy they were made with. SMF_POSDEF factorizations ignore it. Like
- * smf_factor(), it must not run concurrently with another call that uses
- * the same analysis handle.
+ * Diagnostics and inertia populated by smf_ipm_analyse / factor / solve.
  */
-int smf_set_pivoting(smf_analysis_t analysis, int pivoting);
+typedef struct {
+    int     struct_size;     /**< sizeof(smf_ipm_info_t)                           */
+    int     status;          /**< SMF_OK or SMF_ERR_*                              */
+    int     num_pos;         /**< Positive eigenvalue count                        */
+    int     num_neg;         /**< Negative eigenvalue count                        */
+    int     num_zero;        /**< Zero eigenvalue count                            */
+    int     matrix_rank;     /**< n - num_zero                                     */
+    int     num_delay;       /**< Delayed pivots                                   */
+    int     num_two;         /**< 2x2 pivots                                       */
+    int     maxfront;        /**< Maximum front dimension                          */
+    int     maxsupernode;    /**< Maximum supernode width                          */
+    int     maxdepth;        /**< Assembly tree depth                              */
+    int     num_sup;         /**< Number of supernodes                             */
+    int     ordering_used;   /**< Ordering actually chosen                         */
+    int     inertia_exact;   /**< 1 if inertia is exact, 0 if static-perturbed     */
+    int     threads_used;    /**< Thread count used in the last factorization      */
+    int     static_pivots;   /**< Number of static-perturbed pivots                */
+    int64_t num_factor;      /**< Actual factor entries                            */
+    int64_t num_flops;       /**< Actual factorization flops                       */
+    double  analyse_seconds; /**< Wall time of symbolic analysis (seconds)         */
+    double  factor_seconds;  /**< Wall time of numeric factorization (seconds)     */
+    double  solve_seconds;   /**< Wall time of triangular solve (seconds)          */
+    int     reserved_i[8];
+    double  reserved_d[8];
+} smf_ipm_info_t;
+
+/** Fill ctrl with defaults suitable for interior-point KKT systems. */
+SMF_C_API void smf_ipm_default_control(smf_ipm_control_t* ctrl);
+
+/** Allocate a new reusable IPM session handle. */
+SMF_C_API int smf_ipm_create(smf_ipm_session_t* out);
 
 /**
- * @brief Perform numerical factorisation of A.
+ * Store a 0-based lower-triangular CSC sparsity pattern (equivalently 0-based
+ * upper-triangular CSR) and run symbolic analysis.
  *
- * @param analysis  Handle obtained from smf_analyse().  Must not be NULL.
- * @param values    Numerical values to factor, length col_ptr[n] of the
- *                  matrix passed to smf_analyse(), in the same entry order
- *                  (same pattern; only the values may change).  These values
- *                  are factored, not the ones given to smf_analyse().
- *                  Must not be NULL.
- * @param mtype     SMF_POSDEF or SMF_INDEF.
- * @param out       On success, *out is set to a newly allocated factor handle.
- *                  Must not be NULL.
- * @return SMF_OK, SMF_ERR_INVALID_ARG (also for NaN/Inf values),
- *         SMF_ERR_SINGULAR (singular, or not positive definite under
- *         SMF_POSDEF), or SMF_ERR_INTERNAL.
- *
- * The analysis handle must outlive every factor made from it (the factor
- * refers to it), and one analysis handle must not be factored from two
- * threads at once (a factorization may attach a re-analysis to it).
- *
- * Uses the default smf::Control (with the pivoting policy of
- * smf_set_pivoting(), threshold by default): an SMF_INDEF factorization whose delayed
- * pivots inflate its work past Control::scale_on_delay_ratio stops and is
- * redone with the matching scaling of its values (the try may stop sooner,
- * at Control::scale_on_delay_early_ratio, when its inflation so far projects
- * past Control::scale_on_delay_early_proj). Each call starts from a
- * new factor, so a sequence of calls on such a matrix pays that stopped try
- * every time.
- *
- * Threads: one (Control::num_threads = 1), BLAS included: the calling
- * thread's BLAS runs one thread for the call, whatever the application set
- * (e.g. threaded MKL's default, every core), and its setting is restored on
- * return. The same holds for smf_solve().
+ * If values == NULL, symbolic analysis is deferred to the first
+ * smf_ipm_factor() call so saddle-point matching sees real numerical values.
+ * Entries within each column do not need to be sorted; upper-triangular
+ * entries (row < col) are rejected if invalid or skipped cleanly.
  */
-int smf_factor(smf_analysis_t analysis,
-               const double*  values,
-               int            mtype,
-               smf_factor_t*  out);
+SMF_C_API int smf_ipm_analyse(smf_ipm_session_t        session,
+                              int                      n,
+                              const int*               col_ptr,
+                              const int*               row_idx,
+                              const double*            values,
+                              const smf_ipm_control_t* ctrl,
+                              smf_ipm_info_t*          info);
 
 /**
- * @brief Solve A X = B in-place (B is overwritten with the solution X).
+ * Factorize new numerical values (in the same entry order passed to
+ * smf_ipm_analyse) reusing the session's analysis and workspaces.
  *
- * @param analysis  Handle from smf_analyse().  Must not be NULL.
- * @param factor    Handle from smf_factor().   Must not be NULL.
- * @param nrhs      Number of right-hand sides (>= 1).
- * @param rhs       Column-major array of size n * nrhs; overwritten with X.
- *                  Must not be NULL.
- * @param job       SMF_SOLVE_FULL, SMF_SOLVE_FORWARD, or SMF_SOLVE_BACKWARD.
- * @return SMF_OK, SMF_ERR_INVALID_ARG (also when the factor's order is not
- *         the analysis'), or SMF_ERR_INTERNAL.
- *
- * A factor made with SMF_PIVOTING_STATIC that forced or perturbed a pivot
- * is refined on SMF_SOLVE_FULL (see smf_set_pivoting()); a partial solve is
- * not. A refinement that
- * misses the target still returns SMF_OK with the best iterate.
+ * @param session  Session handle from smf_ipm_create() + smf_ipm_analyse().
+ * @param mtype    SMF_INDEF or SMF_POSDEF.
+ * @param values   Length col_ptr[n] array of numerical values.
+ * @param ctrl     Control options (may be NULL to use defaults).
+ * @param info     Optional diagnostics/inertia output (may be NULL).
+ * @param scale    Optional length-n scaling vector for caller-managed dynamic
+ *                 scaling (e.g. IPOPT reuse strategies). Pass NULL when using
+ *                 SMF_SCALE_AUTO or unscaled factorizations.
+ * @return SMF_OK, SMF_ERR_SINGULAR, SMF_ERR_INEXACT_INERTIA,
+ *         SMF_ERR_WRONG_INERTIA, SMF_ERR_INVALID_ARG, or SMF_ERR_INTERNAL.
  */
-int smf_solve(smf_analysis_t analysis,
-              smf_factor_t   factor,
-              int            nrhs,
-              double*        rhs,
-              int            job);
+SMF_C_API int smf_ipm_factor(smf_ipm_session_t        session,
+                             int                      mtype,
+                             const double*            values,
+                             const smf_ipm_control_t* ctrl,
+                             smf_ipm_info_t*          info,
+                             double*                  scale);
 
 /**
- * @brief Query the inertia computed during the last smf_factor() call.
+ * Solve A X = B in-place using the session's latest factorization.
  *
- * @param factor   Handle from smf_factor().  Must not be NULL.
- * @param inertia  Populated with (pos, neg, zero) counts on success.
- *                 Must not be NULL.
- * @return SMF_OK or SMF_ERR_INVALID_ARG.
+ * @param session  Session handle with a completed factorization.
+ * @param job      SMF_SOLVE_FULL, SMF_SOLVE_FORWARD, SMF_SOLVE_DIAGONAL, or
+ *                 SMF_SOLVE_BACKWARD.
+ * @param nrhs     Number of right-hand sides (>= 1).
+ * @param rhs      Column-major array of leading dimension ldx (at least n).
+ * @param ldx      Leading dimension of rhs (>= n).
+ * @param ctrl     Optional control block (may be NULL).
+ * @param info     Optional diagnostics output (may be NULL).
  */
-int smf_inertia(smf_factor_t factor, smf_inertia_t* inertia);
+SMF_C_API int smf_ipm_solve(smf_ipm_session_t        session,
+                            int                      job,
+                            int                      nrhs,
+                            double*                  rhs,
+                            int                      ldx,
+                            const smf_ipm_control_t* ctrl,
+                            smf_ipm_info_t*          info);
 
-/**
- * @brief Free an analysis handle.  No-op if handle or *handle is NULL.
- *
- * @param handle  Pointer to the handle variable; set to NULL on return.
- */
-void smf_free_analysis(smf_analysis_t* handle);
-
-/**
- * @brief Free a factor handle.  No-op if handle or *handle is NULL.
- *
- * @param handle  Pointer to the handle variable; set to NULL on return.
- */
-void smf_free_factor(smf_factor_t* handle);
+/** Free an IPM session handle and set *session = NULL. */
+SMF_C_API void smf_ipm_free(smf_ipm_session_t* session);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
-
-#endif /* SMF_BUILD_C_API */

@@ -116,6 +116,8 @@ struct SmfAkeep
     smf::CscLower mat;          // pattern + this factorization's values (CSC order)
     std::vector<int> sort_perm; // CSC entry -> caller's entry
     int n = 0;
+    int delay_budget = -1;       // captured from SMF_TEST_DELAY_BUDGET at analyse time
+    smf::IpmControl ipm_ctrl{};  // captured from SMF_IPM_* at analyse time
     int capture_id = 0;          // KKT dump sequence id (SMF_KKT_DUMP_DIR)
     int dump_factorizations = 0; // factorizations dumped for this analysis
 };
@@ -195,10 +197,15 @@ static smf::IpmControl plugin_ipm_control()
 // keeps the default delay_budget = -1 (unlimited delays, exact inertia).
 static int test_delay_budget()
 {
-    static const int budget = [] {
+    const auto read = [] {
         const char* v = std::getenv("SMF_TEST_DELAY_BUDGET");
         return (v == nullptr || *v == '\0') ? -1 : std::atoi(v);
-    }();
+    };
+    // On ELF/glibc, libgomp/STB_GNU_UNIQUE can prevent dlclose from unloading
+    // the DSO even with SMF_PLUGIN_UNLOAD=1 (test-only mode); re-read there.
+    if (const char* u = std::getenv("SMF_PLUGIN_UNLOAD"); u != nullptr && std::atoi(u) != 0)
+        return read();
+    static const int budget = read();
     return budget;
 }
 
@@ -434,7 +441,7 @@ static smf::Ma97Options ma97_options(const ma97_control_d& c)
 // Every MA97 control block maps through smf::apply_ma97_options()
 // (smf/ipopt_plugin_control.hpp), the single source of the plugin's Control
 // that bench_replay's ipopt-plugin track builds from too.
-static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl)
+static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctrl, int delay_budget)
 {
     // No control block: the MA97 defaults stay, but the thread count and
     // the pivoting policy (SMF_PIVOTING) are the plugin's all the same.
@@ -443,7 +450,7 @@ static bool apply_ma97_control(smf::Control &out_ctrl, const ma97_control_d* ctr
     out_ctrl.slack_elimination = smf::plugin_slack_elimination();
     if (!ctrl)
         return true;
-    return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), test_delay_budget());
+    return smf::apply_ma97_options(out_ctrl, ma97_options(*ctrl), delay_budget);
 }
 
 extern "C"
@@ -507,8 +514,10 @@ extern "C"
         const int base = (ctrl && ctrl->f_arrays) ? 1 : 0;
 
         auto* ak = new SmfAkeep();
+        ak->delay_budget = test_delay_budget();
+        ak->ipm_ctrl = plugin_ipm_control();
         ak->ctrl.matrix_type = smf::MatrixType::RealSymmetricIndefinite;
-        if (!apply_ma97_control(ak->ctrl, ctrl))
+        if (!apply_ma97_control(ak->ctrl, ctrl, ak->delay_budget))
         {
             info->flag = -6;
             delete ak;
@@ -536,7 +545,7 @@ extern "C"
             values = ak->mat.values;
         }
         const smf::BlasThreadGuard blas(ak->ctrl.num_threads);
-        if (ak->session->analyse(ak->mat, values, ak->ctrl, plugin_ipm_control()) != smf::ErrorCode::Success)
+        if (ak->session->analyse(ak->mat, values, ak->ctrl, ak->ipm_ctrl) != smf::ErrorCode::Success)
         {
             info->flag = -3;
             delete ak;
@@ -584,7 +593,7 @@ extern "C"
         ak->ctrl.matrix_type = (matrix_type == static_cast<int>(smf::MatrixType::RealSymmetricPositiveDefinite))
                                    ? smf::MatrixType::RealSymmetricPositiveDefinite
                                    : smf::MatrixType::RealSymmetricIndefinite;
-        if (!apply_ma97_control(ak->ctrl, ctrl))
+        if (!apply_ma97_control(ak->ctrl, ctrl, ak->delay_budget))
         {
             info->flag = -6;
             return;
@@ -860,7 +869,7 @@ extern "C"
         // (hybrid / static_as_zero) accounting, unchanged. With the defaults
         // (no static mode, delay_budget -1) no pivot is ever static, so the
         // guard never fires.
-        if (!si.inertia_exact && plugin_ipm_control().static_mode == smf::StaticMode::Off)
+        if (!si.inertia_exact && ak->ipm_ctrl.static_mode == smf::StaticMode::Off)
         {
             if (g_stats.trace)
                 std::fprintf(stderr, "[smf_ma97] factor %ld: %d static pivots, inexact inertia: flag 7\n",
@@ -936,7 +945,7 @@ extern "C"
             return;
         }
 
-        apply_ma97_control(fw->ctrl, ctrl);
+        apply_ma97_control(fw->ctrl, ctrl, fw->ctrl.delay_budget);
         const smf::SolveJob sjob = static_cast<smf::SolveJob>(job);
         smf::IpmSession& session = *fw->session;
         session.set_control(fw->ctrl);

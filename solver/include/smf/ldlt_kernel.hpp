@@ -60,10 +60,13 @@ struct LdltKernelResult {
 /// columns (first plus this call's pivots), while inertia, static_pivots and
 /// flops count this call's pivots only.
 ///
-/// `work` must hold at least f * (prm.nb + 2) doubles.
+/// `work` must hold at least f * (prm.nb + 2) doubles. When `work_cap` is
+/// larger (see ldlt_schur_work_size), schur_update uses it for contiguous
+/// column-major L * D storage.
 LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
-                                   double *work, int first = 0);
+                                   double *work, int first = 0,
+                                   std::size_t work_cap = 0);
 
 /// SPD front by LAPACK-style blocks (Control::posdef_front_kernel = Lapack):
 /// dpotrf on the leading num_elig x num_elig block, dtrsm for the rows below
@@ -121,6 +124,24 @@ LdltKernelResult ldlt_factor_small_front(double *F, int ld, int f, int num_elig,
 /// Number of doubles ldlt_factor_front needs in `work` for a front of size f.
 inline std::size_t ldlt_work_size(int f, const LdltKernelParams &prm) {
     return static_cast<std::size_t>(f) * static_cast<std::size_t>(prm.nb + 2);
+}
+
+/// Cap on contiguous L*D scratch in schur_update (doubles, 4 MiB) so giant
+/// fronts chunk in L3 while medium/large KKT fronts run in one chunk.
+inline constexpr std::size_t kSchurLdMaxDoubles = 512u * 1024u;
+
+/// Workspace doubles for ldlt_factor_front including contiguous L*D scratch.
+inline std::size_t ldlt_schur_work_size(int f, int num_elig, const LdltKernelParams &prm) {
+    const std::size_t base = ldlt_work_size(f, prm);
+    const int q = f - num_elig;
+    if (q <= 0 || num_elig <= 0 || f < prm.blocked_min_front || prm.nb <= 1) return base;
+    const std::size_t sq = static_cast<std::size_t>(q);
+    const std::size_t full = sq * static_cast<std::size_t>(num_elig);
+    if (full <= kSchurLdMaxDoubles) return base > full ? base : full;
+    const std::size_t min_cols = static_cast<std::size_t>(num_elig < 64 ? num_elig : 64);
+    const std::size_t chunk = sq * min_cols;
+    const std::size_t schur = kSchurLdMaxDoubles > chunk ? kSchurLdMaxDoubles : chunk;
+    return base > schur ? base : schur;
 }
 
 } // namespace smf

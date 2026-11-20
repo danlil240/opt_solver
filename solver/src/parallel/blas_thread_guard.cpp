@@ -157,6 +157,10 @@ thread_local const std::atomic<int> *tl_share = nullptr;
 thread_local int tl_share_set = 0;
 std::atomic<int> g_active{0};
 std::atomic<int> g_peak{0};
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+std::atomic<int> g_serial_pin_depth{0};
+int g_serial_pin_saved = 1;
+#endif
 
 void count_change(int delta) noexcept {
     const int now = g_active.fetch_add(delta, std::memory_order_relaxed) + delta;
@@ -165,6 +169,47 @@ void count_change(int delta) noexcept {
     }
 }
 } // namespace
+
+bool blas_is_pinned_serial() noexcept
+{
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    return false;
+#else
+    return g_serial_pin_depth.load(std::memory_order_acquire) > 0;
+#endif
+}
+
+BlasSerialPinScope::BlasSerialPinScope() noexcept
+{
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+    std::lock_guard<std::mutex> lock(blas_guard_mutex());
+    if (g_serial_pin_depth.fetch_add(1, std::memory_order_acq_rel) == 0) {
+        g_serial_pin_saved = blas_set_num_threads(1);
+    }
+#endif
+}
+
+BlasSerialPinScope::~BlasSerialPinScope() noexcept
+{
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+    std::lock_guard<std::mutex> lock(blas_guard_mutex());
+    if (g_serial_pin_depth.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        blas_restore(g_serial_pin_saved);
+    }
+#endif
+}
+
+BlasWorkerSerialScope::BlasWorkerSerialScope() noexcept : prev_counted_(tl_counted)
+{
+    tl_counted = 1;
+    count_change(1 - prev_counted_);
+}
+
+BlasWorkerSerialScope::~BlasWorkerSerialScope() noexcept
+{
+    count_change(prev_counted_ - tl_counted);
+    tl_counted = prev_counted_;
+}
 
 BlasThreadGuard::BlasThreadGuard(int n_threads) noexcept
     : BlasThreadGuard(n_threads, -1)
@@ -179,12 +224,25 @@ BlasThreadGuard::BlasThreadGuard(int n_threads, int blocktime_ms) noexcept
     tl_share = nullptr;
     tl_share_set = 0;
     const int requested = (n_threads > 0) ? n_threads : 1;
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         saved_threads_ = blas_get_num_threads();
         if (saved_threads_ <= 0) saved_threads_ = 1;
         prev_setting_ = blas_set_num_threads(requested);
+        touched_blas_ = true;
     }
+#else
+    if (!blas_is_pinned_serial()) {
+        std::lock_guard<std::mutex> lock(blas_guard_mutex());
+        if (!blas_is_pinned_serial()) {
+            saved_threads_ = blas_get_num_threads();
+            if (saved_threads_ <= 0) saved_threads_ = 1;
+            prev_setting_ = blas_set_num_threads(requested);
+            touched_blas_ = true;
+        }
+    }
+#endif
     tl_counted = requested;
     count_change(requested - prev_counted_);
     // After the first MKL call above, so the Intel runtime is loaded.
@@ -200,7 +258,7 @@ BlasThreadGuard::BlasThreadGuard(int n_threads, int blocktime_ms) noexcept
 BlasThreadGuard::~BlasThreadGuard() noexcept
 {
     if (prev_blocktime_ >= 0) mkl_blocktime_set(prev_blocktime_);
-    {
+    if (touched_blas_) {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         blas_restore(prev_setting_);
     }
@@ -229,13 +287,46 @@ void blas_follow_share() noexcept
     if (s == nullptr) return;
     const int v = s->load(std::memory_order_acquire);
     if (v <= 0 || v == tl_share_set) return;
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         blas_set_num_threads(v);
     }
+#else
+    if (!blas_is_pinned_serial()) {
+        std::lock_guard<std::mutex> lock(blas_guard_mutex());
+        if (!blas_is_pinned_serial()) {
+            blas_set_num_threads(v);
+        }
+    }
+#endif
     tl_share_set = v;
     count_change(v - tl_counted);
     tl_counted = v;
+}
+
+int blas_current_share() noexcept
+{
+    blas_follow_share();
+    return tl_counted > 0 ? tl_counted : 1;
+}
+
+int blas_local_set_seq() noexcept
+{
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    return MKL_Set_Num_Threads_Local(1);
+#else
+    return 0;
+#endif
+}
+
+void blas_local_restore(int prev) noexcept
+{
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    MKL_Set_Num_Threads_Local(prev);
+#else
+    (void)prev;
+#endif
 }
 
 BlasIdleScope::BlasIdleScope() noexcept : prev_counted_(tl_counted)

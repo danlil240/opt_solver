@@ -101,7 +101,7 @@ void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
   }
   if (bounds.back() < f) bounds.push_back(f);
   const int n = static_cast<int>(bounds.size()) - 1;
-#ifdef _OPENMP
+#if defined(_OPENMP) && defined(SMF_USE_MKL) && (SMF_USE_MKL)
   // On the calling thread's OpenMP team, the one its MKL calls run on (smf's
   // OpenMP and MKL's intel threading share one runtime): the team is hot
   // from the front's previous BLAS call and stays so for the next one.
@@ -109,6 +109,19 @@ void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
   // next to MKL's spinning team, and the front's following BLAS calls lost
   // about what the assembly saved (2026-11-09 acopf profile).
   (void)helpers;
+#pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
+  for (int b = 0; b < n; ++b)
+    assemble_front_columns(F, f, orig, kids, bounds[static_cast<std::size_t>(b)],
+                           bounds[static_cast<std::size_t>(b) + 1]);
+#else
+  if (TileHelpers *h = helpers ? helpers : current_top_helpers()) {
+    parallel_for_helpers(n, nthreads, h, [&](int b) {
+      assemble_front_columns(F, f, orig, kids, bounds[static_cast<std::size_t>(b)],
+                             bounds[static_cast<std::size_t>(b) + 1]);
+    });
+    return;
+  }
+#ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads)
   for (int b = 0; b < n; ++b)
     assemble_front_columns(F, f, orig, kids, bounds[static_cast<std::size_t>(b)],
@@ -124,6 +137,7 @@ void assemble_front_parallel(double *F, int f, const AssemblyOriginal &orig,
   TileRunner runner;
   runner.run(dag, pending, roots, n, n, ready, ready_lo.data(), nthreads, helpers);
 #endif
+#endif
 }
 
 void copy_contribution_block(double *dst, const double *cb, std::size_t lda, int q, int nthreads) {
@@ -134,7 +148,7 @@ void copy_contribution_block(double *dst, const double *cb, std::size_t lda, int
     const double *src = cb + u * lda + u;
     std::copy(src, src + (sq - u), dst + u * sq - u * (u - std::size_t{1}) / 2);
   };
-#ifdef _OPENMP
+#if defined(_OPENMP) && defined(SMF_USE_MKL) && (SMF_USE_MKL)
   if (nthreads >= 2) {
     // The calling thread's team, as assemble_front_parallel.
 #pragma omp parallel for schedule(dynamic, 16) num_threads(nthreads)
@@ -142,6 +156,23 @@ void copy_contribution_block(double *dst, const double *cb, std::size_t lda, int
     return;
   }
 #else
+  if (nthreads >= 2) {
+    if (TileHelpers *h = current_top_helpers()) {
+      constexpr int kChunk = 16;
+      const int nblocks = (q + kChunk - 1) / kChunk;
+      parallel_for_helpers(nblocks, nthreads, h, [&](int b) {
+        const int j0 = b * kChunk;
+        const int j1 = std::min(q, j0 + kChunk);
+        for (int jj = j0; jj < j1; ++jj) column(jj);
+      });
+      return;
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 16) num_threads(nthreads)
+    for (int jj = 0; jj < q; ++jj) column(jj);
+    return;
+#endif
+  }
   (void)nthreads;
 #endif
   for (int jj = 0; jj < q; ++jj) column(jj);

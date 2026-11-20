@@ -64,6 +64,7 @@ void SolvePool::run(const std::function<void(int)> &fn, bool workers_count_blas)
         fn(0);
         return;
     }
+    BlasSerialPinScope pin_blas;
     {
         std::lock_guard<std::mutex> lk(mtx_);
         job_ = &fn;
@@ -80,7 +81,11 @@ void SolvePool::run(const std::function<void(int)> &fn, bool workers_count_blas)
 
 void SolvePool::worker(int tid) {
     // Kernels inside a parallel solve run on serial BLAS.
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
     BlasSerialGuard serial_blas;
+#else
+    BlasWorkerSerialScope serial_blas;
+#endif
     unsigned seen = 0;
     const auto finish = [&] {
         if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {

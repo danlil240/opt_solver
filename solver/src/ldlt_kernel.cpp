@@ -1,6 +1,8 @@
 #include "smf/ldlt_kernel.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/dense_kernel.hpp"
 
+#include "parallel/tile_tasks.hpp"
 #include "phase_trace.hpp"
 
 #include <chrono>
@@ -10,16 +12,44 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <utility>
 
 #if defined(__AVX2__)
 #include <immintrin.h>
 #endif
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace smf {
 
 namespace {
+
+// Partition columns [0, m) whose column j has height M - j (M >= m > 0) into
+// up to max_strips equal-area column strips.
+inline int equal_area_strips(int m, int M, int max_strips, int bounds[65]) noexcept {
+    const int nstrips = std::min({max_strips, 64, std::max(1, m / 8)});
+    bounds[0] = 0;
+    if (nstrips <= 1) {
+        bounds[1] = m;
+        return 1;
+    }
+    const double Md = static_cast<double>(M) + 0.5;
+    const double total = static_cast<double>(m) * static_cast<double>(M) -
+                         0.5 * static_cast<double>(m) * static_cast<double>(m - 1);
+    const double Md2 = Md * Md;
+    for (int b = 1; b < nstrips; ++b) {
+        const double target = total * static_cast<double>(b) / static_cast<double>(nstrips);
+        const double disc = std::max(0.0, Md2 - 2.0 * target);
+        int c = static_cast<int>(Md - std::sqrt(disc) + 0.5);
+        c = std::clamp(c, bounds[b - 1] + 1, m - (nstrips - b));
+        bounds[b] = c;
+    }
+    bounds[nstrips] = m;
+    return nstrips;
+}
 
 // std::max({a, b, c}) without the initializer_list (MSVC lowers that to a
 // vectorized max_element call): same result, NaN handling included.
@@ -96,6 +126,44 @@ PivotChoice select_pivot(const double *F, std::size_t ld, int f, int k, int num_
         const double d = F[static_cast<std::size_t>(k) * sf + k];
         if (is_finite_fast(d) && std::abs(d) >= prm.min_abs_pivot) return {1, k, -1};
         return {};
+    }
+    // Fast path for cand = k: contiguous column scan via branchless AVX2 max.
+    // Whenever |a(k,k)| satisfies both the threshold test and the non-weak 1x1
+    // guard over the full column [k+1, f), select_pivot is guaranteed to pick
+    // {1, k, -1} without needing m1/m2/r_best tracking.
+    if (k < limit) {
+        const double *col0 = F + static_cast<std::size_t>(k) * sf;
+        const double a0 = std::abs(col0[k]);
+        if (a0 >= prm.eff_small) {
+            double colmax = 0.0;
+            int i = k + 1;
+#if defined(__AVX2__)
+            if (f - i >= 8) {
+                const __m256d sign_mask = _mm256_set1_pd(-0.0);
+                __m256d vmax0 = _mm256_setzero_pd();
+                __m256d vmax1 = _mm256_setzero_pd();
+                for (; i + 8 <= f; i += 8) {
+                    const __m256d v0 = _mm256_andnot_pd(sign_mask, _mm256_loadu_pd(col0 + i));
+                    const __m256d v1 = _mm256_andnot_pd(sign_mask, _mm256_loadu_pd(col0 + i + 4));
+                    vmax0 = _mm256_max_pd(v0, vmax0);
+                    vmax1 = _mm256_max_pd(v1, vmax1);
+                }
+                vmax0 = _mm256_max_pd(vmax1, vmax0);
+                const __m128d lo = _mm256_castpd256_pd128(vmax0);
+                const __m128d hi = _mm256_extractf128_pd(vmax0, 1);
+                const __m128d m2 = _mm_max_pd(hi, lo);
+                const __m128d m1 = _mm_max_sd(_mm_unpackhi_pd(m2, m2), m2);
+                colmax = _mm_cvtsd_f64(m1);
+            }
+#endif
+            for (; i < f; ++i) {
+                const double v = std::abs(col0[i]);
+                if (v > colmax) colmax = v;
+            }
+            if (!(prm.u * colmax > a0) && !(a0 < kWeakPivotRatio * colmax)) {
+                return {1, k, -1};
+            }
+        }
     }
     for (int cand = k; cand < limit; ++cand) {
         const double *col = F + static_cast<std::size_t>(cand) * sf;
@@ -274,15 +342,82 @@ void eliminate_1x1(double *F, int f, int k, int ucol_end, double *W, int w_col) 
     const double inv_d = 1.0 / ck[k];
     if (W != nullptr) {
         double *w = W + static_cast<std::size_t>(w_col) * sf;
-        for (int i = k + 1; i < f; ++i) w[i] = ck[i];
+        if (k + 1 < f) {
+            std::memcpy(w + (k + 1), ck + (k + 1),
+                        static_cast<std::size_t>(f - (k + 1)) * sizeof(double));
+        }
     }
-    for (int j = k + 1; j < ucol_end; ++j) {
-        const double lj = ck[j] * inv_d;
-        if (lj == 0.0) continue;
-        double *cj = F + j * sf;
-        for (int i = j; i < f; ++i) cj[i] -= ck[i] * lj;
+    int j = k + 1;
+    while (j < ucol_end) {
+        int jc[4];
+        double jl[4];
+        int nc = 0;
+        while (j < ucol_end && nc < 4) {
+            const double lj = ck[j] * inv_d;
+            if (lj != 0.0) {
+                jc[nc] = j;
+                jl[nc] = lj;
+                ++nc;
+            }
+            ++j;
+        }
+        if (nc == 0) break;
+        if (nc == 4) {
+            const int j0 = jc[0], j1 = jc[1], j2 = jc[2], j3 = jc[3];
+            double *c0 = F + static_cast<std::size_t>(j0) * sf;
+            double *c1 = F + static_cast<std::size_t>(j1) * sf;
+            double *c2 = F + static_cast<std::size_t>(j2) * sf;
+            double *c3 = F + static_cast<std::size_t>(j3) * sf;
+            const double l0 = jl[0], l1 = jl[1], l2 = jl[2], l3 = jl[3];
+            for (int i = j0; i < j3; ++i) c0[i] -= ck[i] * l0;
+            for (int i = j1; i < j3; ++i) c1[i] -= ck[i] * l1;
+            for (int i = j2; i < j3; ++i) c2[i] -= ck[i] * l2;
+            int i = j3;
+#if defined(__AVX2__)
+            const __m256d vl0 = _mm256_set1_pd(l0);
+            const __m256d vl1 = _mm256_set1_pd(l1);
+            const __m256d vl2 = _mm256_set1_pd(l2);
+            const __m256d vl3 = _mm256_set1_pd(l3);
+            for (; i + 4 <= f; i += 4) {
+                const __m256d vk = _mm256_loadu_pd(ck + i);
+                _mm256_storeu_pd(c0 + i, _mm256_sub_pd(_mm256_loadu_pd(c0 + i), _mm256_mul_pd(vk, vl0)));
+                _mm256_storeu_pd(c1 + i, _mm256_sub_pd(_mm256_loadu_pd(c1 + i), _mm256_mul_pd(vk, vl1)));
+                _mm256_storeu_pd(c2 + i, _mm256_sub_pd(_mm256_loadu_pd(c2 + i), _mm256_mul_pd(vk, vl2)));
+                _mm256_storeu_pd(c3 + i, _mm256_sub_pd(_mm256_loadu_pd(c3 + i), _mm256_mul_pd(vk, vl3)));
+            }
+#endif
+            for (; i < f; ++i) {
+                const double vk = ck[i];
+                c0[i] -= vk * l0;
+                c1[i] -= vk * l1;
+                c2[i] -= vk * l2;
+                c3[i] -= vk * l3;
+            }
+        } else {
+            for (int t = 0; t < nc; ++t) {
+                const int jt = jc[t];
+                const double lt = jl[t];
+                double *ct = F + static_cast<std::size_t>(jt) * sf;
+                int i = jt;
+#if defined(__AVX2__)
+                const __m256d vlt = _mm256_set1_pd(lt);
+                for (; i + 4 <= f; i += 4) {
+                    const __m256d vk = _mm256_loadu_pd(ck + i);
+                    _mm256_storeu_pd(ct + i, _mm256_sub_pd(_mm256_loadu_pd(ct + i), _mm256_mul_pd(vk, vlt)));
+                }
+#endif
+                for (; i < f; ++i) ct[i] -= ck[i] * lt;
+            }
+        }
     }
-    for (int i = k + 1; i < f; ++i) ck[i] *= inv_d;
+    int i = k + 1;
+#if defined(__AVX2__)
+    const __m256d vs = _mm256_set1_pd(inv_d);
+    for (; i + 4 <= f; i += 4) {
+        _mm256_storeu_pd(ck + i, _mm256_mul_pd(_mm256_loadu_pd(ck + i), vs));
+    }
+#endif
+    for (; i < f; ++i) ck[i] *= inv_d;
 }
 
 // Inverse [i00 i10; i10 i11] of the 2x2 pivot [d00 d10; d10 d11], scaled by
@@ -309,21 +444,88 @@ void eliminate_2x2(double *F, int f, int k, int ucol_end, double *W, int w_col) 
     if (W != nullptr) {
         double *w0 = W + static_cast<std::size_t>(w_col) * sf;
         double *w1 = w0 + sf;
-        for (int i = k + 2; i < f; ++i) {
-            w0[i] = c0[i];
-            w1[i] = c1[i];
+        if (k + 2 < f) {
+            const std::size_t nb_bytes = static_cast<std::size_t>(f - (k + 2)) * sizeof(double);
+            std::memcpy(w0 + (k + 2), c0 + (k + 2), nb_bytes);
+            std::memcpy(w1 + (k + 2), c1 + (k + 2), nb_bytes);
         }
     }
-    for (int j = k + 2; j < ucol_end; ++j) {
-        const double a0 = c0[j];
-        const double a1 = c1[j];
-        const double l0 = i00 * a0 + i10 * a1;
-        const double l1 = i10 * a0 + i11 * a1;
-        if (l0 == 0.0 && l1 == 0.0) continue;
-        double *cj = F + j * sf;
-        for (int i = j; i < f; ++i) cj[i] -= c0[i] * l0 + c1[i] * l1;
+    int j = k + 2;
+    while (j < ucol_end) {
+        int jc[2];
+        double jl0[2], jl1[2];
+        int nc = 0;
+        while (j < ucol_end && nc < 2) {
+            const double a0 = c0[j];
+            const double a1 = c1[j];
+            const double l0 = i00 * a0 + i10 * a1;
+            const double l1 = i10 * a0 + i11 * a1;
+            if (l0 != 0.0 || l1 != 0.0) {
+                jc[nc] = j;
+                jl0[nc] = l0;
+                jl1[nc] = l1;
+                ++nc;
+            }
+            ++j;
+        }
+        if (nc == 0) break;
+        if (nc == 2) {
+            const int j0 = jc[0], j1 = jc[1];
+            double *d0 = F + static_cast<std::size_t>(j0) * sf;
+            double *d1 = F + static_cast<std::size_t>(j1) * sf;
+            const double l00 = jl0[0], l01 = jl1[0];
+            const double l10 = jl0[1], l11 = jl1[1];
+            for (int i = j0; i < j1; ++i) d0[i] -= c0[i] * l00 + c1[i] * l01;
+            int i = j1;
+#if defined(__AVX2__)
+            const __m256d v00 = _mm256_set1_pd(l00);
+            const __m256d v01 = _mm256_set1_pd(l01);
+            const __m256d v10 = _mm256_set1_pd(l10);
+            const __m256d v11 = _mm256_set1_pd(l11);
+            for (; i + 4 <= f; i += 4) {
+                const __m256d vc0 = _mm256_loadu_pd(c0 + i);
+                const __m256d vc1 = _mm256_loadu_pd(c1 + i);
+                const __m256d t0 = _mm256_add_pd(_mm256_mul_pd(vc0, v00), _mm256_mul_pd(vc1, v01));
+                const __m256d t1 = _mm256_add_pd(_mm256_mul_pd(vc0, v10), _mm256_mul_pd(vc1, v11));
+                _mm256_storeu_pd(d0 + i, _mm256_sub_pd(_mm256_loadu_pd(d0 + i), t0));
+                _mm256_storeu_pd(d1 + i, _mm256_sub_pd(_mm256_loadu_pd(d1 + i), t1));
+            }
+#endif
+            for (; i < f; ++i) {
+                const double vc0 = c0[i], vc1 = c1[i];
+                d0[i] -= vc0 * l00 + vc1 * l01;
+                d1[i] -= vc0 * l10 + vc1 * l11;
+            }
+        } else {
+            const int j0 = jc[0];
+            double *d0 = F + static_cast<std::size_t>(j0) * sf;
+            const double l0 = jl0[0], l1 = jl1[0];
+            int i = j0;
+#if defined(__AVX2__)
+            const __m256d v0 = _mm256_set1_pd(l0);
+            const __m256d v1 = _mm256_set1_pd(l1);
+            for (; i + 4 <= f; i += 4) {
+                const __m256d t = _mm256_add_pd(_mm256_mul_pd(_mm256_loadu_pd(c0 + i), v0),
+                                                _mm256_mul_pd(_mm256_loadu_pd(c1 + i), v1));
+                _mm256_storeu_pd(d0 + i, _mm256_sub_pd(_mm256_loadu_pd(d0 + i), t));
+            }
+#endif
+            for (; i < f; ++i) d0[i] -= c0[i] * l0 + c1[i] * l1;
+        }
     }
-    for (int i = k + 2; i < f; ++i) {
+    int i = k + 2;
+#if defined(__AVX2__)
+    const __m256d w00 = _mm256_set1_pd(i00);
+    const __m256d w10 = _mm256_set1_pd(i10);
+    const __m256d w11 = _mm256_set1_pd(i11);
+    for (; i + 4 <= f; i += 4) {
+        const __m256d a0 = _mm256_loadu_pd(c0 + i);
+        const __m256d a1 = _mm256_loadu_pd(c1 + i);
+        _mm256_storeu_pd(c0 + i, _mm256_add_pd(_mm256_mul_pd(w00, a0), _mm256_mul_pd(w10, a1)));
+        _mm256_storeu_pd(c1 + i, _mm256_add_pd(_mm256_mul_pd(w10, a0), _mm256_mul_pd(w11, a1)));
+    }
+#endif
+    for (; i < f; ++i) {
         const double a0 = c0[i];
         const double a1 = c1[i];
         c0[i] = i00 * a0 + i10 * a1;
@@ -494,36 +696,227 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
     const int m = e - c0;
     if (jb <= 0 || m <= 0) return;
     const std::size_t sf = static_cast<std::size_t>(f);
+    {
+        const int nt = blas_current_share();
+        const int M = f - c0;
+        if (nt >= 2 && m >= 24 && static_cast<long long>(M) * m * jb >= 65536LL) {
+            int bounds[65];
+            const int nstrips = equal_area_strips(m, M, nt, bounds);
+            if (nstrips >= 2) {
+                const auto run_strip = [&](int s) {
+                    const int j0 = bounds[s];
+                    const int j1 = bounds[s + 1];
+                    const int w = j1 - j0;
+                    const int col = c0 + j0;
+                    const int H = f - col;
+                    double *C = F + static_cast<std::size_t>(col) * sf + col;
+                    const double *A = F + static_cast<std::size_t>(p0) * sf + col;
+                    const double *B = W + col;
+                    if (2 * w < H) {
+                        smf_dgemm_nt_seq(C, H, w, jb, A, f, B, f, f, -1.0, 1.0);
+                    } else {
+                        smf_dgemmt_lower_nt_sub_seq(C, w, jb, A, f, B, f, f);
+                        if (H > w) {
+                            smf_dgemm_nt_seq(C + w, H - w, w, jb, A + w, f, B, f, f, -1.0, 1.0);
+                        }
+                    }
+                };
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+                if (TileHelpers *h = current_top_helpers()) {
+                    BlasSerialPinScope pin_blas;
+                    parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                    return;
+                }
+#endif
+#if defined(_OPENMP)
+                BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+                {
+                    const int prev_blas = blas_local_set_seq();
+                    const int tid = omp_get_thread_num();
+                    if (tid < nstrips) run_strip(tid);
+                    blas_local_restore(prev_blas);
+                }
+                return;
+#endif
+            }
+        }
+    }
     smf_dgemmt_lower_nt_sub(F + c0 * sf + c0, m, jb, F + p0 * sf + c0, f, W + c0, f, f);
     const int r = f - e;
     if (r > 0)
         smf_dgemm_nt(F + c0 * sf + e, r, m, jb, F + p0 * sf + e, f, W + c0, f, f, -1.0, 1.0);
 }
 
+// Fill one contiguous column of LD (length q) for pivot column c in [c0, c1).
+inline void fill_ld_column(const double *F, std::size_t sf, int e, int q,
+                           const int8_t *tags, int c, double *dst) noexcept {
+    const double *Lc = F + static_cast<std::size_t>(c) * sf;
+    const int8_t tag = tags[c];
+    if (tag == 1) {
+        const double d = Lc[c];
+        const double *src = Lc + e;
+        int i = 0;
+#if defined(__AVX2__)
+        const __m256d vd = _mm256_set1_pd(d);
+        for (; i + 4 <= q; i += 4) {
+            _mm256_storeu_pd(dst + i, _mm256_mul_pd(_mm256_loadu_pd(src + i), vd));
+        }
+#endif
+        for (; i < q; ++i) dst[i] = src[i] * d;
+    } else if (tag == 2) {
+        const double *Lc1 = Lc + sf;
+        const double d00 = Lc[c];
+        const double d10 = Lc[c + 1];
+        const double *s0 = Lc + e;
+        const double *s1 = Lc1 + e;
+        int i = 0;
+#if defined(__AVX2__)
+        const __m256d v0 = _mm256_set1_pd(d00);
+        const __m256d v1 = _mm256_set1_pd(d10);
+        for (; i + 4 <= q; i += 4) {
+            const __m256d t = _mm256_add_pd(_mm256_mul_pd(_mm256_loadu_pd(s0 + i), v0),
+                                            _mm256_mul_pd(_mm256_loadu_pd(s1 + i), v1));
+            _mm256_storeu_pd(dst + i, t);
+        }
+#endif
+        for (; i < q; ++i) dst[i] = s0[i] * d00 + s1[i] * d10;
+    } else if (tag == -1) {
+        const double *Lc0 = Lc - sf;
+        const double d10 = Lc0[c];
+        const double d11 = Lc[c];
+        const double *s0 = Lc0 + e;
+        const double *s1 = Lc + e;
+        int i = 0;
+#if defined(__AVX2__)
+        const __m256d v0 = _mm256_set1_pd(d10);
+        const __m256d v1 = _mm256_set1_pd(d11);
+        for (; i + 4 <= q; i += 4) {
+            const __m256d t = _mm256_add_pd(_mm256_mul_pd(_mm256_loadu_pd(s0 + i), v0),
+                                            _mm256_mul_pd(_mm256_loadu_pd(s1 + i), v1));
+            _mm256_storeu_pd(dst + i, t);
+        }
+#endif
+        for (; i < q; ++i) dst[i] = s0[i] * d10 + s1[i] * d11;
+    } else {
+        std::fill_n(dst, q, 0.0);
+    }
+}
+
 // Schur complement of the rows below the eligible block, once and at rank
-// p - p0: F[e:f, e:f] -= L[e:f, p0:p] D L[e:f, p0:p]^T (lower). L D is formed
-// in the front's unused strict upper triangle, F[p0:p, e:f], as its transpose.
-void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags) {
+// p - p0: F[e:f, e:f] -= L[e:f, p0:p] D L[e:f, p0:p]^T (lower).
+void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags,
+                  double *buf, std::size_t buf_cap) {
     const int q = f - e;
     if (p <= p0 || q <= 0) return;
     const std::size_t sf = static_cast<std::size_t>(f);
-    for (int c = p0; c < p; ++c) {
-        const double *Lc = F + static_cast<std::size_t>(c) * sf;
-        if (tags[c] == 2) {
-            const double *Lc1 = Lc + sf;
-            const double d00 = Lc[c], d10 = Lc[c + 1], d11 = Lc1[c + 1];
-            for (int i = e; i < f; ++i) {
-                double *row = F + static_cast<std::size_t>(i) * sf;
-                row[c] = Lc[i] * d00 + Lc1[i] * d10;
-                row[c + 1] = Lc[i] * d10 + Lc1[i] * d11;
+    if (buf == nullptr || buf_cap < static_cast<std::size_t>(q) * 2u) {
+        for (int c = p0; c < p; ++c) {
+            const double *Lc = F + static_cast<std::size_t>(c) * sf;
+            if (tags[c] == 2) {
+                const double *Lc1 = Lc + sf;
+                const double d00 = Lc[c], d10 = Lc[c + 1], d11 = Lc1[c + 1];
+                for (int i = e; i < f; ++i) {
+                    double *row = F + static_cast<std::size_t>(i) * sf;
+                    row[c] = Lc[i] * d00 + Lc1[i] * d10;
+                    row[c + 1] = Lc[i] * d10 + Lc1[i] * d11;
+                }
+                ++c;
+            } else {
+                const double d = Lc[c];
+                for (int i = e; i < f; ++i) F[static_cast<std::size_t>(i) * sf + c] = Lc[i] * d;
             }
-            ++c;
-        } else {
-            const double d = Lc[c];
-            for (int i = e; i < f; ++i) F[static_cast<std::size_t>(i) * sf + c] = Lc[i] * d;
         }
+        smf_dgemmt_lower_nn_sub(F + e * sf + e, q, p - p0, F + p0 * sf + e, f, F + e * sf + p0, f, f);
+        return;
     }
-    smf_dgemmt_lower_nn_sub(F + e * sf + e, q, p - p0, F + p0 * sf + e, f, F + e * sf + p0, f, f);
+
+    const std::size_t sq = static_cast<std::size_t>(q);
+    const int max_cols = static_cast<int>(std::min<std::size_t>(
+        static_cast<std::size_t>(p - p0), buf_cap / sq));
+    int c0 = p0;
+    while (c0 < p) {
+        int c1 = std::min(p, c0 + max_cols);
+        if (c1 < p && tags[c1 - 1] == 2) {
+            if (c1 - 1 > c0) --c1;
+            else ++c1;
+        }
+        const int kc = c1 - c0;
+        {
+            const int nt = blas_current_share();
+            if (nt >= 2 && q >= 64 && static_cast<long long>(q) * q * kc >= 262144LL) {
+                int bounds[65];
+                const int nstrips = equal_area_strips(q, q, nt, bounds);
+                if (nstrips >= 2) {
+                    const auto run_strip = [&](int s) {
+                        const int j0 = bounds[s];
+                        const int j1 = bounds[s + 1];
+                        const int w = j1 - j0;
+                        const int H = q - j0;
+                        double *C = F + static_cast<std::size_t>(e + j0) * sf + (e + j0);
+                        const double *A = F + static_cast<std::size_t>(c0) * sf + (e + j0);
+                        const double *B = buf + j0;
+                        if (2 * w < H) {
+                            smf_dgemm_nt_seq(C, H, w, kc, A, f, B, q, f, -1.0, 1.0);
+                        } else {
+                            smf_dgemmt_lower_nt_sub_seq(C, w, kc, A, f, B, q, f);
+                            if (H > w) {
+                                smf_dgemm_nt_seq(C + w, H - w, w, kc, A + w, f, B, q, f, -1.0, 1.0);
+                            }
+                        }
+                    };
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+                    if (TileHelpers *h = current_top_helpers()) {
+                        BlasSerialPinScope pin_blas;
+                        if (static_cast<long long>(kc) * q >= 16384LL && kc >= 8) {
+                            const int nfill = std::min(nstrips, kc);
+                            parallel_for_helpers(nfill, nfill, h, [&](int s) {
+                                const int t0 = (kc * s) / nfill;
+                                const int t1 = (kc * (s + 1)) / nfill;
+                                for (int t = t0; t < t1; ++t) {
+                                    fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                                   buf + static_cast<std::size_t>(t) * sq);
+                                }
+                            });
+                        } else {
+                            for (int t = 0; t < kc; ++t) {
+                                fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                               buf + static_cast<std::size_t>(t) * sq);
+                            }
+                        }
+                        parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                        c0 = c1;
+                        continue;
+                    }
+#endif
+#if defined(_OPENMP)
+                    BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+                    {
+                        const int prev_blas = blas_local_set_seq();
+#pragma omp for schedule(static)
+                        for (int t = 0; t < kc; ++t) {
+                            fill_ld_column(F, sf, e, q, tags, c0 + t,
+                                           buf + static_cast<std::size_t>(t) * sq);
+                        }
+                        const int tid = omp_get_thread_num();
+                        if (tid < nstrips) run_strip(tid);
+                        blas_local_restore(prev_blas);
+                    }
+                    c0 = c1;
+                    continue;
+#endif
+                }
+            }
+        }
+        for (int t = 0; t < kc; ++t) {
+            fill_ld_column(F, sf, e, q, tags, c0 + t,
+                           buf + static_cast<std::size_t>(t) * sq);
+        }
+        smf_dgemmt_lower_nt_sub(F + static_cast<std::size_t>(e) * sf + e, q, kc,
+                                F + static_cast<std::size_t>(c0) * sf + e, f, buf, q, f);
+        c0 = c1;
+    }
 }
 
 // ldlt_factor_front's unblocked loop on the small-front layout.
@@ -563,7 +956,8 @@ LdltKernelResult ldlt_factor_small_front(double *F, int ld, int f, int num_elig,
 
 LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
                                    const LdltKernelParams &prm, int8_t *tags,
-                                   double *work, int first) {
+                                   double *work, int first,
+                                   std::size_t work_cap) {
     LdltKernelResult res;
     int k = first;
 
@@ -724,20 +1118,120 @@ LdltKernelResult ldlt_factor_front(double *F, int f, int num_elig, Int *rows,
         }
     }
     lap(PhaseSum::TopPanel);
-    schur_update(F, f, first, k, num_elig, tags);
+    const std::size_t eff_cap = work_cap > 0 ? work_cap : ldlt_work_size(f, prm);
+    schur_update(F, f, first, k, num_elig, tags, work, eff_cap);
     lap(PhaseSum::TopSchur);
     res.num_accepted = k;
     return res;
 }
+
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+namespace {
+void posdef_dtrsm_omp(double *B, int n_rows, int k, const double *L, int ldl, int ldb, int nt) {
+    if (n_rows <= 0 || k <= 0) return;
+    if (nt >= 2 && n_rows >= 64 && static_cast<long long>(n_rows) * k * k >= 65536LL) {
+        const int nstrips = std::min({nt, 64, std::max(1, n_rows / 16)});
+        if (nstrips >= 2) {
+            const auto run_strip = [&](int s) {
+                const int r0 = (n_rows * s) / nstrips;
+                const int r1 = (n_rows * (s + 1)) / nstrips;
+                if (r1 > r0) {
+                    smf_dtrsm_right_lower_transpose_seq(B + r0, r1 - r0, k, L, ldl, ldb);
+                }
+            };
+            if (TileHelpers *h = current_top_helpers()) {
+                BlasSerialPinScope pin_blas;
+                parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                return;
+            }
+#if defined(_OPENMP)
+            BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+            {
+                const int tid = omp_get_thread_num();
+                if (tid < nstrips) run_strip(tid);
+            }
+            return;
+#endif
+        }
+    }
+    smf_dtrsm_right_lower_transpose(B, n_rows, k, L, ldl, ldb);
+}
+
+void posdef_dsyrk_omp(double *C, int m, const double *A, int k, int lda, int ldc, int nt) {
+    if (m <= 0 || k <= 0) return;
+    if (nt >= 2 && m >= 64 && static_cast<long long>(m) * m * k >= 262144LL) {
+        int bounds[65];
+        const int nstrips = equal_area_strips(m, m, nt, bounds);
+        if (nstrips >= 2) {
+            const std::size_t sldc = static_cast<std::size_t>(ldc);
+            const auto run_strip = [&](int s) {
+                const int j0 = bounds[s];
+                const int j1 = bounds[s + 1];
+                const int w = j1 - j0;
+                const int H = m - j0;
+                double *Cj = C + static_cast<std::size_t>(j0) * sldc + j0;
+                const double *Aj = A + j0;
+                smf_dsyrk_lower_seq(Cj, w, Aj, k, lda, ldc);
+                if (H > w) {
+                    smf_dgemm_nt_seq(Cj + w, H - w, w, k, Aj + w, lda, Aj, lda, ldc, -1.0, 1.0);
+                }
+            };
+            if (TileHelpers *h = current_top_helpers()) {
+                BlasSerialPinScope pin_blas;
+                parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                return;
+            }
+#if defined(_OPENMP)
+            BlasSerialPinScope pin_blas;
+#pragma omp parallel num_threads(nstrips)
+            {
+                const int tid = omp_get_thread_num();
+                if (tid < nstrips) run_strip(tid);
+            }
+            return;
+#endif
+        }
+    }
+    smf_dsyrk_lower(C, m, A, k, lda, ldc);
+}
+
+int posdef_dpotrf_omp(double *A, int n, int lda, int nt) {
+    if (nt < 2 || n < 256) return smf_dpotrf_lower(A, n, lda);
+    constexpr int kNb = 128;
+    const std::size_t slda = static_cast<std::size_t>(lda);
+    BlasSerialPinScope pin_blas;
+    for (int j = 0; j < n; j += kNb) {
+        const int jb = std::min(kNb, n - j);
+        double *Ajj = A + static_cast<std::size_t>(j) * slda + j;
+        const int info = smf_dpotrf_lower(Ajj, jb, lda);
+        if (info != 0) return info > 0 ? j + info : info;
+        const int rem = n - (j + jb);
+        if (rem > 0) {
+            double *A21 = Ajj + jb;
+            double *A22 = A + static_cast<std::size_t>(j + jb) * slda + (j + jb);
+            posdef_dtrsm_omp(A21, rem, jb, Ajj, lda, lda, nt);
+            posdef_dsyrk_omp(A22, rem, A21, jb, lda, lda, nt);
+        }
+    }
+    return 0;
+}
+} // namespace
+#endif
 
 LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8_t *tags) {
     LdltKernelResult res;
     const int p = num_elig;
     if (p <= 0) return res;
     const std::size_t sf = static_cast<std::size_t>(f);
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+    const int nt = blas_current_share();
+    const int info = posdef_dpotrf_omp(F, p, f, nt);
+#else
     // dpotrf stops at the first leading minor whose pivot is not > 0 (or is
     // NaN); info = that column + 1. The columns before it are factored.
     const int info = smf_dpotrf_lower(F, p, f);
+#endif
     int ok = info == 0 ? p : (info > 0 ? info - 1 : 0);
     // ldlt_factor_front also rejects an infinite pivot, which dpotrf takes
     // (sqrt(inf) = inf); the pivots before it are finite and positive.
@@ -758,8 +1252,14 @@ LdltKernelResult posdef_factor_front_lapack(double *F, int f, int num_elig, int8
     const int q = f - p;
     if (q > 0) {
         // L21 = A21 L11^-T, then S = A22 - L21 L21^T (lower).
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
+        const int nt2 = blas_current_share();
+        posdef_dtrsm_omp(F + p, q, p, F, f, f, nt2);
+        posdef_dsyrk_omp(F + static_cast<std::size_t>(p) * sf + p, q, F + p, p, f, f, nt2);
+#else
         smf_dtrsm_right_lower_transpose(F + p, q, p, F, f, f);
         smf_dsyrk_lower(F + static_cast<std::size_t>(p) * sf + p, q, F + p, p, f, f);
+#endif
     }
     return res;
 }

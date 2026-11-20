@@ -1,0 +1,21 @@
+SMF_1.0 {
+  global:
+    smf_c_abi_version;
+    smf_version;
+    smf_blas_backend;
+    smf_analyse;
+    smf_set_pivoting;
+    smf_factor;
+    smf_solve;
+    smf_inertia;
+    smf_free_analysis;
+    smf_free_factor;
+    smf_ipm_default_control;
+    smf_ipm_create;
+    smf_ipm_analyse;
+    smf_ipm_factor;
+    smf_ipm_solve;
+    smf_ipm_free;
+  local:
+    *;
+};
