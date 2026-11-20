@@ -61,6 +61,14 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
 void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
                              const double *B, int ldb, int ldc);
 
+/// Sequential (no blas_follow_share) variants for use inside an active OpenMP
+/// parallel region where each thread holds blas_local_set_seq().
+void smf_dgemm_nt_seq(double *C, int m, int n, int k, const double *A, int lda,
+                      const double *B, int ldb, int ldc, double alpha = 1.0,
+                      double beta = 1.0);
+void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
+                                 int lda, const double *B, int ldb, int ldc);
+
 /// Matrix-vector: y := alpha * A * x + beta * y. A is m×n, lda.
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha = 1.0, double beta = 0.0);
