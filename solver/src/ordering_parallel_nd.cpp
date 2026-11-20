@@ -311,6 +311,7 @@ bool order_leaf(const Compressed& c, Node& node, int id, const std::vector<int>&
 {
     const std::size_t m = node.verts.size();
     node.order.clear();
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
     if (static_cast<Int>(m) < amd_leaf_max) {
         // AMD on the uncompressed leaf.
         std::vector<Int> orig;
@@ -344,8 +345,21 @@ bool order_leaf(const Compressed& c, Node& node, int id, const std::vector<int>&
         }
         return true;
     }
+#else
+    (void)oloc; (void)amd_leaf_max; (void)xadj; (void)adj;
+#endif
+    if (m <= 1) {
+        for (Int s : node.verts)
+            for (Int p = c.mptr[s]; p < c.mptr[s + 1]; ++p) node.order.push_back(c.members[static_cast<std::size_t>(p)]);
+        return true;
+    }
     std::vector<Int> sx, sa, sw;
     induced(c, node.verts, id, owner, loc, sx, sa, sw);
+    if (sa.empty()) {
+        for (Int s : node.verts)
+            for (Int p = c.mptr[s]; p < c.mptr[s + 1]; ++p) node.order.push_back(c.members[static_cast<std::size_t>(p)]);
+        return true;
+    }
     std::vector<Int> lp(m), lip(m);
     if (!metis_node_nd(static_cast<Int>(m), sx.data(), sa.data(), sw.data(), lp.data(), lip.data()))
         return false;

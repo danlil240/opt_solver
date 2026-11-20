@@ -776,3 +776,41 @@ TEST(CApiTest, IpmSessionAcceptsEitherOrBothTriangles) {
     EXPECT_EQ(info_full.num_neg, info_low.num_neg);
     EXPECT_EQ(info_up.num_neg, info_low.num_neg);
 }
+
+/* Passing a per-call control override to smf_ipm_solve must apply only to that
+ * call and must not overwrite the session's control for subsequent solves with
+ * ctrl == NULL. */
+TEST(CApiTest, IpmSolveCtrlOverrideDoesNotResetSessionControl) {
+    /* Singular 3x3: diag = [2, 0, -3]. With continue_on_singular=1 the factor
+     * is kept and solves succeed; with continue_on_singular=0 solves fail. */
+    static const int    col_ptr[] = {0, 1, 2, 3};
+    static const int    row_idx[] = {0, 1, 2};
+    static const double vals[]    = {2.0, 0.0, -3.0};
+
+    smf_ipm_control_t factor_ctrl;
+    smf_ipm_default_control(&factor_ctrl);
+    factor_ctrl.num_threads = 1;
+    factor_ctrl.continue_on_singular = 1;
+
+    smf_ipm_session_t sess = nullptr;
+    ASSERT_EQ(smf_ipm_create(&sess), SMF_OK);
+    ASSERT_EQ(smf_ipm_analyse(sess, 3, col_ptr, row_idx, vals, &factor_ctrl, nullptr), SMF_OK);
+    ASSERT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals, &factor_ctrl, nullptr, nullptr),
+              SMF_ERR_SINGULAR);
+
+    /* First solve: temporary override with continue_on_singular=0 fails. */
+    smf_ipm_control_t strict_ctrl = factor_ctrl;
+    strict_ctrl.continue_on_singular = 0;
+    double rhs1[3] = {2.0, 0.0, -3.0};
+    EXPECT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, 1, rhs1, 3, &strict_ctrl, nullptr),
+              SMF_ERR_INTERNAL);
+
+    /* Subsequent solve with ctrl == NULL must still use the factor's session
+     * control (continue_on_singular=1), not the earlier solve's override. */
+    double rhs2[3] = {2.0, 0.0, -3.0};
+    EXPECT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, 1, rhs2, 3, nullptr, nullptr), SMF_OK);
+    EXPECT_NEAR(rhs2[0], 1.0, 1e-12);
+    EXPECT_NEAR(rhs2[2], 1.0, 1e-12);
+
+    smf_ipm_free(&sess);
+}

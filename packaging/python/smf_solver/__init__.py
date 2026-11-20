@@ -73,10 +73,17 @@ def ma97_plugin_path() -> str:
 
 def _load_c_lib() -> ctypes.CDLL:
     path = c_library_path()
-    parent = pathlib.Path(path).parent
-    if sys.platform == "win32" and parent.is_dir() and hasattr(os, "add_dll_directory"):
-        os.add_dll_directory(str(parent))
-    lib = ctypes.CDLL(path)
+    dir_name = os.path.dirname(path)
+    if (
+        sys.platform == "win32"
+        and dir_name
+        and hasattr(os, "add_dll_directory")
+        and os.path.isdir(dir_name)
+    ):
+        with os.add_dll_directory(os.path.abspath(dir_name)):
+            lib = ctypes.CDLL(path)
+    else:
+        lib = ctypes.CDLL(path)
     lib.smf_c_abi_version.restype = ctypes.c_int
     lib.smf_c_abi_version.argtypes = []
     lib.smf_version.restype = ctypes.c_char_p

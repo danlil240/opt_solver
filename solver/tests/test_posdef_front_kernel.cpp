@@ -12,12 +12,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numeric>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace smf;
@@ -514,4 +516,42 @@ TEST(PosdefFrontKernel, LapackMinFrontThreshold) {
         // Every front of the 1-thread run on the Lapack kernel at threshold 1.
         if (threads == 1) EXPECT_GT(prev, 0);
     }
+}
+
+// On non-MKL builds without OpenMP (and outside TopScheduler helpers),
+// posdef_factor_front_lapack has no strip executor to parallelize the blocked
+// Cholesky loop, so it must NOT pin BLAS to 1 thread (which would force
+// serial BLAS instead of letting threaded BLAS use the caller's share).
+TEST(PosdefFrontKernel, NonOpenMpDoesNotPinBlasSerial) {
+#if !(defined(SMF_USE_MKL) && (SMF_USE_MKL)) && !defined(_OPENMP)
+    constexpr int f = 384;
+    const std::vector<double> F0 = random_spd_front(f, 777);
+    std::vector<int8_t> tags(static_cast<std::size_t>(f), 0);
+
+    BlasThreadGuard blas(4);
+    std::atomic<bool> ready{false};
+    std::atomic<bool> stop{false};
+    std::atomic<bool> saw_pin{false};
+    std::thread observer([&] {
+        ready.store(true, std::memory_order_release);
+        while (!stop.load(std::memory_order_acquire)) {
+            if (blas_is_pinned_serial()) {
+                saw_pin.store(true, std::memory_order_relaxed);
+            }
+        }
+    });
+    while (!ready.load(std::memory_order_acquire)) {
+    }
+    for (int rep = 0; rep < 12; ++rep) {
+        std::vector<double> F = F0;
+        const LdltKernelResult kr = posdef_factor_front_lapack(F.data(), f, f, tags.data());
+        ASSERT_EQ(kr.num_accepted, f);
+    }
+    stop.store(true, std::memory_order_release);
+    observer.join();
+    EXPECT_FALSE(saw_pin.load())
+        << "posdef_factor_front_lapack pinned BLAS serial without OpenMP or TopScheduler helpers";
+#else
+    GTEST_SKIP() << "only applies to non-MKL, non-OpenMP builds";
+#endif
 }
