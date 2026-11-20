@@ -39,7 +39,7 @@ option(SMF_BUILD_TESTS         "Build unit tests"                       ON)
 option(SMF_BUILD_BENCHMARKS    "Build benchmarks"                       ON)
 option(SMF_SANITIZE            "Enable -fsanitize=address,undefined"    OFF)
 option(SMF_BUILD_IPOPT_ADAPTER "Build smf IPOPT TSymLinearSolver adapter" OFF)
-option(SMF_BUILD_C_API         "Build C ABI wrapper for smf"              OFF)
+option(SMF_BUILD_C_API         "Build shared C ABI library (libsmf_c) and pkg-config file" ON)
 option(SMF_BUILD_CHOLMOD_COMPARE "Build CHOLMOD comparison tests (ON if CHOLMOD found)" OFF)
 option(SMF_BUILD_MA97_PLUGIN   "Build libsmf_ma97.so HSL MA97 plugin (IPOPT dynamic loader)" ON)
 option(SMF_REQUIRE_BENCHMARK_BASELINES "Fail configuration/execution when required benchmark baselines are missing" OFF)
@@ -588,6 +588,7 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_BLAS_REFERENCE}>:SMF_BLAS_REFERENCE=1>
     $<$<BOOL:${SMF_REQUIRE_BENCHMARK_BASELINES}>:SMF_REQUIRE_BENCHMARK_BASELINES=1>
     SMF_BLAS_BACKEND_STR="${SMF_BLAS_BACKEND_NAME}"
+    SMF_VERSION_STR="${PROJECT_VERSION}"
 )
 
 
@@ -601,13 +602,43 @@ if(SMF_BUILD_IPOPT_ADAPTER)
     target_compile_definitions(smf PUBLIC SMF_BUILD_IPOPT_ADAPTER=1)
 endif()
 
-# ---- C ABI wrapper (optional) -------------------------------------------
+# ---- C ABI shared library (libsmf_c + smf.pc) ---------------------------
 if(SMF_BUILD_C_API)
-    target_sources(smf PRIVATE src/smf_c.cpp)
-    target_compile_definitions(smf PUBLIC SMF_BUILD_C_API=1)
+    add_library(smf_c SHARED src/smf_c.cpp)
+    target_link_libraries(smf_c PRIVATE smf)
+    target_include_directories(smf_c PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(smf_c
+        PRIVATE SMF_C_EXPORTS=1
+        INTERFACE SMF_C_SHARED=1
+    )
+    set_target_properties(smf_c PROPERTIES
+        SOVERSION 1
+        VERSION   ${PROJECT_VERSION}
+    )
+    smf_stage_runtime_dlls(smf_c)
+    if(UNIX AND NOT APPLE)
+        target_link_options(smf_c PRIVATE
+            "LINKER:--exclude-libs,ALL"
+            "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/cmake/smf_c.map"
+        )
+        set_target_properties(smf_c PROPERTIES
+            LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/smf_c.map"
+        )
+    endif()
     if(SMF_BUILD_TESTS)
         add_executable(test_c_api tests/test_c_api.cpp)
-        target_link_libraries(test_c_api PRIVATE smf GTest::gtest_main)
+        target_link_libraries(test_c_api PRIVATE smf_c smf GTest::gtest_main)
+        target_include_directories(test_c_api PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+        smf_stage_runtime_dlls(test_c_api)
+        if(WIN32)
+            add_custom_command(TARGET test_c_api POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:smf_c> $<TARGET_FILE_DIR:test_c_api>
+                VERBATIM)
+        endif()
         add_test(NAME CApiTest COMMAND test_c_api)
     endif()
 endif()
@@ -621,6 +652,15 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 set(_smf_install_targets smf)
+if(TARGET smf_c)
+    list(APPEND _smf_install_targets smf_c)
+    configure_file(
+        cmake/smf.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
+        @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+endif()
 if(TARGET smf_metis)
     list(APPEND _smf_install_targets smf_metis)
 endif()
