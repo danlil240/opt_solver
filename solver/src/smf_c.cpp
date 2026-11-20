@@ -750,6 +750,7 @@ int smf_ipm_solve(smf_ipm_session_t        session,
 
     try {
         smf::Control solve_ctrl = session->last_ctrl;
+        bool restore_ctrl = false;
         if (ctrl) {
             const int mtype = (solve_ctrl.matrix_type == smf::MatrixType::RealSymmetricPositiveDefinite)
                                   ? SMF_POSDEF
@@ -758,7 +759,16 @@ int smf_ipm_solve(smf_ipm_session_t        session,
                 return SMF_ERR_INVALID_ARG;
             }
             session->session.set_control(solve_ctrl);
+            restore_ctrl = true;
         }
+        struct ControlRestore {
+            smf::IpmSession& sess;
+            const smf::Control& saved;
+            bool active;
+            ~ControlRestore() {
+                if (active) sess.set_control(saved);
+            }
+        } ctrl_restore{session->session, session->last_ctrl, restore_ctrl};
 
         const smf::BlasThreadGuard blas(solve_ctrl.num_threads);
         const auto t0 = std::chrono::steady_clock::now();

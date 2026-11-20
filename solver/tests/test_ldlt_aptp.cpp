@@ -17,6 +17,7 @@
 ///     kernel (ldlt_aptp_front_tiled) keeps the contract and is bitwise
 ///     identical on 1, 3 and 4 threads.
 
+#include "smf/blas_thread_guard.hpp"
 #include "smf/ldlt_aptp.hpp"
 #include "smf/ldlt_kernel.hpp"
 #include "../src/parallel/tile_tasks.hpp"
@@ -75,6 +76,9 @@ InertiaCounts eigen_inertia(const Mat &A, int f, int n) {
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
     const int info = LAPACKE_dsyev(LAPACK_COL_MAJOR, 'N', 'L', n, a.data(), n, w.data());
 #elif !(defined(SMF_BLAS_REFERENCE) && (SMF_BLAS_REFERENCE))
+    // Keep process-wide BLAS (OpenBLAS) single-threaded for these small
+    // reference eigensolves so ctest does not spin all cores in dsyev_.
+    BlasSerialGuard serial_blas;
     int info = 0;
     int lwork = -1;
     double q = 0.0;
@@ -130,6 +134,7 @@ struct Run {
 };
 
 Run run_aptp(const Mat &A, int f, int num_elig, const AptpParams &prm) {
+    BlasSerialGuard serial_blas;
     Run r;
     r.F = A;
     r.rows.resize(f);
@@ -356,6 +361,7 @@ TEST(LdltAptp, SchurMatchesReference) {
         LdltKernelParams kp;
         kp.u = prm.u;
         std::vector<double> wk(ldlt_work_size(f, kp));
+        BlasSerialGuard serial_blas;
         const LdltKernelResult rr =
             ldlt_factor_front(Fr.data(), f, num_elig, rows_r.data(), kp, tags_r.data(), wk.data());
 
@@ -435,6 +441,7 @@ TEST(LdltAptp, FailedColumnsKeepLayout) {
 // signs, so every column passes its 1x1 test in order and both runs take
 // the same pivot sequence (no swaps).
 TEST(LdltAptp, TppContinuationFromFirstMatchesOneCall) {
+    BlasSerialGuard serial_blas;
     const int f = 300, k = 100, ne = 250;
     std::mt19937 rng(77);
     std::uniform_real_distribution<double> uni(-1.0, 1.0);

@@ -1204,7 +1204,12 @@ void posdef_dsyrk_omp(double *C, int m, const double *A, int k, int lda, int ldc
 }
 
 int posdef_dpotrf_omp(double *A, int n, int lda, int nt) {
-    if (nt < 2 || n < 256) return smf_dpotrf_lower(A, n, lda);
+#if defined(_OPENMP)
+    const bool have_strip_parallel = true;
+#else
+    const bool have_strip_parallel = (current_top_helpers() != nullptr);
+#endif
+    if (nt < 2 || n < 256 || !have_strip_parallel) return smf_dpotrf_lower(A, n, lda);
     constexpr int kNb = 128;
     const std::size_t slda = static_cast<std::size_t>(lda);
     BlasSerialPinScope pin_blas;

@@ -12,10 +12,9 @@ sources = [
 script = raw"""
 cd $WORKSPACE/srcdir/opt_solver
 
-MARCH_OPT="-DSMF_MARCH="
-if [[ "${target}" == x86_64-* ]]; then
-    MARCH_OPT="-DSMF_MARCH=x86-64-v3"
-fi
+# Let BinaryBuilder's compiler wrappers select the target microarchitecture
+# (do not force x86-64-v3 on generic x86_64 platforms).
+MARCH_OPT="-DSMF_MARCH=none"
 
 cmake -S solver -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX=${prefix} \

@@ -70,11 +70,16 @@ else()
         # A library that runs elsewhere, e.g. the IPOPT plugin inside a
         # container image, wants a fixed level such as x86-64-v3 (AVX2 + FMA,
         # the level of the MSVC build above).
-        set(SMF_MARCH "native" CACHE STRING "GCC/Clang -march= value for smf code (e.g. native, x86-64-v3)")
+        set(SMF_MARCH "native" CACHE STRING "GCC/Clang -march= value for smf code (e.g. native, x86-64-v3, or none)")
         if(NOT SMF_MARCH)
-            message(FATAL_ERROR "smf: SMF_MARCH is empty; give a -march value (native, x86-64-v3, ...)")
+            message(FATAL_ERROR "smf: SMF_MARCH is empty; give a -march value (native, x86-64-v3, ...) or 'none'")
         endif()
-        add_compile_options(-O3 -march=${SMF_MARCH})
+        string(TOLOWER "${SMF_MARCH}" _smf_march_lower)
+        if(_smf_march_lower STREQUAL "none")
+            add_compile_options(-O3)
+        else()
+            add_compile_options(-O3 -march=${SMF_MARCH})
+        endif()
     endif()
 endif()
 

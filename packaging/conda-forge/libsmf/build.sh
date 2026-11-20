@@ -6,7 +6,7 @@ if [[ "${target_platform}" == "linux-64" || "${target_platform}" == "osx-64" ]];
   MARCH_OPT="-DSMF_MARCH=x86-64-v3"
 else
   # ARM64 / Apple Silicon / ppc64le: use compiler default target flags.
-  MARCH_OPT="-DSMF_MARCH="
+  MARCH_OPT="-DSMF_MARCH=none"
 fi
 
 cmake -S solver -B build -G Ninja \
