@@ -260,7 +260,18 @@ BlasThreadGuard::~BlasThreadGuard() noexcept
     if (prev_blocktime_ >= 0) mkl_blocktime_set(prev_blocktime_);
     if (touched_blas_) {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+        // Set before another thread's BlasSerialPinScope began: restoring now
+        // would un-pin the process-wide BLAS under that pin's strip workers.
+        // Hand the restore to the pin instead; it applies it when it ends.
+        if (blas_is_pinned_serial()) {
+            g_serial_pin_saved = prev_setting_;
+        } else {
+            blas_restore(prev_setting_);
+        }
+#else
         blas_restore(prev_setting_);
+#endif
     }
     count_change(prev_counted_ - tl_counted);
     tl_counted = prev_counted_;

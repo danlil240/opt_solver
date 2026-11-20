@@ -727,3 +727,52 @@ TEST(CApiTest, IpmSessionSingularAndHonestInertiaGuard) {
 
     smf_ipm_free(&sess);
 }
+
+/* The lower triangle, the upper triangle or both: the same matrix. With both
+ * triangles the upper copies are ignored, not mirrored and summed (which
+ * doubled every off-diagonal); an upper-only input is still mirrored. */
+TEST(CApiTest, IpmSessionAcceptsEitherOrBothTriangles) {
+    /* A = [4 1 0; 1 -3 2; 0 2 5], full CSC (both triangles), unsorted rows
+     * in column 2 to take the slow path either way. */
+    static const int    full_col_ptr[] = {0, 2, 5, 7};
+    static const int    full_row_idx[] = {0, 1, 1, 0, 2, 2, 1};
+    static const double full_vals[]    = {4.0, 1.0, -3.0, 1.0, 2.0, 5.0, 2.0};
+    static const int    low_col_ptr[]  = {0, 2, 4, 5};
+    static const int    low_row_idx[]  = {0, 1, 1, 2, 2};
+    static const double low_vals[]     = {4.0, 1.0, -3.0, 2.0, 5.0};
+    static const int    up_col_ptr[]   = {0, 1, 3, 5};
+    static const int    up_row_idx[]   = {0, 0, 1, 1, 2};
+    static const double up_vals[]      = {4.0, 1.0, -3.0, 2.0, 5.0};
+
+    smf_ipm_control_t ctrl;
+    smf_ipm_default_control(&ctrl);
+    ctrl.num_threads = 1;
+
+    const auto solve = [&](const int* cp, const int* ri, const double* v, double* x,
+                           smf_ipm_info_t* info) {
+        smf_ipm_session_t sess = nullptr;
+        ASSERT_EQ(smf_ipm_create(&sess), SMF_OK);
+        ASSERT_EQ(smf_ipm_analyse(sess, 3, cp, ri, v, &ctrl, nullptr), SMF_OK);
+        ASSERT_EQ(smf_ipm_factor(sess, SMF_INDEF, v, &ctrl, info, nullptr), SMF_OK);
+        ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, 1, x, 3, &ctrl, nullptr), SMF_OK);
+        smf_ipm_free(&sess);
+    };
+
+    /* b = A * [1, 2, 3]^T = [6, 1, 19]^T */
+    double x_full[3] = {6.0, 1.0, 19.0};
+    double x_low[3]  = {6.0, 1.0, 19.0};
+    double x_up[3]   = {6.0, 1.0, 19.0};
+    smf_ipm_info_t info_full, info_low, info_up;
+    solve(full_col_ptr, full_row_idx, full_vals, x_full, &info_full);
+    solve(low_col_ptr, low_row_idx, low_vals, x_low, &info_low);
+    solve(up_col_ptr, up_row_idx, up_vals, x_up, &info_up);
+
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_NEAR(x_full[i], static_cast<double>(i + 1), 1e-12);
+        EXPECT_NEAR(x_low[i], static_cast<double>(i + 1), 1e-12);
+        EXPECT_NEAR(x_up[i], static_cast<double>(i + 1), 1e-12);
+    }
+    EXPECT_EQ(info_full.num_pos, info_low.num_pos);
+    EXPECT_EQ(info_full.num_neg, info_low.num_neg);
+    EXPECT_EQ(info_up.num_neg, info_low.num_neg);
+}

@@ -443,25 +443,44 @@ static bool build_ipm_csc_pattern(smf_ipm_session_s* s,
         return true;
     }
 
-    // Slow path: normalize to lower triangle and sort rows per column.
+    // Slow path: normalize to the lower triangle and sort rows per column.
+    // An entry above the diagonal (row < col) is mirrored, so an upper-
+    // triangle input works, unless the lower triangle holds that position
+    // too: a matrix passed with both triangles keeps only its lower copy
+    // (duplicates are summed, so keeping both would double it).
     struct Entry {
         int r;
         int c;
         int orig;
+        bool mirrored;
     };
     std::vector<Entry> entries;
     entries.reserve(static_cast<std::size_t>(nnz));
     for (int j = 0; j < n; ++j) {
         for (int p = col_ptr[j]; p < col_ptr[j + 1]; ++p) {
-            int r = row_idx[p];
-            int c = j;
-            if (r < c) std::swap(r, c);
-            entries.push_back({r, c, p});
+            const int r = row_idx[p];
+            if (r < j) entries.push_back({j, r, p, true});
+            else       entries.push_back({r, j, p, false});
         }
     }
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) noexcept {
-        return (a.c != b.c) ? (a.c < b.c) : (a.r < b.r);
+        if (a.c != b.c) return a.c < b.c;
+        if (a.r != b.r) return a.r < b.r;
+        return a.mirrored < b.mirrored;  // lower copies first
     });
+    {
+        std::size_t out = 0;
+        for (std::size_t k = 0; k < entries.size(); ++k) {
+            const Entry& e = entries[k];
+            // The group of (r, c) starts with its lower copies, if any.
+            if (e.mirrored && out > 0 && !entries[out - 1].mirrored &&
+                entries[out - 1].r == e.r && entries[out - 1].c == e.c) {
+                continue;
+            }
+            entries[out++] = e;
+        }
+        entries.resize(out);
+    }
 
     const std::size_t m = entries.size();
     s->mat.col_ptr.assign(static_cast<std::size_t>(n + 1), 0);

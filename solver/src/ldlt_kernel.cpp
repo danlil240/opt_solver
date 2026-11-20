@@ -51,6 +51,17 @@ inline int equal_area_strips(int m, int M, int max_strips, int bounds[65]) noexc
     return nstrips;
 }
 
+#if defined(_OPENMP)
+// Runs strips [0, nstrips) on the current OpenMP team; call it inside the
+// parallel region. The team can be smaller than the num_threads(nstrips)
+// request (a nested region with nesting off, OMP_DYNAMIC, a thread limit), so
+// each thread takes every team-size-th strip: none is skipped.
+template <class Fn> inline void run_team_strips(int nstrips, const Fn &fn) {
+    const int nth = omp_get_num_threads();
+    for (int s = omp_get_thread_num(); s < nstrips; s += nth) fn(s);
+}
+#endif
+
 // std::max({a, b, c}) without the initializer_list (MSVC lowers that to a
 // vectorized max_element call): same result, NaN handling included.
 inline double max3(double a, double b, double c) noexcept {
@@ -733,8 +744,7 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
 #pragma omp parallel num_threads(nstrips)
                 {
                     const int prev_blas = blas_local_set_seq();
-                    const int tid = omp_get_thread_num();
-                    if (tid < nstrips) run_strip(tid);
+                    run_team_strips(nstrips, run_strip);
                     blas_local_restore(prev_blas);
                 }
                 return;
@@ -899,8 +909,7 @@ void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags,
                             fill_ld_column(F, sf, e, q, tags, c0 + t,
                                            buf + static_cast<std::size_t>(t) * sq);
                         }
-                        const int tid = omp_get_thread_num();
-                        if (tid < nstrips) run_strip(tid);
+                        run_team_strips(nstrips, run_strip);
                         blas_local_restore(prev_blas);
                     }
                     c0 = c1;
@@ -1148,8 +1157,7 @@ void posdef_dtrsm_omp(double *B, int n_rows, int k, const double *L, int ldl, in
             BlasSerialPinScope pin_blas;
 #pragma omp parallel num_threads(nstrips)
             {
-                const int tid = omp_get_thread_num();
-                if (tid < nstrips) run_strip(tid);
+                run_team_strips(nstrips, run_strip);
             }
             return;
 #endif
@@ -1186,8 +1194,7 @@ void posdef_dsyrk_omp(double *C, int m, const double *A, int k, int lda, int ldc
             BlasSerialPinScope pin_blas;
 #pragma omp parallel num_threads(nstrips)
             {
-                const int tid = omp_get_thread_num();
-                if (tid < nstrips) run_strip(tid);
+                run_team_strips(nstrips, run_strip);
             }
             return;
 #endif

@@ -236,7 +236,9 @@ SMF_C_API int smf_ipm_create(smf_ipm_session_t* out);
  * If values == NULL, symbolic analysis is deferred to the first
  * smf_ipm_factor() call so saddle-point matching sees real numerical values.
  * Entries within each column do not need to be sorted; upper-triangular
- * entries (row < col) are rejected if invalid or skipped cleanly.
+ * entries (row < col) are mirrored into the lower triangle, so the lower
+ * triangle, the upper triangle or both may be passed; where both triangles
+ * hold a position, the upper copy is ignored (not summed).
  */
 SMF_C_API int smf_ipm_analyse(smf_ipm_session_t        session,
                               int                      n,
