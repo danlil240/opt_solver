@@ -1,0 +1,39 @@
+[build-system]
+requires = ["scikit-build-core>=0.9"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "smf-solver"
+version = "0.1.0"
+description = "Sparse symmetric multifrontal direct linear solver (libsmf_c + libsmf_ma97) for IPOPT, cyipopt, and CasADi"
+readme = "README.md"
+license = { text = "MIT AND Apache-2.0" }
+requires-python = ">=3.9"
+classifiers = [
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: C++",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/danlil240/opt_solver"
+
+[tool.scikit-build]
+cmake.source-dir = "../../solver"
+cmake.build-type = "Release"
+wheel.packages = ["smf_solver"]
+cmake.args = [
+    "-DSMF_USE_MKL=OFF",
+    "-DSMF_BUILD_C_API=ON",
+    "-DSMF_BUILD_MA97_PLUGIN=ON",
+    "-DSMF_BUILD_TESTS=OFF",
+    "-DSMF_BUILD_BENCHMARKS=OFF",
+    "-DSMF_VENDORED_METIS=ON",
+    "-DCMAKE_INSTALL_LIBDIR=smf_solver/_libs",
+    "-DCMAKE_INSTALL_BINDIR=smf_solver/_libs",
+]

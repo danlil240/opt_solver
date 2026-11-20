@@ -33,7 +33,7 @@ The options most people touch:
 | `SMF_DETERMINISTIC` | OFF | Reproducible factors at every thread count |
 | `SMF_BUILD_MA97_PLUGIN` | ON | Build `libsmf_ma97` for IPOPT's dynamic loader |
 | `SMF_BUILD_IPOPT_ADAPTER` | OFF | Build the IPOPT `TSymLinearSolver` adapter |
-| `SMF_BUILD_C_API` | OFF | Build the C ABI wrapper (`smf_c.h`) |
+| `SMF_BUILD_C_API` | ON | Build shared C ABI library (`libsmf_c`, `smf_c.h`) and `pkg-config` (`smf.pc`) |
 | `SMF_BUILD_BENCHMARKS` | ON | Build the benchmark drivers in `solver/benchmarks/` |
 | `SMF_SANITIZE` | OFF | Build with address and UB sanitizers |
 | `SMF_MARCH` | `native` | GCC/Clang `-march=` value. `native` needs the build machine's CPU at run time; use `x86-64-v3` (AVX2 + FMA) for a library that runs elsewhere |
@@ -57,9 +57,11 @@ solver.factor(*ak, ctrl, info, fkeep);
 solver.solve(fkeep, ctrl, info, b.data(), n);    // b is overwritten with x
 ```
 
-To use smf from IPOPT, build the plugin and point IPOPT's `hsllib` option at `libsmf_ma97` (`smf_ma97.dll` on Windows) with `linear_solver ma97`.
+### Using smf from IPOPT, cyipopt, CasADi, and Julia
 
-Stock IPOPT (3.14.19 and its master branch) has a bug in its MA97 interface: at the start of a solve it can read an uninitialised value and then pick its strategy by chance, so the same problem can take a different number of iterations from one run to the next. It affects HSL MA97 and smf alike. [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md) has the details and a two-line patch for IPOPT.
+- **Native `linear_solver=smf` (recommended):** [`tools/ipopt/smf-linear-solver/`](tools/ipopt/smf-linear-solver/) provides `IpSmfSolverInterface` and a patch for IPOPT 3.14.19 backed by `libsmf_c` (`pkg-config smf`). It supports both compile-time linking (`IPOPT_HAS_SMF`, making `smf` a built-in default solver) and runtime loading via `smflib`, works cleanly alongside full CoinHSL (no `hsllib` conflict), initializes `numneg_` properly (immune to `coin-or/Ipopt#870`), and credits `smf` in IPOPT logs.
+- **Stock IPOPT drop-in (`ma97` shim):** Point IPOPT's `hsllib` option at `libsmf_ma97` (`smf_ma97.dll` on Windows) with `linear_solver ma97`. Note that stock IPOPT 3.14.19's `Ma97SolverInterface` has an uninitialized `numneg_` bug affecting both HSL MA97 and the shim; see [`docs/ipopt-ma97-interface-numneg.md`](docs/ipopt-ma97-interface-numneg.md).
+- **Packaging recipes:** Ready-to-use recipes live under [`packaging/conda-forge/`](packaging/conda-forge/) (`libsmf` + `ipopt-feedstock`), [`packaging/ipopt_jll/`](packaging/ipopt_jll/) (`smf_jll` / `Ipopt_jll` BinaryBuilder), and [`packaging/python/`](packaging/python/) (`smf-solver` for `cyipopt` and `CasADi`).
 
 ### Fast mode (opt-in static pivoting)
 

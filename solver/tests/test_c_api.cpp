@@ -16,6 +16,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <gtest/gtest.h>
 #include <span>
 #include <vector>
@@ -595,4 +596,134 @@ TEST(CApiFastMode, StaticForcedPivotOnUncleanPattern) {
     EXPECT_NEAR(x[2], 2.0, 1e-13);
     smf_free_factor(&fh);
     smf_free_analysis(&ah);
+}
+
+/* =========================================================================
+ * Versioned IPM session C API (smf_ipm_*) tests
+ * ========================================================================= */
+
+TEST(CApiTest, VersionAndBackendIntrospection) {
+    EXPECT_EQ(smf_c_abi_version(), SMF_C_ABI_VERSION);
+    ASSERT_NE(smf_version(), nullptr);
+    EXPECT_GT(std::strlen(smf_version()), 0u);
+    ASSERT_NE(smf_blas_backend(), nullptr);
+    EXPECT_GT(std::strlen(smf_blas_backend()), 0u);
+}
+
+TEST(CApiTest, IpmSessionDeferredAnalyseRefactorMultiRhsAndInertia) {
+    /* 4x4 saddle-point KKT system:
+     *   [ 2  0  1  0 ]
+     *   [ 0  3  0  1 ]
+     *   [ 1  0  0  0 ]
+     *   [ 0  1  0  0 ]
+     * Lower CSC (0-based == upper CSR 0-based):
+     *   col 0: (0,0)=2, (2,0)=1
+     *   col 1: (1,1)=3, (3,1)=1
+     *   col 2: (2,2)=0
+     *   col 3: (3,3)=0
+     * Exact inertia: pos=2, neg=2, zero=0.
+     */
+    static const int    col_ptr[] = {0, 2, 4, 5, 6};
+    static const int    row_idx[] = {0, 2, 1, 3, 2, 3};
+    static const double vals1[]   = {2.0, 1.0, 3.0, 1.0, 0.0, 0.0};
+    static const double vals2[]   = {5.0, 1.0, 7.0, 1.0, -0.5, -0.25};
+
+    smf_ipm_control_t ctrl;
+    smf_ipm_default_control(&ctrl);
+    EXPECT_EQ(ctrl.abi_version, SMF_C_ABI_VERSION);
+    EXPECT_EQ(ctrl.struct_size, static_cast<int>(sizeof(smf_ipm_control_t)));
+    ctrl.num_threads = 2;
+    ctrl.deterministic = 1;
+
+    smf_ipm_session_t sess = nullptr;
+    ASSERT_EQ(smf_ipm_create(&sess), SMF_OK);
+    ASSERT_NE(sess, nullptr);
+
+    /* Deferred analysis (values == NULL), matching IPOPT's InitializeStructure(). */
+    smf_ipm_info_t info;
+    ASSERT_EQ(smf_ipm_analyse(sess, 4, col_ptr, row_idx, nullptr, &ctrl, &info), SMF_OK);
+    EXPECT_EQ(info.status, SMF_OK);
+
+    /* First factor triggers deferred analysis + numeric factorization. */
+    ASSERT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals1, &ctrl, &info, nullptr), SMF_OK);
+    EXPECT_EQ(info.num_pos, 2);
+    EXPECT_EQ(info.num_neg, 2);
+    EXPECT_EQ(info.num_zero, 0);
+    EXPECT_EQ(info.matrix_rank, 4);
+    EXPECT_EQ(info.inertia_exact, 1);
+
+    /* Multi-RHS solve with ldx > n (ldx = 6, nrhs = 2). */
+    const int ldx = 6;
+    std::vector<double> rhs(ldx * 2, -999.0);
+    /* RHS 0: A1 * [1, 2, 3, 4]^T = [5, 10, 1, 2]^T */
+    rhs[0] = 5.0; rhs[1] = 10.0; rhs[2] = 1.0; rhs[3] = 2.0;
+    /* RHS 1: A1 * [-1, 0, 2, -3]^T = [0, -3, -1, 0]^T */
+    rhs[ldx + 0] = 0.0; rhs[ldx + 1] = -3.0; rhs[ldx + 2] = -1.0; rhs[ldx + 3] = 0.0;
+
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, 2, rhs.data(), ldx, &ctrl, &info), SMF_OK);
+    EXPECT_NEAR(rhs[0], 1.0, 1e-12);
+    EXPECT_NEAR(rhs[1], 2.0, 1e-12);
+    EXPECT_NEAR(rhs[2], 3.0, 1e-12);
+    EXPECT_NEAR(rhs[3], 4.0, 1e-12);
+    EXPECT_DOUBLE_EQ(rhs[4], -999.0);  /* padding untouched */
+    EXPECT_NEAR(rhs[ldx + 0], -1.0, 1e-12);
+    EXPECT_NEAR(rhs[ldx + 1],  0.0, 1e-12);
+    EXPECT_NEAR(rhs[ldx + 2],  2.0, 1e-12);
+    EXPECT_NEAR(rhs[ldx + 3], -3.0, 1e-12);
+
+    /* Refactorize with new values on the same pattern (including caller scale[]). */
+    ctrl.scaling = SMF_SCALE_MATCHING;
+    std::vector<double> scale(4, 1.0);
+    ASSERT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals2, &ctrl, &info, scale.data()), SMF_OK);
+    EXPECT_EQ(info.num_pos, 2);
+    EXPECT_EQ(info.num_neg, 2);
+    EXPECT_EQ(info.num_zero, 0);
+
+    /* Reuse scale[] on a subsequent factor (SMF_SCALE_NONE + non-null scale). */
+    ctrl.scaling = SMF_SCALE_NONE;
+    ASSERT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals2, &ctrl, &info, scale.data()), SMF_OK);
+    EXPECT_EQ(info.num_pos, 2);
+    EXPECT_EQ(info.num_neg, 2);
+
+    /* Solve A2 * [1, 1, 1, 1]^T = [6, 8, 0.5, 0.75]^T */
+    double rhs2[4] = {6.0, 8.0, 0.5, 0.75};
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, 1, rhs2, 4, &ctrl, &info), SMF_OK);
+    for (int i = 0; i < 4; ++i) EXPECT_NEAR(rhs2[i], 1.0, 1e-12);
+
+    smf_ipm_free(&sess);
+    EXPECT_EQ(sess, nullptr);
+}
+
+TEST(CApiTest, IpmSessionSingularAndHonestInertiaGuard) {
+    /* Singular 3x3: diag = [2, 0, -3] */
+    static const int    col_ptr[] = {0, 1, 2, 3};
+    static const int    row_idx[] = {0, 1, 2};
+    static const double vals[]    = {2.0, 0.0, -3.0};
+
+    smf_ipm_control_t ctrl;
+    smf_ipm_default_control(&ctrl);
+    ctrl.num_threads = 1;
+
+    smf_ipm_session_t sess = nullptr;
+    ASSERT_EQ(smf_ipm_create(&sess), SMF_OK);
+    ASSERT_EQ(smf_ipm_analyse(sess, 3, col_ptr, row_idx, vals, &ctrl, nullptr), SMF_OK);
+
+    smf_ipm_info_t info;
+    EXPECT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals, &ctrl, &info, nullptr), SMF_ERR_SINGULAR);
+    EXPECT_EQ(info.num_zero, 1);
+    EXPECT_EQ(info.matrix_rank, 2);
+
+    /* Static pivoting perturbs the zero pivot -> honest_inertia=1 rejects it. */
+    ctrl.pivoting = SMF_PIVOTING_STATIC;
+    ctrl.honest_inertia = 1;
+    EXPECT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals, &ctrl, &info, nullptr),
+              SMF_ERR_INEXACT_INERTIA);
+    EXPECT_EQ(info.inertia_exact, 0);
+    EXPECT_GT(info.static_pivots, 0);
+
+    /* Opting out of honest_inertia allows static pivoting to succeed. */
+    ctrl.honest_inertia = 0;
+    EXPECT_EQ(smf_ipm_factor(sess, SMF_INDEF, vals, &ctrl, &info, nullptr), SMF_OK);
+
+    smf_ipm_free(&sess);
 }
