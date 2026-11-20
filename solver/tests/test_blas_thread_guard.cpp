@@ -18,6 +18,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -393,4 +395,53 @@ TEST(BlasSerialPin, PinsProcessWideAndPreservesCallerOnConcurrentGuards) {
             << "BlasSerialPinScope did not restore caller's BLAS thread count";
     }
     EXPECT_EQ(get_blas_threads(), original);
+}
+
+// A guard that set the process-wide BLAS count before another thread's pin
+// began, and ends while the pin lives, must not un-pin BLAS under the pin's
+// workers; the pin then restores what the guard would have restored.
+TEST(BlasSerialPin, GuardEndingUnderAnotherThreadsPinKeepsThePin) {
+    const int original = get_blas_threads();
+    std::mutex m;
+    std::condition_variable cv;
+    int stage = 0;  // 1: guard set; 2: pin taken; 3: guard ended
+    std::thread other([&] {
+        {
+            smf::BlasThreadGuard g(6);
+            {
+                std::lock_guard<std::mutex> lk(m);
+                stage = 1;
+            }
+            cv.notify_all();
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait(lk, [&] { return stage == 2; });
+        }
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stage = 3;
+        }
+        cv.notify_all();
+    });
+    {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&] { return stage == 1; });
+    }
+    {
+        smf::BlasSerialPinScope pin;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            stage = 2;
+        }
+        cv.notify_all();
+        {
+            std::unique_lock<std::mutex> lk(m);
+            cv.wait(lk, [&] { return stage == 3; });
+        }
+#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+        EXPECT_TRUE(smf::blas_is_pinned_serial());
+        EXPECT_EQ(get_blas_threads(), 1) << "a guard ending on another thread un-pinned BLAS";
+#endif
+    }
+    other.join();
+    EXPECT_EQ(get_blas_threads(), original) << "the pin did not restore the original count";
 }

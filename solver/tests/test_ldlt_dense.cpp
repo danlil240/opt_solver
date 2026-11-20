@@ -1,4 +1,5 @@
 #include "smf/dense_indef.hpp"
+#include "smf/blas_thread_guard.hpp"
 #include "smf/ldlt_kernel.hpp"
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -9,6 +10,9 @@
 #include <random>
 #include <string>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 using namespace smf;
 
 TEST(LDLT, SPD2x2) {
@@ -342,5 +346,115 @@ TEST(LdltDense, StalledPanelsPullInPartners) {
         }
     EXPECT_LT(worst, 1e-10);
 }
+
+
+#ifdef _OPENMP
+namespace {
+
+// Symmetric front, column-major f x f, lower triangle set; diagonal of size
+// ~f with mixed signs, so every pivot is a clear in-order 1x1 (the threaded
+// and serial runs then take the same pivots and differ only by rounding).
+std::vector<double> dominant_indefinite_front(int f, bool posdef, std::mt19937 &rng) {
+    std::uniform_real_distribution<double> off(-1.0, 1.0);
+    std::vector<double> F(static_cast<std::size_t>(f) * f, 0.0);
+    for (int j = 0; j < f; ++j) {
+        const double sign = (posdef || j % 3 != 1) ? 1.0 : -1.0;
+        F[static_cast<std::size_t>(j) * f + j] = sign * (2.0 * f + j);
+        for (int i = j + 1; i < f; ++i) F[static_cast<std::size_t>(j) * f + i] = off(rng);
+    }
+    return F;
+}
+
+// Runs fn on one thread of an outer OpenMP team with nesting off, so every
+// omp parallel region inside fn gets a team of 1 whatever num_threads asks.
+template <class Fn> void run_inside_outer_team(const Fn &fn) {
+#if _OPENMP >= 200805
+    const int prev_levels = omp_get_max_active_levels();
+    omp_set_max_active_levels(1);
+#else
+    const int prev_nested = omp_get_nested();
+    omp_set_nested(0);
+#endif
+    int inner_team = -1;
+#pragma omp parallel num_threads(2)
+    {
+#pragma omp single
+        {
+#pragma omp parallel num_threads(4)
+            {
+#pragma omp single
+                inner_team = omp_get_num_threads();
+            }
+            fn();
+        }
+    }
+#if _OPENMP >= 200805
+    omp_set_max_active_levels(prev_levels);
+#else
+    omp_set_nested(prev_nested);
+#endif
+    EXPECT_EQ(inner_team, 1) << "nested team not shrunk: the test does not cover the case";
+}
+
+double max_lower_diff(const std::vector<double> &a, const std::vector<double> &b, int f) {
+    double worst = 0.0;
+    for (int j = 0; j < f; ++j)
+        for (int i = j; i < f; ++i) {
+            const std::size_t k = static_cast<std::size_t>(j) * f + i;
+            worst = std::max(worst, std::abs(a[k] - b[k]));
+        }
+    return worst;
+}
+
+} // namespace
+
+// The column-strip deferred / Schur updates (and the SPD TRSM / SYRK strips)
+// ask OpenMP for one thread per strip. Called from inside the application's
+// own parallel region, the team is smaller than asked; every strip must still
+// be applied, or the factor is silently wrong.
+TEST(LdltDense, StripUpdatesSurviveASmallerOpenMPTeam) {
+    std::mt19937 rng(20261120);
+    for (const bool posdef : {false, true}) {
+        SCOPED_TRACE(posdef ? "posdef" : "indefinite");
+        const int f = 420;
+        const int num_elig = 300;
+        const std::vector<double> A = dominant_indefinite_front(f, posdef, rng);
+        LdltKernelParams prm;
+        prm.posdef = posdef;
+
+        const auto factor = [&](std::vector<double> &F, std::vector<int8_t> &tags) {
+            std::vector<Int> rows(static_cast<std::size_t>(f));
+            std::iota(rows.begin(), rows.end(), Int{0});
+            tags.assign(static_cast<std::size_t>(f), 0);
+            if (posdef) return posdef_factor_front_lapack(F.data(), f, num_elig, tags.data());
+            std::vector<double> work(ldlt_schur_work_size(f, num_elig, prm));
+            return ldlt_factor_front(F.data(), f, num_elig, rows.data(), prm, tags.data(),
+                                     work.data(), 0, work.size());
+        };
+
+        // Reference: one BLAS thread, so no strip path runs.
+        std::vector<double> R = A;
+        std::vector<int8_t> rtags;
+        LdltKernelResult rr;
+        {
+            const BlasThreadGuard g(1);
+            rr = factor(R, rtags);
+        }
+        ASSERT_EQ(rr.num_accepted, num_elig);
+
+        // Threaded share of 8 inside an outer team: strips on a team of 1.
+        std::vector<double> T = A;
+        std::vector<int8_t> ttags;
+        LdltKernelResult tr;
+        run_inside_outer_team([&] {
+            const BlasThreadGuard g(8);
+            tr = factor(T, ttags);
+        });
+        EXPECT_EQ(tr.num_accepted, rr.num_accepted);
+        EXPECT_EQ(ttags, rtags);
+        EXPECT_LT(max_lower_diff(T, R, f), 1e-9);
+    }
+}
+#endif
 
 int main(int argc,char**argv){testing::InitGoogleTest(&argc,argv);return RUN_ALL_TESTS();}
