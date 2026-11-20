@@ -200,6 +200,17 @@ void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
   }
 }
 
+void smf_dgemm_nt_seq(double *C, int m, int n, int k, const double *A, int lda,
+                      const double *B, int ldb, int ldc, double alpha,
+                      double beta) {
+  smf_dgemm_nt(C, m, n, k, A, lda, B, ldb, ldc, alpha, beta);
+}
+
+void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
+                                 int lda, const double *B, int ldb, int ldc) {
+  smf_dgemmt_lower_nt_sub(C, m, k, A, lda, B, ldb, ldc);
+}
+
 void smf_dgemv(double *y, int m, int n, const double *A, int lda,
                const double *x, double alpha, double beta) {
   if (beta == 0.0) {
@@ -583,6 +594,36 @@ void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
     const int nc = std::min(kBlock, m - j0);
     cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, m - j0, nc, k, -1.0,
                 A + j0, lda, B + static_cast<std::size_t>(j0) * ldb, ldb, 1.0,
+                C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
+  }
+#endif
+}
+
+void smf_dgemm_nt_seq(double *C, int m, int n, int k, const double *A, int lda,
+                      const double *B, int ldb, int ldc, double alpha,
+                      double beta) {
+  if (m <= 0 || n <= 0 || k <= 0) return;
+  cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m, n, k, alpha, A, lda,
+              B, ldb, beta, C, ldc);
+}
+
+void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
+                                 int lda, const double *B, int ldb, int ldc) {
+  if (m <= 0 || k <= 0) return;
+#if defined(SMF_USE_MKL) && (SMF_USE_MKL)
+#if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
+  cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasTrans, m, k, -1.0,
+                A, lda, B, ldb, 1.0, C, ldc);
+#else
+  cblas_dgemmt(CblasColMajor, CblasLower, CblasNoTrans, CblasTrans, m, k, -1.0,
+               A, lda, B, ldb, 1.0, C, ldc);
+#endif
+#else
+  constexpr int kBlock = 64;
+  for (int j0 = 0; j0 < m; j0 += kBlock) {
+    const int nc = std::min(kBlock, m - j0);
+    cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, m - j0, nc, k, -1.0,
+                A + j0, lda, B + j0, ldb, 1.0,
                 C + static_cast<std::size_t>(j0) * ldc + j0, ldc);
   }
 #endif

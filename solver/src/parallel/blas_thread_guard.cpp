@@ -238,6 +238,30 @@ void blas_follow_share() noexcept
     tl_counted = v;
 }
 
+int blas_current_share() noexcept
+{
+    blas_follow_share();
+    return tl_counted > 0 ? tl_counted : 1;
+}
+
+int blas_local_set_seq() noexcept
+{
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    return MKL_Set_Num_Threads_Local(1);
+#else
+    return 0;
+#endif
+}
+
+void blas_local_restore(int prev) noexcept
+{
+#if defined(SMF_USE_MKL) && SMF_USE_MKL
+    MKL_Set_Num_Threads_Local(prev);
+#else
+    (void)prev;
+#endif
+}
+
 BlasIdleScope::BlasIdleScope() noexcept : prev_counted_(tl_counted)
 {
     tl_counted = 0;

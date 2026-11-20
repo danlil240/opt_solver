@@ -414,7 +414,7 @@ inline void copy_short(const double *src, double *dst, std::size_t n) noexcept {
 // the larger of APTP's plus its canary and the TPP fallback's.
 std::size_t front_work_need(int f, int num_elig, const LdltKernelParams &prm,
                             const AptpParams *aprm) {
-  const std::size_t tpp = ldlt_work_size(f, prm);
+  const std::size_t tpp = ldlt_schur_work_size(f, num_elig, prm);
   if (aprm == nullptr) return tpp;
   return std::max(tpp, aptp_work_size(f, num_elig, *aprm) + 1);
 }
@@ -794,7 +794,8 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
       }
       aptp_failed = ar.num_failed;
       if (ar.num_failed > 0) {
-        kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, ar.num_eliminated);
+        kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, ar.num_eliminated,
+                               P.work->size());
       } else {
         kr.num_accepted = ar.num_eliminated;
       }
@@ -807,7 +808,7 @@ ErrorCode process_front(const FactorContext &cx, FrontPass &P, int me, Int s, bo
     } else if (lapack_front) {
       kr = posdef_factor_front_lapack(F, f, num_elig, tags);
     } else {
-      kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work);
+      kr = ldlt_factor_front(F, f, num_elig, rows, *prm, tags, work, 0, P.work->size());
     }
     // Delay budget: a front whose delays would take the count past the
     // budget is assembled again and static-pivoted (it then delays nothing),

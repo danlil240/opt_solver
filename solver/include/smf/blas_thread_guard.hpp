@@ -123,6 +123,15 @@ private:
 /// without one. The smf BLAS-3 wrappers call it first thing.
 void blas_follow_share() noexcept;
 
+/// Current BLAS thread share for this thread (calls blas_follow_share() first).
+/// Returns 1 outside a multi-thread guard or in deterministic mode.
+int blas_current_share() noexcept;
+
+/// Lock-free thread-local switch to 1 BLAS thread (MKL only) for calling
+/// sequential BLAS inside an active OpenMP parallel region, and its restore.
+int blas_local_set_seq() noexcept;
+void blas_local_restore(int prev) noexcept;
+
 /// Accounting only (the BLAS setting is untouched): this thread counts no
 /// BLAS threads while the scope lives, e.g. a pool worker between tasks
 /// whose calling thread holds an outer guard. Guards nested inside count
