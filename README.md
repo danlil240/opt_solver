@@ -36,7 +36,7 @@ The options most people touch:
 | `SMF_BUILD_C_API` | ON | Build shared C ABI library (`libsmf_c`, `smf_c.h`) and `pkg-config` (`smf.pc`) |
 | `SMF_BUILD_BENCHMARKS` | ON | Build the benchmark drivers in `solver/benchmarks/` |
 | `SMF_SANITIZE` | OFF | Build with address and UB sanitizers |
-| `SMF_MARCH` | `native` | GCC/Clang `-march=` value. `native` needs the build machine's CPU at run time; use `x86-64-v3` (AVX2 + FMA) for a library that runs elsewhere |
+| `SMF_MARCH` | `native` | GCC/Clang `-march=` value. `native` needs the build machine's CPU at run time; use `x86-64-v3` (AVX2 + FMA) for portable x86-64 binaries, or `none` to let the toolchain control target flags |
 
 `solver/README.md` has the full option list and dependency notes.
 
@@ -178,11 +178,11 @@ The C API keeps the default threshold `pivot_u = 0.01`, where the elimination ne
 
 The reference board is the front-tier manifest: 144 case-tracks (78 matrices) of KKT, hard indefinite and SPD matrices, each replayed with the "recommended" and "ipopt" pivoting settings, split into tuning and held-out sets. Scores are smf's time divided by the other solver's, as a shifted geometric mean with a 10 ms shift, so below 1 means smf is faster. A case only counts when both solvers pass the accuracy gate (eta ≤ 1e-10, omega ≤ 1e-8), so the headline geomeans below cover fewer than 144 case-tracks: per thread count, the 5 that smf fails and the cases where no rival is accurate drop out.
 
-Against the fastest accurate other solver on each case, smf scores **0.68 at 1 thread and 0.56 at 8 threads**: 0.682 over 132 of the 144 case-tracks at 1 thread and 0.561 over 125 at 8 threads. The other case-tracks are the 5 smf fails, plus 7 at 1 thread and 14 at 8 threads where no rival is accurate.
+Against the fastest accurate other solver on each case, smf scores **0.67 at 1 thread and 0.50 at 8 threads** with Intel MKL (0.667 over 132 of the 144 case-tracks at 1 thread and 0.502 over 125 at 8 threads), and **0.66 at 1 thread and 0.52 at 8 threads** with OpenBLAS (0.656 at 1 thread and 0.521 at 8 threads, Linux GCC 15 + OpenBLAS 0.3.32, `-march=x86-64-v3`, on the same CPU). The remaining case-tracks are the 5 smf fails, plus 7 at 1 thread and 14 at 8 threads where no rival is accurate.
 
-That is the November 5 board on an i9-12900K, main 8af054e. smf was measured fresh (3 trials plus 1 warmup, threaded MKL) against the rival records of the November 3-4 fair board, where all four rivals were rerun: MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS. SSIDS does not run on that machine. The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
+That is the November 20 board on an i9-12900K, main `cb69131`. Both smf builds were measured fresh (3 trials plus 1 warmup) against the rival records of the November 3-4 fair board on the same machine, where all four rivals were rerun: MA57 at 1 thread only, MA97, MKL PARDISO and MUMPS. SSIDS does not run on that machine. Directly comparing smf's two backends across all 139 accurate case-tracks on the same CPU, Linux OpenBLAS runs at **0.943x** MKL's wall time at 1 thread and **1.027x** at 8 threads (0 accuracy flips). The earlier Ryzen boards, which also include SSIDS and CHOLMOD, gave 0.80 at 1 thread and 0.56 at 16 threads. MA27 and cuDSS are measured as reference columns only.
 
-**The earlier boards flattered smf.** The previous 12900K board (0.63 at 1 thread, 0.45 at 8 threads) ran MKL PARDISO in 1x1-only pivoting mode and MA57 with automatic scaling on the ipopt track. PR #34 fixed both. PARDISO now uses Bunch-Kaufman pivoting, perturbation 1e-8 and MKL's default parallel METIS ordering, and MA57 on the ipopt track uses IPOPT's own defaults (no automatic scaling). The scores of 0.63 and 0.45 should not be compared with the fair-board numbers (0.72 and 0.61 with PR #36, 0.68 and 0.56 now) as a regression; the rivals are simply measured correctly now.
+**The earlier boards flattered smf.** The previous 12900K board (0.63 at 1 thread, 0.45 at 8 threads) ran MKL PARDISO in 1x1-only pivoting mode and MA57 with automatic scaling on the ipopt track. PR #34 fixed both. PARDISO now uses Bunch-Kaufman pivoting, perturbation 1e-8 and MKL's default parallel METIS ordering, and MA57 on the ipopt track uses IPOPT's own defaults (no automatic scaling). The scores of 0.63 and 0.45 should not be compared with the fair-board numbers (0.72 and 0.61 with PR #36, 0.68 and 0.56 on November 5, 0.67 and 0.50 now) as a regression; the rivals are simply measured correctly now.
 
 Head to head at 1 thread (October 30 board, Ryzen), smf against each solver: MA57 0.60, MA97 0.62, MKL PARDISO 0.58, SSIDS 0.37, MUMPS 0.26. smf also solves more case-tracks accurately than any of them. The one pairing it still loses is MA27 on small KKT systems, where MA27's low overhead wins.
 
@@ -204,26 +204,23 @@ Inertia against the reference factorisation, as wrong counts per thread count: s
 
 What changed since the November 3-4 fair board (PR #36, 0.718 / 0.611), measured against the same rival records:
 
-- PRs #37-#46 bring smf to 0.681 / 0.566: the skip-trial gate, SPD fronts on dpotrf, and the hybrid matcher switching to the auction after 4 passes.
-- Then three more PRs bring it to 0.682 / 0.561:
-  - #48 runs the top nested-dissection separators' METIS runs in parallel (8 threads: ncvxqp1/5 0.83-0.90x, nd24k 0.87x, cfd2 and bmwcra_1 0.93x wall).
-  - #49 makes the thread-count model price large untiled fronts with their BLAS threads.
-  - #47 adds the opt-in fast mode, which is off by default and not in these numbers.
+- PRs #37-#53 brought smf to **0.678 / 0.561** (November 5): the skip-trial gate, SPD fronts on `dpotrf`, the hybrid matcher switching to auction after 4 passes, parallel METIS separators, and the opt-in fast mode (off by default).
+- PRs #66-#75 (the 8-thread refactorization engine) and #79 (vectorized TPP panel + OpenMP equal-area column-strip deferred/Schur updates) cut 8-thread factorization time by a further **26%** (0.738x factor / 0.877x wall geomean vs November 5), bringing MKL to **0.667 / 0.502** and winning **8 of 8** long-refactor KKT probe cases against MKL PARDISO at both 1 and 8 threads.
+- PR #80 brought OpenBLAS to MKL parity (**0.656 / 0.521** on the full 144-case board, 0.943x / 1.027x vs MKL) via recursive triangle-split `dgemmt`, serial BLAS pinning, and cooperative `StripJob` dispatch on `TopScheduler`.
 - smf's accuracy (139 of 144 per thread count) and inertia (0 wrong) are unchanged throughout.
 
-What still loses by more than 1.1x (November 5 board):
+What still loses by more than 1.1x (November 20 MKL board):
 
-- **At 1 thread (8 case-tracks):**
-  - Analysis overhead against MA57 and MA97: blockqp1 (1.46x ipopt, 1.13x rec), cops_polygon_200 ipopt (1.22x), darcy003 and mario002 ipopt (1.13-1.14x).
-  - Factor time: ncvxqp9 rec (1.33x against MA97), pde_control_250 and pde_control_120 rec (1.29x and 1.13x against PARDISO).
-- **At 8 threads (11):** mainly factor speed against PARDISO:
-  - pde_control_120 and pde_control_250 rec (1.86x, 1.67x).
-  - acopf_grid_160 (1.17-1.22x) and acopf_grid_80 ipopt (1.13x).
-  - helm3d01 rec (1.21x), G3_circuit (1.18x), bratu3d ipopt (1.14x).
-  - ncvxqp9 rec (1.25x against MA97).
-  - Outside the factor: cfd2 (ordering, 1.26x) and ncvxqp5 rec (matching, 1.21x; it was 1.78x on the November 3-4 board).
+- **At 1 thread (7 case-tracks):**
+  - Factor time: ncvxqp9 rec (1.35x against MA97), pde_control_250 and pde_control_120 rec (1.23x and 1.10x against PARDISO), cops_polygon_200 ipopt (1.17x against MA57), cops_chain_800 rec (1.10x against MA97).
+  - Analysis overhead: blockqp1 ipopt (1.14x against MA57), cfd2 rec (1.11x against PARDISO).
+- **At 8 threads (4 case-tracks, down from 11 on November 5):**
+  - pde_control_120 and pde_control_250 rec (1.62x and 1.12x against PARDISO).
+  - cfd2 rec (1.23x ordering against PARDISO).
+  - ncvxqp9 rec (1.17x factor against MA97).
+  - `acopf_grid_80`, `acopf_grid_160`, `helm3d01`, `G3_circuit`, `bratu3d`, and `ncvxqp5` all flipped from losses to wins.
 
-The hybrid matcher write-up is `docs/performance/2026-11-02-auction-matching.md`. The latest results are in `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival is in `docs/performance/2026-10-30-branches-and-scoreboard.md`.
+The OpenBLAS parity write-up is `docs/performance/2026-11-20-openblas-parity.md`. Earlier write-ups include `docs/performance/2026-11-02-auction-matching.md`, `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival in `docs/performance/2026-10-30-branches-and-scoreboard.md`.
 
 ## Roadmap
 
