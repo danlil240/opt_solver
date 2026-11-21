@@ -327,18 +327,18 @@ TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
         EXPECT_EQ(i_d.num_negative, kM);
         EXPECT_LT(i_d.front_work, i_off.front_work);
         EXPECT_GT(i_try.front_work + i_d.front_work, i_off.front_work);
+        Info i_d2, i_2;
+        ASSERT_EQ(s.factor(*ak, dflt, i_d2, fk_d), FactorStatus::Success);
+        EXPECT_EQ(i_d2.delay_stops, 0);
+        EXPECT_EQ(i_d2.delay_rescales, 0);
+        ASSERT_EQ(s.factor(*ak, ctrl, i_2, fk), FactorStatus::Success);  // early stop off
+        ASSERT_TRUE(ctrl.scale_on_delay_carry);
+        EXPECT_EQ(i_2.delay_stops, 0);
+        EXPECT_EQ(i_2.delay_try_seconds, 0.0);
+        EXPECT_EQ(i_2.delay_early_stops, 0);
+        EXPECT_EQ(i_2.delay_rescales, 1);
+        EXPECT_EQ(i_2.front_work, i_d2.front_work);
     }
-    Info i_d2, i_2;
-    ASSERT_EQ(s.factor(*ak, dflt, i_d2, fk_d), FactorStatus::Success);
-    EXPECT_EQ(i_d2.delay_stops, 0);
-    EXPECT_EQ(i_d2.delay_rescales, 0);
-    ASSERT_EQ(s.factor(*ak, ctrl, i_2, fk), FactorStatus::Success);  // early stop off
-    ASSERT_TRUE(ctrl.scale_on_delay_carry);
-    EXPECT_EQ(i_2.delay_stops, 0);
-    EXPECT_EQ(i_2.delay_try_seconds, 0.0);
-    EXPECT_EQ(i_2.delay_early_stops, 0);
-    EXPECT_EQ(i_2.delay_rescales, 1);
-    EXPECT_EQ(i_2.front_work, i_d2.front_work);
 }
 
 // Below pivot u = 1e-6 (IPOPT's 1e-8: the ipopt track, the MA97 plugin,
