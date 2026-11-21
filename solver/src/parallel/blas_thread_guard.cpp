@@ -16,6 +16,69 @@ static int  blas_get_num_threads()        { return MKL_Get_Max_Threads(); }
 static int  blas_set_num_threads(int n)   { return MKL_Set_Num_Threads_Local(n); }
 static void blas_restore(int prev)        { MKL_Set_Num_Threads_Local(prev); }
 #  define SMF_BLAS_THREAD_API 1
+#  define SMF_BLAS_THREAD_LOCAL 1
+
+#elif defined(SMF_HAS_ACCELERATE) && SMF_HAS_ACCELERATE
+#  ifndef ACCELERATE_NEW_LAPACK
+#    define ACCELERATE_NEW_LAPACK 1
+#  endif
+#  include <Accelerate/Accelerate.h>
+#  if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+// Apple Accelerate (macOS 15+) exposes a per-thread BLAS_THREADING toggle
+// (single-threaded vs multi-threaded). Track the logical thread count on the
+// calling thread so nested guards and BlasShareScope report and restore exact
+// values while actually switching Accelerate between single- and multi-threaded.
+static thread_local int tl_accel_threads = 0;  // 0: OS default (no active guard)
+static int blas_get_num_threads() {
+    if (__builtin_available(macOS 15.0, *)) {
+        if (BLASGetThreading() == BLAS_THREADING_SINGLE_THREADED) return 1;
+        return tl_accel_threads > 1 ? tl_accel_threads : 2;
+    }
+    return 1;
+}
+static int blas_set_num_threads(int n) {
+    if (__builtin_available(macOS 15.0, *)) {
+        const BLAS_THREADING prev_mode = BLASGetThreading();
+        const int prev_token =
+            (tl_accel_threads > 0)
+                ? tl_accel_threads
+                : (prev_mode == BLAS_THREADING_SINGLE_THREADED ? -1 : -2);
+        const int want_n = n > 0 ? n : 1;
+        const BLAS_THREADING want_mode =
+            (want_n <= 1) ? BLAS_THREADING_SINGLE_THREADED : BLAS_THREADING_MULTI_THREADED;
+        if (prev_mode != want_mode) BLASSetThreading(want_mode);
+        tl_accel_threads = want_n;
+        return prev_token;
+    }
+    return 0;
+}
+static void blas_restore(int prev_token) {
+    if (__builtin_available(macOS 15.0, *)) {
+        if (prev_token == -1) {
+            tl_accel_threads = 0;
+            if (BLASGetThreading() != BLAS_THREADING_SINGLE_THREADED)
+                BLASSetThreading(BLAS_THREADING_SINGLE_THREADED);
+        } else if (prev_token == -2) {
+            tl_accel_threads = 0;
+            if (BLASGetThreading() != BLAS_THREADING_MULTI_THREADED)
+                BLASSetThreading(BLAS_THREADING_MULTI_THREADED);
+        } else if (prev_token > 0) {
+            tl_accel_threads = prev_token;
+            const BLAS_THREADING want_mode =
+                (prev_token <= 1) ? BLAS_THREADING_SINGLE_THREADED : BLAS_THREADING_MULTI_THREADED;
+            if (BLASGetThreading() != want_mode) BLASSetThreading(want_mode);
+        }
+    }
+}
+#    define SMF_BLAS_THREAD_API 1
+#    define SMF_BLAS_THREAD_LOCAL 1
+#  else
+static int  blas_get_num_threads()        { return 1; }
+static int  blas_set_num_threads(int /*n*/) { return 0; }
+static void blas_restore(int /*prev*/)    {}
+#    define SMF_BLAS_THREAD_API 0
+#    define SMF_BLAS_THREAD_LOCAL 1
+#  endif
 
 #elif defined(SMF_HAS_OPENBLAS) && SMF_HAS_OPENBLAS
 #  include <cblas.h>
@@ -29,12 +92,14 @@ static int  blas_get_num_threads()        { return openblas_get_num_threads(); }
 static int  blas_set_num_threads(int n)   { const int prev = openblas_get_num_threads(); if (prev != n) openblas_set_num_threads(n); return prev; }
 static void blas_restore(int prev)        { const int want = prev > 0 ? prev : 1; if (openblas_get_num_threads() != want) openblas_set_num_threads(want); }
 #  define SMF_BLAS_THREAD_API 1
+#  define SMF_BLAS_THREAD_LOCAL 0
 
 #else
 static int  blas_get_num_threads()        { return 1; }
 static int  blas_set_num_threads(int /*n*/) { return 0; }
 static void blas_restore(int /*prev*/)    {}
 #  define SMF_BLAS_THREAD_API 0
+#  define SMF_BLAS_THREAD_LOCAL 0
 #endif
 
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
@@ -157,7 +222,7 @@ thread_local const std::atomic<int> *tl_share = nullptr;
 thread_local int tl_share_set = 0;
 std::atomic<int> g_active{0};
 std::atomic<int> g_peak{0};
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !SMF_BLAS_THREAD_LOCAL
 std::atomic<int> g_serial_pin_depth{0};
 int g_serial_pin_saved = 1;
 #endif
@@ -172,7 +237,7 @@ void count_change(int delta) noexcept {
 
 bool blas_is_pinned_serial() noexcept
 {
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
+#if SMF_BLAS_THREAD_LOCAL
     return false;
 #else
     return g_serial_pin_depth.load(std::memory_order_acquire) > 0;
@@ -181,7 +246,7 @@ bool blas_is_pinned_serial() noexcept
 
 BlasSerialPinScope::BlasSerialPinScope() noexcept
 {
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !SMF_BLAS_THREAD_LOCAL
     std::lock_guard<std::mutex> lock(blas_guard_mutex());
     if (g_serial_pin_depth.fetch_add(1, std::memory_order_acq_rel) == 0) {
         g_serial_pin_saved = blas_set_num_threads(1);
@@ -191,7 +256,7 @@ BlasSerialPinScope::BlasSerialPinScope() noexcept
 
 BlasSerialPinScope::~BlasSerialPinScope() noexcept
 {
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !SMF_BLAS_THREAD_LOCAL
     std::lock_guard<std::mutex> lock(blas_guard_mutex());
     if (g_serial_pin_depth.fetch_sub(1, std::memory_order_acq_rel) == 1) {
         blas_restore(g_serial_pin_saved);
@@ -224,7 +289,7 @@ BlasThreadGuard::BlasThreadGuard(int n_threads, int blocktime_ms) noexcept
     tl_share = nullptr;
     tl_share_set = 0;
     const int requested = (n_threads > 0) ? n_threads : 1;
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
+#if SMF_BLAS_THREAD_LOCAL
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         saved_threads_ = blas_get_num_threads();
@@ -260,7 +325,7 @@ BlasThreadGuard::~BlasThreadGuard() noexcept
     if (prev_blocktime_ >= 0) mkl_blocktime_set(prev_blocktime_);
     if (touched_blas_) {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !SMF_BLAS_THREAD_LOCAL
         // Set before another thread's BlasSerialPinScope began: restoring now
         // would un-pin the process-wide BLAS under that pin's strip workers.
         // Hand the restore to the pin instead; it applies it when it ends.
@@ -298,7 +363,7 @@ void blas_follow_share() noexcept
     if (s == nullptr) return;
     const int v = s->load(std::memory_order_acquire);
     if (v <= 0 || v == tl_share_set) return;
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
+#if SMF_BLAS_THREAD_LOCAL
     {
         std::lock_guard<std::mutex> lock(blas_guard_mutex());
         blas_set_num_threads(v);
@@ -324,8 +389,8 @@ int blas_current_share() noexcept
 
 int blas_local_set_seq() noexcept
 {
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
-    return MKL_Set_Num_Threads_Local(1);
+#if SMF_BLAS_THREAD_LOCAL
+    return blas_set_num_threads(1);
 #else
     return 0;
 #endif
@@ -333,8 +398,8 @@ int blas_local_set_seq() noexcept
 
 void blas_local_restore(int prev) noexcept
 {
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
-    MKL_Set_Num_Threads_Local(prev);
+#if SMF_BLAS_THREAD_LOCAL
+    blas_restore(prev);
 #else
     (void)prev;
 #endif

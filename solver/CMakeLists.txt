@@ -89,6 +89,7 @@ endif()
 
 # ---- BLAS & LAPACK + backend verification -------------------------------
 set(SMF_HAS_OPENBLAS OFF)
+set(SMF_HAS_ACCELERATE OFF)
 set(SMF_BLAS_REFERENCE OFF)
 set(SMF_BLAS_BACKEND_NAME "unknown")
 
@@ -137,9 +138,10 @@ else()
     if(BLAS_FOUND AND LAPACK_FOUND)
         set(_smf_blas_str "${BLAS_LIBRARIES}")
         if(APPLE AND _smf_blas_str MATCHES "Accelerate")
+            set(SMF_HAS_ACCELERATE ON)
             set(SMF_BLAS_BACKEND_NAME "accelerate")
             find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h)
-            message(STATUS "smf: Apple Accelerate BLAS/LAPACK found (cblas.h: ${OPENBLAS_CBLAS_INCLUDE_DIR})")
+            message(STATUS "smf: Apple Accelerate BLAS/LAPACK found (SMF_HAS_ACCELERATE=ON, cblas.h: ${OPENBLAS_CBLAS_INCLUDE_DIR})")
         else()
             set(SMF_BLAS_BACKEND_NAME "system")
             find_package(OpenBLAS QUIET CONFIG)
@@ -612,6 +614,7 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_METIS_THREADSAFE}>:SMF_METIS_THREADSAFE=1>
     $<$<BOOL:${SMF_DETERMINISTIC}>:SMF_DETERMINISTIC=1>
     $<$<BOOL:${SMF_HAS_OPENBLAS}>:SMF_HAS_OPENBLAS=1>
+    $<$<BOOL:${SMF_HAS_ACCELERATE}>:SMF_HAS_ACCELERATE=1>
     $<$<BOOL:${SMF_USE_MKL}>:SMF_USE_MKL=1>
     $<$<BOOL:${SMF_BLAS_REFERENCE}>:SMF_BLAS_REFERENCE=1>
     $<$<BOOL:${SMF_REQUIRE_BENCHMARK_BASELINES}>:SMF_REQUIRE_BENCHMARK_BASELINES=1>
