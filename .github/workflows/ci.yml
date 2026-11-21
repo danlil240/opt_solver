@@ -93,24 +93,39 @@ jobs:
         run: pytest -q packaging/python/tests
 
   macos-arm64:
-    name: macOS (Apple Silicon arm64, Accelerate, SMF_MARCH=none)
+    name: macOS (Apple Silicon arm64, conda-forge OpenBLAS)
     runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash -el {0}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: brew install ninja suite-sparse libomp pkg-config
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: smfci
+          create-args: >-
+            libopenblas=*=*pthreads*
+            libblas=*=*openblas
+            liblapack
+            libcblas
+            blas-devel
+            suitesparse
+            llvm-openmp
+            ninja
+            pkg-config
 
       - name: Configure & build
         run: |
-          BREW_PREFIX="$(brew --prefix)"
           cmake -S solver -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
-            -DCMAKE_PREFIX_PATH="${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}" \
-            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${BREW_PREFIX}/opt/libomp/include" \
+            -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DCMAKE_FIND_FRAMEWORK=LAST \
+            -DBLA_VENDOR=OpenBLAS \
+            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${CONDA_PREFIX}/include" \
             -DOpenMP_CXX_LIB_NAMES="omp" \
-            -DOpenMP_omp_LIBRARY="${BREW_PREFIX}/opt/libomp/lib/libomp.dylib" \
+            -DOpenMP_omp_LIBRARY="${CONDA_PREFIX}/lib/libomp.dylib" \
             -DSMF_USE_MKL=OFF \
             -DSMF_MARCH=none \
             -DSMF_BUILD_C_API=ON \
@@ -129,17 +144,19 @@ jobs:
           pkg-config --exists smf
           cat > /tmp/smf_c99_check.c <<'EOF'
           #include <stdio.h>
+          #include <string.h>
           #include <smf/smf_c.h>
           int main(void) {
             if (smf_c_abi_version() != SMF_C_ABI_VERSION) return 1;
             printf("abi=%d version=%s blas=%s\n",
                    smf_c_abi_version(), smf_version(), smf_blas_backend());
+            if (strcmp(smf_blas_backend(), "openblas") != 0) return 2;
             return 0;
           }
           EOF
           cc -std=c99 -Wall -Wextra -Werror /tmp/smf_c99_check.c \
             $(pkg-config --cflags --libs smf) \
-            -Wl,-rpath,"$PWD/install/lib" -o /tmp/smf_c99_check
+            -Wl,-rpath,"$PWD/install/lib" -Wl,-rpath,"$CONDA_PREFIX/lib" -o /tmp/smf_c99_check
           /tmp/smf_c99_check
 
   windows-msvc:
