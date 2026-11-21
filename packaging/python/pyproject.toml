@@ -27,6 +27,8 @@ Homepage = "https://github.com/danlil240/opt_solver"
 cmake.source-dir = "../../solver"
 cmake.build-type = "Release"
 wheel.packages = ["smf_solver"]
+wheel.py-api = "py3"
+install.components = ["runtime"]
 cmake.args = [
     "-DSMF_USE_MKL=OFF",
     "-DSMF_BUILD_C_API=ON",
@@ -36,4 +38,5 @@ cmake.args = [
     "-DSMF_VENDORED_METIS=ON",
     "-DCMAKE_INSTALL_LIBDIR=smf_solver/_libs",
     "-DCMAKE_INSTALL_BINDIR=smf_solver/_libs",
+    "-DCMAKE_INSTALL_DATADIR=smf_solver/_licenses",
 ]
