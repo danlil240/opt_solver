@@ -23,7 +23,7 @@ jobs:
             os: ubuntu-latest
             march: x86-64-v3
           - name: macos-arm64
-            os: macos-14
+            os: macos-latest
             march: none
           - name: windows-x64
             os: windows-latest
@@ -50,6 +50,7 @@ jobs:
             libblas=*=*openblas
             liblapack
             libcblas
+            blas-devel
             suitesparse
             python=3.12
             pip
