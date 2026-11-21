@@ -1,0 +1,55 @@
+pool ready: build 3.6 s per worker, 5.1 s total
+seed: 58/60 cold solves stored in 827 s (median 31.4 s per solve)
+new  lib1  plan   0.87 s (  22 it)  cold  27.30 s ( 454 it)  obj   18.262 vs   18.262
+new  lib1  plan  12.90 s ( 256 it)  cold  31.29 s ( 453 it)  obj   21.413 vs   21.413
+new  lib2  plan   1.17 s (  28 it)  cold  27.56 s ( 457 it)  obj   22.127 vs   22.127
+new  lib2  plan   1.04 s (  26 it)  cold  19.19 s ( 298 it)  obj   18.654 vs   18.654
+new  lib1  plan   1.12 s (  27 it)  cold  23.38 s ( 392 it)  obj   16.122 vs   16.122
+new  lib3  plan   3.52 s (  72 it)  cold  25.28 s ( 442 it)  obj   22.373 vs   22.373
+new  lib2  plan   1.67 s (  44 it)  cold  30.24 s ( 501 it)  obj   16.408 vs   16.408
+new  lib2  plan   0.74 s (  19 it)  cold  42.85 s ( 693 it)  obj   23.334 vs   23.334
+new  lib2  plan   4.56 s ( 100 it)  cold  36.07 s ( 560 it)  obj   22.185 vs   22.185
+new  lib3  plan   3.77 s (  93 it)  cold  25.16 s ( 399 it)  obj   18.180 vs   18.180
+new  lib2  plan  16.64 s ( 312 it)  cold  44.63 s ( 717 it)  obj   19.686 vs   19.686
+new  lib2  plan   6.80 s ( 123 it)  cold  23.39 s ( 334 it)  obj   33.438 vs   22.482
+new  lib2  plan   0.63 s (  15 it)  cold  28.36 s ( 488 it)  obj   23.029 vs   23.029
+new  lib1  plan   0.84 s (  19 it)  cold  38.94 s ( 547 it)  obj   20.756 vs   20.756
+new  lib1  plan   1.05 s (  25 it)  cold  38.17 s ( 572 it)  obj   15.977 vs   15.977
+new  lib1  plan   5.31 s (  85 it)  cold  29.43 s ( 451 it)  obj   20.631 vs   20.631
+new  lib2  plan   2.34 s (  56 it)  cold  27.28 s ( 482 it)  obj   22.992 vs   22.992
+new  lib2  plan   9.57 s ( 198 it)  cold  25.23 s ( 430 it)  obj   19.504 vs   19.504
+new  lib1  plan   1.58 s (  39 it)  cold  27.02 s ( 485 it)  obj   23.442 vs   23.442
+new  lib3  plan   4.39 s (  97 it)  cold  39.02 s ( 639 it)  obj   21.480 vs   21.480
+new tasks: 20 tasks, failures cold 0 / planner 0
+  cold    median   27.96 s  p90   39.41 s  max   44.63 s
+  planner median    2.00 s  p90    9.90 s  max   16.64 s
+  total speedup 7.57x, median per-task speedup 14.4x
+replan 0.0 hint   26.35 s ( 525 it)
+replan 0.1 hint   23.48 s ( 410 it)
+replan 0.2 lib1   13.24 s ( 259 it)
+replan 0.3 lib2   11.62 s ( 198 it)
+replan 0.4 lib2    4.71 s ( 106 it)
+replan 0.5 lib1   29.11 s ( 495 it)
+replan 0.6 lib1    3.65 s (  95 it)
+replan 0.7 lib2   14.49 s ( 270 it)
+replan 1.0 lib1    2.96 s (  71 it)
+replan 1.1 hint    2.20 s (  60 it)
+replan 1.2 lib1    2.06 s (  57 it)
+replan 1.3 hint   17.91 s ( 376 it)
+replan 1.4 lib1    9.12 s ( 249 it)
+replan 1.5 hint    2.75 s (  64 it)
+replan 1.6 hint    3.04 s (  76 it)
+replan 1.7 lib1    1.33 s (  36 it)
+replan 2.0 hint   23.25 s ( 480 it)
+replan 2.1 lib2   12.18 s ( 241 it)
+replan 2.2 hint    2.42 s (  65 it)
+replan 2.3 hint    1.56 s (  44 it)
+replan 2.4 hint    1.31 s (  37 it)
+replan 2.5 hint    1.13 s (  28 it)
+replan 2.6 lib2    1.29 s (  34 it)
+replan 2.7 lib2   39.61 s ( 834 it)
+replans: 24 tasks, failures cold 0 / planner 0
+  cold    median   34.40 s  p90   72.49 s  max  165.62 s
+  planner median    4.18 s  p90   25.49 s  max   39.61 s
+  total speedup 4.58x, median per-task speedup 7.9x
+total 1793 s

@@ -1,0 +1,20 @@
+{
+ "problem": "quadmov",
+ "N": 100,
+ "solver": "mumps",
+ "ntrain": 240,
+ "ntest": 60,
+ "workers": 4,
+ "seed": 0,
+ "nx": 1613,
+ "ng": 3972,
+ "cold_phase_s": 179.68069726,
+ "train_ok": 240,
+ "train_total": 240,
+ "mlp_train_mse_std": 6.891642151318211e-05,
+ "mlp_train_s": 62.305613636999965,
+ "mlp_infer_ms_median": 0.14734899997392858,
+ "knn_guess_rms_sd": 1.4050950157820155,
+ "mlp_guess_rms_sd": 1.2904808567604251,
+ "warm_phase_s": 318.5787440490001
+}

@@ -1,0 +1,31 @@
+pool ready: build 3.5 s per worker, 5.1 s total
+seed: 58/60 cold solves stored in 852 s (median 31.8 s per solve)
+replan 0.0 hint    0.84 s (  18 it)
+replan 0.1 hint    1.11 s (  22 it)
+replan 0.2 lib1   23.18 s ( 450 it)
+replan 0.3 hint    4.01 s ( 106 it)
+replan 0.4 hint    0.59 s (  13 it)
+replan 0.5 hint    0.54 s (  11 it)
+replan 0.6 lib2   18.50 s ( 319 it)
+replan 0.7 lib1   15.17 s ( 293 it)
+replan 1.0 hint    0.90 s (  21 it)
+replan 1.1 lib1    2.48 s (  57 it)
+replan 1.2 hint    4.49 s (  99 it)
+replan 1.3 hint    1.57 s (  32 it)
+replan 1.4 lib1   39.96 s ( 825 it)
+replan 1.5 lib1   34.91 s ( 694 it)
+replan 1.6 hint   10.53 s ( 228 it)
+replan 1.7 hint    0.67 s (  16 it)
+replan 2.0 hint    0.81 s (  20 it)
+replan 2.1 hint    3.03 s (  55 it)
+replan 2.2 hint    1.08 s (  27 it)
+replan 2.3 hint    0.67 s (  15 it)
+replan 2.4 hint    0.90 s (  20 it)
+replan 2.5 hint    0.68 s (  17 it)
+replan 2.6 hint   13.89 s ( 310 it)
+replan 2.7 hint    0.94 s (  24 it)
+replans: 24 tasks, failures cold 2 / planner 0
+  cold    median   35.13 s  p90  120.64 s  max  370.77 s
+  planner median    1.10 s  p90   18.17 s  max   39.96 s
+  total speedup 10.54x, median per-task speedup 29.4x
+total 1706 s
