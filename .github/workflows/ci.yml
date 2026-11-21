@@ -1,0 +1,260 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-openblas:
+    name: Linux (GCC, OpenBLAS, x86-64-v3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libopenblas-dev libsuitesparse-dev pkg-config python3-pytest
+
+      - name: Configure & build
+        run: |
+          cmake -S solver -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DSMF_USE_MKL=OFF \
+            -DSMF_MARCH=x86-64-v3 \
+            -DSMF_BUILD_C_API=ON \
+            -DSMF_BUILD_MA97_PLUGIN=ON \
+            -DSMF_BUILD_TESTS=ON \
+            -DSMF_BUILD_BENCHMARKS=OFF
+          cmake --build build -j
+
+      - name: Run C++ test suite
+        run: ctest --test-dir build --output-on-failure -j 4
+
+      - name: Install & verify C ABI, pkg-config, CMake package, and ISA
+        run: |
+          cmake --install build
+          export PKG_CONFIG_PATH="$PWD/install/lib/pkgconfig"
+          pkg-config --exists smf
+          pkg-config --modversion smf
+
+          # Verify smfTargets.cmake exports only relocatable include dir
+          ! grep "INTERFACE_INCLUDE_DIRECTORIES" "$PWD/install/lib/cmake/smf/smfTargets.cmake" | grep -q "/usr"
+
+          # Verify zero AVX-512 zmm instructions in x86-64-v3 shared libraries
+          for lib in "$PWD"/install/lib/libsmf_c.so.*.*.* "$PWD"/install/lib/libsmf_ma97.so.*.*.*; do
+            zmm=$(objdump -d "$lib" | grep -c '\bzmm[0-9]' || true)
+            echo "$lib: zmm=$zmm"
+            test "$zmm" -eq 0
+          done
+
+          # Pure C99 consumer via pkg-config
+          cat > /tmp/smf_c99_check.c <<'EOF'
+          #include <stdio.h>
+          #include <smf/smf_c.h>
+          int main(void) {
+            smf_ipm_control_t ctrl;
+            smf_ipm_default_control(&ctrl);
+            if (smf_c_abi_version() != SMF_C_ABI_VERSION) return 1;
+            printf("abi=%d version=%s blas=%s\n",
+                   smf_c_abi_version(), smf_version(), smf_blas_backend());
+            return 0;
+          }
+          EOF
+          cc -std=c99 -Wall -Wextra -Werror /tmp/smf_c99_check.c \
+            $(pkg-config --cflags --libs smf) \
+            -Wl,-rpath,"$PWD/install/lib" -o /tmp/smf_c99_check
+          /tmp/smf_c99_check
+
+          # CMake find_package(smf CONFIG REQUIRED) consumer
+          mkdir -p /tmp/smf_cmake_consumer
+          cat > /tmp/smf_cmake_consumer/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.20)
+          project(smf_consumer C)
+          find_package(smf CONFIG REQUIRED)
+          add_executable(app /tmp/smf_c99_check.c)
+          target_link_libraries(app PRIVATE smf::smf_c)
+          EOF
+          cmake -S /tmp/smf_cmake_consumer -B /tmp/smf_cmake_consumer/build -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/install"
+          cmake --build /tmp/smf_cmake_consumer/build
+          LD_LIBRARY_PATH="$PWD/install/lib" /tmp/smf_cmake_consumer/build/app
+
+      - name: Run Python packaging unit tests
+        run: pytest -q packaging/python/tests
+
+  macos-arm64:
+    name: macOS (Apple Silicon arm64, OpenBLAS, SMF_MARCH=none)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install ninja openblas suite-sparse libomp pkg-config
+
+      - name: Configure & build
+        run: |
+          BREW_PREFIX="$(brew --prefix)"
+          cmake -S solver -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DCMAKE_PREFIX_PATH="${BREW_PREFIX}/opt/openblas;${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}" \
+            -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${BREW_PREFIX}/opt/libomp/include" \
+            -DOpenMP_CXX_LIB_NAMES="omp" \
+            -DOpenMP_omp_LIBRARY="${BREW_PREFIX}/opt/libomp/lib/libomp.dylib" \
+            -DSMF_USE_MKL=OFF \
+            -DSMF_MARCH=none \
+            -DSMF_BUILD_C_API=ON \
+            -DSMF_BUILD_MA97_PLUGIN=ON \
+            -DSMF_BUILD_TESTS=ON \
+            -DSMF_BUILD_BENCHMARKS=OFF
+          cmake --build build -j
+
+      - name: Run C++ test suite
+        run: ctest --test-dir build --output-on-failure -j 4
+
+      - name: Install & verify pkg-config C99 consumer
+        run: |
+          cmake --install build
+          export PKG_CONFIG_PATH="$PWD/install/lib/pkgconfig"
+          pkg-config --exists smf
+          cat > /tmp/smf_c99_check.c <<'EOF'
+          #include <stdio.h>
+          #include <smf/smf_c.h>
+          int main(void) {
+            if (smf_c_abi_version() != SMF_C_ABI_VERSION) return 1;
+            printf("abi=%d version=%s blas=%s\n",
+                   smf_c_abi_version(), smf_version(), smf_blas_backend());
+            return 0;
+          }
+          EOF
+          cc -std=c99 -Wall -Wextra -Werror /tmp/smf_c99_check.c \
+            $(pkg-config --cflags --libs smf) \
+            -Wl,-rpath,"$PWD/install/lib" -o /tmp/smf_c99_check
+          /tmp/smf_c99_check
+
+  windows-msvc:
+    name: Windows (MSVC, conda-forge OpenBLAS)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd /C call {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: smfci
+          create-args: >-
+            libblas=*=*openblas
+            liblapack
+            libcblas
+            suitesparse
+            python=3.12
+
+      - name: Configure & build
+        shell: bash -el {0}
+        run: |
+          cmake -S solver -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+            -DSMF_USE_MKL=OFF \
+            -DSMF_BUILD_C_API=ON \
+            -DSMF_BUILD_MA97_PLUGIN=ON \
+            -DSMF_BUILD_TESTS=ON \
+            -DSMF_BUILD_BENCHMARKS=OFF
+          cmake --build build --config Release --parallel
+
+      - name: Run C++ test suite
+        shell: bash -el {0}
+        run: ctest --test-dir build -C Release --output-on-failure -j 4
+
+      - name: Install & run Python packaging tests
+        shell: bash -el {0}
+        run: |
+          cmake --install build --config Release
+          test -f install/bin/smf_c.dll
+          test -f install/bin/smf_ma97.dll
+          test -f install/include/smf/smf_c.h
+          python -m unittest discover -s packaging/python/tests -v
+
+  ipopt-native-smf:
+    name: Native IPOPT 3.14.19 (linear_solver=smf)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build gfortran libopenblas-dev libsuitesparse-dev pkg-config curl
+
+      - name: Build & install libsmf_c
+        run: |
+          cmake -S solver -B build-smf -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/smf-prefix" \
+            -DSMF_USE_MKL=OFF \
+            -DSMF_MARCH=x86-64-v3 \
+            -DSMF_BUILD_C_API=ON \
+            -DSMF_BUILD_MA97_PLUGIN=OFF \
+            -DSMF_BUILD_TESTS=OFF \
+            -DSMF_BUILD_BENCHMARKS=OFF
+          cmake --build build-smf -j
+          cmake --install build-smf
+
+      - name: Patch, build, and test IPOPT 3.14.19 (compile-time & runtime smf)
+        run: |
+          export PKG_CONFIG_PATH="$PWD/smf-prefix/lib/pkgconfig"
+          mkdir -p /tmp/ipopt-ci && cd /tmp/ipopt-ci
+          curl -fsSL https://github.com/coin-or/Ipopt/archive/refs/tags/releases/3.14.19.tar.gz -o ipopt.tar.gz
+          tar -xzf ipopt.tar.gz
+          SRC="$PWD/Ipopt-releases-3.14.19"
+
+          # Verify patch applies cleanly
+          cp -a "$SRC" /tmp/ipopt-patch-check
+          (cd /tmp/ipopt-patch-check && patch -p1 --dry-run < "$GITHUB_WORKSPACE/tools/ipopt/smf-linear-solver/ipopt-3.14.19-smf.patch")
+
+          # Apply via apply_to_ipopt.py
+          python3 "$GITHUB_WORKSPACE/tools/ipopt/smf-linear-solver/apply_to_ipopt.py" "$SRC"
+
+          # Mode A: compile-time linked IPOPT_HAS_SMF (default solver)
+          mkdir -p build-builtin inst-builtin
+          cd build-builtin
+          "$SRC/configure" \
+            --prefix="/tmp/ipopt-ci/inst-builtin" \
+            --disable-java --without-hsl --without-mumps \
+            --with-lapack-lflags="-lopenblas" \
+            CPPFLAGS="-DIPOPT_HAS_SMF $(pkg-config --cflags smf)" \
+            LDFLAGS="$(pkg-config --libs-only-L smf) -Wl,-rpath,$(pkg-config --variable=libdir smf)" \
+            LIBS="$(pkg-config --libs-only-l smf)"
+          make -j"$(nproc)" && make install
+          g++ -O2 -std=c++17 "$GITHUB_WORKSPACE/tools/ipopt/smf-linear-solver/test_ipopt_smf.cpp" \
+            $(PKG_CONFIG_PATH="/tmp/ipopt-ci/inst-builtin/lib/pkgconfig" pkg-config --cflags --libs ipopt) \
+            -Wl,-rpath,"/tmp/ipopt-ci/inst-builtin/lib" -Wl,-rpath,"$GITHUB_WORKSPACE/smf-prefix/lib" \
+            -o /tmp/ipopt-ci/test_builtin
+          /tmp/ipopt-ci/test_builtin
+
+          # Mode B: runtime dynamic loading via smflib
+          cd /tmp/ipopt-ci
+          mkdir -p build-runtime inst-runtime
+          cd build-runtime
+          "$SRC/configure" \
+            --prefix="/tmp/ipopt-ci/inst-runtime" \
+            --disable-java --without-hsl --without-mumps \
+            --with-lapack-lflags="-lopenblas"
+          make -j"$(nproc)" && make install
+          g++ -O2 -std=c++17 "$GITHUB_WORKSPACE/tools/ipopt/smf-linear-solver/test_ipopt_smf.cpp" \
+            $(PKG_CONFIG_PATH="/tmp/ipopt-ci/inst-runtime/lib/pkgconfig" pkg-config --cflags --libs ipopt) \
+            -Wl,-rpath,"/tmp/ipopt-ci/inst-runtime/lib" \
+            -o /tmp/ipopt-ci/test_runtime
+          /tmp/ipopt-ci/test_runtime "$GITHUB_WORKSPACE/smf-prefix/lib/libsmf_c.so"

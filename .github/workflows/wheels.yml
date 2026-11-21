@@ -1,0 +1,121 @@
+name: Build Python Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - 'packaging/python/**'
+      - 'solver/CMakeLists.txt'
+      - '.github/workflows/wheels.yml'
+  workflow_dispatch:
+
+jobs:
+  build-wheel:
+    name: Wheel (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            march: x86-64-v3
+          - name: macos-arm64
+            os: macos-14
+            march: none
+          - name: windows-x64
+            os: windows-latest
+            march: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libopenblas-dev libsuitesparse-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install ninja openblas suite-sparse libomp
+
+      - uses: mamba-org/setup-micromamba@v2
+        if: runner.os == 'Windows'
+        with:
+          environment-name: smfwhl
+          create-args: >-
+            libblas=*=*openblas
+            liblapack
+            libcblas
+            suitesparse
+            python=3.12
+            pip
+            pytest
+            ninja
+
+      - uses: actions/setup-python@v5
+        if: runner.os != 'Windows'
+        with:
+          python-version: '3.12'
+
+      - name: Build py3-none wheel (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install --upgrade pip scikit-build-core ninja pytest
+          CMAKE_ARGS="-DSMF_MARCH=${{ matrix.march }}" \
+            python -m pip wheel ./packaging/python --no-build-isolation --no-deps -w dist/
+
+      - name: Build py3-none wheel (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BREW_PREFIX="$(brew --prefix)"
+          python -m pip install --upgrade pip scikit-build-core ninja pytest
+          export CMAKE_ARGS="-DSMF_MARCH=${{ matrix.march }} '-DCMAKE_PREFIX_PATH=${BREW_PREFIX}/opt/openblas;${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}' '-DOpenMP_CXX_FLAGS=-Xpreprocessor -fopenmp -I${BREW_PREFIX}/opt/libomp/include' -DOpenMP_CXX_LIB_NAMES=omp -DOpenMP_omp_LIBRARY=${BREW_PREFIX}/opt/libomp/lib/libomp.dylib"
+          python -m pip wheel ./packaging/python --no-build-isolation --no-deps -w dist/
+
+      - name: Build py3-none wheel (Windows)
+        if: runner.os == 'Windows'
+        shell: bash -el {0}
+        run: |
+          python -m pip install --upgrade pip scikit-build-core
+          python -m pip wheel ./packaging/python --no-build-isolation --no-deps -w dist/
+
+      - name: Verify wheel contents & runtime import
+        shell: bash -el {0}
+        run: |
+          ls -lh dist/
+          python - <<'EOF'
+          import glob, sys, zipfile
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          whl = wheels[0]
+          print("Wheel:", whl)
+          assert "-py3-none-" in whl, f"Expected py3-none wheel, got {whl}"
+          with zipfile.ZipFile(whl) as zf:
+              bad = []
+              for info in zf.infolist():
+                  print(f"{info.file_size:10d}  {info.filename}")
+                  if info.filename.endswith((".a", ".lib")) or info.filename.startswith(("include/", "share/")):
+                      bad.append(info.filename)
+              assert not bad, f"Unexpected non-runtime files in wheel: {bad}"
+          EOF
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python - <<'EOF'
+          import os, smf_solver
+          print("c_library_path:", smf_solver.c_library_path())
+          print("ma97_plugin_path:", smf_solver.ma97_plugin_path())
+          assert "_libs" in smf_solver.c_library_path() and os.path.isfile(smf_solver.c_library_path())
+          assert "_libs" in smf_solver.ma97_plugin_path() and os.path.isfile(smf_solver.ma97_plugin_path())
+          print("abi:", smf_solver.abi_version(), "ver:", smf_solver.version(), "blas:", smf_solver.blas_backend())
+          assert smf_solver.abi_version() == 1
+          assert smf_solver.version() == "0.1.0"
+          EOF
+          pytest -q packaging/python/tests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
