@@ -141,20 +141,30 @@ else()
             set(SMF_HAS_OPENBLAS ON)
             set(SMF_BLAS_BACKEND_NAME "openblas")
             message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
-        else()
-            find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
-                PATHS
-                    /usr/include/x86_64-linux-gnu/openblas-pthread
-                    /usr/include/openblas-pthread
-                    /usr/include/openblas
-                    /usr/include/x86_64-linux-gnu
-                    /usr/local/include
-            )
-            if(OPENBLAS_CBLAS_INCLUDE_DIR)
+        endif()
+        find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
+            HINTS
+                ${OpenBLAS_INCLUDE_DIRS}
+                "${_smf_default_conda_lib}/include"
+                "${_smf_default_conda_lib}/include/openblas"
+            PATH_SUFFIXES
+                openblas
+                openblas-pthread
+            PATHS
+                /opt/homebrew/opt/openblas/include
+                /usr/local/opt/openblas/include
+                /usr/include/x86_64-linux-gnu/openblas-pthread
+                /usr/include/openblas-pthread
+                /usr/include/openblas
+                /usr/include/x86_64-linux-gnu
+                /usr/local/include
+        )
+        if(OPENBLAS_CBLAS_INCLUDE_DIR)
+            if(NOT SMF_HAS_OPENBLAS)
                 set(SMF_HAS_OPENBLAS ON)
                 set(SMF_BLAS_BACKEND_NAME "openblas")
-                message(STATUS "smf: OpenBLAS cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
             endif()
+            message(STATUS "smf: cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
         endif()
     else()
         set(SMF_BLAS_REFERENCE ON)
@@ -533,7 +543,7 @@ target_include_directories(smf PUBLIC
 
 if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
     target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${MKL_INCLUDE_DIR}>)
-elseif(SMF_HAS_OPENBLAS AND OPENBLAS_CBLAS_INCLUDE_DIR)
+elseif(OPENBLAS_CBLAS_INCLUDE_DIR)
     target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${OPENBLAS_CBLAS_INCLUDE_DIR}>)
 endif()
 

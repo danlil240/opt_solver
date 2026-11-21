@@ -113,6 +113,7 @@ jobs:
           print("abi:", smf_solver.abi_version(), "ver:", smf_solver.version(), "blas:", smf_solver.blas_backend())
           assert smf_solver.abi_version() == 1
           assert smf_solver.version() == "0.1.0"
+          assert smf_solver.blas_backend() != "reference", "Expected OpenBLAS/system BLAS, got reference"
           EOF
           pytest -q packaging/python/tests
 
