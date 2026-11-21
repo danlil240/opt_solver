@@ -85,16 +85,16 @@ CscLower grid_kkt(int m, int stride) {
     return A;
 }
 
-struct Run {
+struct RunResult {
     Info info;
     std::vector<double> x;
 };
 
-Run factor_and_solve(const CscLower &A, Control ctrl, int threads, int refactors = 1) {
+RunResult factor_and_solve(const CscLower &A, Control ctrl, int threads, int refactors = 1) {
     ctrl.num_threads = threads;
     ctrl.auto_threads = false;  // small test trees
     Solver solver;
-    Run run;
+    RunResult run;
     auto ak = solver.analyse(A, ctrl, run.info);
     EXPECT_NE(ak.get(), nullptr);
     NumericWorkspace nws;
@@ -127,8 +127,8 @@ TEST(TreeParallel, SpdMatchesSerial) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
-    const Run serial = factor_and_solve(A, ctrl, 1);
-    const Run par = factor_and_solve(A, ctrl, 4, /*refactors=*/2);
+    const RunResult serial = factor_and_solve(A, ctrl, 1);
+    const RunResult par = factor_and_solve(A, ctrl, 4, /*refactors=*/2);
     EXPECT_EQ(serial.info.parallel_subtrees, 0);
     ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
     EXPECT_LT(max_rel_diff(serial.x, par.x), 1e-12);
@@ -141,9 +141,9 @@ TEST(TreeParallel, IndefiniteMatchesSerial) {
     ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
     ctrl.ordering = OrderingMethod::AMD;
     ctrl.scaling = ScalingMethod::None;
-    const Run serial = factor_and_solve(A, ctrl, 1);
+    const RunResult serial = factor_and_solve(A, ctrl, 1);
     ASSERT_GT(serial.info.num_negative, 0);
-    const Run par = factor_and_solve(A, ctrl, 4, /*refactors=*/2);
+    const RunResult par = factor_and_solve(A, ctrl, 4, /*refactors=*/2);
     ASSERT_GE(par.info.parallel_subtrees, 2) << "parallel path not taken";
     EXPECT_EQ(par.info.num_positive, serial.info.num_positive);
     EXPECT_EQ(par.info.num_negative, serial.info.num_negative);
@@ -609,8 +609,8 @@ TEST(TreeParallel, PhaseTimesReported) {
     Control ctrl;
     ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
     ctrl.ordering = OrderingMethod::AMD;
-    const Run serial = factor_and_solve(A, ctrl, 1);
-    const Run par = factor_and_solve(A, ctrl, 4);
+    const RunResult serial = factor_and_solve(A, ctrl, 1);
+    const RunResult par = factor_and_solve(A, ctrl, 4);
     EXPECT_EQ(serial.info.threads_used, 1);
     EXPECT_EQ(serial.info.subtree_seconds, 0.0);
     EXPECT_EQ(serial.info.top_seconds, 0.0);

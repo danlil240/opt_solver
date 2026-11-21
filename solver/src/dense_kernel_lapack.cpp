@@ -607,7 +607,7 @@ void smf_dgemmt_lower_nt_sub(double *C, int m, int k, const double *A, int lda,
     blas_follow_share();
   if (m <= 0 || k <= 0) return;
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
-#if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
+#if defined(SMF_MKL_HAS_GEMMTR) && (SMF_MKL_HAS_GEMMTR)
   cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasTrans, m, k, -1.0,
                 A, lda, B, ldb, 1.0, C, ldc);
 #else
@@ -624,7 +624,7 @@ void smf_dgemmt_lower_nn_sub(double *C, int m, int k, const double *A, int lda,
     blas_follow_share();
   if (m <= 0 || k <= 0) return;
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
-#if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
+#if defined(SMF_MKL_HAS_GEMMTR) && (SMF_MKL_HAS_GEMMTR)
   cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasNoTrans, m, k, -1.0,
                 A, lda, B, ldb, 1.0, C, ldc);
 #else
@@ -648,7 +648,7 @@ void smf_dgemmt_lower_nt_sub_seq(double *C, int m, int k, const double *A,
                                  int lda, const double *B, int ldb, int ldc) {
   if (m <= 0 || k <= 0) return;
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
-#if defined(INTEL_MKL_VERSION) && INTEL_MKL_VERSION >= 20250000
+#if defined(SMF_MKL_HAS_GEMMTR) && (SMF_MKL_HAS_GEMMTR)
   cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasTrans, m, k, -1.0,
                 A, lda, B, ldb, 1.0, C, ldc);
 #else

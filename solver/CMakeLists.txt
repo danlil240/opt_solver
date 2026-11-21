@@ -131,6 +131,23 @@ if(SMF_USE_MKL)
     endif()
     set(SMF_BLAS_BACKEND_NAME "mkl")
     message(STATUS "smf: Intel MKL verified (include: ${MKL_INCLUDE_DIR}, libs: ${BLAS_LIBRARIES})")
+    # cblas_dgemmtr (the successor of the deprecated cblas_dgemmt) is not in
+    # every MKL >= 2025: the conda-forge 2025.3 and 2026.1 headers lack it.
+    # Probe for it instead of trusting INTEL_MKL_VERSION.
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_INCLUDES "${MKL_INCLUDE_DIR}")
+    set(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
+    check_cxx_source_compiles([=[
+#include <mkl.h>
+int main() {
+  double a = 1.0, c = 0.0;
+  cblas_dgemmtr(CblasColMajor, CblasLower, CblasNoTrans, CblasTrans, 1, 1,
+                -1.0, &a, 1, &a, 1, 1.0, &c, 1);
+  return 0;
+}
+]=] SMF_MKL_HAS_GEMMTR)
+    unset(CMAKE_REQUIRED_INCLUDES)
+    unset(CMAKE_REQUIRED_LIBRARIES)
 else()
     find_package(BLAS QUIET)
     find_package(LAPACK QUIET)
@@ -390,7 +407,8 @@ function(smf_stage_runtime_dlls target)
             cholmod.dll amd.dll camd.dll colamd.dll ccolamd.dll
             suitesparseconfig.dll
             dmumps.dll cmumps.dll smumps.dll zmumps.dll
-            libblas.dll liblapack.dll libcblas.dll)
+            libblas.dll liblapack.dll libcblas.dll
+            gtest.dll gtest_main.dll gmock.dll gmock_main.dll)
         if(EXISTS "${SMF_DEPS_DLL_DIR}/${_extra}")
             list(APPEND _smf_dep_dlls "${SMF_DEPS_DLL_DIR}/${_extra}")
         endif()
@@ -594,6 +612,9 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_REQUIRE_BENCHMARK_BASELINES}>:SMF_REQUIRE_BENCHMARK_BASELINES=1>
     SMF_BLAS_BACKEND_STR="${SMF_BLAS_BACKEND_NAME}"
     SMF_VERSION_STR="${PROJECT_VERSION}"
+)
+target_compile_definitions(smf PRIVATE
+    $<$<BOOL:${SMF_MKL_HAS_GEMMTR}>:SMF_MKL_HAS_GEMMTR=1>
 )
 
 
