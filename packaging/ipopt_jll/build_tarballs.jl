@@ -6,7 +6,7 @@ version = v"0.1.0"
 
 sources = [
     GitSource("https://github.com/danlil240/opt_solver.git",
-              "REPLACE_WITH_RELEASE_COMMIT_SHA"),
+              "a1275b5202e8abf124d7fb2d6b308a069d1007c5"),
 ]
 
 script = raw"""
