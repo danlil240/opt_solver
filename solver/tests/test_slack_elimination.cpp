@@ -103,7 +103,7 @@ Control base(SlackElimination mode) {
     return c;
 }
 
-struct Run {
+struct RunResult {
     FactorStatus status = FactorStatus::Success;
     Info info;
     std::vector<double> x;  // solution of A x = b, b_i = 1 + i % 7
@@ -111,12 +111,12 @@ struct Run {
     bool slack = false;
 };
 
-Run run(const CscLower &A, const Control &c, int nrhs = 1) {
+RunResult run(const CscLower &A, const Control &c, int nrhs = 1) {
     Solver s;
     Info ia;
     auto ak = s.analyse(A, c, ia);
     EXPECT_NE(ak.get(), nullptr);
-    Run r;
+    RunResult r;
     if (!ak) return r;
     FactorKeep fk;
     NumericWorkspace ws;
@@ -290,8 +290,8 @@ TEST(SlackElimination, MatchesFullPathOnRandomKkts) {
         SCOPED_TRACE(seed);
         const Kkt k = make_kkt(seed, 60 + 10 * static_cast<int>(seed), 10, 120 + 15 * static_cast<int>(seed),
                                seed % 3 == 0 ? 0.2 : 0.0, seed % 4 == 0 ? 0.0 : 1e-8);
-        const Run on = run(k.A, base(SlackElimination::On), 3);
-        const Run off = run(k.A, base(SlackElimination::Off), 3);
+        const RunResult on = run(k.A, base(SlackElimination::On), 3);
+        const RunResult off = run(k.A, base(SlackElimination::Off), 3);
         ASSERT_EQ(on.status, off.status);
         EXPECT_FALSE(off.slack);
         fired += on.slack;
@@ -317,8 +317,8 @@ TEST(SlackElimination, ZeroSlackDiagonalsAreExact) {
     // Every slack diagonal 0 (variables in one constraint only): the 2x2
     // block pivots stay exact where 1x1 pivots on the slacks would divide by 0.
     const Kkt k = make_kkt(77, 80, 8, 200, 1.0);
-    const Run on = run(k.A, base(SlackElimination::On));
-    const Run off = run(k.A, base(SlackElimination::Off));
+    const RunResult on = run(k.A, base(SlackElimination::On));
+    const RunResult off = run(k.A, base(SlackElimination::Off));
     EXPECT_TRUE(on.slack);
     EXPECT_EQ(on.info.num_negative, off.info.num_negative);
     EXPECT_EQ(on.info.num_positive, off.info.num_positive);
@@ -335,7 +335,7 @@ TEST(SlackElimination, ForcedFallbackIsTheFullPath) {
     auto ak = s.analyse(k.A, c, ia);
     ASSERT_NE(ak.get(), nullptr);
     ASSERT_NE(ak->slack, nullptr);
-    const Run off = run(k.A, base(SlackElimination::Off));
+    const RunResult off = run(k.A, base(SlackElimination::Off));
     std::vector<double> x_off(static_cast<std::size_t>(k.A.n));
     {
         Solver so;
@@ -370,8 +370,8 @@ TEST(SlackElimination, ForcedFallbackIsTheFullPath) {
 TEST(SlackElimination, AutoBelowThresholdIsOff) {
     // Few pairs (about 6% of the rows): Auto keeps the full path, bitwise.
     const Kkt k = make_kkt(9, 400, 40, 15);
-    const Run a = run(k.A, base(SlackElimination::Auto));
-    const Run off = run(k.A, base(SlackElimination::Off));
+    const RunResult a = run(k.A, base(SlackElimination::Auto));
+    const RunResult off = run(k.A, base(SlackElimination::Off));
     EXPECT_FALSE(a.slack);
     EXPECT_EQ(a.info.slack_pairs, 0);
     EXPECT_TRUE(same_bits(a.x, off.x));
@@ -385,8 +385,8 @@ TEST(SlackElimination, IllConditionedBackwardError) {
     for (unsigned seed = 40; seed < 44; ++seed) {
         SCOPED_TRACE(seed);
         const Kkt k = make_kkt(seed, 200, 20, 500, 0.1, 1e-10, 6.0);
-        const Run on = run(k.A, base(SlackElimination::On));
-        const Run off = run(k.A, base(SlackElimination::Off));
+        const RunResult on = run(k.A, base(SlackElimination::On));
+        const RunResult off = run(k.A, base(SlackElimination::Off));
         EXPECT_TRUE(on.slack);
         EXPECT_EQ(on.info.num_negative, off.info.num_negative);
         const auto b = rhs_of(static_cast<int>(k.A.n));
@@ -409,7 +409,7 @@ TEST(SlackElimination, AboveMaxPivotUIsUnchanged) {
     ASSERT_TRUE(ka && ko);
     EXPECT_EQ(ka->slack, nullptr);
     EXPECT_EQ(ka->perm, ko->perm);
-    const Run ra = run(k.A, a), ro = run(k.A, off);
+    const RunResult ra = run(k.A, a), ro = run(k.A, off);
     EXPECT_FALSE(ra.slack);
     EXPECT_TRUE(same_bits(ra.x, ro.x));
     EXPECT_TRUE(same_bits(ra.parts, ro.parts));
@@ -453,7 +453,7 @@ TEST(SlackElimination, DeterministicAcrossThreads) {
         Control c = base(SlackElimination::On);
         c.deterministic = true;
         c.num_threads = t;
-        const Run r = run(k.A, c);
+        const RunResult r = run(k.A, c);
         EXPECT_TRUE(r.slack);
         if (x1.empty()) x1 = r.x;
         else EXPECT_TRUE(same_bits(r.x, x1)) << t << " threads";
@@ -462,7 +462,7 @@ TEST(SlackElimination, DeterministicAcrossThreads) {
 
 TEST(SlackElimination, IpmSessionPath) {
     const Kkt k = make_kkt(31, 150, 15, 350);
-    const Run off = run(k.A, base(SlackElimination::Off));
+    const RunResult off = run(k.A, base(SlackElimination::Off));
     IpmSession sess;
     IpmControl ipm;
     ASSERT_EQ(sess.analyse(k.A, std::span<const double>(k.A.values), base(SlackElimination::Auto), ipm),

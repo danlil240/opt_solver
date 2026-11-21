@@ -195,7 +195,7 @@ CscLower with_duplicates(const CscLower &A) {
 // diag(1, d, 0.5): max|A| = 1, so rho = 1e-8 exactly (no scaling).
 CscLower tiny_diag(double d) { return from_triplets(3, {{0, 0, 1.0}, {1, 1, d}, {2, 2, 0.5}}); }
 
-struct Run {
+struct RunResult {
     IpmFactorStatus status = IpmFactorStatus::Error;
     InertiaCounts in{};
     int delayed = -1;
@@ -208,9 +208,9 @@ struct Run {
 // Analyse A's pattern in Regularized mode, factor A's values (or `values`),
 // and solve with rhs(n); the solution is validated against the
 // unregularized matrix A (with those values).
-Run run_regularized(const CscLower &A, const IpmControl &ipm = reg_mode(),
+RunResult run_regularized(const CscLower &A, const IpmControl &ipm = reg_mode(),
                     const std::vector<double> *values = nullptr) {
-    Run r;
+    RunResult r;
     IpmSession s;
     EXPECT_EQ(s.analyse(A, {}, ipopt_control(), ipm), ErrorCode::Success);
     const std::vector<double> &v = values ? *values : A.values;
@@ -285,7 +285,7 @@ TEST(IpmRegularized, FixturesHaveExpectedInertia) {
 }
 
 TEST(IpmRegularized, InertiaMatchesReducedHessian) {
-    const Run r = run_regularized(with_zero_diagonal(good_kkt()));
+    const RunResult r = run_regularized(with_zero_diagonal(good_kkt()));
     EXPECT_EQ(r.status, IpmFactorStatus::Ok);
     EXPECT_EQ(r.in.negative, kM) << str(r.in);
     EXPECT_EQ(r.in.zero, 0) << str(r.in);
@@ -294,7 +294,7 @@ TEST(IpmRegularized, InertiaMatchesReducedHessian) {
 }
 
 TEST(IpmRegularized, WrongInertiaWhenReducedHessianIndefinite) {
-    const Run r = run_regularized(with_zero_diagonal(bad_kkt()));
+    const RunResult r = run_regularized(with_zero_diagonal(bad_kkt()));
     EXPECT_EQ(r.status, IpmFactorStatus::Ok);
     EXPECT_GT(r.in.negative, kM) << str(r.in);
     EXPECT_EQ(r.in.positive + r.in.negative + r.in.zero, kN + kM);
@@ -303,7 +303,7 @@ TEST(IpmRegularized, WrongInertiaWhenReducedHessianIndefinite) {
 
 TEST(IpmRegularized, RefinedSolveMeetsGate) {
     for (const CscLower &A : {with_zero_diagonal(good_kkt()), good_kkt(), with_zero_diagonal(bad_kkt())}) {
-        const Run r = run_regularized(A);
+        const RunResult r = run_regularized(A);
         EXPECT_TRUE(r.qualified) << "eta " << r.eta;
         EXPECT_EQ(r.delayed, 0);
     }
@@ -345,7 +345,7 @@ TEST(IpmRegularized, MissingDiagonalAugmented) {
     IpmSession s;
     ASSERT_EQ(s.analyse(missing, missing.values, ipopt_control(), reg_mode()), ErrorCode::Success);
     ASSERT_EQ(s.factor(missing.values), IpmFactorStatus::Ok);
-    const Run z = run_regularized(zeros);
+    const RunResult z = run_regularized(zeros);
     EXPECT_TRUE(same(s.inertia(), z.in)) << str(s.inertia()) << " vs " << str(z.in);
     EXPECT_EQ(s.info().delayed_pivots, 0);
     for (Int i = 0; i < missing.n; ++i) EXPECT_EQ(s.row_is_constraint(i), i >= kN) << "row " << i;
@@ -387,7 +387,7 @@ TEST(IpmRegularized, NegativePrimalDiagonalIsPrimal) {
     // (d = +rho / 2, raised to +rho and counted by its sign: positive);
     // with -rho it would be -1.5 rho, a negative pivot.
     const CscLower T = tiny_diag(-0.5e-8);
-    const Run r = run_regularized(T);
+    const RunResult r = run_regularized(T);
     EXPECT_TRUE(same(r.in, InertiaCounts{3, 0, 0})) << str(r.in);
     const Direct as_primal = run_explicit(T, {1, 1, 1});
     const Direct as_constraint = run_explicit(T, {1, -1, 1});
@@ -400,7 +400,7 @@ TEST(IpmRegularized, ForcedPivotAccounting) {
     // Exact zero: -rho + rho = 0, raised to +rho. A zero eigenvalue under
     // both accountings; the factor is singular.
     for (const bool as_zero : {false, true}) {
-        const Run r = run_regularized(tiny_diag(-1e-8), reg_mode(as_zero));
+        const RunResult r = run_regularized(tiny_diag(-1e-8), reg_mode(as_zero));
         EXPECT_EQ(r.status, IpmFactorStatus::Singular) << "as_zero " << as_zero;
         EXPECT_TRUE(same(r.in, InertiaCounts{2, 0, 1})) << "as_zero " << as_zero << " " << str(r.in);
         EXPECT_EQ(r.statics, 1) << "as_zero " << as_zero;
@@ -409,11 +409,11 @@ TEST(IpmRegularized, ForcedPivotAccounting) {
     }
     // Nonzero tiny: -rho / 2 + rho = rho / 2, raised to +rho. Its sign by
     // default (hybrid), a zero eigenvalue only with static_as_zero.
-    const Run hybrid = run_regularized(tiny_diag(-0.5e-8), reg_mode(false));
+    const RunResult hybrid = run_regularized(tiny_diag(-0.5e-8), reg_mode(false));
     EXPECT_EQ(hybrid.status, IpmFactorStatus::Ok);
     EXPECT_TRUE(same(hybrid.in, InertiaCounts{3, 0, 0})) << str(hybrid.in);
     EXPECT_EQ(hybrid.statics, 1);
-    const Run zero = run_regularized(tiny_diag(-0.5e-8), reg_mode(true));
+    const RunResult zero = run_regularized(tiny_diag(-0.5e-8), reg_mode(true));
     EXPECT_EQ(zero.status, IpmFactorStatus::Singular);
     EXPECT_TRUE(same(zero.in, InertiaCounts{2, 0, 1})) << str(zero.in);
     EXPECT_EQ(zero.statics, 1);
@@ -466,7 +466,7 @@ TEST(IpmRegularized, NoDelays) {
                               tiny_diag(-0.5e-8), tiny_diag(-1.0)};
     for (const CscLower &A : cases) {
         for (const bool as_zero : {false, true}) {
-            const Run r = run_regularized(A, reg_mode(as_zero));
+            const RunResult r = run_regularized(A, reg_mode(as_zero));
             EXPECT_EQ(r.delayed, 0) << "n " << A.n << " as_zero " << as_zero;
             EXPECT_TRUE(r.status == IpmFactorStatus::Ok || r.status == IpmFactorStatus::Singular);
         }

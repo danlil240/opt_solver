@@ -127,7 +127,7 @@ std::vector<double> rhs_ones(const CscLower &A) {
     return b;
 }
 
-struct Run {
+struct RunResult {
     std::unique_ptr<AnalysisKeep> ak;
     Info ia, ifac;
     FactorStatus st = FactorStatus::Success;
@@ -135,8 +135,8 @@ struct Run {
     std::vector<double> x;
 };
 
-Run run(const CscLower &A, const Control &c) {
-    Run r;
+RunResult run(const CscLower &A, const Control &c) {
+    RunResult r;
     Solver s;
     r.ak = s.analyse(A, c, r.ia);
     EXPECT_NE(r.ak, nullptr);
@@ -163,7 +163,7 @@ std::vector<double> factor_by_steps(const FactorKeep &fk) {
 }
 
 // Bitwise the same analysis and factorization.
-void expect_same(const Run &a, const Run &b, const char *what) {
+void expect_same(const RunResult &a, const RunResult &b, const char *what) {
     EXPECT_EQ(b.ia.matching_trial, a.ia.matching_trial) << what;
     EXPECT_EQ(b.ia.matching_initial_ratio, a.ia.matching_initial_ratio) << what;
     EXPECT_EQ(b.ia.matching_exact_ratio, a.ia.matching_exact_ratio) << what;
@@ -215,7 +215,7 @@ TEST(SkipTrialGate, OffOrOutsideTheBandIsBitwiseUnchanged) {
             for (double budget : {-1.0, 0.0, 2.0}) {
                 Control off = ipopt_control(threads);
                 off.matching_search_budget = budget;
-                const Run ref = run(A, off);
+                const RunResult ref = run(A, off);
                 ASSERT_NE(ref.ak, nullptr);
                 ASSERT_NE(ref.ia.matching_trial, MatchingTrial::None) << "premise: the trial runs";
                 EXPECT_EQ(ref.ia.matching_gate_flops_per_row, 0.0);
@@ -224,13 +224,13 @@ TEST(SkipTrialGate, OffOrOutsideTheBandIsBitwiseUnchanged) {
                 strong.pivot_u = 0.01;  // above skip_trial_max_pivot_u: not armed
                 Control strong_off = off;
                 strong_off.pivot_u = 0.01;
-                const Run rs = run(A, strong_off);
-                const Run gs = run(A, strong);
+                const RunResult rs = run(A, strong_off);
+                const RunResult gs = run(A, strong);
                 expect_same(rs, gs, "pivot_u above the gate's bound");
                 EXPECT_EQ(gs.ia.matching_gate_flops_per_row, 0.0);
 
                 for (auto [lo, hi] : {std::pair{kInf, kInf}, std::pair{0.0, 0.0}}) {
-                    const Run g = run(A, gate_on(off, lo, hi));
+                    const RunResult g = run(A, gate_on(off, lo, hi));
                     expect_same(ref, g, "armed, outside the band");
                     EXPECT_GT(g.ia.matching_gate_flops_per_row, 0.0);
                     EXPECT_EQ(g.ifac.skip_trial_rescues, 0);
@@ -249,12 +249,12 @@ TEST(SkipTrialGate, InsideTheBandSkipsTheTrial) {
     for (const CscLower &A : trial_matrices()) {
         for (int threads : {1, 4}) {
             const Control off = ipopt_control(threads);
-            const Run ref = run(A, off);
-            const Run probe = run(A, gate_on(off, kInf, kInf));
+            const RunResult ref = run(A, off);
+            const RunResult probe = run(A, gate_on(off, kInf, kInf));
             const double flr = probe.ia.matching_gate_flops_per_row;
             ASSERT_GT(flr, 0.0);
 
-            const Run g = run(A, gate_on(off, flr, flr));
+            const RunResult g = run(A, gate_on(off, flr, flr));
             ASSERT_NE(g.ak, nullptr);
             EXPECT_TRUE(g.ia.matching_trial_skipped) << "threads " << threads;
             EXPECT_TRUE(g.ak->matching_trial_skipped);
@@ -297,9 +297,9 @@ TEST(SkipTrialGate, DiagonalTrialIsKept) {
     const CscLower A = diagonal_kkt(10000, 3);
     for (int threads : {1, 4}) {
         const Control off = ipopt_control(threads);
-        const Run ref = run(A, off);
+        const RunResult ref = run(A, off);
         ASSERT_EQ(ref.ia.matching_trial, MatchingTrial::Diagonal);
-        const Run g = run(A, gate_on(off, 0.0, kInf));
+        const RunResult g = run(A, gate_on(off, 0.0, kInf));
         expect_same(ref, g, "diagonal");
         EXPECT_EQ(g.ia.matching_gate_flops_per_row, 0.0);
         EXPECT_TRUE(g.ak->matching_scale_partial);
@@ -324,10 +324,10 @@ TEST(SkipTrialGate, SafetyNetRescuesASkippedTrialThatNeededMatching) {
     Control bare = on;
     bare.skip_trial_rescue_ratio = -1.0;
 
-    const Run ref = run(A, base);
+    const RunResult ref = run(A, base);
     std::printf("[SkipTrialGate] trial: %d delays, front work %.3g\n", ref.ifac.delayed_pivots,
                 ref.ifac.front_work);
-    const Run b = run(A, bare);
+    const RunResult b = run(A, bare);
     ASSERT_TRUE(b.ia.matching_trial_skipped);
     const double free_work = delay_free_front_work(*b.ak);
     const double ratio = b.ifac.front_work / free_work;
@@ -379,7 +379,7 @@ TEST(SkipTrialGate, SafetyNetRescuesASkippedTrialThatNeededMatching) {
     // Nor under ScalingMethod::None (the IPOPT plugin's MA97 scaling 0).
     Control none = on;
     none.scaling = ScalingMethod::None;
-    const Run nn = run(A, none);
+    const RunResult nn = run(A, none);
     EXPECT_TRUE(nn.ia.matching_trial_skipped);
     EXPECT_EQ(nn.ifac.delay_rescales, 0);
     EXPECT_EQ(nn.ifac.skip_trial_rescues, 0);
@@ -395,14 +395,14 @@ TEST(SkipTrialGate, DeterministicAcrossThreadCounts) {
                                         scaled_kkt(100, 1500, 4.0, 6.0, -0.1)};
     for (const CscLower &A : mats) {
         for (OrderingMethod ord : {OrderingMethod::AutoSerial, OrderingMethod::AutoParallel}) {
-            Run first;
+            RunResult first;
             bool have = false;
             for (int threads : {1, 2, 4}) {
                 Control c = gate_on(ipopt_control(threads), 0.0, kInf);
                 c.ordering = ord;
                 c.amalgamation = Amalgamation::Smf;
                 c.deterministic = true;
-                Run r = run(A, c);
+                RunResult r = run(A, c);
                 ASSERT_NE(r.ak, nullptr);
                 EXPECT_TRUE(r.ia.matching_trial_skipped) << "threads " << threads;
                 if (!have) {

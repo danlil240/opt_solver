@@ -126,16 +126,16 @@ InertiaCounts eigen_inertia(const Mat &A, int f, int n) {
     return c;
 }
 
-struct Run {
+struct RunResult {
     Mat F;
     std::vector<Int> rows;
     std::vector<int8_t> tags;
     AptpResult res{};
 };
 
-Run run_aptp(const Mat &A, int f, int num_elig, const AptpParams &prm) {
+RunResult run_aptp(const Mat &A, int f, int num_elig, const AptpParams &prm) {
     BlasSerialGuard serial_blas;
-    Run r;
+    RunResult r;
     r.F = A;
     r.rows.resize(f);
     std::iota(r.rows.begin(), r.rows.end(), 0);
@@ -157,7 +157,7 @@ double max_abs_l(const Mat &F, int f, int p, const std::vector<int8_t> &tags) {
 
 /// ||P A P^T - (L D L^T + [0 0; 0 S])||_F / ||A||_F over the lower triangle,
 /// where p = num_eliminated and S is the trailing lower triangle of F.
-double reconstruction_error(const Mat &A, const Run &r, int f) {
+double reconstruction_error(const Mat &A, const RunResult &r, int f) {
     const int p = r.res.num_eliminated;
     const Mat &F = r.F;
     // LD = L * D (f x p), L unit lower in columns [0, p).
@@ -207,7 +207,7 @@ double reconstruction_error(const Mat &A, const Run &r, int f) {
     return den > 0.0 ? std::sqrt(num / den) : std::sqrt(num);
 }
 
-void expect_valid_tags(const Run &r) {
+void expect_valid_tags(const RunResult &r) {
     const int p = r.res.num_eliminated;
     for (int c = 0; c < p; ++c) {
         if (r.tags[c] == 2) {
@@ -220,14 +220,14 @@ void expect_valid_tags(const Run &r) {
     }
 }
 
-void expect_row_permutation(const Run &r, int f, int num_elig) {
+void expect_row_permutation(const RunResult &r, int f, int num_elig) {
     std::vector<Int> s(r.rows.begin(), r.rows.end());
     std::sort(s.begin(), s.end());
     for (int i = 0; i < f; ++i) ASSERT_EQ(s[i], i);
     for (int i = num_elig; i < f; ++i) ASSERT_EQ(r.rows[i], i) << "non-eligible row moved";
 }
 
-InertiaCounts inertia_from_d(const Run &r, int f) {
+InertiaCounts inertia_from_d(const RunResult &r, int f) {
     InertiaCounts c;
     for (int k = 0; k < r.res.num_eliminated; ++k) {
         if (r.tags[k] == 2) {
@@ -256,7 +256,7 @@ TEST(LdltAptp, MatchesTppOnRandomIndefinite) {
         const int f = Df(rng);
         const int num_elig = std::uniform_int_distribution<int>(1, f)(rng);
         const Mat A = random_symmetric(f, rng);
-        const Run r = run_aptp(A, f, num_elig, prm);
+        const RunResult r = run_aptp(A, f, num_elig, prm);
         SCOPED_TRACE(trace_msg("trial ", t, " f=", f, " elig=", num_elig));
 
         ASSERT_GE(r.res.num_eliminated, 0);
@@ -292,7 +292,7 @@ TEST(LdltAptp, AllColumnsFailOnZeroBlock) {
         for (int j = 0; j < num_elig; ++j)
             for (int i = j; i < num_elig; ++i) at(A, f, i, j) = 0.0;
         const AptpParams prm;
-        const Run r = run_aptp(A, f, num_elig, prm);
+        const RunResult r = run_aptp(A, f, num_elig, prm);
         EXPECT_EQ(r.res.num_eliminated, 0);
         EXPECT_EQ(r.res.num_failed, num_elig);
         EXPECT_EQ(r.res.inertia.positive + r.res.inertia.negative + r.res.inertia.zero, 0);
@@ -314,7 +314,7 @@ TEST(LdltAptp, SaddlePointUsesTwoByTwo) {
     for (int i = 0; i < nb; ++i)
         for (int j = 0; j < nb; ++j) at(A, f, nb + i, j) = (i == j ? 4.0 : 0.0) + U(rng) / nb;
     const AptpParams prm;
-    const Run r = run_aptp(A, f, f, prm);
+    const RunResult r = run_aptp(A, f, f, prm);
     ASSERT_EQ(r.res.num_eliminated, f);
     EXPECT_EQ(r.res.num_failed, 0);
     for (int c = 0; c < f; c += 2) {
@@ -352,7 +352,7 @@ TEST(LdltAptp, SchurMatchesReference) {
         }
         SCOPED_TRACE(trace_msg("trial ", t, " f=", f, " elig=", num_elig));
 
-        const Run r = run_aptp(A, f, num_elig, prm);
+        const RunResult r = run_aptp(A, f, num_elig, prm);
 
         Mat Fr = A;
         std::vector<Int> rows_r(f);
@@ -419,7 +419,7 @@ TEST(LdltAptp, FailedColumnsKeepLayout) {
         prm.nb = (t % 2 == 0) ? 16 : 24;
         prm.ib = (t % 3 == 0) ? 4 : 8;
         prm.u = (t % 4 == 0) ? 0.1 : 0.01;
-        const Run r = run_aptp(A, f, num_elig, prm);
+        const RunResult r = run_aptp(A, f, num_elig, prm);
         SCOPED_TRACE(trace_msg("trial ", t, " f=", f, " elig=", num_elig));
         ASSERT_EQ(r.res.num_eliminated + r.res.num_failed, num_elig);
         if (r.res.num_failed > 0) ++with_failures;
@@ -501,8 +501,8 @@ TEST(LdltAptp, TppContinuationFromFirstMatchesOneCall) {
 
 namespace {
 
-Run run_aptp_tiled(const Mat &A, int f, int num_elig, const AptpParams &prm, int threads) {
-    Run r;
+RunResult run_aptp_tiled(const Mat &A, int f, int num_elig, const AptpParams &prm, int threads) {
+    RunResult r;
     r.F = A;
     r.rows.resize(f);
     std::iota(r.rows.begin(), r.rows.end(), 0);
@@ -556,7 +556,7 @@ TEST(LdltAptp, TiledKeepsContractAndIsDeterministic) {
         prm.ib = (t % 2 == 0) ? 8 : 4;
         prm.u = (t % 4 == 1) ? 0.1 : 0.01;
         SCOPED_TRACE(trace_msg("trial ", t, " f=", f, " elig=", num_elig, " nb=", prm.nb));
-        const Run r = run_aptp_tiled(A, f, num_elig, prm, 4);
+        const RunResult r = run_aptp_tiled(A, f, num_elig, prm, 4);
         ASSERT_EQ(r.res.num_eliminated + r.res.num_failed, num_elig);
         if (r.res.num_failed > 0) ++with_failures;
         expect_valid_tags(r);
@@ -567,11 +567,11 @@ TEST(LdltAptp, TiledKeepsContractAndIsDeterministic) {
         EXPECT_EQ(r.res.inertia.positive, dI.positive);
         EXPECT_EQ(r.res.inertia.negative, dI.negative);
         // Same pivot count as the serial kernel on these fronts.
-        const Run s = run_aptp(A, f, num_elig, prm);
+        const RunResult s = run_aptp(A, f, num_elig, prm);
         EXPECT_EQ(r.res.num_eliminated, s.res.num_eliminated);
 
         for (const int threads : {1, 3}) {
-            const Run o = run_aptp_tiled(A, f, num_elig, prm, threads);
+            const RunResult o = run_aptp_tiled(A, f, num_elig, prm, threads);
             ASSERT_EQ(o.res.num_eliminated, r.res.num_eliminated) << threads << " threads";
             EXPECT_EQ(o.rows, r.rows) << threads << " threads";
             EXPECT_EQ(o.tags, r.tags) << threads << " threads";
