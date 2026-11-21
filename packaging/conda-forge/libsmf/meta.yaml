@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/danlil240/opt_solver/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: REPLACE_WITH_RELEASE_TARBALL_SHA256
+  sha256: ad36380e3dc73a99e83f8afa3723bc1b809e03a8020c688d2ae0ba492c488480
 
 build:
   number: 0
