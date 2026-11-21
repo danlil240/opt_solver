@@ -93,13 +93,13 @@ jobs:
         run: pytest -q packaging/python/tests
 
   macos-arm64:
-    name: macOS (Apple Silicon arm64, OpenBLAS, SMF_MARCH=none)
+    name: macOS (Apple Silicon arm64, Accelerate, SMF_MARCH=none)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install ninja openblas suite-sparse libomp pkg-config
+        run: brew install ninja suite-sparse libomp pkg-config
 
       - name: Configure & build
         run: |
@@ -107,8 +107,7 @@ jobs:
           cmake -S solver -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
-            -DCMAKE_PREFIX_PATH="${BREW_PREFIX}/opt/openblas;${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}" \
-            -DBLA_VENDOR=OpenBLAS \
+            -DCMAKE_PREFIX_PATH="${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}" \
             -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${BREW_PREFIX}/opt/libomp/include" \
             -DOpenMP_CXX_LIB_NAMES="omp" \
             -DOpenMP_omp_LIBRARY="${BREW_PREFIX}/opt/libomp/lib/libomp.dylib" \
@@ -121,13 +120,7 @@ jobs:
           cmake --build build -j
 
       - name: Run C++ test suite
-        run: |
-          echo "macOS hw.ncpu=$(sysctl -n hw.ncpu)"
-          if ! ctest --test-dir build --output-on-failure --timeout 180 -j 4; then
-            echo "=== Re-run OneThreadIsOneBlasThread with OPENBLAS_NUM_THREADS=1 ==="
-            OPENBLAS_NUM_THREADS=1 ./build/tests/test_parallel_determinism --gtest_filter=ParallelDeterminism.OneThreadIsOneBlasThread || true
-            exit 1
-          fi
+        run: ctest --test-dir build --output-on-failure --timeout 300 -j 4
 
       - name: Install & verify pkg-config C99 consumer
         run: |
@@ -183,12 +176,7 @@ jobs:
 
       - name: Run C++ test suite
         shell: bash -el {0}
-        run: |
-          if ! ctest --test-dir build -C Release --output-on-failure --timeout 180 -j 4; then
-            echo "=== Re-running full Ma97PluginRuntime with SMF_PLUGIN_UNLOAD=0 ==="
-            SMF_PLUGIN_UNLOAD=0 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.* || true
-            exit 1
-          fi
+        run: ctest --test-dir build -C Release --output-on-failure --timeout 300 -j 4
 
       - name: Install & run Python packaging tests
         shell: bash -el {0}

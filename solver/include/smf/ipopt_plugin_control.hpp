@@ -188,18 +188,19 @@ inline PluginPivoting plugin_pivoting_from_env()
     return plugin_pivoting_resolve(std::getenv("SMF_PIVOTING"));
 }
 
-/// The plugin's pivoting policy: plugin_pivoting_from_env(), read once per
-/// process at its first use (as the plugin's other environment knobs).
+/// The plugin's pivoting policy: plugin_pivoting_from_env() (SMF_PIVOTING).
 inline Pivoting plugin_pivoting()
 {
-    static const Pivoting p = [] {
-        const PluginPivoting r = plugin_pivoting_from_env();
-        if (!r.valid)
+    const PluginPivoting r = plugin_pivoting_from_env();
+    if (!r.valid) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
             std::fprintf(stderr, "[smf_ma97] SMF_PIVOTING=\"%s\" is not threshold or static: threshold pivoting\n",
                          std::getenv("SMF_PIVOTING"));
-        return r.pivoting;
-    }();
-    return p;
+        }
+    }
+    return r.pivoting;
 }
 
 /// SMF_SLACK_ELIM: Control::slack_elimination ("on", "auto"; "off" or unset:
@@ -361,10 +362,7 @@ inline IpmControl ipopt_plugin_ipm_control()
         ipm.static_as_zero = flag("SMF_IPM_STATIC_ZERO");
         return ipm;
     };
-    if (flag("SMF_PLUGIN_UNLOAD"))
-        return read_ipm();
-    static const IpmControl cached = read_ipm();
-    return cached;
+    return read_ipm();
 }
 
 /// SMF_PLUGIN_MC64=always: the plugin answers every MC64 request (scaling =
