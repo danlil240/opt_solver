@@ -579,15 +579,22 @@ TEST(Matching, KktScalingBoundsEntries) {
         ASSERT_EQ(mr.matched_rank, A.n);
         double max_scaled = 0.0;
         for (int j = 0; j < A.n; ++j) {
-            for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            Int p = A.col_ptr[static_cast<std::size_t>(j)];
+            const Int pend = A.col_ptr[static_cast<std::size_t>(j) + 1];
+            while (p < pend) {
                 const int i = A.row_idx[static_cast<std::size_t>(p)];
+                double v = 0.0;
+                while (p < pend && A.row_idx[static_cast<std::size_t>(p)] == i) {
+                    v += A.values[static_cast<std::size_t>(p)];
+                    ++p;
+                }
                 max_scaled = std::max(max_scaled, std::abs(mr.scale[static_cast<std::size_t>(i)] *
-                                                           A.values[static_cast<std::size_t>(p)] *
+                                                           v *
                                                            mr.scale[static_cast<std::size_t>(j)]));
             }
         }
-        EXPECT_LE(max_scaled, 1.0 + 1e-9) << "seed=" << seed;
-        EXPECT_GT(max_scaled, 0.5) << "seed=" << seed;
+        EXPECT_LE(max_scaled, 1.0 + 1e-9) << "seed=" << seed << " max_scaled=" << max_scaled;
+        EXPECT_GT(max_scaled, 0.5) << "seed=" << seed << " max_scaled=" << max_scaled;
     }
 }
 

@@ -414,7 +414,7 @@ void set_env(const char *name, const char *value) {
 // These tests change SMF_* settings between plugin loads, which the plugin
 // reads once per load: keep it unloading on every free (it pins itself
 // otherwise). Set before the first load.
-const bool g_plugin_unloads = (set_env("SMF_PLUGIN_UNLOAD", "1"), true);
+const bool g_plugin_unloads = (std::getenv("SMF_PLUGIN_UNLOAD") ? 0 : (set_env("SMF_PLUGIN_UNLOAD", "1"), 0), true);
 
 } // namespace
 

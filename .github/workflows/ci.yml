@@ -38,7 +38,7 @@ jobs:
           cmake --build build -j
 
       - name: Run C++ test suite
-        run: ctest --test-dir build --output-on-failure -j 4
+        run: ctest --test-dir build --output-on-failure --timeout 180 -j 4
 
       - name: Install & verify C ABI, pkg-config, CMake package, and ISA
         run: |
@@ -121,7 +121,13 @@ jobs:
           cmake --build build -j
 
       - name: Run C++ test suite
-        run: ctest --test-dir build --output-on-failure -j 4
+        run: |
+          echo "macOS hw.ncpu=$(sysctl -n hw.ncpu)"
+          if ! ctest --test-dir build --output-on-failure --timeout 180 -j 4; then
+            echo "=== Re-run OneThreadIsOneBlasThread with OPENBLAS_NUM_THREADS=1 ==="
+            OPENBLAS_NUM_THREADS=1 ./build/tests/test_parallel_determinism --gtest_filter=ParallelDeterminism.OneThreadIsOneBlasThread || true
+            exit 1
+          fi
 
       - name: Install & verify pkg-config C99 consumer
         run: |
@@ -178,11 +184,9 @@ jobs:
       - name: Run C++ test suite
         shell: bash -el {0}
         run: |
-          if ! ctest --test-dir build -C Release --output-on-failure -j 4; then
-            echo "=== Re-running Ma97PluginRuntime failing case with SMF_PLUGIN_STATS=2 ==="
-            SMF_PLUGIN_STATS=2 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.Mc64RequestAfterDelayCascadeIsHonoured || true
-            echo "=== Re-running with SMF_NUM_THREADS=1 ==="
-            SMF_NUM_THREADS=1 SMF_PLUGIN_STATS=2 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.Mc64RequestAfterDelayCascadeIsHonoured || true
+          if ! ctest --test-dir build -C Release --output-on-failure --timeout 180 -j 4; then
+            echo "=== Re-running full Ma97PluginRuntime with SMF_PLUGIN_UNLOAD=0 ==="
+            SMF_PLUGIN_UNLOAD=0 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.* || true
             exit 1
           fi
 
