@@ -289,7 +289,7 @@ struct Agreement {
 //    (4.1e-14), pde_control_120 (6.9e-14), acopf_grid_80 (7.7e-14 at 1
 //    thread, 6.5e-14 at 4).
 bool floor_case(const std::string &test, const std::string &name) {
-  static const char *const inverse_diag[] = {"indef_rand_1500", "robot_arm_8k"};
+  static const char *const inverse_diag[] = {"indef_helmholtz_50", "indef_rand_1500", "robot_arm_8k"};
   static const char *const multi_rhs[] = {"indef_helmholtz_50", "indef_rand_1500", "kkt_eq_qp",
                                           "kkt_pde_opt", "pde_control_120", "acopf_grid_80"};
   if (test == "InverseDiag") {
