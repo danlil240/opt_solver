@@ -532,9 +532,9 @@ target_include_directories(smf PUBLIC
 )
 
 if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
-    target_include_directories(smf PUBLIC ${MKL_INCLUDE_DIR})
+    target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${MKL_INCLUDE_DIR}>)
 elseif(SMF_HAS_OPENBLAS AND OPENBLAS_CBLAS_INCLUDE_DIR)
-    target_include_directories(smf PUBLIC ${OPENBLAS_CBLAS_INCLUDE_DIR})
+    target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${OPENBLAS_CBLAS_INCLUDE_DIR}>)
 endif()
 
 # Required for linking smf into shared libraries (e.g. libsmf_ma97.so)
@@ -567,9 +567,9 @@ if(SMF_HAS_AMD)
     target_link_libraries(smf PUBLIC SuiteSparseAMD::amd)
     get_filename_component(_amd_parent_inc "${SuiteSparseAMD_INCLUDE_DIR}" DIRECTORY)
     target_include_directories(smf PUBLIC
-        "${SuiteSparseAMD_INCLUDE_DIR}"
-        "${_amd_parent_inc}"
-        /usr/include/suitesparse)
+        $<BUILD_INTERFACE:${SuiteSparseAMD_INCLUDE_DIR}>
+        $<BUILD_INTERFACE:${_amd_parent_inc}>
+        $<BUILD_INTERFACE:/usr/include/suitesparse>)
 endif()
 
 if(SMF_HAS_METIS AND SMF_METIS_THREADSAFE)
@@ -656,39 +656,49 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_smf_install_targets smf)
+set(_smf_dev_install_targets smf)
+if(TARGET smf_metis)
+    list(APPEND _smf_dev_install_targets smf_metis)
+endif()
+install(TARGETS ${_smf_dev_install_targets} EXPORT smfTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT development)
 if(TARGET smf_c)
-    list(APPEND _smf_install_targets smf_c)
+    install(TARGETS smf_c EXPORT smfTargets
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime
+                NAMELINK_COMPONENT development
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development)
     configure_file(
         cmake/smf.pc.in
         ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
         @ONLY)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
-        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+        COMPONENT development)
 endif()
-if(TARGET smf_metis)
-    list(APPEND _smf_install_targets smf_metis)
-endif()
-install(TARGETS ${_smf_install_targets} EXPORT smfTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    COMPONENT development)
 if(TARGET smf_metis)
     # The vendored METIS/GKlib are in the installed libraries: ship their
-    # licences and notices (third_party/README.md).
+    # licences and notices (third_party/README.md) with runtime artefacts too.
     install(FILES
         third_party/README.md
         third_party/LICENSE-Apache-2.0.txt
         third_party/metis/LICENSE
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party)
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party
+        COMPONENT runtime)
     install(FILES third_party/gklib/LICENSE.txt
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party/gklib)
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/smf/third_party/gklib
+        COMPONENT runtime)
 endif()
 install(EXPORT smfTargets
     FILE smfTargets.cmake
     NAMESPACE smf::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf
+    COMPONENT development)
 
 configure_package_config_file(
     cmake/smfConfig.cmake.in
@@ -701,7 +711,8 @@ write_basic_package_version_file(
 install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/smfConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/smfConfigVersion.cmake
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf)
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/smf
+    COMPONENT development)
 
 # ---- HSL MA97 plugin (optional) -----------------------------------------
 # Builds libsmf_ma97.so: an IPOPT-loadable shared library that implements
@@ -725,9 +736,10 @@ if(SMF_BUILD_MA97_PLUGIN)
         target_link_options(smf_ma97 PRIVATE "LINKER:--exclude-libs,ALL")
     endif()
     install(TARGETS smf_ma97
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime
+                NAMELINK_COMPONENT development
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development)
     message(STATUS "smf: MA97 plugin enabled -- will build libsmf_ma97.so")
 endif()
 
