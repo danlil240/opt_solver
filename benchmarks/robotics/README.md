@@ -44,6 +44,9 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 
 ## Results
 
+The comparison with NVIDIA cuRobo on the arm (2026-11-07) is in `curobo_cmp/report.md`, with its scripts and records.
+
+
 `results/` holds the measurements made with the suite (2026-11-06, 1 thread, seed 0 unless noted):
 
 | file | what |

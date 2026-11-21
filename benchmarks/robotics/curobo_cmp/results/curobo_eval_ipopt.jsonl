@@ -1,0 +1,15 @@
+{"file": "traj_ipopt_dyn_N100_s0.npy", "seed": 0, "curobo_sphere_clearance": -0.060594413018003224, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_dyn_N100_s1.npy", "seed": 1, "curobo_sphere_clearance": -0.042407997656033286, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_dyn_N100_s2.npy", "seed": 2, "curobo_sphere_clearance": -0.0692941971568643, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_dyn_N100_s3.npy", "seed": 3, "curobo_sphere_clearance": -0.06771674951324977, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_dyn_N100_s4.npy", "seed": 4, "curobo_sphere_clearance": -0.017509424570713056, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s0.npy", "seed": 0, "curobo_sphere_clearance": -0.009137348299415038, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s1.npy", "seed": 1, "curobo_sphere_clearance": 0.001130299815206598, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s2.npy", "seed": 2, "curobo_sphere_clearance": -0.009191827928149099, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s3.npy", "seed": 3, "curobo_sphere_clearance": -0.0006327714507174398, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s4.npy", "seed": 4, "curobo_sphere_clearance": -0.024447410442426154, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s5.npy", "seed": 5, "curobo_sphere_clearance": -0.022281147804840334, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s6.npy", "seed": 6, "curobo_sphere_clearance": 0.006332194851927875, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s7.npy", "seed": 7, "curobo_sphere_clearance": -0.020460926672868168, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s8.npy", "seed": 8, "curobo_sphere_clearance": 0.000521260578609406, "curobo_table_clearance": 0.08000000156462192}
+{"file": "traj_ipopt_kin_N32_s9.npy", "seed": 9, "curobo_sphere_clearance": -0.008852899528657365, "curobo_table_clearance": 0.08000000156462192}
