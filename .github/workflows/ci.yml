@@ -108,6 +108,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/install" \
             -DCMAKE_PREFIX_PATH="${BREW_PREFIX}/opt/openblas;${BREW_PREFIX}/opt/suite-sparse;${BREW_PREFIX}" \
+            -DBLA_VENDOR=OpenBLAS \
             -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I${BREW_PREFIX}/opt/libomp/include" \
             -DOpenMP_CXX_LIB_NAMES="omp" \
             -DOpenMP_omp_LIBRARY="${BREW_PREFIX}/opt/libomp/lib/libomp.dylib" \
@@ -176,7 +177,14 @@ jobs:
 
       - name: Run C++ test suite
         shell: bash -el {0}
-        run: ctest --test-dir build -C Release --output-on-failure -j 4
+        run: |
+          if ! ctest --test-dir build -C Release --output-on-failure -j 4; then
+            echo "=== Re-running Ma97PluginRuntime failing case with SMF_PLUGIN_STATS=2 ==="
+            SMF_PLUGIN_STATS=2 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.Mc64RequestAfterDelayCascadeIsHonoured || true
+            echo "=== Re-running with SMF_NUM_THREADS=1 ==="
+            SMF_NUM_THREADS=1 SMF_PLUGIN_STATS=2 ./build/tests/Release/test_ipopt_plugin_runtime.exe --gtest_filter=Ma97PluginRuntime.Mc64RequestAfterDelayCascadeIsHonoured || true
+            exit 1
+          fi
 
       - name: Install & run Python packaging tests
         shell: bash -el {0}
