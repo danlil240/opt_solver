@@ -60,6 +60,7 @@ venv/
 # ---------------------------------------------------------------------------
 # Large matrices: tools/bench/fetch_suitesparse.py
 benchmarks/fixtures/large/
+benchmarks/fixtures/public_suitesparse/
 # PGLib-OPF cases: tools/bench/fetch_pglib.py
 benchmarks/fixtures/pglib/
 # KKT captures: tools/bench/ipopt_kkt.py
