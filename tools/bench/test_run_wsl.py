@@ -50,10 +50,6 @@ class WslCommandTests(unittest.TestCase):
         self.assertNotIn("smf", run_wsl.WSL_SOLVERS)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ClassifyTests(unittest.TestCase):
     def test_driver_crash_is_failed_not_dead(self):
         outcome, why, dead = run_wsl.classify_no_record(139, "Segmentation fault")
@@ -118,3 +114,248 @@ class RunDispatchTests(unittest.TestCase):
         n, recs = self._run(0xFFFFFFFF)
         self.assertEqual(n, 1)
         self.assertEqual([r["outcome"] for r in recs], ["Unavailable"])
+
+
+class WslSmfCommandTests(unittest.TestCase):
+    def test_wsl_smf_command_env_and_paths(self):
+        cmd = run_wsl.wsl_smf_command(
+            ["--solver", "smf", "--mtx", r"C:\data\a.mtx", "--JsonlOut", r"C:\out\r.jsonl"],
+            threads=8,
+            binary="/home/u/build/bench_replay",
+            distro="Ubuntu",
+            timeout_s=300,
+        )
+        self.assertEqual(cmd[:5], ["wsl.exe", "-d", "Ubuntu", "--exec", "/usr/bin/env"])
+        bin_idx = cmd.index("/home/u/build/bench_replay")
+        env = cmd[cmd.index("/usr/bin/env") + 1:bin_idx]
+        self.assertIn("OMP_NUM_THREADS=8", env)
+        self.assertIn("OPENBLAS_NUM_THREADS=1", env)
+        self.assertIn("MKL_NUM_THREADS=1", env)
+        self.assertNotIn("OMP_CANCELLATION=TRUE", env)
+        self.assertNotIn("OMP_PROC_BIND=TRUE", env)
+        timeout_idx = cmd.index("/usr/bin/timeout")
+        self.assertEqual(cmd[timeout_idx:timeout_idx + 4], ["/usr/bin/timeout", "-k", "5", "300"])
+        self.assertEqual(cmd[timeout_idx + 4], "/home/u/build/bench_replay")
+        args = cmd[bin_idx + 1:]
+        self.assertEqual(args[args.index("--mtx") + 1], "/mnt/c/data/a.mtx")
+        self.assertEqual(args[args.index("--JsonlOut") + 1], "/mnt/c/out/r.jsonl")
+
+    def test_smf_driver_path_env_override(self):
+        import os
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {"SMF_WSL_SMF_BINARY": "/custom/bench_replay"}):
+            self.assertEqual(run_wsl.smf_driver_path(), "/custom/bench_replay")
+
+        clean_env = {k: v for k, v in os.environ.items() if k != "SMF_WSL_SMF_BINARY"}
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            with mock.patch.object(run_wsl, "wsl_home", return_value="/home/alice"):
+                self.assertEqual(
+                    run_wsl.smf_driver_path(),
+                    "/home/alice/opt_solver_wsl/build/benchmarks/bench_replay",
+                )
+            with mock.patch.object(run_wsl, "wsl_home", return_value=None):
+                self.assertEqual(
+                    run_wsl.smf_driver_path(),
+                    "/root/opt_solver_wsl/build/benchmarks/bench_replay",
+                )
+
+
+class InventoryAndPanuaEnvTests(unittest.TestCase):
+    def test_inventory_environment_includes_panua_and_gpu_keys(self):
+        import os
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        clean_env = {k: v for k, v in os.environ.items()
+                     if k not in ("SMF_PANUA_PARDISO_LIB", "PANUA_LIC_PATH")}
+        with tempfile.TemporaryDirectory() as td:
+            fake_home = pathlib.Path(td)
+            with mock.patch.dict(os.environ, clean_env, clear=True), \
+                 mock.patch.object(pathlib.Path, "home", return_value=fake_home), \
+                 mock.patch.object(run.subprocess, "Popen", side_effect=FileNotFoundError("no nvidia-smi")):
+                info = run.inventory_environment(pathlib.Path("build"))
+                for key in ("panua_pardiso_lib", "panua_lic_path", "panua_license_check", "gpu"):
+                    self.assertIn(key, info)
+                    self.assertIsNone(info[key])
+
+            # With Panua lib, check_license, panua.lic in home, and nvidia-smi present
+            panua_root = fake_home / "panua"
+            (panua_root / "lib").mkdir(parents=True)
+            (panua_root / "bin").mkdir(parents=True)
+            lib_file = panua_root / "lib" / "libpardiso800.dll"
+            lib_file.write_text("", encoding="utf-8")
+            chk_file = panua_root / "bin" / "check_license.exe"
+            chk_file.write_text("", encoding="utf-8")
+            (fake_home / "panua.lic").write_text("LIC", encoding="utf-8")
+
+            def fake_popen(cmd, **kw):
+                proc = mock.MagicMock()
+                proc.returncode = 0
+                if "nvidia-smi" in cmd[0]:
+                    proc.communicate.return_value = ("NVIDIA RTX 4090, 550.0, 24564 MiB\n", "")
+                else:
+                    proc.communicate.return_value = ("License valid until 2027-01-01\n", "")
+                return proc
+
+            with mock.patch.dict(os.environ, {"SMF_PANUA_PARDISO_LIB": str(lib_file)}), \
+                 mock.patch.object(pathlib.Path, "home", return_value=fake_home), \
+                 mock.patch.object(run.subprocess, "Popen", side_effect=fake_popen):
+                info = run.inventory_environment(pathlib.Path("build"))
+                self.assertEqual(info["panua_pardiso_lib"], str(lib_file))
+                self.assertEqual(info["panua_lic_path"], str(fake_home / "panua.lic"))
+                self.assertEqual(info["panua_license_check"], "License valid until 2027-01-01")
+                self.assertEqual(info["gpu"], "NVIDIA RTX 4090, 550.0, 24564 MiB")
+
+    def test_panua_pardiso_sets_pardisolicmessage_env(self):
+        import json
+        import os
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": [{"matrix_id": "c1", "mtx_path": "x.mtx"}]}))
+            fake_bin = td / "bench_replay.exe"
+            fake_bin.write_text("", encoding="utf-8")
+            captured_envs = []
+
+            def fake_run(cmd, **kw):
+                captured_envs.append(kw.get("env", {}))
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            clean_env = {k: v for k, v in os.environ.items() if k != "PARDISOLICMESSAGE"}
+            with mock.patch.dict(os.environ, clean_env, clear=True), \
+                 mock.patch.object(run.subprocess, "run", side_effect=fake_run):
+                run.main([
+                    "--manifest", str(manifest),
+                    "--output", str(td / "out"),
+                    "--solvers", "panua_pardiso",
+                    "--trials", "1",
+                    "--warmups", "0",
+                    "--allow-short-trials",
+                    "--binary", str(fake_bin),
+                ])
+            self.assertEqual(len(captured_envs), 1)
+            self.assertEqual(captured_envs[0].get("PARDISOLICMESSAGE"), "1")
+
+
+class RunWslSolverFlagTests(unittest.TestCase):
+    def test_run_wsl_main_accepts_solver_smf_and_ssids(self):
+        from unittest import mock
+
+        import run
+
+        recorded_cmds = []
+
+        def fake_run_main(cmd):
+            recorded_cmds.append(cmd)
+            return 0
+
+        with mock.patch.object(run, "main", side_effect=fake_run_main):
+            rc_smf = run_wsl.main(["--solver", "smf", "--manifest", "m.json", "--output", "out_smf"])
+            rc_ssids = run_wsl.main(["--solver", "ssids", "--manifest", "m.json", "--output", "out_ssids"])
+            rc_default = run_wsl.main(["--manifest", "m.json", "--output", "out_def"])
+
+        self.assertEqual(rc_smf, 0)
+        self.assertEqual(rc_ssids, 0)
+        self.assertEqual(rc_default, 0)
+        self.assertEqual(len(recorded_cmds), 3)
+
+        smf_cmd, ssids_cmd, def_cmd = recorded_cmds
+        self.assertEqual(smf_cmd[smf_cmd.index("--runner") + 1], "wsl-smf")
+        self.assertEqual(smf_cmd[smf_cmd.index("--solvers") + 1], "smf")
+        self.assertEqual(ssids_cmd[ssids_cmd.index("--runner") + 1], "wsl")
+        self.assertEqual(ssids_cmd[ssids_cmd.index("--solvers") + 1], "ssids")
+        self.assertEqual(def_cmd[def_cmd.index("--runner") + 1], "wsl")
+        self.assertEqual(def_cmd[def_cmd.index("--solvers") + 1], "ssids")
+
+    def test_run_py_wsl_smf_dispatches_through_wsl_smf_command(self):
+        import json
+        import os
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": [{"matrix_id": "c1", "mtx_path": "x.mtx"}]}))
+            dispatched = []
+
+            def fake_run(cmd, **kw):
+                dispatched.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with mock.patch.dict(os.environ, {"SMF_WSL_SMF_BINARY": "/home/u/bench_replay"}), \
+                 mock.patch.object(run.subprocess, "run", side_effect=fake_run):
+                run.main([
+                    "--manifest", str(manifest),
+                    "--output", str(td / "out"),
+                    "--runner", "wsl-smf",
+                    "--solvers", "smf",
+                    "--trials", "1",
+                    "--warmups", "0",
+                    "--allow-short-trials",
+                    "--threads", "4",
+                    "--build-dir", str(td / "nobuild"),
+                ])
+            self.assertEqual(len(dispatched), 1)
+            cmd = dispatched[0]
+            self.assertIn("/home/u/bench_replay", cmd)
+            self.assertIn("OMP_NUM_THREADS=4", cmd)
+            self.assertNotIn("OMP_CANCELLATION=TRUE", cmd)
+            self.assertNotIn("OMP_PROC_BIND=TRUE", cmd)
+
+    def test_run_py_wsl_runner_keeps_smf_native(self):
+        import json
+        import os
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            manifest = td / "m.json"
+            manifest.write_text(json.dumps({"cases": [{"matrix_id": "c1", "mtx_path": "x.mtx"}]}))
+            native_bin = td / "bench_replay.exe"
+            native_bin.write_bytes(b"")
+            dispatched = []
+
+            def fake_run(cmd, **kw):
+                dispatched.append(cmd)
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            with mock.patch.dict(os.environ, {"SMF_WSL_SSIDS_DRIVER": "/d/ssids"}), \
+                 mock.patch.object(run.subprocess, "run", side_effect=fake_run):
+                run.main([
+                    "--manifest", str(manifest),
+                    "--output", str(td / "out"),
+                    "--runner", "wsl",
+                    "--solvers", "smf,ssids",
+                    "--trials", "1",
+                    "--warmups", "0",
+                    "--allow-short-trials",
+                    "--binary", str(native_bin),
+                ])
+            self.assertEqual(len(dispatched), 2)
+            native_cmds = [c for c in dispatched if str(c[0]) == str(native_bin)]
+            wsl_cmds = [c for c in dispatched if str(c[0]) == "wsl.exe"]
+            self.assertEqual(len(native_cmds), 1)
+            self.assertEqual(len(wsl_cmds), 1)
+            self.assertIn("/d/ssids", wsl_cmds[0])
+
+
+if __name__ == "__main__":
+    unittest.main()

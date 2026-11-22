@@ -12,6 +12,7 @@ Standalone use (a thin wrapper over run.py that defaults to the ssids solver):
 Environment:
     SMF_WSL_DISTRO          WSL distribution (default Ubuntu)
     SMF_WSL_SSIDS_DRIVER    Linux path of the driver (default ~/ssids_bench/ssids_replay)
+    SMF_WSL_SMF_BINARY      Linux path of bench_replay (default ~/opt_solver_wsl/build/benchmarks/bench_replay)
 """
 
 from __future__ import annotations
@@ -72,29 +73,52 @@ def driver_path(distro: str = DISTRO) -> str:
     return f"{wsl_home(distro) or '/root'}/ssids_bench/ssids_replay"
 
 
-def wsl_command(args: List[str], threads: int, driver: Optional[str] = None,
-                distro: str = DISTRO, timeout_s: Optional[float] = None) -> List[str]:
-    """wsl.exe command running the driver with bench_replay-style `args`
-    (the arguments after the binary), Windows paths translated, thread env set."""
+def _build_wsl_command(args: List[str], env: List[str], executable: str,
+                       distro: str = DISTRO, timeout_s: Optional[float] = None) -> List[str]:
+    """Build a wsl.exe invocation with translated paths, env vars, and optional timeout guard."""
     translated: List[str] = []
     prev = None
     for a in args:
         translated.append(to_wsl_path(a) if prev in _PATH_OPTIONS else a)
         prev = a
-    env = [f"OMP_NUM_THREADS={threads}", f"OMP_THREAD_LIMIT={threads}",
-           "OPENBLAS_NUM_THREADS=1", "MKL_NUM_THREADS=1", *_SSIDS_ENV]
     # Killing wsl.exe on a Windows-side timeout does not kill the Linux
     # process, so the driver runs under coreutils timeout (TERM, then KILL 5 s
     # later) and dies on its own.
     guard = ["/usr/bin/timeout", "-k", "5", str(max(1, int(timeout_s)))] if timeout_s else []
     return ["wsl.exe", "-d", distro, "--exec", "/usr/bin/env", *env, *guard,
-            driver or driver_path(distro), *translated]
+            executable, *translated]
 
 
-def kill_stray_drivers(distro: str = DISTRO) -> None:
-    """Best-effort: stop any ssids_replay left running inside WSL."""
+def wsl_command(args: List[str], threads: int, driver: Optional[str] = None,
+                distro: str = DISTRO, timeout_s: Optional[float] = None) -> List[str]:
+    """wsl.exe command running the driver with bench_replay-style `args`
+    (the arguments after the binary), Windows paths translated, thread env set."""
+    env = [f"OMP_NUM_THREADS={threads}", f"OMP_THREAD_LIMIT={threads}",
+           "OPENBLAS_NUM_THREADS=1", "MKL_NUM_THREADS=1", *_SSIDS_ENV]
+    return _build_wsl_command(args, env, driver or driver_path(distro),
+                              distro=distro, timeout_s=timeout_s)
+
+
+def smf_driver_path(distro: str = DISTRO) -> str:
+    """Return the Linux path of the WSL bench_replay binary for smf."""
+    explicit = os.environ.get("SMF_WSL_SMF_BINARY")
+    if explicit:
+        return explicit
+    return f"{wsl_home(distro) or '/root'}/opt_solver_wsl/build/benchmarks/bench_replay"
+
+
+def wsl_smf_command(args: List[str], threads: int, binary: Optional[str] = None,
+                    distro: str = DISTRO, timeout_s: Optional[float] = None) -> List[str]:
+    """wsl.exe command running Linux bench_replay for smf OS-parity benchmarks."""
+    env = [f"OMP_NUM_THREADS={threads}", "OPENBLAS_NUM_THREADS=1", "MKL_NUM_THREADS=1"]
+    return _build_wsl_command(args, env, binary or smf_driver_path(distro),
+                              distro=distro, timeout_s=timeout_s)
+
+
+def kill_stray_drivers(distro: str = DISTRO, pattern: str = "ssids_replay") -> None:
+    """Best-effort: stop any solver driver left running inside WSL."""
     try:
-        subprocess.run(["wsl.exe", "-d", distro, "--exec", "/usr/bin/pkill", "-9", "-f", "ssids_replay"],
+        subprocess.run(["wsl.exe", "-d", distro, "--exec", "/usr/bin/pkill", "-9", "-f", pattern],
                        capture_output=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -153,10 +177,13 @@ def unavailable_record(case: dict, solver_id: str, mode: str, track: str, trial_
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Run the WSL-hosted solvers (ssids) over a manifest.")
+    parser = argparse.ArgumentParser(description="Run WSL-hosted solvers (ssids or Linux smf) over a manifest.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", default=None, help="default: build/wsl_results/<manifest stem>")
-    parser.add_argument("--solvers", default="ssids")
+    parser.add_argument("--solver", choices=("ssids", "smf"), default="ssids",
+                        help="WSL-hosted solver to run (default: ssids)")
+    parser.add_argument("--solvers", default=None,
+                        help="Optional comma-separated solver override (overrides --solver)")
     parser.add_argument("--cases", default=None)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
@@ -168,9 +195,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     import run  # sibling module (tools/bench is sys.path[0] when run as a script)
 
+    solvers_arg = args.solvers if args.solvers is not None else args.solver
+    runner = "wsl-smf" if "smf" in solvers_arg.split(",") else "wsl"
     out_dir = args.output or str(pathlib.Path(args.build_dir) / "wsl_results" / pathlib.Path(args.manifest).stem)
-    cmd = ["--manifest", args.manifest, "--output", out_dir, "--runner", "wsl",
-           "--solvers", args.solvers, "--trials", str(args.trials), "--warmups", str(args.warmups),
+    cmd = ["--manifest", args.manifest, "--output", out_dir, "--runner", runner,
+           "--solvers", solvers_arg, "--trials", str(args.trials), "--warmups", str(args.warmups),
            "--threads", args.threads, "--timeout", str(args.timeout), "--build-dir", args.build_dir]
     if args.trials < 10:
         cmd.append("--allow-short-trials")
