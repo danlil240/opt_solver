@@ -12,6 +12,7 @@
 #include "smf/solver.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -293,6 +294,35 @@ TEST(ParallelNd, SplitSeparatorDeterministicAcrossThreads)
             ASSERT_TRUE(smf::parallel_nd_order(g.n, g.xadj, g.adj, nullptr, threads, p));
             ASSERT_EQ(p, ref) << "rep " << rep << " threads " << threads;
         }
+}
+
+TEST(ParallelNd, ReserveCallerCoreDeterministicAndCancel)
+{
+    const Graph g = grid(24, 24, 24);
+    std::vector<Int> ref(static_cast<std::size_t>(g.n));
+    ASSERT_TRUE(smf::parallel_nd_order(g.n, g.xadj.data(), g.adj.data(), nullptr, 1, ref.data()));
+    ASSERT_TRUE(is_permutation(ref, g.n));
+
+    smf::ParallelNdOptions opts;
+    opts.reserve_caller_core = true;
+    std::vector<Int> p(static_cast<std::size_t>(g.n));
+    ASSERT_TRUE(smf::parallel_nd_order(g.n, g.xadj.data(), g.adj.data(), nullptr, 8, p.data(), opts));
+    EXPECT_EQ(p, ref);
+
+    // Pre-set cancel flag must abort immediately and return false.
+    volatile int cancel = 1;
+    EXPECT_FALSE(smf::parallel_nd_order(g.n, g.xadj.data(), g.adj.data(), nullptr, 4, p.data(),
+                                        opts, &cancel));
+
+    // Asynchronous cancel during ordering must exit cleanly without crashing.
+    volatile int async_cancel = 0;
+    std::thread stopper([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        async_cancel = 1;
+    });
+    (void)smf::parallel_nd_order(g.n, g.xadj.data(), g.adj.data(), nullptr, 4, p.data(),
+                                 opts, &async_cancel);
+    stopper.join();
 }
 
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS

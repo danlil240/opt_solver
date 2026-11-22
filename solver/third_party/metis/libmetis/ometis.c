@@ -187,9 +187,18 @@ void MlevelNestedDissection(ctrl_t *ctrl, graph_t *graph, idx_t *order,
   idx_t *label, *bndind;
   graph_t *lgraph, *rgraph;
 
+  if (ctrl->smf_cancel && *ctrl->smf_cancel) {
+    FreeGraph(&graph);
+    return;
+  }
+
   nvtxs = graph->nvtxs;
 
   MlevelNodeBisectionMultiple(ctrl, graph);
+  if (ctrl->smf_cancel && *ctrl->smf_cancel) {
+    FreeGraph(&graph);
+    return;
+  }
 
   IFSET(ctrl->dbglvl, METIS_DBG_SEPINFO, 
       printf("Nvtxs: %6"PRIDX", [%6"PRIDX" %6"PRIDX" %6"PRIDX"]\n", 
@@ -210,13 +219,15 @@ void MlevelNestedDissection(ctrl_t *ctrl, graph_t *graph, idx_t *order,
 
   /* Recurse on lgraph first, as its lastvtx depends on rgraph->nvtxs, which
      will not be defined upon return from MlevelNestedDissection. */
-  if (lgraph->nvtxs > MMDSWITCH && lgraph->nedges > 0) 
+  if (lgraph->nvtxs > MMDSWITCH && lgraph->nedges > 0 &&
+      (ctrl->smf_mmd_switch <= 0 || lgraph->tvwgt[0] > ctrl->smf_mmd_switch)) 
     MlevelNestedDissection(ctrl, lgraph, order, lastvtx-rgraph->nvtxs);
   else {
     MMDOrder(ctrl, lgraph, order, lastvtx-rgraph->nvtxs); 
     FreeGraph(&lgraph);
   }
-  if (rgraph->nvtxs > MMDSWITCH && rgraph->nedges > 0) 
+  if (rgraph->nvtxs > MMDSWITCH && rgraph->nedges > 0 &&
+      (ctrl->smf_mmd_switch <= 0 || rgraph->tvwgt[0] > ctrl->smf_mmd_switch)) 
     MlevelNestedDissection(ctrl, rgraph, order, lastvtx);
   else {
     MMDOrder(ctrl, rgraph, order, lastvtx); 
@@ -344,12 +355,15 @@ void MlevelNodeBisectionMultiple(ctrl_t *ctrl, graph_t *graph)
 /*************************************************************************/
 void MlevelNodeBisectionL2(ctrl_t *ctrl, graph_t *graph, idx_t niparts)
 {
-  idx_t i, mincut, nruns=5;
+  idx_t i, mincut, nruns = (ctrl->smf_l2_nruns > 0 ? ctrl->smf_l2_nruns : 5);
   graph_t *cgraph; 
   idx_t *bestwhere;
 
+  if (ctrl->smf_niparts > 0)
+    niparts = ctrl->smf_niparts;
+
   /* if the graph is small, just find a single vertex separator */
-  if (graph->nvtxs < 5000) {
+  if (graph->nvtxs < 5000 || nruns <= 1) {
     MlevelNodeBisectionL1(ctrl, graph, niparts);
     return;
   }
@@ -364,7 +378,9 @@ void MlevelNodeBisectionL2(ctrl_t *ctrl, graph_t *graph, idx_t niparts)
 
   mincut = graph->tvwgt[0];
   for (i=0; i<nruns; i++) {
-    MlevelNodeBisectionL1(ctrl, cgraph, 0.7*niparts);
+    if (ctrl->smf_cancel && *ctrl->smf_cancel)
+      break;
+    MlevelNodeBisectionL1(ctrl, cgraph, (idx_t)(0.7*niparts));
 
     if (i == 0 || cgraph->mincut < mincut) {
       mincut = cgraph->mincut;
@@ -379,10 +395,21 @@ void MlevelNodeBisectionL2(ctrl_t *ctrl, graph_t *graph, idx_t niparts)
       FreeRData(cgraph);
   }
 
-  if (mincut != cgraph->mincut) 
+  if (mincut != cgraph->mincut && cgraph->where != NULL) 
     icopy(cgraph->nvtxs, bestwhere, cgraph->where);
 
   WCOREPOP;
+
+  if (ctrl->smf_cancel && *ctrl->smf_cancel) {
+    /* Free coarsening chain safely when cancelled before refinement */
+    while (cgraph != graph) {
+      graph_t *f = cgraph->finer;
+      f->coarser = NULL;
+      FreeGraph(&cgraph);
+      cgraph = f;
+    }
+    return;
+  }
 
   Refine2WayNode(ctrl, graph, cgraph);
 
@@ -403,6 +430,16 @@ void MlevelNodeBisectionL1(ctrl_t *ctrl, graph_t *graph, idx_t niparts)
     ctrl->CoarsenTo = 40;
 
   cgraph = CoarsenGraph(ctrl, graph);
+
+  if (ctrl->smf_cancel && *ctrl->smf_cancel) {
+    while (cgraph != graph) {
+      graph_t *f = cgraph->finer;
+      f->coarser = NULL;
+      FreeGraph(&cgraph);
+      cgraph = f;
+    }
+    return;
+  }
 
   niparts = gk_max(1, (cgraph->nvtxs <= ctrl->CoarsenTo ? niparts/2: niparts));
   /*niparts = (cgraph->nvtxs <= ctrl->CoarsenTo ? SMALLNIPARTS : LARGENIPARTS);*/

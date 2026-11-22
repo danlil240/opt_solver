@@ -213,6 +213,15 @@ typedef struct ctrl_t {
 
   /* ondisk related info */
   pid_t pid;            /*!< The pid of the running process */
+
+  /* smf extensions (all zero-initialized by SetupCtrl -> stock METIS behavior) */
+  idx_t smf_l2_nruns;       /* 0 => METIS default (5); >0 => override L2 nruns */
+  idx_t smf_mmd_switch;     /* 0 => METIS default (MMDSWITCH); >0 => weight-based switch */
+  idx_t smf_niparts;        /* 0 => METIS default (LARGENIPARTS); >0 => override niparts */
+  void (*smf_pfor)(int ntasks, void (*body)(int, void *), void *ctx, void *pool);
+  void *smf_pfor_pool;
+  int   smf_pfor_threads;
+  volatile int *smf_cancel;
 } ctrl_t;
 
 

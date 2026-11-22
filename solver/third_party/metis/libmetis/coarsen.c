@@ -68,6 +68,9 @@ graph_t *CoarsenGraph(ctrl_t *ctrl, graph_t *graph)
 
     ASSERT(CheckGraph(graph, 0, 1));
 
+    if (ctrl->smf_cancel && *ctrl->smf_cancel)
+      break;
+
   } while (graph->nvtxs > ctrl->CoarsenTo && 
            graph->nvtxs < COARSEN_FRACTION*graph->finer->nvtxs && 
            graph->nedges > graph->nvtxs/2);
@@ -131,6 +134,9 @@ graph_t *CoarsenGraphNlevels(ctrl_t *ctrl, graph_t *graph, idx_t nlevels)
     eqewgts = 0;
 
     ASSERT(CheckGraph(graph, 0, 1));
+
+    if (ctrl->smf_cancel && *ctrl->smf_cancel)
+      break;
 
     if (graph->nvtxs < ctrl->CoarsenTo || 
         graph->nvtxs > COARSEN_FRACTION*graph->finer->nvtxs || 
@@ -818,6 +824,206 @@ void PrintCGraphStats(ctrl_t *ctrl, graph_t *graph)
 }
 
 
+#define SMF_CONTRACT_MAX_CHUNKS 32
+
+typedef struct {
+  const idx_t *xadj, *adjncy, *adjwgt, *vwgt, *match, *cmap, *pair_v;
+  idx_t total_cnvtxs;
+  idx_t c_start[SMF_CONTRACT_MAX_CHUNKS + 1];
+  idx_t chunk_max_e[SMF_CONTRACT_MAX_CHUNKS];
+  idx_t *cxadj, *cvwgt;
+  idx_t *chunk_adj[SMF_CONTRACT_MAX_CHUNKS];
+  idx_t *chunk_wgt[SMF_CONTRACT_MAX_CHUNKS];
+  idx_t chunk_nedges[SMF_CONTRACT_MAX_CHUNKS];
+  idx_t chunk_tvwgt[SMF_CONTRACT_MAX_CHUNKS];
+  idx_t *out_adj, *out_wgt;
+  volatile int oom;
+} smf_contract_ctx_t;
+
+static void smf_contract_worker(int tid, void *vctx)
+{
+  smf_contract_ctx_t *ctx = (smf_contract_ctx_t *)vctx;
+  const idx_t c0 = ctx->c_start[tid];
+  const idx_t c1 = ctx->c_start[tid + 1];
+  const idx_t mask = HTLENGTH;
+  const idx_t *xadj = ctx->xadj;
+  const idx_t *adjncy = ctx->adjncy;
+  const idx_t *adjwgt = ctx->adjwgt;
+  const idx_t *vwgt = ctx->vwgt;
+  const idx_t *match = ctx->match;
+  const idx_t *cmap = ctx->cmap;
+  const idx_t *pair_v = ctx->pair_v;
+  idx_t *cxadj = ctx->cxadj;
+  idx_t *cvwgt = ctx->cvwgt;
+  idx_t *cadj_base, *cwgt_base, *cadjncy, *cadjwgt;
+  idx_t *htable, *dtable = NULL;
+  unsigned int *hmark;
+  unsigned int hgen = 0;
+  idx_t c, v, u, j, k, kk, m, istart, iend, nedges, out_pos = 0, tvwgt = 0;
+  size_t cap;
+
+  ctx->chunk_adj[tid] = NULL;
+  ctx->chunk_wgt[tid] = NULL;
+  ctx->chunk_nedges[tid] = 0;
+  ctx->chunk_tvwgt[tid] = 0;
+  if (c0 >= c1)
+    return;
+
+  cap = (size_t)ctx->chunk_max_e[tid] + 1;
+  cadj_base = (idx_t *)malloc(cap * sizeof(idx_t));
+  cwgt_base = (idx_t *)malloc(cap * sizeof(idx_t));
+  hmark     = (unsigned int *)calloc((size_t)(mask + 1), sizeof(unsigned int));
+  htable    = (idx_t *)malloc((size_t)(mask + 1) * sizeof(idx_t));
+  if (!cadj_base || !cwgt_base || !hmark || !htable) {
+    free(cadj_base);
+    free(cwgt_base);
+    free(hmark);
+    free(htable);
+    ctx->oom = 1;
+    return;
+  }
+
+  cadjncy = cadj_base;
+  cadjwgt = cwgt_base;
+  for (c = c0; c < c1; c++) {
+    v = pair_v[c];
+    u = match[v];
+    cvwgt[c] = (v == u) ? vwgt[v] : (vwgt[v] + vwgt[u]);
+    tvwgt += cvwgt[c];
+
+    if ((xadj[v+1] - xadj[v] + xadj[u+1] - xadj[u]) < (mask >> 2)) {
+      if (++hgen == 0) {
+        memset(hmark, 0, (size_t)(mask + 1) * sizeof(unsigned int));
+        hgen = 1;
+      }
+      kk = c & mask;
+      hmark[kk] = hgen;
+      htable[kk] = 0;
+      cadjncy[0] = c;
+      nedges = 1;
+
+      istart = xadj[v];
+      iend   = xadj[v+1];
+      for (j = istart; j < iend; j++) {
+        k = cmap[adjncy[j]];
+        for (kk = k & mask; hmark[kk] == hgen && cadjncy[htable[kk]] != k; kk = (kk + 1) & mask);
+        if (hmark[kk] != hgen) {
+          cadjncy[nedges] = k;
+          cadjwgt[nedges] = adjwgt[j];
+          hmark[kk] = hgen;
+          htable[kk] = nedges++;
+        }
+        else {
+          cadjwgt[htable[kk]] += adjwgt[j];
+        }
+      }
+
+      if (v != u) {
+        istart = xadj[u];
+        iend   = xadj[u+1];
+        for (j = istart; j < iend; j++) {
+          k = cmap[adjncy[j]];
+          for (kk = k & mask; hmark[kk] == hgen && cadjncy[htable[kk]] != k; kk = (kk + 1) & mask);
+          if (hmark[kk] != hgen) {
+            cadjncy[nedges] = k;
+            cadjwgt[nedges] = adjwgt[j];
+            hmark[kk] = hgen;
+            htable[kk] = nedges++;
+          }
+          else {
+            cadjwgt[htable[kk]] += adjwgt[j];
+          }
+        }
+      }
+
+      cadjncy[0] = cadjncy[--nedges];
+      cadjwgt[0] = cadjwgt[nedges];
+    }
+    else {
+      if (dtable == NULL) {
+        dtable = (idx_t *)malloc((size_t)ctx->total_cnvtxs * sizeof(idx_t));
+        if (!dtable) {
+          free(cadj_base);
+          free(cwgt_base);
+          free(hmark);
+          free(htable);
+          ctx->oom = 1;
+          return;
+        }
+        for (j = 0; j < ctx->total_cnvtxs; j++)
+          dtable[j] = -1;
+      }
+      nedges = 0;
+      istart = xadj[v];
+      iend   = xadj[v+1];
+      for (j = istart; j < iend; j++) {
+        k = cmap[adjncy[j]];
+        if ((m = dtable[k]) == -1) {
+          cadjncy[nedges] = k;
+          cadjwgt[nedges] = adjwgt[j];
+          dtable[k] = nedges++;
+        }
+        else {
+          cadjwgt[m] += adjwgt[j];
+        }
+      }
+
+      if (v != u) {
+        istart = xadj[u];
+        iend   = xadj[u+1];
+        for (j = istart; j < iend; j++) {
+          k = cmap[adjncy[j]];
+          if ((m = dtable[k]) == -1) {
+            cadjncy[nedges] = k;
+            cadjwgt[nedges] = adjwgt[j];
+            dtable[k] = nedges++;
+          }
+          else {
+            cadjwgt[m] += adjwgt[j];
+          }
+        }
+
+        if ((j = dtable[c]) != -1) {
+          cadjncy[j] = cadjncy[--nedges];
+          cadjwgt[j] = cadjwgt[nedges];
+          dtable[c] = -1;
+        }
+      }
+
+      for (j = 0; j < nedges; j++)
+        dtable[cadjncy[j]] = -1;
+    }
+
+    cadjncy += nedges;
+    cadjwgt += nedges;
+    out_pos += nedges;
+    cxadj[c + 1] = nedges;
+  }
+
+  free(hmark);
+  free(htable);
+  free(dtable);
+  ctx->chunk_adj[tid] = cadj_base;
+  ctx->chunk_wgt[tid] = cwgt_base;
+  ctx->chunk_nedges[tid] = out_pos;
+  ctx->chunk_tvwgt[tid] = tvwgt;
+}
+
+static void smf_scatter_worker(int tid, void *vctx)
+{
+  smf_contract_ctx_t *ctx = (smf_contract_ctx_t *)vctx;
+  const idx_t cnt = ctx->chunk_nedges[tid];
+  if (cnt > 0) {
+    const idx_t off = ctx->cxadj[ctx->c_start[tid]];
+    memcpy(ctx->out_adj + off, ctx->chunk_adj[tid], (size_t)cnt * sizeof(idx_t));
+    memcpy(ctx->out_wgt + off, ctx->chunk_wgt[tid], (size_t)cnt * sizeof(idx_t));
+  }
+  free(ctx->chunk_adj[tid]);
+  free(ctx->chunk_wgt[tid]);
+  ctx->chunk_adj[tid] = NULL;
+  ctx->chunk_wgt[tid] = NULL;
+}
+
 /*************************************************************************/
 /*! This function creates the coarser graph. Depending on the size of the
     candidate adjancency lists it either uses a hash table or an array
@@ -828,9 +1034,10 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
          idx_t *match)
 {
   idx_t j, jj, k, kk, l, m, istart, iend, nvtxs, nedges, ncon, 
-        cnedges, v, u, mask;
+        cnedges, v, u, mask, total_cnvtxs;
   idx_t *xadj, *vwgt, *vsize, *adjncy, *adjwgt;
-  idx_t *cmap, *htable, *dtable;
+  idx_t *cmap, *htable, *dtable, *hmark;
+  idx_t hgen;
   idx_t *cxadj, *cvwgt, *cvsize, *cadjncy, *cadjwgt;
   graph_t *cgraph;
   int dovsize, dropedges;
@@ -854,6 +1061,104 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
   adjncy  = graph->adjncy;
   adjwgt  = graph->adjwgt;
   cmap    = graph->cmap;
+  total_cnvtxs = cnvtxs;
+
+  /* Parallel contraction path for large single-constraint graphs (bitwise identical to serial). */
+  if (ctrl->smf_pfor != NULL && ctrl->smf_pfor_threads > 1 &&
+      total_cnvtxs >= 4000 && ncon == 1 && !dropedges && !dovsize) {
+    int nt = ctrl->smf_pfor_threads;
+    int t;
+    idx_t *pair_v;
+    idx_t ci = 0, target_e, cur_e = 0, chunk_e = 0;
+    smf_contract_ctx_t ctx;
+
+    if (nt > SMF_CONTRACT_MAX_CHUNKS) nt = SMF_CONTRACT_MAX_CHUNKS;
+    if (nt > total_cnvtxs / 512) nt = (int)(total_cnvtxs / 512);
+    if (nt > 1) {
+      pair_v = iwspacemalloc(ctrl, total_cnvtxs);
+      for (v = 0; v < nvtxs; v++) {
+        if (match[v] >= v)
+          pair_v[ci++] = v;
+      }
+
+      cgraph = CreateGraph();
+      cgraph->nvtxs = total_cnvtxs;
+      cgraph->ncon = 1;
+      cgraph->finer = graph;
+      graph->coarser = cgraph;
+      cgraph->xadj     = imalloc(total_cnvtxs + 1, "CreateCoarseGraph: xadj");
+      cgraph->vwgt     = imalloc(total_cnvtxs,     "CreateCoarseGraph: vwgt");
+      cgraph->tvwgt    = imalloc(1,                "CreateCoarseGraph: tvwgt");
+      cgraph->invtvwgt = rmalloc(1,                "CreateCoarseGraph: invtvwgt");
+
+      memset(&ctx, 0, sizeof(ctx));
+      ctx.xadj = xadj;
+      ctx.adjncy = adjncy;
+      ctx.adjwgt = adjwgt;
+      ctx.vwgt = vwgt;
+      ctx.match = match;
+      ctx.cmap = cmap;
+      ctx.pair_v = pair_v;
+      ctx.total_cnvtxs = total_cnvtxs;
+      ctx.cxadj = cgraph->xadj;
+      ctx.cvwgt = cgraph->vwgt;
+
+      target_e = (graph->nedges + nt - 1) / nt;
+      ctx.c_start[0] = 0;
+      t = 0;
+      for (ci = 0; ci < total_cnvtxs; ci++) {
+        v = pair_v[ci];
+        u = match[v];
+        idx_t de = (xadj[v+1] - xadj[v]) + (u != v ? (xadj[u+1] - xadj[u]) : 0);
+        if (t < nt - 1 && ci > ctx.c_start[t] && cur_e + de > (idx_t)(t + 1) * target_e) {
+          ctx.chunk_max_e[t] = chunk_e;
+          ctx.c_start[++t] = ci;
+          chunk_e = 0;
+        }
+        cur_e += de;
+        chunk_e += de;
+      }
+      ctx.chunk_max_e[t] = chunk_e;
+      for (++t; t <= nt; t++) {
+        ctx.c_start[t] = total_cnvtxs;
+        if (t < nt) ctx.chunk_max_e[t] = 0;
+      }
+
+      ctrl->smf_pfor(nt, smf_contract_worker, &ctx, ctrl->smf_pfor_pool);
+
+      if (!ctx.oom) {
+        idx_t sum_tvwgt = 0;
+        cgraph->xadj[0] = 0;
+        for (ci = 0; ci < total_cnvtxs; ci++)
+          cgraph->xadj[ci + 1] += cgraph->xadj[ci];
+        cnedges = cgraph->xadj[total_cnvtxs];
+        cgraph->nedges = cnedges;
+        cgraph->adjncy = imalloc(cnedges + 1, "CreateCoarseGraph: adjncy");
+        cgraph->adjwgt = imalloc(cnedges + 1, "CreateCoarseGraph: adjwgt");
+        ctx.out_adj = cgraph->adjncy;
+        ctx.out_wgt = cgraph->adjwgt;
+
+        for (t = 0; t < nt; t++)
+          sum_tvwgt += ctx.chunk_tvwgt[t];
+        cgraph->tvwgt[0] = sum_tvwgt;
+        cgraph->invtvwgt[0] = 1.0 / (sum_tvwgt > 0 ? sum_tvwgt : 1);
+
+        ctrl->smf_pfor(nt, smf_scatter_worker, &ctx, ctrl->smf_pfor_pool);
+
+        IFSET(ctrl->dbglvl, METIS_DBG_TIME, gk_stopcputimer(ctrl->ContractTmr));
+        WCOREPOP;
+        return;
+      }
+
+      /* OOM fallback: clean up partial buffers and fall through to serial path. */
+      for (t = 0; t < nt; t++) {
+        free(ctx.chunk_adj[t]);
+        free(ctx.chunk_wgt[t]);
+      }
+      graph->coarser = NULL;
+      FreeGraph(&cgraph);
+    }
+  }
 
   /* Setup structures for dropedges */
   if (dropedges) {
@@ -877,8 +1182,10 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
   cadjncy  = cgraph->adjncy;
   cadjwgt  = cgraph->adjwgt;
 
-  htable = iset(mask+1, -1, iwspacemalloc(ctrl, mask+1));   /* hash table */
-  dtable = iset(cnvtxs, -1, iwspacemalloc(ctrl, cnvtxs));   /* direct table */
+  hmark  = iset(mask+1, 0, iwspacemalloc(ctrl, mask+1));
+  hgen   = 0;
+  htable = iwspacemalloc(ctrl, mask+1);   /* hash table */
+  dtable = NULL;                          /* direct table (allocated lazily if needed) */
 
   cxadj[0] = cnvtxs = cnedges = 0;
   for (v=0; v<nvtxs; v++) {
@@ -910,9 +1217,16 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
 
     /* take care of the edges */ 
     if ((xadj[v+1]-xadj[v] + xadj[u+1]-xadj[u]) < (mask>>2)) { /* use mask */
+      if (hgen == IDX_MAX) {
+        iset(mask+1, 0, hmark);
+        hgen = 0;
+      }
+      ++hgen;
       /* put the ID of the contracted node itself at the start, so that it can be 
        * removed easily */
-      htable[cnvtxs&mask] = 0;
+      kk = cnvtxs & mask;
+      hmark[kk] = hgen;
+      htable[kk] = 0;
       cadjncy[0] = cnvtxs;
       nedges = 1;
 
@@ -920,14 +1234,15 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
       iend   = xadj[v+1];
       for (j=istart; j<iend; j++) {
         k = cmap[adjncy[j]];
-        for (kk=k&mask; htable[kk]!=-1 && cadjncy[htable[kk]]!=k; kk=((kk+1)&mask));
-        if ((m = htable[kk]) == -1) {
+        for (kk=k&mask; hmark[kk]==hgen && cadjncy[htable[kk]]!=k; kk=((kk+1)&mask));
+        if (hmark[kk] != hgen) {
           cadjncy[nedges] = k;
           cadjwgt[nedges] = adjwgt[j];
+          hmark[kk] = hgen;
           htable[kk] = nedges++;
         }
         else {
-          cadjwgt[m] += adjwgt[j];
+          cadjwgt[htable[kk]] += adjwgt[j];
         }
       }
   
@@ -936,24 +1251,17 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
         iend   = xadj[u+1];
         for (j=istart; j<iend; j++) {
           k = cmap[adjncy[j]];
-          for (kk=k&mask; htable[kk]!=-1 && cadjncy[htable[kk]]!=k; kk=((kk+1)&mask));
-          if ((m = htable[kk]) == -1) {
+          for (kk=k&mask; hmark[kk]==hgen && cadjncy[htable[kk]]!=k; kk=((kk+1)&mask));
+          if (hmark[kk] != hgen) {
             cadjncy[nedges] = k;
             cadjwgt[nedges] = adjwgt[j];
+            hmark[kk]       = hgen;
             htable[kk]      = nedges++;
           }
           else {
-            cadjwgt[m] += adjwgt[j];
+            cadjwgt[htable[kk]] += adjwgt[j];
           }
         }
-      }
-
-      /* reset the htable -- reverse order (LIFO) is critical to prevent cadjncy[-1]
-       * indexing due to a remove of an earlier entry */
-      for (j=nedges-1; j>=0; j--) {
-        k = cadjncy[j];
-        for (kk=k&mask; cadjncy[htable[kk]]!=k; kk=((kk+1)&mask));
-        htable[kk] = -1;  
       }
 
       /* remove the contracted vertex from the list */
@@ -961,6 +1269,8 @@ void CreateCoarseGraph(ctrl_t *ctrl, graph_t *graph, idx_t cnvtxs,
       cadjwgt[0] = cadjwgt[nedges];
     }
     else {
+      if (dtable == NULL)
+        dtable = iset(total_cnvtxs, -1, iwspacemalloc(ctrl, total_cnvtxs));
       nedges = 0;
       istart = xadj[v];
       iend   = xadj[v+1];
@@ -1112,7 +1422,7 @@ graph_t *SetupCoarseGraph(graph_t *graph, idx_t cnvtxs, int dovsize)
 /*************************************************************************/
 void ReAdjustMemory(ctrl_t *ctrl, graph_t *graph, graph_t *cgraph) 
 {
-  if (cgraph->nedges > 10000 && cgraph->nedges < 0.9*graph->nedges) {
+  if (cgraph->nedges > 10000 && cgraph->nedges < 0.5*graph->nedges) {
     cgraph->adjncy = irealloc(cgraph->adjncy, cgraph->nedges, "ReAdjustMemory: adjncy");
     cgraph->adjwgt = irealloc(cgraph->adjwgt, cgraph->nedges, "ReAdjustMemory: adjwgt");
   }

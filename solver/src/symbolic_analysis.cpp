@@ -32,6 +32,11 @@ namespace smf
 #else
     static constexpr bool kHaveMetis = false;
 #endif
+#if defined(SMF_HAS_AMD) && SMF_HAS_AMD
+    static constexpr bool kHaveAmd = true;
+#else
+    static constexpr bool kHaveAmd = false;
+#endif
 
     // Matching ordering: a matched pair is kept together when either scaled
     // diagonal is below this (on the GHS_indef KKT set every pair has a zero
@@ -706,6 +711,19 @@ namespace smf
         }
         lap(phases.matching);
 
+        struct SpecNd {
+            std::vector<Int> perm;
+            volatile int cancel = 0;
+            bool ok = false;
+            std::thread th;
+            ~SpecNd()
+            {
+                cancel = 1;
+                if (th.joinable()) th.join();
+            }
+        };
+        std::unique_ptr<SpecNd> spec_nd;
+
         if (user_order)
         {
             // Used as given (validated above). Not an auto ordering, so the
@@ -739,6 +757,27 @@ namespace smf
                 control.ordering == OrderingMethod::AMD ||
                 control.ordering == OrderingMethod::AutoParallel ||
                 control.ordering == OrderingMethod::Matching;
+            // On multi-threaded AutoParallel runs for dense-enough 3D/FEM
+            // graphs (avg symmetric degree >= 12) with no concurrent matching
+            // trial, overlap parallel_nd_order on worker threads with serial
+            // AMD + etree1. If AMD's predicted flops fall below the METIS
+            // threshold, cancel aborts the speculative ordering immediately.
+            if (kHaveMetis && kHaveAmd && !matching_ordered && amd_backend &&
+                control.ordering == OrderingMethod::AutoParallel && n > 8192 &&
+                control.num_threads > 1 && !auto_matching &&
+                static_cast<std::size_t>(xadj[n]) >= 12 * sn_sz)
+            {
+                spec_nd = std::make_unique<SpecNd>();
+                spec_nd->perm.resize(sn_sz);
+                ParallelNdOptions nd_opts{};
+                nd_opts.reserve_caller_core = true;
+                const int nd_threads = std::max(1, control.num_threads);
+                spec_nd->th = std::thread([&, nd_threads, nd_opts] {
+                    spec_nd->ok = parallel_nd_order(
+                        n, xadj, adj, nullptr, nd_threads, spec_nd->perm.data(),
+                        nd_opts, &spec_nd->cancel);
+                });
+            }
             if (!matching_ordered && amd_backend)
                 amd_ordered = amd_order_adjacency(n, xadj, adj, perm.data(), amd_work);
             if (!matching_ordered && !amd_ordered)
@@ -869,23 +908,22 @@ namespace smf
             if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
             {
                 std::vector<Int> mperm;
-                // Deterministic mode: parallel ND at every thread count (its
-                // permutation does not depend on the thread count; serial
-                // METIS at 1 thread would give another ordering).
-                if (control.num_threads > 1 || deterministic_mode(control))
+                if (spec_nd)
+                {
+                    if (spec_nd->th.joinable()) spec_nd->th.join();
+                    if (spec_nd->ok) mperm = std::move(spec_nd->perm);
+                    spec_nd.reset();
+                }
+                else
                 {
                     // Parallel nested dissection straight off the arena's
-                    // adjacency (compressed, AMD leaves on threads).
+                    // adjacency (compressed, depth-graded separators, AMD/fast
+                    // METIS leaves) at both 1T and multi-thread: identical
+                    // permutation across thread counts and no redundant copies.
                     mperm.resize(sn_sz);
                     if (!parallel_nd_order(n, xadj, adj, nullptr, std::max(1, control.num_threads),
                                            mperm.data()))
                         mperm.clear();
-                }
-                else
-                {
-                    auto backend = make_ordering_backend(OrderingMethod::METIS, n, info);
-                    auto [xadj_m, adjncy_m] = build_symmetric_adjacency(C);
-                    mperm = backend->compute_ordering(n, xadj_m, adjncy_m);
                 }
                 if (mperm.size() == sn_sz)
                 {
@@ -899,6 +937,18 @@ namespace smf
                     }
                 }
             }
+            else if (spec_nd)
+            {
+                spec_nd->cancel = 1;
+                if (spec_nd->th.joinable()) spec_nd->th.join();
+                spec_nd.reset();
+            }
+        }
+        else if (spec_nd)
+        {
+            spec_nd->cancel = 1;
+            if (spec_nd->th.joinable()) spec_nd->th.join();
+            spec_nd.reset();
         }
 
         lap(phases.ordering);

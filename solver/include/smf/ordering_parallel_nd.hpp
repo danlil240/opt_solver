@@ -17,6 +17,10 @@ inline constexpr int kParallelNdLevels = 4;
 struct ParallelNdOptions {
     int levels = kParallelNdLevels;
     Int amd_leaf_max = kParallelNdAmdLeafMax;
+    /// When running speculatively alongside AMD on another thread, cap top-level
+    /// parallel contraction at num_threads - 1 so AMD keeps its own core while
+    /// leaving all num_threads workers available for the deeper dissection levels.
+    bool reserve_caller_core = false;
 };
 
 /// Parallel nested dissection: vertices with identical closed adjacency are
@@ -40,9 +44,12 @@ bool parallel_nd_order(Int n, const std::vector<Int>& xadj, const std::vector<In
                        const std::vector<Int>* vwgt, int num_threads, std::vector<Int>& perm);
 
 /// Same on raw arrays (e.g. the analyse arena's adjacency); perm has n entries.
+/// cancel: optional non-zero flag checked between tasks and coarsening levels
+/// to abort a speculative ordering early (returns false when cancelled).
 bool parallel_nd_order(Int n, const Int* xadj, const Int* adjncy, const Int* vwgt,
                        int num_threads, Int* perm,
-                       const ParallelNdOptions& options = ParallelNdOptions{});
+                       const ParallelNdOptions& options = ParallelNdOptions{},
+                       volatile int* cancel = nullptr);
 
 /// Exact compression: vertices with identical closed adjacency (the same
 /// neighbours, each other included) share a supervariable. super_of[v] is
