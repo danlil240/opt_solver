@@ -164,7 +164,8 @@ constexpr double kRescueMaxFree = 0.02;
 // leave kRescueMaxFree of the columns free. Empty when there is none
 // (structurally singular: an all-zero column, or more unmatched columns
 // than that share). cv is borrowed (moved in and back), not copied.
-std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv) {
+std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double> &cv,
+                                      int num_threads) {
   if (cv.size() != ak.cleaned.row_idx.size()) return {};
   const std::vector<double> &analysed =
       !ak.matching_scale.empty() && !ak.matching_scale_partial ? ak.matching_scale
@@ -175,13 +176,7 @@ std::vector<double> matching_scale_of(const AnalysisKeep &ak, std::vector<double
   C.col_ptr = ak.cleaned.col_ptr;
   C.row_idx = ak.cleaned.row_idx;
   C.values = std::move(cv);
-  MatchingResult mr;
-  {
-    SymmetricMatcher m(C);
-    m.set_stop_free(static_cast<int>(kRescueMaxFree * static_cast<double>(ak.n)));
-    m.advance();
-    mr = m.current();
-  }
+  MatchingResult mr = compute_rescue_matching_scale(C, kRescueMaxFree, num_threads);
   cv = std::move(C.values);
   if (mr.status != ErrorCode::Success || mr.scale.size() != static_cast<std::size_t>(ak.n)) return {};
   for (const double s : mr.scale)
@@ -244,7 +239,7 @@ double scale_on_delay_probe(const AnalysisKeep &ak, std::span<const double> cv,
   }
   std::vector<double> x = b;
   Control sc = ctrl;
-  sc.num_threads = 1;
+  sc.num_threads = deterministic_mode(ctrl) ? 1 : ctrl.num_threads;
   Info si;
   Solver solver;
   if (solver.solve(fkeep, sc, si, x.data(), static_cast<int>(n), 1) != 0)
@@ -521,7 +516,8 @@ rescale:
   // A new matching scaling of these values.
   get_values();
   const auto t0 = now();
-  std::vector<double> scale = matching_scale_of(ak, cv);
+  std::vector<double> scale =
+      matching_scale_of(ak, cv, deterministic_mode(ctrl) ? 1 : ctrl.num_threads);
   info.delay_matching_seconds = secs(t0, now());
   extra_seconds += info.delay_matching_seconds;
   FactorStatus st;
@@ -539,17 +535,13 @@ rescale:
     info.delay_rescales = 1;
     if (ran(st)) {
       info.scaling_used = static_cast<int>(ScalingMethod::Matching);
-      // The fresh scale's probe error, the reuse baseline; none (-1) when
-      // reuse is off or the factor has zero pivots (nothing to solve with).
-      double omega = -1.0;
-      if (reuse_on && st == FactorStatus::Success) {
-        const auto tp = now();
-        omega = scale_on_delay_probe(ak, cv, fkeep, ctrl);
-        extra_seconds += secs(tp, now());
-      }
+      // Do not run an eager probe on a fresh matching: a later reuse checks
+      // its own probe against kReuseOmegaMax (scale_on_delay_reuse_passes with
+      // fresh_omega = -1), avoiding wasted probes on cold solves and on steps
+      // whose scale fails staleness on the next factorization.
       fkeep.delay_analysis = ak.serial;
       fkeep.delay_scale = std::move(scale);
-      fkeep.delay_omega = omega;
+      fkeep.delay_omega = -1.0;
     }
   }
   return finish(st);

@@ -65,7 +65,8 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
                               std::vector<RowState> &rs, std::vector<double> &v,
                               std::vector<int> &row_match, std::vector<Int> &col_to_row,
                               const std::vector<int> &first_queue, const AuctionOptions &opt,
-                              AuctionState &st, long long &work, long long work_budget) {
+                              AuctionState &st, long long &work, long long work_budget,
+                              int stop_free) {
     assert(opt.eps_factor > 1.0 && opt.eps_final > 0.0);
     const int n = static_cast<int>(col_to_row.size());
     const Int *const gptr = g.ptr.data();
@@ -100,15 +101,18 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
         st.phase = 0;
     }
 
+    const std::size_t stop_q = stop_free > 0 ? static_cast<std::size_t>(stop_free) : 0;
     for (;;) {
-        if (st.head == st.queue.size()) {
+        if (st.queue.size() - st.head <= stop_q) {
             if (st.eps <= opt.eps_final) return st.dropped ? AuctionStatus::Capped : AuctionStatus::Done;
             // Next phase: the matched columns whose edge is more than the
             // new eps above their column's minimum become free again.
             st.eps = std::max(st.eps / opt.eps_factor, opt.eps_final);
             ++st.phase;
-            st.queue.clear();
-            st.head = 0;
+            if (st.head > 0) {
+                st.queue.erase(st.queue.begin(), st.queue.begin() + static_cast<std::ptrdiff_t>(st.head));
+                st.head = 0;
+            }
             st.bids_in_phase = 0;
             for (int j = 0; j < n; ++j) {
                 const Int r = col_to_row[static_cast<std::size_t>(j)];

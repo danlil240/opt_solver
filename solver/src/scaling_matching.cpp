@@ -13,14 +13,16 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace smf {
 
 namespace detail {
 
-ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
+ErrorCode build_cost_graph(const CscLower &A, CostGraph &g, int num_threads) {
     const int n = static_cast<int>(A.n);
-    std::vector<Int> count(static_cast<std::size_t>(n) + 1, 0);
     // Cleaned input (each column's rows strictly increasing, none above the
     // diagonal, as analyse() passes it) expands without duplicates: column
     // j gets rows jj < j from the earlier columns, then its own rows >= j.
@@ -39,8 +41,6 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
                 return ErrorCode::IllegalValue;
             }
             if (i < j || (p > p0 && i <= A.row_idx[static_cast<std::size_t>(p) - 1])) cleaned = false;
-            ++count[static_cast<std::size_t>(j) + 1];
-            if (i != j) ++count[static_cast<std::size_t>(i) + 1];
             if (av > 0.0) {
                 ++nz_count[j];
                 cmax[j] = std::max(cmax[j], av);
@@ -62,11 +62,58 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
         const std::size_t nnz = static_cast<std::size_t>(g.ptr[static_cast<std::size_t>(n)]);
         g.row.resize(nnz);
         g.cost.resize(nnz);
-        std::vector<double> log_cmax(static_cast<std::size_t>(n));
-        for (int j = 0; j < n; ++j) log_cmax[static_cast<std::size_t>(j)] = std::log(cmax[j]);
+        g.log_col_max.resize(static_cast<std::size_t>(n));
+        double *const log_cmax = g.log_col_max.data();
+        const int nt = num_threads > 1 ? num_threads : 1;
+#if defined(_OPENMP)
+        if (nt > 1 && n >= 8192) {
+            #pragma omp parallel for schedule(static) num_threads(nt)
+            for (int j = 0; j < n; ++j) log_cmax[static_cast<std::size_t>(j)] = std::log(cmax[j]);
+        } else
+#endif
+        {
+            for (int j = 0; j < n; ++j) log_cmax[static_cast<std::size_t>(j)] = std::log(cmax[j]);
+        }
         std::vector<Int> next(g.ptr.begin(), g.ptr.end() - 1);
+        g.row_min_cost.assign(static_cast<std::size_t>(n), kInf);
+        double *const rmin = g.row_min_cost.data();
         int *const grow = g.row.data();
         double *const gcost = g.cost.data();
+#if defined(_OPENMP)
+        if (nt > 1 && A.values.size() >= 32768) {
+            const std::size_t nnz_in = A.values.size();
+            std::unique_ptr<double[]> log_av(new double[nnz_in]);
+            const double *const av_ptr = A.values.data();
+            double *const lav_ptr = log_av.get();
+            #pragma omp parallel for schedule(static) num_threads(nt)
+            for (std::int64_t p = 0; p < static_cast<std::int64_t>(nnz_in); ++p) {
+                const double av = std::abs(av_ptr[static_cast<std::size_t>(p)]);
+                lav_ptr[static_cast<std::size_t>(p)] = av > 0.0 ? std::log(av) : -kInf;
+            }
+            for (int j = 0; j < n; ++j) {
+                const double lj = log_cmax[static_cast<std::size_t>(j)];
+                for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+                     p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+                    const double la = lav_ptr[static_cast<std::size_t>(p)];
+                    if (la == -kInf) continue;
+                    const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
+                    const std::size_t qj = static_cast<std::size_t>(next[static_cast<std::size_t>(j)]++);
+                    const double cij = std::max(0.0, lj - la);
+                    grow[qj] = i;
+                    gcost[qj] = cij;
+                    rmin[i] = std::min(rmin[i], cij);
+                    if (i != j) {
+                        const std::size_t qi = static_cast<std::size_t>(next[static_cast<std::size_t>(i)]++);
+                        const double cji = std::max(0.0, log_cmax[static_cast<std::size_t>(i)] - la);
+                        grow[qi] = j;
+                        gcost[qi] = cji;
+                        rmin[j] = std::min(rmin[j], cji);
+                    }
+                }
+            }
+            return ErrorCode::Success;
+        }
+#endif
         for (int j = 0; j < n; ++j) {
             const double lj = log_cmax[static_cast<std::size_t>(j)];
             for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
@@ -76,16 +123,28 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
                 const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
                 const double la = std::log(av);
                 const std::size_t qj = static_cast<std::size_t>(next[static_cast<std::size_t>(j)]++);
+                const double cij = std::max(0.0, lj - la);
                 grow[qj] = i;
-                gcost[qj] = std::max(0.0, lj - la);
+                gcost[qj] = cij;
+                rmin[i] = std::min(rmin[i], cij);
                 if (i != j) {
                     const std::size_t qi = static_cast<std::size_t>(next[static_cast<std::size_t>(i)]++);
+                    const double cji = std::max(0.0, log_cmax[static_cast<std::size_t>(i)] - la);
                     grow[qi] = j;
-                    gcost[qi] = std::max(0.0, log_cmax[static_cast<std::size_t>(i)] - la);
+                    gcost[qi] = cji;
+                    rmin[j] = std::min(rmin[j], cji);
                 }
             }
         }
         return ErrorCode::Success;
+    }
+    std::vector<Int> count(static_cast<std::size_t>(n) + 1, 0);
+    for (int j = 0; j < n; ++j) {
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)]; p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
+            ++count[static_cast<std::size_t>(j) + 1];
+            if (i != j) ++count[static_cast<std::size_t>(i) + 1];
+        }
     }
     for (int j = 0; j < n; ++j) {
         count[static_cast<std::size_t>(j) + 1] += count[static_cast<std::size_t>(j)];
@@ -157,6 +216,9 @@ ErrorCode build_cost_graph(const CscLower &A, CostGraph &g) {
         }
         g.col_max[static_cast<std::size_t>(j)] = col_max;
         const double log_cmax = std::log(col_max);
+        if (g.log_col_max.size() != static_cast<std::size_t>(n))
+            g.log_col_max.resize(static_cast<std::size_t>(n));
+        g.log_col_max[static_cast<std::size_t>(j)] = log_cmax;
         for (Int q = begin; q < out; ++q) {
             double &c = g.cost[static_cast<std::size_t>(q)];
             c = std::max(0.0, log_cmax - std::log(c));
@@ -188,6 +250,8 @@ using detail::kInf;
 // what it left loose back to the same searches (hybrid_step()).
 struct SymmetricMatcher::State {
     int n = 0;
+    int num_threads = 1;
+    bool scratch_ready = false;
     bool shape_ok = true;
     ErrorCode status = ErrorCode::Success;
     CostGraph g;
@@ -240,6 +304,16 @@ struct SymmetricMatcher::State {
     IndexedMinHeap heap;
 
     bool dense(int i) const { return row_dense[static_cast<std::size_t>(i)] != 0; }
+    void ensure_search_scratch() {
+        if (scratch_ready) return;
+        scratch_ready = true;
+        heap.reset(n);
+        touched.resize(static_cast<std::size_t>(n));
+        finalized.resize(static_cast<std::size_t>(n));
+        level.resize(static_cast<std::size_t>(n));
+        row_parent.assign(static_cast<std::size_t>(n), -1);
+        row_done.assign(static_cast<std::size_t>(n), 0);
+    }
     bool search(int start_col);
     void list_free_sparse();
     void repair();
@@ -251,9 +325,10 @@ struct SymmetricMatcher::State {
 };
 
 SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order, MatchingAlgorithm alg,
-                                   const AuctionOptions *auction)
+                                   const AuctionOptions *auction, int num_threads, bool save_initial)
     : s_(std::make_unique<State>()) {
     State &s = *s_;
+    s.num_threads = num_threads > 1 ? num_threads : 1;
     s.order = order;
     s.alg = alg;
     if (alg == MatchingAlgorithm::Hybrid) {
@@ -273,7 +348,7 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
         s.phase = 4;
         return;
     }
-    s.status = build_cost_graph(A, s.g);
+    s.status = build_cost_graph(A, s.g, s.num_threads);
     if (s.status != ErrorCode::Success) return;
     const CostGraph &g = s.g;
     auto &col_to_row = s.col_to_row;
@@ -282,13 +357,7 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
     const double *const gcost = g.cost.data();
 
     s.rs.assign(static_cast<std::size_t>(n), RowState{kInf, kInf});
-    s.heap.reset(n);
-    s.touched.resize(static_cast<std::size_t>(n));
-    s.finalized.resize(static_cast<std::size_t>(n));
-    s.level.resize(static_cast<std::size_t>(n));
     s.row_match.assign(static_cast<std::size_t>(n), -1);
-    s.row_parent.assign(static_cast<std::size_t>(n), -1);
-    s.row_done.assign(static_cast<std::size_t>(n), 0);
     s.row_dense.assign(static_cast<std::size_t>(n), 0);
     RowState *const R = s.rs.data();
     int *const M = s.row_match.data();
@@ -318,27 +387,52 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
     // start at 0 (phase 2 makes their edges feasible).
     std::vector<double> &v = s.v;
     v.assign(static_cast<std::size_t>(n), kInf);
-    for (int j = 0; j < n; ++j) {
-        if (is_dense(j)) continue;
-        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
-            const int i = grow[q];
-            if (is_dense(i)) continue;
-            R[i].u = std::min(R[i].u, gcost[q]);
+    if (!s.any_dense && g.row_min_cost.size() == static_cast<std::size_t>(n)) {
+        for (int i = 0; i < n; ++i) {
+            const double u = g.row_min_cost[static_cast<std::size_t>(i)];
+            R[i].u = (u == kInf) ? 0.0 : u;
         }
-    }
-    for (int i = 0; i < n; ++i) {
-        if (R[i].u == kInf) R[i].u = 0.0;
-    }
-    for (int j = 0; j < n; ++j) {
-        double vj = kInf;
-        if (!is_dense(j)) {
+    } else {
+        for (int j = 0; j < n; ++j) {
+            if (is_dense(j)) continue;
             for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
                 const int i = grow[q];
                 if (is_dense(i)) continue;
-                vj = std::min(vj, gcost[q] - R[i].u);
+                R[i].u = std::min(R[i].u, gcost[q]);
             }
         }
-        v[static_cast<std::size_t>(j)] = (vj == kInf) ? 0.0 : vj;
+        for (int i = 0; i < n; ++i) {
+            if (R[i].u == kInf) R[i].u = 0.0;
+        }
+    }
+#if defined(_OPENMP)
+    if (s.num_threads > 1 && n >= 8192) {
+        #pragma omp parallel for schedule(static) num_threads(s.num_threads)
+        for (int j = 0; j < n; ++j) {
+            double vj = kInf;
+            if (!is_dense(j)) {
+                for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                    const int i = grow[q];
+                    if (is_dense(i)) continue;
+                    vj = std::min(vj, gcost[q] - R[i].u);
+                }
+            }
+            v[static_cast<std::size_t>(j)] = (vj == kInf) ? 0.0 : vj;
+        }
+    } else
+#endif
+    {
+        for (int j = 0; j < n; ++j) {
+            double vj = kInf;
+            if (!is_dense(j)) {
+                for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                    const int i = grow[q];
+                    if (is_dense(i)) continue;
+                    vj = std::min(vj, gcost[q] - R[i].u);
+                }
+            }
+            v[static_cast<std::size_t>(j)] = (vj == kInf) ? 0.0 : vj;
+        }
     }
     const auto reduced = [&](Int q, int j) {
         return gcost[q] - R[grow[q]].u - v[static_cast<std::size_t>(j)];
@@ -361,39 +455,43 @@ SymmetricMatcher::SymmetricMatcher(const CscLower &A, MatchingSearchOrder order,
     // Length-2 augmentations on tight edges: free column j takes row i from
     // column jj, which moves to another free tight row. Rows never become
     // free again here, so each column's scan cursor only moves forward.
-    std::vector<Int> cursor(g.ptr.begin(), g.ptr.end() - 1);
-    for (int j = 0; j < n && matched < n; ++j) {
-        if (is_dense(j) || col_to_row[static_cast<std::size_t>(j)] >= 0) continue;
-        for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
-            const int i = grow[q];
-            if (is_dense(i) || reduced(q, j) > 0.0) continue;
-            const int jj = M[i];
-            if (jj < 0) continue;
-            Int &c = cursor[static_cast<std::size_t>(jj)];
-            int free_row = -1;
-            for (; c < gptr[jj + 1]; ++c) {
-                const int k = grow[c];
-                if (!is_dense(k) && M[k] < 0 && reduced(c, jj) <= 0.0) {
-                    free_row = k;
-                    ++c;
-                    break;
+    if (matched < n) {
+        std::vector<Int> cursor(g.ptr.begin(), g.ptr.end() - 1);
+        for (int j = 0; j < n && matched < n; ++j) {
+            if (is_dense(j) || col_to_row[static_cast<std::size_t>(j)] >= 0) continue;
+            for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                const int i = grow[q];
+                if (is_dense(i) || reduced(q, j) > 0.0) continue;
+                const int jj = M[i];
+                if (jj < 0) continue;
+                Int &c = cursor[static_cast<std::size_t>(jj)];
+                int free_row = -1;
+                for (; c < gptr[jj + 1]; ++c) {
+                    const int k = grow[c];
+                    if (!is_dense(k) && M[k] < 0 && reduced(c, jj) <= 0.0) {
+                        free_row = k;
+                        ++c;
+                        break;
+                    }
                 }
+                if (free_row < 0) continue;
+                M[free_row] = jj;
+                col_to_row[static_cast<std::size_t>(jj)] = free_row;
+                M[i] = j;
+                col_to_row[static_cast<std::size_t>(j)] = i;
+                ++matched;
+                break;
             }
-            if (free_row < 0) continue;
-            M[free_row] = jj;
-            col_to_row[static_cast<std::size_t>(jj)] = free_row;
-            M[i] = j;
-            col_to_row[static_cast<std::size_t>(j)] = i;
-            ++matched;
-            break;
         }
     }
     s.matched = matched;
 
-    s.init_col_to_row = col_to_row;
-    s.init_u.resize(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) s.init_u[static_cast<std::size_t>(i)] = R[i].u;
-    s.init_v = v;
+    if (save_initial) {
+        s.init_col_to_row = col_to_row;
+        s.init_u.resize(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) s.init_u[static_cast<std::size_t>(i)] = R[i].u;
+        s.init_v = v;
+    }
 
     // Phase 1 hides the dense rows from its searches by a distance of -inf,
     // which no candidate distance beats (dense_duals() restores inf).
@@ -447,6 +545,7 @@ MatchingResult SymmetricMatcher::diagonal_result() {
 // success the duals are updated and the matching augmented. In phase 1 the
 // dense rows are invisible (their distance is -inf, see the constructor).
 bool SymmetricMatcher::State::search(int start_col) {
+    ensure_search_scratch();
     RowState *const R = rs.data();
     int *const M = row_match.data();
     int *const P = row_parent.data();
@@ -743,6 +842,7 @@ bool SymmetricMatcher::State::hybrid_step(long long work_budget) {
     repair();  // relists search_order (every free sparse column), next_col = 0
     canon_due = true;
     if (!hybrid_failed.empty()) {
+        ensure_search_scratch();
         // Their phase-1 search already failed: phase 3 takes them, as in
         // the plain run (row_done is clear between searches).
         for (int j : hybrid_failed) row_done[static_cast<std::size_t>(j)] = 1;
@@ -855,6 +955,7 @@ bool SymmetricMatcher::advance(long long work_budget) {
 // Cost: one pass over the matched columns plus n heap operations (+0.8-1.0
 // passes on the probe's matrices), counted in work().
 void SymmetricMatcher::State::canonical_duals() {
+    ensure_search_scratch();
     canon_due = false;
     RowState *const R = rs.data();
     const Int *const gptr = g.ptr.data();
@@ -934,20 +1035,46 @@ MatchingResult SymmetricMatcher::State::result(const std::vector<Int> &c2r, cons
     if (u_rows == nullptr || vcol == nullptr) return res;
     const std::vector<double> &u = *u_rows;
     std::vector<double> vt = *vcol;
-    for (int j = 0; j < n; ++j) {
-        const int r = static_cast<int>(c2r[static_cast<std::size_t>(j)]);
-        for (Int q = g.ptr[static_cast<std::size_t>(j)]; q < g.ptr[static_cast<std::size_t>(j) + 1]; ++q) {
-            if (g.row[static_cast<std::size_t>(q)] == r) {
-                vt[static_cast<std::size_t>(j)] = g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
-                break;
+    const bool have_log = g.log_col_max.size() == static_cast<std::size_t>(n);
+#if defined(_OPENMP)
+    if (num_threads > 1 && n >= 8192) {
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+        for (int j = 0; j < n; ++j) {
+            const int r = static_cast<int>(c2r[static_cast<std::size_t>(j)]);
+            for (Int q = g.ptr[static_cast<std::size_t>(j)]; q < g.ptr[static_cast<std::size_t>(j) + 1]; ++q) {
+                if (g.row[static_cast<std::size_t>(q)] == r) {
+                    vt[static_cast<std::size_t>(j)] = g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
+                    break;
+                }
             }
         }
-    }
-    for (int i = 0; i < n; ++i) {
-        const double log_s = 0.5 * (u[static_cast<std::size_t>(i)] + vt[static_cast<std::size_t>(i)] -
-                                    std::log(g.col_max[static_cast<std::size_t>(i)]));
-        const double clamped_log = std::clamp(log_s, -340.0, 340.0);
-        res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);
+        #pragma omp parallel for schedule(static) num_threads(num_threads)
+        for (int i = 0; i < n; ++i) {
+            const double lc = have_log ? g.log_col_max[static_cast<std::size_t>(i)]
+                                       : std::log(g.col_max[static_cast<std::size_t>(i)]);
+            const double log_s = 0.5 * (u[static_cast<std::size_t>(i)] + vt[static_cast<std::size_t>(i)] - lc);
+            const double clamped_log = std::clamp(log_s, -340.0, 340.0);
+            res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);
+        }
+    } else
+#endif
+    {
+        for (int j = 0; j < n; ++j) {
+            const int r = static_cast<int>(c2r[static_cast<std::size_t>(j)]);
+            for (Int q = g.ptr[static_cast<std::size_t>(j)]; q < g.ptr[static_cast<std::size_t>(j) + 1]; ++q) {
+                if (g.row[static_cast<std::size_t>(q)] == r) {
+                    vt[static_cast<std::size_t>(j)] = g.cost[static_cast<std::size_t>(q)] - u[static_cast<std::size_t>(r)];
+                    break;
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i) {
+            const double lc = have_log ? g.log_col_max[static_cast<std::size_t>(i)]
+                                       : std::log(g.col_max[static_cast<std::size_t>(i)]);
+            const double log_s = 0.5 * (u[static_cast<std::size_t>(i)] + vt[static_cast<std::size_t>(i)] - lc);
+            const double clamped_log = std::clamp(log_s, -340.0, 340.0);
+            res.scale[static_cast<std::size_t>(i)] = std::exp(clamped_log);
+        }
     }
     return res;
 }
@@ -988,6 +1115,159 @@ ErrorCode compute_matching_scale(const CscLower &A,
     }
     scale = std::move(mr.scale);
     return ErrorCode::Success;
+}
+
+MatchingResult compute_rescue_matching_scale(const CscLower &A,
+                                             double max_free_share,
+                                             int num_threads) {
+    AuctionOptions opt;
+    opt.eps_start = 1.0;
+    opt.eps_factor = 4.0;
+    opt.eps_final = 0.1;
+    opt.switch_passes = 2.0;
+    opt.bid_cap = 10.0;
+    SymmetricMatcher m(A, MatchingSearchOrder::Column, MatchingAlgorithm::Hybrid, &opt, num_threads,
+                       /*save_initial=*/false);
+    SymmetricMatcher::State &s = *m.s_;
+    if (s.status != ErrorCode::Success || s.phase == 4) return m.current();
+    const int n = s.n;
+    const auto build_scale = [&](bool tighten_matched) {
+        MatchingResult res;
+        res.status = s.status;
+        res.matched_rank = s.matched;
+        if (res.status != ErrorCode::Success || n == 0) return res;
+        res.scale.resize(static_cast<std::size_t>(n));
+        const bool have_log = s.g.log_col_max.size() == static_cast<std::size_t>(n);
+        const Int *const gptr = s.g.ptr.data();
+        const int *const grow = s.g.row.data();
+        const double *const gcost = s.g.cost.data();
+        const auto compute_i = [&](int i) {
+            double vi = s.v[static_cast<std::size_t>(i)];
+            if (tighten_matched) {
+                const int r = static_cast<int>(s.col_to_row[static_cast<std::size_t>(i)]);
+                if (r >= 0) {
+                    for (Int q = gptr[i]; q < gptr[i + 1]; ++q) {
+                        if (grow[q] == r) {
+                            vi = gcost[q] - s.rs[static_cast<std::size_t>(r)].u;
+                            break;
+                        }
+                    }
+                }
+            }
+            const double lc = have_log ? s.g.log_col_max[static_cast<std::size_t>(i)]
+                                       : std::log(s.g.col_max[static_cast<std::size_t>(i)]);
+            const double log_s = 0.5 * (s.rs[static_cast<std::size_t>(i)].u + vi - lc);
+            res.scale[static_cast<std::size_t>(i)] = std::exp(std::clamp(log_s, -340.0, 340.0));
+        };
+#if defined(_OPENMP)
+        if (s.num_threads > 1 && n >= 8192) {
+            #pragma omp parallel for schedule(static) num_threads(s.num_threads)
+            for (int i = 0; i < n; ++i) compute_i(i);
+        } else
+#endif
+        {
+            for (int i = 0; i < n; ++i) compute_i(i);
+        }
+        return res;
+    };
+    const int stop_free = std::max(0, static_cast<int>(max_free_share * static_cast<double>(n)));
+    if (n - s.matched <= stop_free) {
+        if (s.any_dense) s.dense_duals();
+        s.phase = 4;
+        return build_scale(/*tighten_matched=*/true);
+    }
+    s.list_free_sparse();
+    const int n_free = static_cast<int>(s.search_order.size());
+    bool switch_to_auction = false;
+    for (; s.next_col < n_free && s.matched < n; ++s.next_col) {
+        if (n - s.matched <= stop_free) {
+            if (s.any_dense) s.dense_duals();
+            s.phase = 4;
+            return build_scale(/*tighten_matched=*/true);
+        }
+        if (n >= 4000 && opt.switch_passes >= 0.0 && static_cast<double>(s.work) >= s.switch_work) {
+            switch_to_auction = true;
+            break;
+        }
+        s.search(s.search_order[static_cast<std::size_t>(s.next_col)]);
+    }
+    if (n - s.matched <= stop_free) {
+        if (s.any_dense) s.dense_duals();
+        s.phase = 4;
+        return build_scale(/*tighten_matched=*/true);
+    }
+    if (switch_to_auction) {
+        s.hybrid_queue.assign(s.search_order.begin() + s.next_col, s.search_order.end());
+        s.hybrid_reset_u.resize(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i)
+            s.hybrid_reset_u[static_cast<std::size_t>(i)] = s.rs[static_cast<std::size_t>(i)].u;
+        s.init_v = s.v;
+        int other_free = 0;
+        for (int j = 0; j < n; ++j)
+            if (s.col_to_row[static_cast<std::size_t>(j)] < 0) ++other_free;
+        other_free = std::max(0, other_free - static_cast<int>(s.hybrid_queue.size()));
+        const int auction_stop = std::max(0, stop_free - other_free);
+        const detail::AuctionStatus ast = detail::auction_advance(
+            s.g, s.row_dense.data(), s.rs, s.v, s.row_match, s.col_to_row,
+            s.hybrid_queue, s.auction_opt, s.auction, s.work, -1, auction_stop);
+        int matched = 0;
+        for (int j = 0; j < n; ++j)
+            if (s.col_to_row[static_cast<std::size_t>(j)] >= 0) ++matched;
+        s.matched = matched;
+        if (ast == detail::AuctionStatus::Done || n - s.matched <= stop_free) {
+            const Int *const gptr = s.g.ptr.data();
+            const int *const grow = s.g.row.data();
+            const double *const gcost = s.g.cost.data();
+            for (int j = 0; j < n; ++j) {
+                if (s.dense(j) || s.col_to_row[static_cast<std::size_t>(j)] < 0) continue;
+                double vj = kInf;
+                for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                    const int i = grow[q];
+                    if (!s.dense(i)) vj = std::min(vj, gcost[q] - s.rs[static_cast<std::size_t>(i)].u);
+                }
+                if (vj < kInf) s.v[static_cast<std::size_t>(j)] = vj;
+            }
+            s.canonical_duals();
+            // canonical_duals() caps free columns' v[j] at init_v[j] (for full
+            // Hybrid's phase 3). In partial rescue those columns are not
+            // searched further, so raise each free sparse column's v[j] to its
+            // tightest feasible value min_i (c_ij - u_i).
+            for (int j = 0; j < n; ++j) {
+                if (s.dense(j) || s.col_to_row[static_cast<std::size_t>(j)] >= 0) continue;
+                double vj = kInf;
+                for (Int q = gptr[j]; q < gptr[j + 1]; ++q) {
+                    const int i = grow[q];
+                    if (!s.dense(i)) vj = std::min(vj, gcost[q] - s.rs[static_cast<std::size_t>(i)].u);
+                }
+                if (vj < kInf) s.v[static_cast<std::size_t>(j)] = vj;
+            }
+            if (s.any_dense) s.dense_duals();
+            s.phase = 4;
+            return build_scale(/*tighten_matched=*/false);
+        }
+        s.repair();
+        s.canonical_duals();
+        if (s.any_dense) s.dense_duals();
+        s.phase = 3;
+        s.next_col = 0;
+    } else {
+        if (s.any_dense) s.dense_duals();
+        s.phase = 3;
+        s.next_col = 0;
+    }
+    for (; s.next_col < n && s.matched < n; ++s.next_col) {
+        if (n - s.matched <= stop_free) break;
+        const int j = s.next_col;
+        if (s.col_to_row[static_cast<std::size_t>(j)] < 0) {
+            if (!s.search(j)) {
+                s.status = ErrorCode::SingularMatrix;
+                s.phase = 4;
+                return build_scale(/*tighten_matched=*/true);
+            }
+        }
+    }
+    s.phase = 4;
+    return build_scale(/*tighten_matched=*/true);
 }
 
 } // namespace smf

@@ -20,11 +20,13 @@ struct CostGraph {
     std::vector<int> row;
     std::vector<double> cost;
     std::vector<double> col_max;
+    std::vector<double> log_col_max;
+    std::vector<double> row_min_cost;  // populated on cleaned fast path: min_j cost(i, j)
 };
 
 // Builds g from A (shape already validated). IllegalValue on a non-finite
 // entry, SingularMatrix on a column without nonzeros.
-ErrorCode build_cost_graph(const CscLower &A, CostGraph &g);
+ErrorCode build_cost_graph(const CscLower &A, CostGraph &g, int num_threads = 1);
 
 // The per-row state every scanned edge reads: the row dual and the search
 // distance, 16 bytes, so four rows share a cache line (the searches are

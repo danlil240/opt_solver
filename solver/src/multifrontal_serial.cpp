@@ -249,11 +249,14 @@ struct FrontPass {
 // decided only once phase 2 has reported that top front.
 class EarlyGate {
  public:
-  // `works`: the subtree engine's per-supernode slots (null: serial).
+  // `works`: the subtree engine's per-supernode slots (null: serial or unordered).
+  // `unordered`: when true (threads > 1, non-deterministic), decide directly from
+  // the running totals of reported fronts instead of waiting on a postorder prefix
+  // (which stalls on the first top front during Phase 1).
   EarlyGate(const AnalysisKeep &keep, const EarlyWorkStop &e, long long at,
-            std::atomic<long long> *works)
-      : keep_(keep), at_(at), proj_(e.proj), works_(works) {
-    if (works_ != nullptr)
+            std::atomic<long long> *works, bool unordered = false)
+      : keep_(keep), at_(at), proj_(e.proj), works_(works), unordered_(unordered) {
+    if (works_ != nullptr && !unordered_)
       for (std::size_t s = 0; s < keep.supernodes.size(); ++s)
         works_[s].store(-1, std::memory_order_relaxed);
   }
@@ -261,6 +264,18 @@ class EarlyGate {
   // Supernode s, about to run with work w: true = stop the factorization.
   bool reach(Int s, long long w) {
     if (verdict_.load(std::memory_order_acquire) != kOpen) return stopped();
+    if (unordered_) {
+      const long long f = static_cast<long long>(keep_.front_size(s));
+      const long long wf =
+          static_cast<long long>(keep_.supernodes[static_cast<std::size_t>(s)].width()) * f * f;
+      const long long tf = total_free_.fetch_add(wf, std::memory_order_relaxed) + wf;
+      const long long tw = total_.fetch_add(w, std::memory_order_relaxed) + w;
+      if (tw > at_ && static_cast<double>(tw) > proj_ * static_cast<double>(tf)) {
+        verdict_.store(kStop, std::memory_order_release);
+        return true;
+      }
+      return stopped();
+    }
     if (works_ == nullptr) {  // the serial engine: s is the cursor's front
       assert(keep_.postorder[cursor_] == s);
       step(w);
@@ -280,26 +295,27 @@ class EarlyGate {
   }
 
  private:
-  static constexpr int kOpen = 0, kGo = 1, kStop = 2;
+  static constexpr int kOpen = 0, kStop = 2;
   bool stopped() const { return verdict_.load(std::memory_order_acquire) == kStop; }
   // The front at the cursor, with work w.
   void step(long long w) {
     const Int s = keep_.postorder[cursor_];
     const double f = static_cast<double>(keep_.front_size(s));
     free_done_ += static_cast<double>(keep_.supernodes[static_cast<std::size_t>(s)].width()) * f * f;
-    if (done_ <= at_ && done_ + w > at_) {
-      const bool stop = static_cast<double>(done_ + w) > proj_ * free_done_;
-      verdict_.store(stop ? kStop : kGo, std::memory_order_release);
-    }
     done_ += w;
+    if (done_ > at_ && static_cast<double>(done_) > proj_ * free_done_) {
+      verdict_.store(kStop, std::memory_order_release);
+    }
     ++cursor_;
   }
 
   const AnalysisKeep &keep_;
   long long at_;
   double proj_;
-  std::atomic<long long> *works_;     // subtree engine: reported works, -1 none yet
+  std::atomic<long long> *works_;     // subtree engine (det): reported works, -1 none yet
+  bool unordered_ = false;
   std::atomic<long long> total_{0};   // subtree engine: sum of the reported works
+  std::atomic<long long> total_free_{0};  // unordered mode: sum of delay-free works of reported fronts
   std::mutex mu_;
   std::size_t cursor_ = 0;  // postorder index of the next front to account
   long long done_ = 0;
@@ -1532,8 +1548,9 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
   std::optional<EarlyGate> early_gate;
   if (work_armed && early.on()) {
     const double at = std::floor(early.ratio * early.free_work);
+    const bool unordered = threads > 1 && !det;
     std::atomic<long long> *works = nullptr;
-    if (threads > 1) {
+    if (threads > 1 && !unordered) {
       TreeParallelBuffers &b = buffers();
       if (b.early_works_cap < ns) {
         b.early_works = std::make_unique<std::atomic<long long>[]>(ns);
@@ -1543,7 +1560,8 @@ ErrorCode multifrontal_factor_serial(const AnalysisKeep &keep, const Int *acp,
     }
     early_gate.emplace(
         keep, early,
-        at >= 9.0e18 ? std::numeric_limits<long long>::max() : static_cast<long long>(at), works);
+        at >= 9.0e18 ? std::numeric_limits<long long>::max() : static_cast<long long>(at), works,
+        unordered);
   }
 
   const bool in_place = ctrl.factor_in_place && threads > 1;

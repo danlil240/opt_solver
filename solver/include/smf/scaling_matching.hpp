@@ -103,7 +103,8 @@ public:
     /// phase is the same for both.
     explicit SymmetricMatcher(const CscLower &A, MatchingSearchOrder order = MatchingSearchOrder::Column,
                               MatchingAlgorithm alg = MatchingAlgorithm::ShortestPath,
-                              const AuctionOptions *auction = nullptr);
+                              const AuctionOptions *auction = nullptr, int num_threads = 1,
+                              bool save_initial = true);
     ~SymmetricMatcher();
     SymmetricMatcher(const SymmetricMatcher &) = delete;
     SymmetricMatcher &operator=(const SymmetricMatcher &) = delete;
@@ -157,6 +158,9 @@ public:
     MatchingResult initial() const;
 
 private:
+    friend MatchingResult compute_rescue_matching_scale(const CscLower &A,
+                                                        double max_free_share,
+                                                        int num_threads);
     struct State;
     std::unique_ptr<State> s_;
 };
@@ -164,5 +168,14 @@ private:
 ErrorCode compute_matching_scale(const CscLower &A,
                                  std::vector<double> &scale,
                                  int print_level = 0);
+
+/// Approximate maximum-product matching scaling for scale-on-delay rescue:
+/// runs the greedy initial phase and shortest-path searches up to
+/// `max_free_share * n` free columns, switching past a small search work
+/// threshold to a partial epsilon-scaling auction (stopping at the same free
+/// share, with canonical dual lifting).
+MatchingResult compute_rescue_matching_scale(const CscLower &A,
+                                             double max_free_share,
+                                             int num_threads = 1);
 
 } // namespace smf

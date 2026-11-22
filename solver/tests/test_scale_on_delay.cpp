@@ -326,7 +326,7 @@ TEST(ScaleOnDelay, CheapDelaysDoNotFire) {
         EXPECT_EQ(i_d.num_positive, kG * kG);
         EXPECT_EQ(i_d.num_negative, kM);
         EXPECT_LT(i_d.front_work, i_off.front_work);
-        EXPECT_GT(i_try.front_work + i_d.front_work, i_off.front_work);
+        EXPECT_LT(i_try.front_work, i_off.front_work);
         Info i_d2, i_2;
         ASSERT_EQ(s.factor(*ak, dflt, i_d2, fk_d), FactorStatus::Success);
         EXPECT_EQ(i_d2.delay_stops, 0);
@@ -684,7 +684,9 @@ TEST(ScaleOnDelay, ProbeErrorAndNaN) {
                 fk.delay_omega);
     EXPECT_GT(omega, 0.0);
     EXPECT_LT(omega, 1e-12);
-    EXPECT_EQ(omega, fk.delay_omega);  // what the trigger recorded
+    // Fresh rescales skip the eager probe (delay_omega < 0); a later reuse
+    // validates its own probe against kReuseOmegaMax.
+    EXPECT_LT(fk.delay_omega, 0.0);
     std::vector<double> bad = A.values;
     bad[bad.size() / 2] = std::numeric_limits<double>::quiet_NaN();
     EXPECT_EQ(scale_on_delay_probe(*ak, bad, fk, ctrl), std::numeric_limits<double>::infinity());
@@ -1185,17 +1187,17 @@ TEST(ScaleOnDelay, EarlyStopEndsATryHeadedPastTheLimit) {
 // limit, at a modest rate, is let through: the same factor as with the rule
 // off, no stop, no rescale.
 TEST(ScaleOnDelay, EarlyStopLetsAModestTryThrough) {
-    // Mildly scaled, a weak (2,2) block: unscaled work > early_ratio (4x)
-    // and < scale_on_delay_ratio (16x) with projection below early_proj (8x).
-    // Step spread slightly if STL distribution differences put r right on 4.0.
+    // Mildly scaled, a weak (2,2) block: unscaled work > early_ratio
+    // and < early_proj (and < scale_on_delay_ratio), so the try is let through.
     const Control ctrl = base_control();
-    CscLower A = kkt(kG, kM, 4.1, 0.5, -0.01);
+    CscLower A = kkt(kG, kM, 4.1, 0.25, -0.01);
     double r = unscaled_ratio(A, ctrl);
     if (r <= ctrl.scale_on_delay_early_ratio) {
-        A = kkt(kG, kM, 4.1, 0.6, -0.01);
+        A = kkt(kG, kM, 4.1, 0.35, -0.01);
         r = unscaled_ratio(A, ctrl);
     }
     ASSERT_GT(r, ctrl.scale_on_delay_early_ratio) << "premise: crosses the early ratio";
+    ASSERT_LT(r, ctrl.scale_on_delay_early_proj) << "premise: below early_proj";
     ASSERT_LT(r, ctrl.scale_on_delay_ratio) << "premise: within the limit";
 
     Solver s;
@@ -1305,6 +1307,57 @@ TEST(ScaleOnDelay, EarlyStopDeterministicAcrossThreadCounts) {
         if (x_ref.empty()) x_ref = x;
         else EXPECT_EQ(x, x_ref) << "threads " << threads;
     }
+}
+
+// Non-deterministic parallel mode: EarlyGate checks running work totals directly
+// across threads so a cascading try stops during Phase 1 without waiting for
+// top fronts in postorder.
+TEST(ScaleOnDelay, EarlyStopUnorderedParallelStopsInPhase1) {
+    const CscLower A = kkt(90, 300, 4.1, 3.0);
+    Control ctrl = base_control();
+    ctrl.deterministic = false;
+    ctrl.num_threads = 4;
+    ctrl.auto_threads = false;
+    Solver s;
+    Info ia;
+    auto ak = s.analyse(A, ctrl, ia);
+    ASSERT_NE(ak.get(), nullptr);
+    const double F = delay_free_front_work(*ak);
+    const double big = 1e6 * F;
+    NumericWorkspace ws;
+    FactorKeep f_stop;
+    Info i_stop;
+    ASSERT_EQ(factor_indef(*ak, A, ctrl, i_stop, f_stop, ws, big, early_of(*ak, ctrl)),
+              FactorStatus::MaxPivotDelays);
+    EXPECT_GT(i_stop.parallel_subtrees, 1);
+    EXPECT_EQ(i_stop.top_part_fronts, 0) << "should stop in Phase 1 before top fronts run";
+    EXPECT_LT(i_stop.front_work, ctrl.scale_on_delay_ratio * F);
+}
+
+// compute_rescue_matching_scale: positive finite dual-feasible scaling
+// (|s_i a_ij s_j| <= 1 + 1e-10), bitwise identical across thread counts.
+TEST(ScaleOnDelay, RescueMatchingScaleDualFeasibleAndThreadInvariant) {
+    const CscLower A = kkt(90, 300, 4.1, 3.0);
+    const MatchingResult r1 = compute_rescue_matching_scale(A, 0.02, 1);
+    const MatchingResult r4 = compute_rescue_matching_scale(A, 0.02, 4);
+    ASSERT_EQ(r1.status, ErrorCode::Success);
+    ASSERT_EQ(r4.status, ErrorCode::Success);
+    ASSERT_EQ(r1.scale.size(), static_cast<std::size_t>(A.n));
+    EXPECT_EQ(r1.scale, r4.scale);
+    double max_scaled = 0.0;
+    for (Int j = 0; j < A.n; ++j) {
+        EXPECT_GT(r1.scale[static_cast<std::size_t>(j)], 0.0);
+        EXPECT_TRUE(std::isfinite(r1.scale[static_cast<std::size_t>(j)]));
+        for (Int p = A.col_ptr[static_cast<std::size_t>(j)];
+             p < A.col_ptr[static_cast<std::size_t>(j) + 1]; ++p) {
+            const Int i = A.row_idx[static_cast<std::size_t>(p)];
+            const double v = std::abs(A.values[static_cast<std::size_t>(p)]) *
+                             r1.scale[static_cast<std::size_t>(i)] *
+                             r1.scale[static_cast<std::size_t>(j)];
+            max_scaled = std::max(max_scaled, v);
+        }
+    }
+    EXPECT_LE(max_scaled, 1.0 + 1e-10);
 }
 
 // --- Control::static_fallback_after_cascade, Pivoting::Static and the

@@ -189,35 +189,18 @@ struct Control {
     double         scale_on_delay_next_ratio = 4.0;
     // Conditional early stop of a first try whose limit is above
     // scale_on_delay_early_ratio times the delay-free front work F (the
-    // full-ratio try; one under scale_on_delay_next_ratio is untouched): at
-    // the front whose work takes the count past early_ratio x F, the try
-    // stops, as a work-limit trip (the matching scaling follows), when its
-    // front work so far, that front included, exceeds
+    // full-ratio try; one under scale_on_delay_next_ratio is untouched): once
+    // front work passes early_ratio x F, the try stops as a work-limit trip
+    // (the matching scaling follows) as soon as its front work so far exceeds
     // scale_on_delay_early_proj times the delay-free work of the fronts
-    // reached so far (that front included): the try's inflation
-    // extrapolated. Otherwise it runs on to the full limit. The fronts are
-    // taken in postorder whatever the engine, so the decision is the same
-    // at every num_threads in deterministic mode. Probe (2026-11-02,
-    // fronttier recommended track, 1T, full limit 16): tries that ended
-    // past 16x measured 10.9-84.7 at the 4x crossing, tries let through
-    // between 4x and 16x 4.0-6.4 (case500's first step, 6.25 and ending at
-    // 16.6, is left to the full limit as before). Local 1T wall against the
-    // full limit alone: pde_control_120 rec 0.66, cops_glider_400 0.83,
-    // ncvxqp9 0.89; pglib300, pglib500 and cops_rocket_800 unchanged, with
-    // the full limit's rescale counts (a fixed limit of 4 cost them extra
-    // rescales, 1.06-1.20 wall). i9-12900K gate (interleaved A/B against the
-    // rule off, small_kkt + large_kkt + hard_indef, 3 rounds, all splits; the
-    // threshold was picked on all splits, so heldout is no independent
-    // check): 1T recommended geomean 0.987 (tuning 0.995, heldout 0.965),
-    // ipopt 0.999 (never armed); proj 7, 8 and 10 decide the same on the same
-    // 12 case-tracks, no rescale count or accuracy changes. 1T wins (rec):
-    // pde_control_120 0.61, cops_glider_400 0.83, ncvxqp9 0.85,
-    // cops_chain_800 0.93, pglib case4661 0.94, case1354/2869 0.96. 8T:
-    // recommended 0.993, ipopt 1.002 (pde_control_120 0.84, glider 0.81,
-    // ncvxqp9 0.87; worst 1.09, cont-300 ipopt, a path never armed).
+    // reached so far (its inflation extrapolated). In deterministic mode the
+    // fronts are accounted in postorder whatever the engine, so the decision
+    // is identical at every num_threads; in non-deterministic parallel mode
+    // the running totals are checked directly across all threads so Phase 1
+    // subtrees stop immediately without waiting for top fronts.
     // Negative early_ratio: off.
-    double         scale_on_delay_early_ratio = 4.0;
-    double         scale_on_delay_early_proj = 8.0;
+    double         scale_on_delay_early_ratio = 0.5;
+    double         scale_on_delay_early_proj = 4.5;
     // The same conditional early stop on a next try (the one under
     // scale_on_delay_next_ratio after a costly let-through), at its own
     // crossing ratio and projection; only used with scale_on_delay_carry

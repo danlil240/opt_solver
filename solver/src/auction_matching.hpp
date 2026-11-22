@@ -66,6 +66,7 @@ AuctionStatus auction_advance(const CostGraph &g, const std::uint8_t *dense,
                               std::vector<RowState> &rs, std::vector<double> &v,
                               std::vector<int> &row_match, std::vector<Int> &col_to_row,
                               const std::vector<int> &first_queue, const AuctionOptions &opt,
-                              AuctionState &st, long long &work, long long work_budget);
+                              AuctionState &st, long long &work, long long work_budget,
+                              int stop_free = 0);
 
 } // namespace smf::detail
