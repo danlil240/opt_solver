@@ -168,16 +168,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # libopenblas is pinned below 0.3.34: the conda-forge win-64 0.3.34
+      # builds crash (access violation in dgemm_kernel_HASWELL/ZEN) on valid
+      # small dgemm/dsyrk calls on AMD Zen 4/5 runners that expose AVX-512,
+      # while 0.3.33 is fine. See conda-forge/openblas-feedstock#196. Lift
+      # the pin once a fixed build ships.
       - uses: mamba-org/setup-micromamba@v2
         with:
           environment-name: smfci
           create-args: >-
             libblas=*=*openblas
+            libopenblas<0.3.34
             liblapack
             libcblas
             blas-devel
             suitesparse
             python=3.12
+
+      - name: Show runner CPU and OpenBLAS build
+        shell: bash -el {0}
+        run: |
+          powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"
+          micromamba list -n smfci openblas
 
       - name: Configure & build
         shell: bash -el {0}
