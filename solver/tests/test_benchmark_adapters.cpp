@@ -808,3 +808,92 @@ TEST(BenchmarkAdapters, CudssSolvesPoisson) {
 }
 
 #endif // SMF_BENCH_CUDSS
+
+TEST(BenchmarkAdapters, PanuaUnavailableWhenLibOrLicenseMissing) {
+    EnvScope env;
+    env.set("SMF_PANUA_PARDISO_LIB", "__nonexistent_panua_lib__.dll");
+
+    auto adapter = make_solver_adapter("panua_pardiso");
+    ASSERT_NE(adapter.get(), nullptr);
+    const AdapterIdentity ident = adapter->identity();
+    EXPECT_EQ(ident.solver_id, "panua_pardiso");
+    EXPECT_FALSE(ident.available);
+
+    const CscLower I3 = make_identity_spd_3x3();
+    EXPECT_EQ(adapter->analyse(I3), Outcome::Unavailable);
+    EXPECT_FALSE(adapter->stats().reason.empty());
+}
+
+TEST(BenchmarkAdapters, PanuaAndMklCoexistInSameProcess) {
+    const char *panua_lib = std::getenv("SMF_PANUA_PARDISO_LIB");
+    if (panua_lib == nullptr || *panua_lib == '\0') {
+        GTEST_SKIP() << "SMF_PANUA_PARDISO_LIB not set";
+    }
+
+    auto mkl = make_solver_adapter("mkl_pardiso");
+    auto panua = make_solver_adapter("panua_pardiso");
+    ASSERT_NE(mkl.get(), nullptr);
+    ASSERT_NE(panua.get(), nullptr);
+
+    const AdapterIdentity mkl_id = mkl->identity();
+    const AdapterIdentity panua_id = panua->identity();
+    EXPECT_EQ(mkl_id.solver_id, "mkl_pardiso");
+    EXPECT_EQ(panua_id.solver_id, "panua_pardiso");
+    ASSERT_TRUE(mkl_id.available);
+    if (!panua_id.available) {
+        const std::string reason = panua->stats().reason;
+        if (reason.find("license") != std::string::npos) {
+            GTEST_SKIP() << reason;
+        }
+        FAIL() << "panua_pardiso unavailable: " << reason;
+    }
+
+    CscLower spd3;
+    spd3.n = 3;
+    spd3.col_ptr = {0, 1, 2, 3};
+    spd3.row_idx = {0, 1, 2};
+    spd3.values = {2.0, 4.0, 8.0};
+
+    const CscLower indef2 = make_exchange_2x2_indef();
+
+    for (SolverAdapter *ad : {mkl.get(), panua.get()}) {
+        const std::string id = ad->identity().solver_id;
+        SCOPED_TRACE("adapter=" + id);
+
+        // SPD 3x3: diag(2, 4, 8)
+        {
+            Control ctrl;
+            ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+            ad->configure(ctrl, "recommended");
+            ASSERT_EQ(ad->analyse(spd3), Outcome::Success) << ad->stats().reason;
+            ASSERT_EQ(ad->factor(spd3.values), Outcome::Success) << ad->stats().reason;
+            const std::vector<double> b = {2.0, 8.0, 24.0};
+            std::vector<double> x = b;
+            ASSERT_EQ(ad->solve(x, 1), Outcome::Success) << ad->stats().reason;
+            EXPECT_TRUE(is_qualified_validation(validate(spd3, b, x, 1)));
+            if (id == "panua_pardiso") {
+                EXPECT_GT(ad->stats().factor_entries, 0);
+            }
+        }
+
+        // Indefinite 2x2 exchange matrix
+        {
+            Control ctrl;
+            ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+            ad->configure(ctrl, "recommended");
+            ASSERT_EQ(ad->analyse(indef2), Outcome::Success) << ad->stats().reason;
+            ASSERT_EQ(ad->factor(indef2.values), Outcome::Success) << ad->stats().reason;
+            const std::vector<double> b = {1.0, 2.0};
+            std::vector<double> x = b;
+            ASSERT_EQ(ad->solve(x, 1), Outcome::Success) << ad->stats().reason;
+            EXPECT_TRUE(is_qualified_validation(validate(indef2, b, x, 1)));
+            const AdapterStats st = ad->stats();
+            EXPECT_EQ(st.inertia_pos, 1);
+            EXPECT_EQ(st.inertia_neg, 1);
+            EXPECT_EQ(st.inertia_zero, 0);
+            if (id == "panua_pardiso") {
+                EXPECT_GT(st.factor_entries, 0);
+            }
+        }
+    }
+}
