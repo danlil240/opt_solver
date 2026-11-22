@@ -6,12 +6,14 @@ Per (class, track, thread count) it reports, for a chosen split:
     (shift 10 ms; the subject itself and any record failing the accuracy gate
     are never the "best competitor"). The competitor set is fixed per class and
     does not depend on the thread count (ruling R43):
-      indefinite (small_kkt, large_kkt, hard_indef): ma57, ma97, ssids,
-        mkl_pardiso, mumps
-      spd: cholmod, mkl_pardiso, ma57, ma97, ssids, mumps
-    Other solvers (ma27, cudss, ...) are reference columns only. A set member
-    with no record in a thread-count table (e.g. a serial-only solver in the
-    8-thread table) is reported as missing for that table,
+      indefinite (small_kkt, large_kkt, hard_indef, public_indef_kkt,
+        public_indef_pde): ma57, ma97, ssids, mkl_pardiso, panua_pardiso, mumps
+      spd (spd, public_spd): cholmod, mkl_pardiso, panua_pardiso, ma57, ma97,
+        ssids, mumps
+    Other solvers (ma27, cudss, ...) are reference columns only (use
+    --include-gpu for a dual CPU-only + GPU head-to-head + incl.-GPU summary).
+    A set member with no record in a thread-count table (e.g. a serial-only
+    solver in the 8-thread table) is reported as missing for that table,
   * solved counts, accuracy failures and hard failures per solver,
   * implausible records: factor throughput above --max-gflops-per-thread x
     threads (a mis-threaded run); excluded like failures and listed,
@@ -63,15 +65,24 @@ DEFAULT_SHIFT_MS = 10.0
 # 1300 GF/s). Records without positive finite flops are not judged.
 DEFAULT_MAX_GFLOPS_PER_THREAD = 165.0
 DEFAULT_TAUS = [1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 5.0, 10.0, 20.0, 50.0, 100.0]
-CLASS_ORDER = ["small_kkt", "large_kkt", "hard_indef", "spd"]
-INDEF_COMPETITORS = ("ma57", "ma97", "ssids", "mkl_pardiso", "mumps")
-SPD_COMPETITORS = ("cholmod", "mkl_pardiso", "ma57", "ma97", "ssids", "mumps")
+CLASS_ORDER = [
+    "small_kkt",
+    "large_kkt",
+    "hard_indef",
+    "spd",
+    "public_indef_kkt",
+    "public_indef_pde",
+    "public_spd",
+]
+GPU_SOLVERS: frozenset[str] = frozenset({"cudss"})
+INDEF_COMPETITORS = ("ma57", "ma97", "ssids", "mkl_pardiso", "panua_pardiso", "mumps")
+SPD_COMPETITORS = ("cholmod", "mkl_pardiso", "panua_pardiso", "ma57", "ma97", "ssids", "mumps")
 
 
 def competitor_set(cls: str) -> tuple[str, ...]:
     """Solvers eligible as "best competitor" for a class (R43). Fixed per class,
     independent of thread count; ma27 / cudss are reference columns only."""
-    return SPD_COMPETITORS if cls == "spd" else INDEF_COMPETITORS
+    return SPD_COMPETITORS if cls in ("spd", "public_spd") else INDEF_COMPETITORS
 TRACK_ORDER = ["recommended", "ipopt", "ipopt-plugin"]
 # Tracks a manifest never lists: run.py --track-override runs a manifest's
 # cases on them (tools/bench/tracks.md). smf only for now.
@@ -160,7 +171,9 @@ def factor_gflops(rec: dict[str, Any]) -> float | None:
 
 def is_implausible(rec: dict[str, Any],
                    max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD) -> bool:
-    """Factor throughput above max_gflops_per_thread x threads (<= 0: off)."""
+    """Factor throughput above max_gflops_per_thread x threads (<= 0: off; GPU exempt)."""
+    if rec.get("solver_id") in GPU_SOLVERS:
+        return False
     if max_gflops_per_thread <= 0:
         return False
     g = factor_gflops(rec)
@@ -374,9 +387,16 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
           shift_ms: float = DEFAULT_SHIFT_MS, subject: str = "smf",
           classes: set[str] | None = None,
           max_gflops_per_thread: float = DEFAULT_MAX_GFLOPS_PER_THREAD,
-          inertia_ref: dict[str, tuple[int, int, int]] | None = None) -> dict[str, Any]:
+          inertia_ref: dict[str, tuple[int, int, int]] | None = None,
+          include_gpu: bool = False) -> dict[str, Any]:
     """inertia_ref (load_inertia_ref): when given, every track's inertia is
-    checked against it instead of the ipopt-track vote among rivals."""
+    checked against it instead of the ipopt-track vote among rivals.
+
+    `ratio` always remains CPU-only for backward compatibility; `gpu_h2h` and
+    `ratio_with_gpu` are populated per cell so `render(..., include_gpu=True)`
+    can present both CPU-only and CPU+GPU summaries regardless of `include_gpu`.
+    """
+    _ = include_gpu  # kept in signature for caller parity with render()
     cases: dict[tuple[str, str], dict[str, Any]] = {}
     for key, c in manifest_case_index(manifest.get("cases", [])).items():
         if split != "all" and c.get("split") != split:
@@ -419,6 +439,11 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
             lambda: collections.defaultdict(list))
         pairs: list[tuple[float, float]] = []
         best_counts: collections.Counter = collections.Counter()
+        pairs_with_gpu: list[tuple[float, float]] = []
+        best_counts_with_gpu: collections.Counter = collections.Counter()
+        gpu_pairs: list[tuple[float, float]] = []
+        gpu_smf_solved = 0
+        gpu_solved = 0
         unsolved_subject = 0
         no_competitor = 0
         report_only: dict[str, dict[str, dict[str, Any]]] = {}
@@ -479,6 +504,16 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
             subj = per.get(subject)
             comp = [(a["wall_ms"], sid) for sid, a in per.items()
                     if sid in eligible and a["status"] == "ok" and a["wall_ms"] is not None]
+            gpu_comp = [(a["wall_ms"], sid) for sid, a in per.items()
+                        if sid in GPU_SOLVERS and sid != subject
+                        and a["status"] == "ok" and a["wall_ms"] is not None]
+            subj_ok = subj is not None and subj["status"] == "ok" and subj["wall_ms"] is not None
+            if subj_ok:
+                gpu_smf_solved += 1
+            if gpu_comp:
+                gpu_solved += 1
+                if subj_ok:
+                    gpu_pairs.append((subj["wall_ms"], min(gpu_comp)[0]))
             if subj is None or subj["status"] == "unavailable":
                 continue
             if subj["status"] != "ok":
@@ -490,10 +525,16 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 best_counts[best_s] += 1
             else:
                 no_competitor += 1
+            comp_with_gpu = comp + gpu_comp
+            if comp_with_gpu:
+                best_gt, best_gs = min(comp_with_gpu)
+                pairs_with_gpu.append((subj["wall_ms"], best_gt))
+                best_counts_with_gpu[best_gs] += 1
 
         for sid in solver_ids:
             stats[sid]["wall_median_ms"] = _median(walls[sid])
             stats[sid]["phases"] = {k: _median(v) for k, v in phase_vals[sid].items()}
+        n_cases = len(per_case) - len(report_only)
         result.setdefault(cls, {}).setdefault(track, {})[threads] = {
             "solvers": stats,
             "ratio": {
@@ -502,10 +543,25 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
                 "geomean": shifted_geomean(pairs, shift_ms),
                 "shift_ms": shift_ms,
                 "best_solver_counts": dict(best_counts),
+                "pairs": pairs,
                 "subject_unsolved": unsolved_subject,
                 "no_accurate_competitor": no_competitor,
                 "competitor_set": eligible,
                 "missing_competitors": missing_competitors,
+            },
+            "gpu_h2h": {
+                "n_common": len(gpu_pairs),
+                "geomean": shifted_geomean(gpu_pairs, shift_ms),
+                "smf_solved": gpu_smf_solved,
+                "gpu_solved": gpu_solved,
+                "n_cases": n_cases,
+                "pairs": gpu_pairs,
+            },
+            "ratio_with_gpu": {
+                "n": len(pairs_with_gpu),
+                "geomean": shifted_geomean(pairs_with_gpu, shift_ms),
+                "best_solver_counts": dict(best_counts_with_gpu),
+                "pairs": pairs_with_gpu,
             },
             "report_only": report_only,
             "implausible": sorted(implausible, key=lambda i: (i["case"], i["solver"])),
@@ -513,7 +569,7 @@ def score(records: list[dict[str, Any]], manifest: dict[str, Any], split: str = 
             "inertia_ref": inertia_ref is not None,
             "max_gflops_per_thread": max_gflops_per_thread,
             "times": times,
-            "n_cases": len(per_case) - len(report_only),
+            "n_cases": n_cases,
         }
     return result
 
@@ -532,11 +588,105 @@ def _fmt(x: float | None, digits: int = 3) -> str:
     return f"{x:.{digits}g}"
 
 
-def render(result: dict[str, Any], split: str) -> str:
+def _fmt_ratio(gm: float | None) -> str:
+    return "n/a" if gm is None else f"{gm:.3f}"
+
+
+def _class_sort_key(cls: str) -> tuple[int, str]:
+    return (CLASS_ORDER.index(cls) if cls in CLASS_ORDER else 99, cls)
+
+
+def _track_sort_key(track: str) -> tuple[int, str]:
+    return (TRACK_ORDER.index(track) if track in TRACK_ORDER else 99, track)
+
+
+def _render_gpu_headline_summary(result: dict[str, Any]) -> list[str]:
+    """Cross-class per-thread roll-up showing CPU-only, GPU h2h, and CPU+GPU."""
+    threads_list = sorted({
+        t for by_track in result.values() for by_threads in by_track.values() for t in by_threads
+    })
+    if not threads_list:
+        return []
+    out = ["## Headline summary (per thread count)", ""]
+    gpu_label = "/".join(sorted(GPU_SOLVERS))
+    for threads in threads_list:
+        cells: list[tuple[str, str, dict[str, Any]]] = []
+        for cls in sorted(result, key=_class_sort_key):
+            for track in sorted(result[cls], key=_track_sort_key):
+                if threads in result[cls][track]:
+                    cells.append((cls, track, result[cls][track][threads]))
+        if not cells:
+            continue
+        first_ratio = cells[0][2]["ratio"]
+        subject = first_ratio["subject"]
+        shift_ms = first_ratio["shift_ms"]
+        total_cases = sum(g["n_cases"] for _, _, g in cells)
+
+        cpu_pairs = [p for _, _, g in cells for p in g["ratio"].get("pairs", [])]
+        cpu_gm = shifted_geomean(cpu_pairs, shift_ms)
+        cpu_best: collections.Counter = collections.Counter()
+        for _, _, g in cells:
+            cpu_best.update(g["ratio"]["best_solver_counts"])
+        smf_solved = sum(g["solvers"].get(subject, {}).get("solved", 0) for _, _, g in cells)
+
+        h2h_pairs = [p for _, _, g in cells for p in g.get("gpu_h2h", {}).get("pairs", [])]
+        h2h_gm = shifted_geomean(h2h_pairs, shift_ms)
+        h2h_smf_solved = sum(g.get("gpu_h2h", {}).get("smf_solved", 0) for _, _, g in cells)
+        h2h_gpu_solved = sum(g.get("gpu_h2h", {}).get("gpu_solved", 0) for _, _, g in cells)
+
+        with_gpu_pairs = [p for _, _, g in cells for p in g.get("ratio_with_gpu", {}).get("pairs", [])]
+        with_gpu_gm = shifted_geomean(with_gpu_pairs, shift_ms)
+        with_gpu_best: collections.Counter = collections.Counter()
+        for _, _, g in cells:
+            with_gpu_best.update(g.get("ratio_with_gpu", {}).get("best_solver_counts", {}))
+
+        out.append(f"### {threads} thread(s) ({total_cases} case-tracks)")
+        out.append("")
+        out.append(
+            f"- **CPU-only:** `{subject}` vs best accurate CPU rival, shifted geomean "
+            f"(shift {shift_ms:g} ms): **{_fmt_ratio(cpu_gm)}** over {len(cpu_pairs)} cases "
+            f"(`{subject}` solved {smf_solved}/{total_cases}); "
+            f"best CPU counts: {dict(cpu_best) or '-'}"
+        )
+        out.append(
+            f"- **GPU head-to-head (`{subject}` vs `{gpu_label}`):** shifted geomean: "
+            f"**{_fmt_ratio(h2h_gm)}** over {len(h2h_pairs)} common accurate cases "
+            f"(`{subject}` solved {h2h_smf_solved}/{total_cases}, "
+            f"`{gpu_label}` solved {h2h_gpu_solved}/{total_cases})"
+        )
+        out.append(
+            f"- **All rivals incl. GPU:** `{subject}` vs best accurate rival (CPU + GPU), "
+            f"shifted geomean: **{_fmt_ratio(with_gpu_gm)}** over {len(with_gpu_pairs)} cases; "
+            f"best solver counts: {dict(with_gpu_best) or '-'}"
+        )
+        out.append("- Per-class breakdown:")
+        by_cls: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+        for cls, _, g in cells:
+            by_cls[cls].append(g)
+        for cls, cls_cells in by_cls.items():
+            cls_cases = sum(g["n_cases"] for g in cls_cells)
+            cls_smf = sum(g["solvers"].get(subject, {}).get("solved", 0) for g in cls_cells)
+            cls_cpu_p = [p for g in cls_cells for p in g["ratio"].get("pairs", [])]
+            cls_h2h_p = [p for g in cls_cells for p in g.get("gpu_h2h", {}).get("pairs", [])]
+            cls_gpu_s = sum(g.get("gpu_h2h", {}).get("gpu_solved", 0) for g in cls_cells)
+            cls_all_p = [p for g in cls_cells for p in g.get("ratio_with_gpu", {}).get("pairs", [])]
+            out.append(
+                f"  - `{cls}`: CPU-only **{_fmt_ratio(shifted_geomean(cls_cpu_p, shift_ms))}** "
+                f"(`{subject}` {cls_smf}/{cls_cases}, n={len(cls_cpu_p)}); "
+                f"GPU h2h **{_fmt_ratio(shifted_geomean(cls_h2h_p, shift_ms))}** "
+                f"(`{gpu_label}` {cls_gpu_s}/{cls_cases}, common {len(cls_h2h_p)}); "
+                f"All rivals incl. GPU **{_fmt_ratio(shifted_geomean(cls_all_p, shift_ms))}**"
+            )
+        out.append("")
+    return out
+
+
+def render(result: dict[str, Any], split: str, include_gpu: bool = False) -> str:
     out = [f"# Front-tier score (split: {split})", ""]
-    for cls in sorted(result, key=lambda c: (CLASS_ORDER.index(c) if c in CLASS_ORDER else 99, c)):
-        for track in sorted(result[cls], key=lambda t: (TRACK_ORDER.index(t)
-                                                        if t in TRACK_ORDER else 99, t)):
+    if include_gpu:
+        out.extend(_render_gpu_headline_summary(result))
+    for cls in sorted(result, key=_class_sort_key):
+        for track in sorted(result[cls], key=_track_sort_key):
             for threads in sorted(result[cls][track]):
                 g = result[cls][track][threads]
                 ratio = g["ratio"]
@@ -547,10 +697,22 @@ def render(result: dict[str, Any], split: str) -> str:
                 out.append(
                     f"{ratio['subject']} vs best accurate competitor, shifted geomean "
                     f"(shift {ratio['shift_ms']:g} ms): "
-                    f"**{'n/a' if gm is None else f'{gm:.3f}'}** over {ratio['n']} cases; "
+                    f"**{_fmt_ratio(gm)}** over {ratio['n']} cases; "
                     f"{ratio['subject']} unsolved on {ratio['subject_unsolved']}; "
                     f"dropped for no accurate competitor: {ratio['no_accurate_competitor']}; "
                     f"best competitor counts: {ratio['best_solver_counts'] or '-'}")
+                if include_gpu:
+                    h2h = g.get("gpu_h2h") or {}
+                    rwg = g.get("ratio_with_gpu") or {}
+                    out.append(
+                        f"{ratio['subject']} vs GPU (`{'/'.join(sorted(GPU_SOLVERS))}`) "
+                        f"head-to-head: **{_fmt_ratio(h2h.get('geomean'))}** over "
+                        f"{h2h.get('n_common', 0)} common accurate cases "
+                        f"({ratio['subject']} solved {h2h.get('smf_solved', 0)}/{g['n_cases']}, "
+                        f"GPU solved {h2h.get('gpu_solved', 0)}/{g['n_cases']}); "
+                        f"all rivals incl. GPU: **{_fmt_ratio(rwg.get('geomean'))}** over "
+                        f"{rwg.get('n', 0)} cases; best solver counts: "
+                        f"{rwg.get('best_solver_counts') or '-'}")
                 out.append("")
                 missing = ratio.get("missing_competitors") or []
                 if track in OVERRIDE_TRACKS:
@@ -656,7 +818,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--records", required=True, help="records.jsonl file or directory")
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--split", default="all", choices=["tuning", "heldout", "all"])
+    ap.add_argument("--split", default="all",
+                    choices=["tuning", "heldout", "sealed_public", "all"])
     ap.add_argument("--class", dest="classes", default="",
                     help="comma-separated class filter")
     ap.add_argument("--subject", default="smf")
@@ -670,6 +833,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inertia-ref", default=None,
                     help="reference inertia file (tools/bench/inertia_ref.py) checked on every "
                          "track; default: the ipopt-track vote among the accurate rivals")
+    ap.add_argument("--include-gpu", action="store_true",
+                    help="prepend a dual CPU-only + GPU head-to-head + incl.-GPU headline summary")
     args = ap.parse_args(argv)
 
     records = load_records(pathlib.Path(args.records))
@@ -677,7 +842,7 @@ def main(argv: list[str] | None = None) -> int:
     classes = {c for c in args.classes.split(",") if c} or None
     inertia_ref = load_inertia_ref(pathlib.Path(args.inertia_ref)) if args.inertia_ref else None
     result = score(records, manifest, args.split, args.shift_ms, args.subject, classes,
-                   args.max_gflops_per_thread, inertia_ref)
+                   args.max_gflops_per_thread, inertia_ref, include_gpu=args.include_gpu)
     if not result:
         print("error: no records matched the manifest/split", file=sys.stderr)
         return 2
@@ -686,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
     if n_bad:
         print(f"warning: {n_bad} implausible (case, solver, threads) result(s) excluded; "
               f"see the 'Implausible' sections", file=sys.stderr)
-    md = render(result, args.split)
+    md = render(result, args.split, include_gpu=args.include_gpu)
     print(md)
     if args.output:
         pathlib.Path(args.output).write_text(md, encoding="utf-8")
