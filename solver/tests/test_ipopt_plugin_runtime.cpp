@@ -411,11 +411,6 @@ void set_env(const char *name, const char *value) {
 #endif
 }
 
-// These tests change SMF_* settings between plugin loads, which the plugin
-// reads once per load: keep it unloading on every free (it pins itself
-// otherwise). Set before the first load.
-const bool g_plugin_unloads = (set_env("SMF_PLUGIN_UNLOAD", "1"), true);
-
 } // namespace
 
 // SMF_IPM_ABORT=1: once a factor has been solved with, a later one with more
@@ -503,19 +498,6 @@ TEST(Ma97PluginRuntime, FastModeFromSmfPivoting) {
         }
     int threshold_delays = -1, threshold_neg = -1;
     for (const char *mode : {"", "static"}) {
-#ifndef _WIN32
-        // SMF_PIVOTING is read once per load: a plugin dlclose did not
-        // unload (glibc keeps STB_GNU_UNIQUE statics) still has the earlier
-        // value.
-#ifdef SMF_MA97_PLUGIN_PATH
-        if (void *still = dlopen(SMF_MA97_PLUGIN_PATH, RTLD_NOW | RTLD_NOLOAD)) {
-#else
-        if (void *still = dlopen("./libsmf_ma97.so", RTLD_NOW | RTLD_NOLOAD)) {
-#endif
-            dlclose(still);
-            GTEST_SKIP() << "the plugin stays loaded after dlclose: its SMF_PIVOTING cannot be re-read";
-        }
-#endif
         set_env("SMF_PIVOTING", mode);
         PluginSymbols sym;
         ASSERT_TRUE(sym.load());
@@ -1175,6 +1157,7 @@ public:
             had_env_ = true;
             old_env_ = v;
         }
+        set_env("SMF_PLUGIN_UNLOAD", "1");
         set_env("SMF_PLUGIN_STATS", "2");
         std::fflush(stderr);
         saved_ = smf_dup(smf_fileno(stderr));

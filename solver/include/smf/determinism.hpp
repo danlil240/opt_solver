@@ -24,6 +24,10 @@
 //   - MKL builds: conditional numerical reproducibility,
 //     mkl_cbwr_set(MKL_CBWR_AVX2), once at first use (process-wide); on CPUs
 //     where MKL rejects that branch (non-Intel), MKL_CBWR_AUTO.
+//   - Apple Accelerate builds: BlasThreadGuard switches Accelerate to single-
+//     threaded mode via macOS 15+ BLASSetThreading, but Accelerate exposes no
+//     alignment-independent CNR mode (unlike MKL CBWR or OpenBLAS), so strict
+//     bitwise identity across thread counts requires MKL or OpenBLAS.
 // Exception: a factorization aborted early by Control::max_negative_pivots
 // (InertiaExceeded) has a deterministic status, but the partial inertia it
 // reports depends on which fronts finished first, i.e. on thread timing.

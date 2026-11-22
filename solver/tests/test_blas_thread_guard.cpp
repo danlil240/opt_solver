@@ -370,7 +370,7 @@ TEST(BlasSerialPin, PinsProcessWideAndPreservesCallerOnConcurrentGuards) {
         const int caller_threads = smf::blas_max_threads();
         {
             smf::BlasSerialPinScope pin;
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !((defined(SMF_USE_MKL) && SMF_USE_MKL) || (defined(SMF_HAS_ACCELERATE) && SMF_HAS_ACCELERATE))
             EXPECT_TRUE(smf::blas_is_pinned_serial());
             EXPECT_EQ(smf::blas_max_threads(), 1);
 #else
@@ -437,7 +437,7 @@ TEST(BlasSerialPin, GuardEndingUnderAnotherThreadsPinKeepsThePin) {
             std::unique_lock<std::mutex> lk(m);
             cv.wait(lk, [&] { return stage == 3; });
         }
-#if !(defined(SMF_USE_MKL) && SMF_USE_MKL)
+#if !((defined(SMF_USE_MKL) && SMF_USE_MKL) || (defined(SMF_HAS_ACCELERATE) && SMF_HAS_ACCELERATE))
         EXPECT_TRUE(smf::blas_is_pinned_serial());
         EXPECT_EQ(get_blas_threads(), 1) << "a guard ending on another thread un-pinned BLAS";
 #endif

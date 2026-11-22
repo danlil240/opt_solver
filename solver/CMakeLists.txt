@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(smf VERSION 0.1.0 LANGUAGES CXX)
+project(smf VERSION 0.1.0 LANGUAGES C CXX)
 
 # ---- C++ standard -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -12,6 +12,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(_smf_default_conda_lib "")
 if(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}/Library")
     file(TO_CMAKE_PATH "$ENV{CONDA_PREFIX}/Library" _smf_default_conda_lib)
+elseif(DEFINED ENV{CONDA_PREFIX} AND EXISTS "$ENV{CONDA_PREFIX}/include")
+    file(TO_CMAKE_PATH "$ENV{CONDA_PREFIX}" _smf_default_conda_lib)
 elseif(DEFINED ENV{USERPROFILE} AND EXISTS "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library")
     file(TO_CMAKE_PATH "$ENV{USERPROFILE}/mamba/envs/smfdeps/Library" _smf_default_conda_lib)
 endif()
@@ -89,6 +91,7 @@ endif()
 
 # ---- BLAS & LAPACK + backend verification -------------------------------
 set(SMF_HAS_OPENBLAS OFF)
+set(SMF_HAS_ACCELERATE OFF)
 set(SMF_BLAS_REFERENCE OFF)
 set(SMF_BLAS_BACKEND_NAME "unknown")
 
@@ -152,25 +155,48 @@ else()
     find_package(BLAS QUIET)
     find_package(LAPACK QUIET)
     if(BLAS_FOUND AND LAPACK_FOUND)
-        set(SMF_BLAS_BACKEND_NAME "system")
-        find_package(OpenBLAS QUIET CONFIG)
-        if(OpenBLAS_FOUND)
-            set(SMF_HAS_OPENBLAS ON)
-            set(SMF_BLAS_BACKEND_NAME "openblas")
-            message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
+        set(_smf_blas_str "${BLAS_LIBRARIES}")
+        if(APPLE AND _smf_blas_str MATCHES "Accelerate")
+            set(SMF_HAS_ACCELERATE ON)
+            set(SMF_BLAS_BACKEND_NAME "accelerate")
+            message(STATUS "smf: Apple Accelerate BLAS/LAPACK found (SMF_HAS_ACCELERATE=ON, ACCELERATE_NEW_LAPACK)")
         else()
+            set(SMF_BLAS_BACKEND_NAME "system")
+            find_package(OpenBLAS QUIET CONFIG)
+            if(OpenBLAS_FOUND)
+                set(SMF_HAS_OPENBLAS ON)
+                set(SMF_BLAS_BACKEND_NAME "openblas")
+                message(STATUS "smf: OpenBLAS package found via config -- SMF_HAS_OPENBLAS=ON")
+            endif()
+            # Prefer OpenBLAS's own cblas.h over system frameworks (e.g. macOS vecLib)
             find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h
+                HINTS
+                    ${OpenBLAS_INCLUDE_DIRS}
+                    "${_smf_default_conda_lib}/include"
+                    "${_smf_default_conda_lib}/include/openblas"
+                PATH_SUFFIXES
+                    openblas
+                    openblas-pthread
                 PATHS
+                    /opt/homebrew/opt/openblas/include
+                    /usr/local/opt/openblas/include
                     /usr/include/x86_64-linux-gnu/openblas-pthread
                     /usr/include/openblas-pthread
                     /usr/include/openblas
                     /usr/include/x86_64-linux-gnu
                     /usr/local/include
+                NO_CMAKE_SYSTEM_PATH
+                NO_SYSTEM_ENVIRONMENT_PATH
             )
+            if(NOT OPENBLAS_CBLAS_INCLUDE_DIR)
+                find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h)
+            endif()
             if(OPENBLAS_CBLAS_INCLUDE_DIR)
-                set(SMF_HAS_OPENBLAS ON)
-                set(SMF_BLAS_BACKEND_NAME "openblas")
-                message(STATUS "smf: OpenBLAS cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} -- SMF_HAS_OPENBLAS=ON")
+                if(NOT SMF_HAS_OPENBLAS AND (_smf_blas_str MATCHES "[Oo]pen[Bb][Ll][Aa][Ss]" OR NOT APPLE))
+                    set(SMF_HAS_OPENBLAS ON)
+                    set(SMF_BLAS_BACKEND_NAME "openblas")
+                endif()
+                message(STATUS "smf: cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} (SMF_HAS_OPENBLAS=${SMF_HAS_OPENBLAS})")
             endif()
         endif()
     else()
@@ -551,7 +577,7 @@ target_include_directories(smf PUBLIC
 
 if(SMF_USE_MKL AND MKL_INCLUDE_DIR)
     target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${MKL_INCLUDE_DIR}>)
-elseif(SMF_HAS_OPENBLAS AND OPENBLAS_CBLAS_INCLUDE_DIR)
+elseif(OPENBLAS_CBLAS_INCLUDE_DIR)
     target_include_directories(smf PUBLIC $<BUILD_INTERFACE:${OPENBLAS_CBLAS_INCLUDE_DIR}>)
 endif()
 
@@ -607,6 +633,7 @@ target_compile_definitions(smf PUBLIC
     $<$<BOOL:${SMF_METIS_THREADSAFE}>:SMF_METIS_THREADSAFE=1>
     $<$<BOOL:${SMF_DETERMINISTIC}>:SMF_DETERMINISTIC=1>
     $<$<BOOL:${SMF_HAS_OPENBLAS}>:SMF_HAS_OPENBLAS=1>
+    $<$<BOOL:${SMF_HAS_ACCELERATE}>:SMF_HAS_ACCELERATE=1>
     $<$<BOOL:${SMF_USE_MKL}>:SMF_USE_MKL=1>
     $<$<BOOL:${SMF_BLAS_REFERENCE}>:SMF_BLAS_REFERENCE=1>
     $<$<BOOL:${SMF_REQUIRE_BENCHMARK_BASELINES}>:SMF_REQUIRE_BENCHMARK_BASELINES=1>

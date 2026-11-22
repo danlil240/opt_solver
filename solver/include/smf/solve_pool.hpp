@@ -8,6 +8,8 @@
 #include <vector>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
+#elif defined(_M_ARM64)
+#include <intrin.h>
 #endif
 
 namespace smf {
@@ -16,6 +18,10 @@ namespace smf {
 inline void solve_pool_relax() {
 #if defined(_M_X64) || defined(__x86_64__)
     _mm_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield" ::: "memory");
+#elif defined(_M_ARM64)
+    __yield();
 #else
     std::this_thread::yield();
 #endif

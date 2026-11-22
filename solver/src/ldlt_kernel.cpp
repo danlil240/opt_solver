@@ -735,7 +735,9 @@ void deferred_update(double *F, int f, int p0, int p1, int c0, int e, const doub
 #if !(defined(SMF_USE_MKL) && (SMF_USE_MKL))
                 if (TileHelpers *h = current_top_helpers()) {
                     BlasSerialPinScope pin_blas;
+                    const int prev_blas = blas_local_set_seq();
                     parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                    blas_local_restore(prev_blas);
                     return;
                 }
 #endif
@@ -894,7 +896,9 @@ void schur_update(double *F, int f, int p0, int p, int e, const int8_t *tags,
                                                buf + static_cast<std::size_t>(t) * sq);
                             }
                         }
+                        const int prev_blas = blas_local_set_seq();
                         parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                        blas_local_restore(prev_blas);
                         c0 = c1;
                         continue;
                     }
@@ -1150,14 +1154,18 @@ void posdef_dtrsm_omp(double *B, int n_rows, int k, const double *L, int ldl, in
             };
             if (TileHelpers *h = current_top_helpers()) {
                 BlasSerialPinScope pin_blas;
+                const int prev_blas = blas_local_set_seq();
                 parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                blas_local_restore(prev_blas);
                 return;
             }
 #if defined(_OPENMP)
             BlasSerialPinScope pin_blas;
 #pragma omp parallel num_threads(nstrips)
             {
+                const int prev_blas = blas_local_set_seq();
                 run_team_strips(nstrips, run_strip);
+                blas_local_restore(prev_blas);
             }
             return;
 #endif
@@ -1187,14 +1195,18 @@ void posdef_dsyrk_omp(double *C, int m, const double *A, int k, int lda, int ldc
             };
             if (TileHelpers *h = current_top_helpers()) {
                 BlasSerialPinScope pin_blas;
+                const int prev_blas = blas_local_set_seq();
                 parallel_for_helpers(nstrips, nstrips, h, run_strip);
+                blas_local_restore(prev_blas);
                 return;
             }
 #if defined(_OPENMP)
             BlasSerialPinScope pin_blas;
 #pragma omp parallel num_threads(nstrips)
             {
+                const int prev_blas = blas_local_set_seq();
                 run_team_strips(nstrips, run_strip);
+                blas_local_restore(prev_blas);
             }
             return;
 #endif

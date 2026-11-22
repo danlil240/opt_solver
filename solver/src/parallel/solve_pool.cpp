@@ -81,7 +81,7 @@ void SolvePool::run(const std::function<void(int)> &fn, bool workers_count_blas)
 
 void SolvePool::worker(int tid) {
     // Kernels inside a parallel solve run on serial BLAS.
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
+#if (defined(SMF_USE_MKL) && SMF_USE_MKL) || (defined(SMF_HAS_ACCELERATE) && SMF_HAS_ACCELERATE)
     BlasSerialGuard serial_blas;
 #else
     BlasWorkerSerialScope serial_blas;

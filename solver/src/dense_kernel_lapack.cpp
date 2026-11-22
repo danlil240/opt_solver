@@ -376,6 +376,11 @@ int smf_dtrtri_lower(double *A, int m, int lda, bool unit) {
 
 #if defined(SMF_USE_MKL) && (SMF_USE_MKL)
 #include <mkl.h>
+#elif defined(SMF_HAS_ACCELERATE) && (SMF_HAS_ACCELERATE)
+#ifndef ACCELERATE_NEW_LAPACK
+#define ACCELERATE_NEW_LAPACK 1
+#endif
+#include <Accelerate/Accelerate.h>
 #else
 #include <cblas.h>
 // Fortran LAPACK declarations — avoids dependency on liblapacke-dev.
