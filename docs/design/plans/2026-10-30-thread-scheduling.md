@@ -1,7 +1,5 @@
 # Thread Scheduling Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** smf never runs slower on N threads than on 1 thread, and uses only as many threads as pay off. This holds for both the factorization and the solve, on every tree shape.
 
 **Architecture:** This plan removes three overheads of the subtree-parallel engine and adds a cost model that picks the thread count.

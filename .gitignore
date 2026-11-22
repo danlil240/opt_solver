@@ -1,71 +1,108 @@
-# Build directories
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
 build/
 build-*/
 cmake-build-*/
-
-# Installation directories
+out/
 install/
 solver/install/
+_deps/
 
-# Clangd / LSP cache
-.cache/
-
-# CMake generated files
+# CMake generated files (in-source builds)
 CMakeFiles/
 CMakeCache.txt
+CMakeUserPresets.json
 cmake_install.cmake
-Makefile
-build.ninja
-compile_commands.json
 CTestTestfile.cmake
 DartConfiguration.tcl
+Makefile
+build.ninja
 *.ninja
+compile_commands.json
+Testing/
 
-# Compiled binaries and object files
+# Compiled objects and binaries
 *.o
+*.obj
 *.a
+*.lib
 *.so
 *.so.*
 *.dylib
 *.dll
 *.exe
+*.pdb
+*.ilk
+*.exp
 
-# Test binaries (built artifacts, not source)
-build/tests/
+# Local third-party dependencies (licensed HSL builds, prebuilt libraries)
+build-deps/
+# Third-party manuals are not redistributable
+/*.pdf
 
-# CTest / CDash output
-Testing/
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
 
-# IDE and editor files
-.vscode/settings.json
+# ---------------------------------------------------------------------------
+# Benchmarks: fetched fixtures and run outputs
+# ---------------------------------------------------------------------------
+# Large matrices: tools/bench/fetch_suitesparse.py
+benchmarks/fixtures/large/
+# PGLib-OPF cases: tools/bench/fetch_pglib.py
+benchmarks/fixtures/pglib/
+# KKT captures: tools/bench/ipopt_kkt.py
+benchmarks/fixtures/ipopt_kkt/
+benchmarks/fixtures/ipopt_hard/
+benchmarks/fixtures/robotics/
+# Manifests generated for the ignored fixtures above
+benchmarks/manifests/large.json
+benchmarks/manifests/ipopt_kkt.json
+# bench_replay binary matrix cache
+*.smfbin
+# Run outputs (tools/bench/run.py, ipopt_kkt.py); a few reference results are tracked
+benchmarks/results/
+planner/
+
+# Logs and scratch output
+*.log
+*.err
+*.tmp
+
+# ---------------------------------------------------------------------------
+# Editors, IDEs, OS
+# ---------------------------------------------------------------------------
+.vscode/
 .idea/
+.vs/
+.clangd
+.cache/
 *.swp
 *.swo
 *~
-
-# OS files
 .DS_Store
 Thumbs.db
 
-# Python cache
-__pycache__/
-*.pyc
-build-deps/
-
-# Large benchmark matrices: fetched by tools/bench/fetch_suitesparse.py
-benchmarks/fixtures/large/
-# bench_replay binary matrix cache
-*.smfbin
-benchmarks/fixtures/ipopt_kkt/
-# Benchmark run outputs (tools/bench/run.py, ipopt_kkt.py)
-benchmarks/results/
-# Generated manifests for the ignored fixtures above (fetch_suitesparse.py, ipopt_kkt.py)
-benchmarks/manifests/large.json
-benchmarks/manifests/ipopt_kkt.json
-
-# PGLib-OPF case files: fetched by tools/bench/fetch_pglib.py
-benchmarks/fixtures/pglib/
-
-# Full-sequence KKT captures of the hard corpus (ipopt_kkt.py capture --suite hard --keep all)
-benchmarks/fixtures/ipopt_hard/
-benchmarks/fixtures/robotics/
+# ---------------------------------------------------------------------------
+# Local notes and agent tooling (not part of the project)
+# ---------------------------------------------------------------------------
+.claude/
+.superpowers/
+docs/superpowers/
+graphify-out/
+reports/
+research_notes/
+/*_report.md
+STATUS.md
+STATUS-archive-*.md

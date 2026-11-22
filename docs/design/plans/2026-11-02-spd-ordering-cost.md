@@ -1,7 +1,5 @@
 # SPD Ordering Cost Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Cut the cost of nested dissection on large SPD matrices without giving up its fill. On cfd2, smf's ordering phase alone (848 ms) costs more than PARDISO's whole analysis (540 ms). bmwcra_1 and nd24k have the same problem. Fill and flops must not get worse, and the factor must not get slower.
 
 **Architecture:** The plan starts with measurement. The SPD `AutoParallel` path in `symbolic_analysis.cpp` (step 5) always runs AMD first. When AMD's predicted flops reach `kMetisFlopsPerRow` per row, it then runs one of two orderings:

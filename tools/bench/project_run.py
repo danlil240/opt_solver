@@ -10,7 +10,7 @@ is priced at the median refactorization. Same formula as the 2026-11-08 probe (P
       --manifest benchmarks/manifests/probe_refactor8t.json --threads 8 [--gate stage1|stage2]
 
 --gate exits 1 when a case of the stage's set has smf / rival >= 1.00, has no ratio, or has an smf record whose
-outcome is not Success. Spec: docs/superpowers/specs/2026-11-09-refactor-8t-engine-design.md.
+outcome is not Success. Spec: docs/design/specs/2026-11-09-refactor-8t-engine-design.md.
 """
 
 from __future__ import annotations

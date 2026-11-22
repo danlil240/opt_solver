@@ -5,7 +5,7 @@
 - ncvxqp3 analysis 2.34x (1T) / 2.49x (8T) faster, ncvxqp7 1.76x / 1.83-1.85x (the 1T miss of the 1.8x bar was accepted); no accuracy loss, 0 verdict changes.
 - The pure auction (Task 4) was killed at G2; its engine and the hybrid probe tooling were removed afterwards (see Code state).
 
-Plan: `docs/superpowers/plans/2026-11-02-auction-matching.md`. Tasks 1-4 ran for the pure auction; the Task 4 kill point tripped, so the pure auction was never wired into `analyse()`. The hybrid below, probed and then built in its place, was.
+Plan: `docs/design/plans/2026-11-02-auction-matching.md`. Tasks 1-4 ran for the pure auction; the Task 4 kill point tripped, so the pure auction was never wired into `analyse()`. The hybrid below, probed and then built in its place, was.
 
 ## Pure auction result (G2)
 

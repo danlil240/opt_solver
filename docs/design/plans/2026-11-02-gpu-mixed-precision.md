@@ -1,7 +1,5 @@
 # GPU Mixed-Precision Factorization Implementation Plan (Milestone 1)
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Find out, on CPU first, whether an FP32 factorization of the large root fronts plus FP64 GMRES-based refinement reaches smf's accuracy gate on the front-tier KKT and SPD cases. If it does, put that root-front factorization on the RTX 5080 behind a build option and measure it against smf's own CPU times and against cuDSS through `bench_replay`.
 
 **Architecture:**
