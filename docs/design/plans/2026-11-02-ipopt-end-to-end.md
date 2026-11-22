@@ -1,7 +1,5 @@
 # IPOPT End-to-End Public Benchmark Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Publish a reproducible IPOPT end-to-end benchmark of smf (the `smf_ma97` plugin) against MA27, MA57, MA97 and MUMPS on three public sets (CUTEst, COPS 3.0, PGLib-OPF v23.07). The report is scored by shifted geometric mean, solved counts and iterations, and the instance list and scoring rules are frozen before the first full smf run.
 
 **Architecture:**

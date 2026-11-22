@@ -1,7 +1,5 @@
 # Auction Matching Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Cut the cost of the analysis' matching trial with an epsilon-scaling auction for the max-product matching. The verdicts stay the same, and so do the ordering delays and the accuracy. A second piece of work then cuts what an initial rejection pays for its candidate ordering (darcy003, mario002).
 
 **Architecture:**

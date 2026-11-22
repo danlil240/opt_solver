@@ -1,7 +1,5 @@
 # Rescue Cost Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Make the scale-on-delay rescue cheaper on delay-heavy small factors (ncvxqp9 rec 32 ms vs MA97 16 ms, stokes128 rec, PGLib rec) in two ways: it resumes the matcher the analysis already built, and it cheapens or skips the stopped unscaled first try after an initial rejection.
 
 **Architecture:**

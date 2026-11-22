@@ -1,7 +1,5 @@
 # Intra-Front Parallelism Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** The large fronts that run serially inside today, SPD fronts and TPP fronts (pivot u < 1e-6, static-pivot, fallback and delay-budget fronts), run as tile tasks on the persistent worker pool. Then nd24k (rec), c-big (ipopt) and ncvxqp3 (ipopt) get faster from 8 to 16 threads instead of staying flat.
 
 **Architecture:** Two new front kernels share the existing tile engine (`TileRunner`, `TileDag`, `TileHelpers` in `solver/src/parallel/tile_tasks.hpp`):
@@ -19,7 +17,7 @@ The cost model (`thread_plan.hpp`) learns the new split fronts, with their own s
 **Spec:** this plan's goal statement and its Background section, which follow from:
 - the recommendation at `https://claude.ai/artifact/Dvh52kmg9CwrigE8smPqUL` (plan 4);
 - `docs/performance/2026-10-30-thread-scheduling.md`, Follow-ups ("Intra-front parallelism for SPD fronts and u < 1e-6 fronts");
-- `docs/superpowers/plans/2026-10-30-thread-scheduling.md` ("Out of scope, as a follow-up plan");
+- `docs/design/plans/2026-10-30-thread-scheduling.md` ("Out of scope, as a follow-up plan");
 - `docs/performance/2026-11-02-factor-side-delays.md` (the current TPP kernel and its stall handling, which this plan must keep).
 
 ## Background (the spec)

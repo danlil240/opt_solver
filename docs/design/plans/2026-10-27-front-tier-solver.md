@@ -1,7 +1,5 @@
 # Front-Tier smf: Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
-
 **Goal:** Make smf the fastest *and* most robust sparse symmetric indefinite solver for interior-point KKT systems. That means beating or matching the best of MA57, MA97, SPRAL SSIDS, MKL PARDISO and MUMPS in every problem class, with exact inertia and a 1e-10 backward error, proven on a public-style benchmark.
 
 **Architecture:** There are six parts, done roughly in this order.

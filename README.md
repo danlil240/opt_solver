@@ -11,7 +11,7 @@ What it adds on top of that design:
 - An interior-point mode (`smf::IpmSession`) that can reuse pivot sequences and the symbolic analysis across IPOPT iterations. Its features are built and gated but stay off by default.
 - A drop-in `libsmf_ma97` plugin that IPOPT loads in place of HSL MA97, an IPOPT `TSymLinearSolver` adapter and a C API.
 
-The code lives in `solver/`. Benchmark tooling is in `tools/bench/`, results in `benchmarks/results/`, and the performance write-ups in `docs/performance/`.
+The code lives in `solver/`. Benchmark tooling is in `tools/bench/` and `benchmarks/`, the IPOPT integration in `tools/ipopt/`, packaging recipes in `packaging/`, performance write-ups in `docs/performance/`, and design specs and implementation plans in `docs/design/`.
 
 ## Building
 
@@ -224,7 +224,7 @@ The OpenBLAS parity write-up is `docs/performance/2026-11-20-openblas-parity.md`
 
 ## Roadmap
 
-The long-term plan is in `docs/roadmap.md`: win the CPU KKT niche, then a GPU mixed-precision path, then prove it on public end-to-end benchmarks. The next six steps each have an implementation plan in `docs/superpowers/plans/`:
+The long-term plan is in `docs/roadmap.md`: win the CPU KKT niche, then a GPU mixed-precision path, then prove it on public end-to-end benchmarks. The next six steps each have an implementation plan in `docs/design/plans/`:
 
 - **Rescue cost** (`2026-11-02-rescue-cost.md`, in progress). The rescue reuses the matcher the analysis already built instead of rebuilding it, and cheapens or skips the unscaled first try after an initial rejection.
 - **Auction matching** (`2026-11-02-auction-matching.md`). An epsilon-scaling auction for the analysis' max-product matching, with the same verdicts and accuracy, aimed at the matching-dominated losses above.

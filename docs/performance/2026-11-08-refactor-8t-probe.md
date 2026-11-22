@@ -53,7 +53,7 @@ At 1 thread smf wins every case (0.50-0.89). At 8 threads it loses 6 of 8 to PAR
   memory traffic and per-front overhead). *Corrected 2026-11-09:* the cause is not its 14-21k delays. PGLib runs on one
   thread at 8T because `kTreeParallelMinWork = 2e7` is a hard floor and the planner prices flops only. Forced to 8
   threads the existing engine gets 2.2x with identical inertia (front trace 2026-11-09; see
-  `docs/superpowers/specs/2026-11-09-refactor-8t-engine-design.md`).
+  `docs/design/specs/2026-11-09-refactor-8t-engine-design.md`).
 - **Re-analysis does nothing here.** `SMF_IPM_REANALYSE=1` leaves the delays unchanged (13,932 / 20,844) and adds
   its own cost (PGLib 8T ratios 0.96 -> 1.22 and 1.67 -> 2.02).
 - **The matching ordering removes most PGLib delays** (20,844 -> 2,001; 13,932 -> 1,972) and gives case2000 its
