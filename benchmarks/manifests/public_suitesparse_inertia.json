@@ -1,0 +1,2498 @@
+{
+ "cases": {
+  "2cubes_sphere": {
+   "method": "spd (manifest matrix_type)",
+   "n": 101492,
+   "neg": 0,
+   "pos": 101492,
+   "status": "ok",
+   "zero": 0
+  },
+  "BenElechi1": {
+   "method": "spd (manifest matrix_type)",
+   "n": 245874,
+   "neg": 0,
+   "pos": 245874,
+   "status": "ok",
+   "zero": 0
+  },
+  "CurlCurl_1": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 43077837195.48434,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 226451,
+   "neg": 0,
+   "pos": 196876,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 196876,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.1488245571627375e-16,
+       "inertia": {
+        "neg": 29575,
+        "pos": 196876,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.863431799604652e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 226451,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 29575
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 196876,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.1685321786378615e-15,
+       "inertia": {
+        "neg": 29575,
+        "pos": 196876,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 9.900696442935721e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 226451,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 29575
+    }
+   },
+   "status": "ok",
+   "zero": 29575
+  },
+  "F1": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 32510002.6697962,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 343791,
+   "neg": 0,
+   "pos": 343791,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 343791,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.8568002686568433e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 343791,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.143436359428658e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 343791,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 343791,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.0258145083009225e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 343791,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.2987694599258797e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 343791,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "F2": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 5535968.04450412,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 71505,
+   "neg": 0,
+   "pos": 71499,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 71499,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.7620792338043408e-16,
+       "inertia": {
+        "neg": 6,
+        "pos": 71499,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.5486345900080127e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 71505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 6
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 71499,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.177134659377942e-16,
+       "inertia": {
+        "neg": 6,
+        "pos": 71499,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.2384446578399538e-16,
+       "inertia": {
+        "neg": 0,
+        "pos": 71505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 6
+    }
+   },
+   "status": "ok",
+   "zero": 6
+  },
+  "G2_circuit": {
+   "method": "spd (manifest matrix_type)",
+   "n": 150102,
+   "neg": 0,
+   "pos": 150102,
+   "status": "ok",
+   "zero": 0
+  },
+  "HTC_336_4438": {
+   "equilibration_residual": 0.0002594703968830103,
+   "max_abs_entry": 226340.0,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 226340,
+   "neg": 120559,
+   "pos": 105781,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 120559,
+     "ok": true,
+     "pos": 105781,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.276864418997208e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.321567289668596e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 120559,
+     "ok": true,
+     "pos": 105781,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.526896693229892e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.116037791476693e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "HTC_336_9129": {
+   "equilibration_residual": 0.0002550856567495874,
+   "max_abs_entry": 226340.0,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 226340,
+   "neg": 120559,
+   "pos": 105781,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 120559,
+     "ok": true,
+     "pos": 105781,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.730220423376574e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.9347040748338515e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 120559,
+     "ok": true,
+     "pos": 105781,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.042056513114926e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 5.616639215360052e-19,
+       "inertia": {
+        "neg": 120559,
+        "pos": 105781,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "Lin": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 532.1825455601816,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 256000,
+   "neg": 14,
+   "pos": 255986,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 14,
+     "ok": true,
+     "pos": 255986,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.899815134771313e-15,
+       "inertia": {
+        "neg": 14,
+        "pos": 255986,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.079435648448375e-15,
+       "inertia": {
+        "neg": 14,
+        "pos": 255986,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 14,
+     "ok": true,
+     "pos": 255986,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.1298596394815398e-13,
+       "inertia": {
+        "neg": 14,
+        "pos": 255986,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.0335403981568006e-13,
+       "inertia": {
+        "neg": 14,
+        "pos": 255986,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "OPF_10000": {
+   "equilibration_residual": 0.00029290704170115145,
+   "max_abs_entry": 8045052.29284,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 43887,
+   "neg": 22494,
+   "pos": 21392,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 22494,
+     "ok": true,
+     "pos": 21392,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.459885351926766e-17,
+       "inertia": {
+        "neg": 22495,
+        "pos": 21392,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.1108906288695278e-17,
+       "inertia": {
+        "neg": 22494,
+        "pos": 21393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    },
+    "smf": {
+     "neg": 22494,
+     "ok": true,
+     "pos": 21392,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.2986285764497438e-17,
+       "inertia": {
+        "neg": 22495,
+        "pos": 21392,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.759173785728565e-17,
+       "inertia": {
+        "neg": 22494,
+        "pos": 21393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    }
+   },
+   "status": "ok",
+   "zero": 1
+  },
+  "OPF_6000": {
+   "equilibration_residual": 0.00039040116397670577,
+   "max_abs_entry": 33333333.333333,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 29902,
+   "neg": 15628,
+   "pos": 14274,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 15628,
+     "ok": true,
+     "pos": 14274,
+     "runs": {
+      "minus": {
+       "eta_inf": 4.163289420160312e-17,
+       "inertia": {
+        "neg": 15628,
+        "pos": 14274,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.0893713197839168e-17,
+       "inertia": {
+        "neg": 15628,
+        "pos": 14274,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 15628,
+     "ok": true,
+     "pos": 14274,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.146715535418652e-18,
+       "inertia": {
+        "neg": 15628,
+        "pos": 14274,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.28653666751412e-17,
+       "inertia": {
+        "neg": 15628,
+        "pos": 14274,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "Si34H36": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 18.26063966641518,
+   "method": "spectrum slicing: solvers disagree or failed",
+   "mode": "cold",
+   "n": 97569,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "ok": false,
+     "runs": {
+      "minus": {
+       "outcome": "Timeout"
+      },
+      "plus": {
+       "outcome": "Timeout"
+      }
+     }
+    },
+    "smf": {
+     "ok": false,
+     "runs": {
+      "minus": {
+       "eta_inf": null,
+       "inertia": {
+        "neg": 0,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "OutOfMemory"
+      },
+      "plus": {
+       "eta_inf": null,
+       "inertia": {
+        "neg": 0,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "OutOfMemory"
+      }
+     }
+    }
+   },
+   "status": "disputed"
+  },
+  "SiO": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 35.8176250619219,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 33401,
+   "neg": 8,
+   "pos": 33393,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 8,
+     "ok": true,
+     "pos": 33393,
+     "runs": {
+      "minus": {
+       "eta_inf": 8.053985834277828e-15,
+       "inertia": {
+        "neg": 8,
+        "pos": 33393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.1223596270056116e-14,
+       "inertia": {
+        "neg": 8,
+        "pos": 33393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 8,
+     "ok": true,
+     "pos": 33393,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.3371409458652685e-15,
+       "inertia": {
+        "neg": 8,
+        "pos": 33393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 5.812637059969146e-15,
+       "inertia": {
+        "neg": 8,
+        "pos": 33393,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "a5esindl": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 9.998293,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 60008,
+   "neg": 21030,
+   "pos": 38978,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 21030,
+     "ok": true,
+     "pos": 38978,
+     "runs": {
+      "minus": {
+       "eta_inf": 8.86076432904847e-20,
+       "inertia": {
+        "neg": 21030,
+        "pos": 38978,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 8.901868043743388e-20,
+       "inertia": {
+        "neg": 21030,
+        "pos": 38978,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 21030,
+     "ok": true,
+     "pos": 38978,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.9784527662806082e-19,
+       "inertia": {
+        "neg": 21030,
+        "pos": 38978,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 8.570940291793071e-20,
+       "inertia": {
+        "neg": 21030,
+        "pos": 38978,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "af_0_k101": {
+   "method": "spd (manifest matrix_type)",
+   "n": 503625,
+   "neg": 0,
+   "pos": 503625,
+   "status": "ok",
+   "zero": 0
+  },
+  "af_2_k101": {
+   "method": "spd (manifest matrix_type)",
+   "n": 503625,
+   "neg": 0,
+   "pos": 503625,
+   "status": "ok",
+   "zero": 0
+  },
+  "bcsstk35": {
+   "equilibration_residual": 0.00012559706804238235,
+   "max_abs_entry": 4874275181.0,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 30237,
+   "neg": 0,
+   "pos": 30231,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 30231,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.7244136939313402e-17,
+       "inertia": {
+        "neg": 6,
+        "pos": 30231,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.230246872050731e-17,
+       "inertia": {
+        "neg": 0,
+        "pos": 30237,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 6
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 30231,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.6159582483308283e-17,
+       "inertia": {
+        "neg": 6,
+        "pos": 30231,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.9129995469609395e-17,
+       "inertia": {
+        "neg": 0,
+        "pos": 30237,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 6
+    }
+   },
+   "status": "ok",
+   "zero": 6
+  },
+  "bcsstk36": {
+   "method": "spd (manifest matrix_type)",
+   "n": 23052,
+   "neg": 0,
+   "pos": 23052,
+   "status": "ok",
+   "zero": 0
+  },
+  "bcsstm36": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 0.5230663976,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 23052,
+   "neg": 0,
+   "pos": 12172,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 12172,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.3046710606684596e-24,
+       "inertia": {
+        "neg": 10880,
+        "pos": 12172,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.4345731006598058e-24,
+       "inertia": {
+        "neg": 0,
+        "pos": 23052,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 10880
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 12172,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.2680914982198114e-24,
+       "inertia": {
+        "neg": 10880,
+        "pos": 12172,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.1703873718736832e-24,
+       "inertia": {
+        "neg": 0,
+        "pos": 23052,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 10880
+    }
+   },
+   "status": "ok",
+   "zero": 10880
+  },
+  "bcsstm39": {
+   "method": "spd (manifest matrix_type)",
+   "n": 46772,
+   "neg": 0,
+   "pos": 46772,
+   "status": "ok",
+   "zero": 0
+  },
+  "boneS01": {
+   "method": "spd (manifest matrix_type)",
+   "n": 127224,
+   "neg": 0,
+   "pos": 127224,
+   "status": "ok",
+   "zero": 0
+  },
+  "brainpc2": {
+   "equilibration_residual": 0.00027379665735283165,
+   "max_abs_entry": 3992.104,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 27607,
+   "neg": 13800,
+   "pos": 13807,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 13800,
+     "ok": true,
+     "pos": 13807,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.0440337783055472e-16,
+       "inertia": {
+        "neg": 13800,
+        "pos": 13807,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.5690185750865586e-15,
+       "inertia": {
+        "neg": 13800,
+        "pos": 13807,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 13800,
+     "ok": true,
+     "pos": 13807,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.1897261561642116e-17,
+       "inertia": {
+        "neg": 13800,
+        "pos": 13807,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 6.076235050250086e-17,
+       "inertia": {
+        "neg": 13800,
+        "pos": 13807,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "bundle_adj": {
+   "method": "spd (manifest matrix_type)",
+   "n": 513351,
+   "neg": 0,
+   "pos": 513351,
+   "status": "ok",
+   "zero": 0
+  },
+  "c-49": {
+   "equilibration_residual": 0.0003875293351593978,
+   "max_abs_entry": 153152.1321465315,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 21132,
+   "neg": 8956,
+   "pos": 12176,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 8956,
+     "ok": true,
+     "pos": 12176,
+     "runs": {
+      "minus": {
+       "eta_inf": 4.414683325523486e-18,
+       "inertia": {
+        "neg": 8956,
+        "pos": 12176,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.1293496545981462e-17,
+       "inertia": {
+        "neg": 8956,
+        "pos": 12176,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 8956,
+     "ok": true,
+     "pos": 12176,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.7639756472842693e-17,
+       "inertia": {
+        "neg": 8956,
+        "pos": 12176,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.209771450190175e-17,
+       "inertia": {
+        "neg": 8956,
+        "pos": 12176,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-52": {
+   "equilibration_residual": 0.0004031405472609828,
+   "max_abs_entry": 1943462492098735.0,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 23948,
+   "neg": 10288,
+   "pos": 13660,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 10288,
+     "ok": true,
+     "pos": 13660,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.491250090876139e-19,
+       "inertia": {
+        "neg": 10288,
+        "pos": 13660,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.31152411560973e-19,
+       "inertia": {
+        "neg": 10288,
+        "pos": 13660,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 10288,
+     "ok": true,
+     "pos": 13660,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.6687190235854857e-19,
+       "inertia": {
+        "neg": 10288,
+        "pos": 13660,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 6.905181666128024e-19,
+       "inertia": {
+        "neg": 10288,
+        "pos": 13660,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-54": {
+   "equilibration_residual": 0.0002575853454437338,
+   "max_abs_entry": 182553379.5559471,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 31793,
+   "neg": 14129,
+   "pos": 17664,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 14129,
+     "ok": true,
+     "pos": 17664,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.6147182114758453e-14,
+       "inertia": {
+        "neg": 14129,
+        "pos": 17664,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 5.938363656974e-15,
+       "inertia": {
+        "neg": 14129,
+        "pos": 17664,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 14129,
+     "ok": true,
+     "pos": 17664,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.6105447466940735e-14,
+       "inertia": {
+        "neg": 14129,
+        "pos": 17664,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.1765129033164359e-14,
+       "inertia": {
+        "neg": 14129,
+        "pos": 17664,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-55": {
+   "equilibration_residual": 0.00035030131470326076,
+   "max_abs_entry": 94044.68446188566,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 32780,
+   "neg": 13659,
+   "pos": 19121,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 13659,
+     "ok": true,
+     "pos": 19121,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.2788005721904591e-17,
+       "inertia": {
+        "neg": 13659,
+        "pos": 19121,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 5.1030943072265935e-18,
+       "inertia": {
+        "neg": 13659,
+        "pos": 19121,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 13659,
+     "ok": true,
+     "pos": 19121,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.4478115158367164e-18,
+       "inertia": {
+        "neg": 13659,
+        "pos": 19121,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.7684554312412596e-18,
+       "inertia": {
+        "neg": 13659,
+        "pos": 19121,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-58": {
+   "equilibration_residual": 0.0002718840213262741,
+   "max_abs_entry": 54154.70839216535,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 37595,
+   "neg": 15134,
+   "pos": 22461,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 15134,
+     "ok": true,
+     "pos": 22461,
+     "runs": {
+      "minus": {
+       "eta_inf": 7.870777749556629e-17,
+       "inertia": {
+        "neg": 15134,
+        "pos": 22461,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.1895238189063574e-17,
+       "inertia": {
+        "neg": 15134,
+        "pos": 22461,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 15134,
+     "ok": true,
+     "pos": 22461,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.4934057928489796e-16,
+       "inertia": {
+        "neg": 15134,
+        "pos": 22461,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.223526618904883e-16,
+       "inertia": {
+        "neg": 15134,
+        "pos": 22461,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-62": {
+   "equilibration_residual": 0.00036738842387828985,
+   "max_abs_entry": 3100349.96,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 41731,
+   "neg": 16573,
+   "pos": 25158,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 16573,
+     "ok": true,
+     "pos": 25158,
+     "runs": {
+      "minus": {
+       "eta_inf": 3.6957301576925395e-18,
+       "inertia": {
+        "neg": 16573,
+        "pos": 25158,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 3.4291725340501072e-18,
+       "inertia": {
+        "neg": 16573,
+        "pos": 25158,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 16573,
+     "ok": true,
+     "pos": 25158,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.690714211190386e-18,
+       "inertia": {
+        "neg": 16573,
+        "pos": 25158,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 7.699432628920997e-18,
+       "inertia": {
+        "neg": 16573,
+        "pos": 25158,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-63": {
+   "equilibration_residual": 0.00027271412568385944,
+   "max_abs_entry": 34041.73188767362,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 44234,
+   "neg": 18729,
+   "pos": 25505,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 18729,
+     "ok": true,
+     "pos": 25505,
+     "runs": {
+      "minus": {
+       "eta_inf": 3.7188119741983584e-17,
+       "inertia": {
+        "neg": 18729,
+        "pos": 25505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 6.660798577779933e-18,
+       "inertia": {
+        "neg": 18729,
+        "pos": 25505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 18729,
+     "ok": true,
+     "pos": 25505,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.619581569608181e-17,
+       "inertia": {
+        "neg": 18729,
+        "pos": 25505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 9.923772390664872e-18,
+       "inertia": {
+        "neg": 18729,
+        "pos": 25505,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-64": {
+   "equilibration_residual": 0.000467177626000681,
+   "max_abs_entry": 794055.135,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 51035,
+   "neg": 23881,
+   "pos": 27154,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 23881,
+     "ok": true,
+     "pos": 27154,
+     "runs": {
+      "minus": {
+       "eta_inf": 3.0029800160790124e-18,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.7880622185225926e-18,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 23881,
+     "ok": true,
+     "pos": 27154,
+     "runs": {
+      "minus": {
+       "eta_inf": 7.579000634733181e-18,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 3.565109011160503e-18,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-64b": {
+   "equilibration_residual": 0.00029610057885620655,
+   "max_abs_entry": 200080.6445495698,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 51035,
+   "neg": 23881,
+   "pos": 27154,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 23881,
+     "ok": true,
+     "pos": 27154,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.0283992186301042e-16,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.520615779771302e-16,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 23881,
+     "ok": true,
+     "pos": 27154,
+     "runs": {
+      "minus": {
+       "eta_inf": 4.5926780240795115e-17,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.0514082424851279e-16,
+       "inertia": {
+        "neg": 23881,
+        "pos": 27154,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-67": {
+   "equilibration_residual": 0.00041103564433131456,
+   "max_abs_entry": 6760765.49,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 57975,
+   "neg": 26718,
+   "pos": 31257,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 26718,
+     "ok": true,
+     "pos": 31257,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.045527935985494e-18,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 7.480015487199729e-19,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 26718,
+     "ok": true,
+     "pos": 31257,
+     "runs": {
+      "minus": {
+       "eta_inf": 7.617623291592262e-19,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 9.426637266734489e-19,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "c-67b": {
+   "equilibration_residual": 0.00034079177562063023,
+   "max_abs_entry": 113479.5807546827,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 57975,
+   "neg": 26718,
+   "pos": 31257,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 26718,
+     "ok": true,
+     "pos": 31257,
+     "runs": {
+      "minus": {
+       "eta_inf": 7.006268957192515e-18,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.7353248974068308e-17,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 26718,
+     "ok": true,
+     "pos": 31257,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.782151560381185e-18,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.513097402607183e-17,
+       "inertia": {
+        "neg": 26718,
+        "pos": 31257,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "cant": {
+   "method": "spd (manifest matrix_type)",
+   "n": 62451,
+   "neg": 0,
+   "pos": 62451,
+   "status": "ok",
+   "zero": 0
+  },
+  "cop20k_A": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 182.126,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 121192,
+   "neg": 1277,
+   "pos": 98566,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 1277,
+     "ok": true,
+     "pos": 98566,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.3976908022348002e-18,
+       "inertia": {
+        "neg": 22626,
+        "pos": 98566,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.6771475107121247e-18,
+       "inertia": {
+        "neg": 1277,
+        "pos": 119915,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 21349
+    },
+    "smf": {
+     "neg": 1277,
+     "ok": true,
+     "pos": 98566,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.3216738135571737e-18,
+       "inertia": {
+        "neg": 22626,
+        "pos": 98566,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.0619474411850586e-18,
+       "inertia": {
+        "neg": 1277,
+        "pos": 119915,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 21349
+    }
+   },
+   "status": "ok",
+   "zero": 21349
+  },
+  "denormal": {
+   "method": "spd (manifest matrix_type)",
+   "n": 89400,
+   "neg": 0,
+   "pos": 89400,
+   "status": "ok",
+   "zero": 0
+  },
+  "dtoc": {
+   "equilibration_residual": 0.00025989033128026584,
+   "max_abs_entry": 1.0,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 24993,
+   "neg": 9997,
+   "pos": 9997,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 9997,
+     "ok": true,
+     "pos": 9997,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.1644658918125036e-15,
+       "inertia": {
+        "neg": 14996,
+        "pos": 9997,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.7937225242751566e-15,
+       "inertia": {
+        "neg": 9997,
+        "pos": 14996,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 4999
+    },
+    "smf": {
+     "neg": 9997,
+     "ok": true,
+     "pos": 9997,
+     "runs": {
+      "minus": {
+       "eta_inf": 3.549738693704172e-16,
+       "inertia": {
+        "neg": 14996,
+        "pos": 9997,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 3.370478267055085e-16,
+       "inertia": {
+        "neg": 9997,
+        "pos": 14996,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 4999
+    }
+   },
+   "status": "ok",
+   "zero": 4999
+  },
+  "gas_sensor": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 6.104166231384609,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 66917,
+   "neg": 66917,
+   "pos": 0,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 66917,
+     "ok": true,
+     "pos": 0,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.5495947050047621e-16,
+       "inertia": {
+        "neg": 66917,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.549917612743031e-16,
+       "inertia": {
+        "neg": 66917,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 66917,
+     "ok": true,
+     "pos": 0,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.388386890509366e-16,
+       "inertia": {
+        "neg": 66917,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 7.429818224991877e-16,
+       "inertia": {
+        "neg": 66917,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "gsm_106857": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 13.342091222953092,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 589446,
+   "neg": 107878,
+   "pos": 481568,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 107878,
+     "ok": true,
+     "pos": 481568,
+     "runs": {
+      "minus": {
+       "eta_inf": 4.509548592235731e-17,
+       "inertia": {
+        "neg": 107878,
+        "pos": 481568,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 4.5788449541428896e-17,
+       "inertia": {
+        "neg": 107878,
+        "pos": 481568,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 107878,
+     "ok": true,
+     "pos": 481568,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.3341644911789544e-16,
+       "inertia": {
+        "neg": 107878,
+        "pos": 481568,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.2161798133662705e-16,
+       "inertia": {
+        "neg": 107878,
+        "pos": 481568,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "k1_san": {
+   "equilibration_residual": 0.0002646751872997788,
+   "max_abs_entry": 131.3871,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 67759,
+   "neg": 20804,
+   "pos": 46954,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 20804,
+     "ok": true,
+     "pos": 46954,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.4186430635096507e-21,
+       "inertia": {
+        "neg": 20805,
+        "pos": 46954,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.782398755729336e-21,
+       "inertia": {
+        "neg": 20804,
+        "pos": 46955,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    },
+    "smf": {
+     "neg": 20804,
+     "ok": true,
+     "pos": 46954,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.100035700807566e-21,
+       "inertia": {
+        "neg": 20805,
+        "pos": 46954,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.464681709192594e-21,
+       "inertia": {
+        "neg": 20804,
+        "pos": 46955,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    }
+   },
+   "status": "ok",
+   "zero": 1
+  },
+  "m_t1": {
+   "method": "spd (manifest matrix_type)",
+   "n": 97578,
+   "neg": 0,
+   "pos": 97578,
+   "status": "ok",
+   "zero": 0
+  },
+  "msdoor": {
+   "method": "spd (manifest matrix_type)",
+   "n": 415863,
+   "neg": 0,
+   "pos": 415863,
+   "status": "ok",
+   "zero": 0
+  },
+  "nasasrb": {
+   "method": "spd (manifest matrix_type)",
+   "n": 54870,
+   "neg": 0,
+   "pos": 54870,
+   "status": "ok",
+   "zero": 0
+  },
+  "ncvxbqp1": {
+   "equilibration_residual": 0.00031732199920686543,
+   "max_abs_entry": 474999.8,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 50000,
+   "neg": 37398,
+   "pos": 12602,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 37398,
+     "ok": true,
+     "pos": 12602,
+     "runs": {
+      "minus": {
+       "eta_inf": 5.726972540723872e-17,
+       "inertia": {
+        "neg": 37398,
+        "pos": 12602,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 5.2094409847018806e-17,
+       "inertia": {
+        "neg": 37398,
+        "pos": 12602,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 37398,
+     "ok": true,
+     "pos": 12602,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.789947613533954e-17,
+       "inertia": {
+        "neg": 37398,
+        "pos": 12602,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.1539517534561268e-16,
+       "inertia": {
+        "neg": 37398,
+        "pos": 12602,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "offshore": {
+   "method": "spd (manifest matrix_type)",
+   "n": 259789,
+   "neg": 0,
+   "pos": 259789,
+   "status": "ok",
+   "zero": 0
+  },
+  "parabolic_fem": {
+   "method": "spd (manifest matrix_type)",
+   "n": 525825,
+   "neg": 0,
+   "pos": 525825,
+   "status": "ok",
+   "zero": 0
+  },
+  "qa8fk": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 0.2622432129874295,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 66127,
+   "neg": 0,
+   "pos": 66126,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 0,
+     "ok": true,
+     "pos": 66126,
+     "runs": {
+      "minus": {
+       "eta_inf": 9.390092019783586e-16,
+       "inertia": {
+        "neg": 1,
+        "pos": 66126,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.2063947383769431e-15,
+       "inertia": {
+        "neg": 0,
+        "pos": 66127,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    },
+    "smf": {
+     "neg": 0,
+     "ok": true,
+     "pos": 66126,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.428083211190235e-15,
+       "inertia": {
+        "neg": 1,
+        "pos": 66126,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.4257218780691944e-15,
+       "inertia": {
+        "neg": 0,
+        "pos": 66127,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 1
+    }
+   },
+   "status": "ok",
+   "zero": 1
+  },
+  "qa8fm": {
+   "method": "spd (manifest matrix_type)",
+   "n": 66127,
+   "neg": 0,
+   "pos": 66127,
+   "status": "ok",
+   "zero": 0
+  },
+  "qpband": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 2.2,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 20000,
+   "neg": 5000,
+   "pos": 15000,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 5000,
+     "ok": true,
+     "pos": 15000,
+     "runs": {
+      "minus": {
+       "eta_inf": 7.888721530304461e-17,
+       "inertia": {
+        "neg": 5000,
+        "pos": 15000,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 6.310977227494682e-17,
+       "inertia": {
+        "neg": 5000,
+        "pos": 15000,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 5000,
+     "ok": true,
+     "pos": 15000,
+     "runs": {
+      "minus": {
+       "eta_inf": 9.466465836365355e-17,
+       "inertia": {
+        "neg": 5000,
+        "pos": 15000,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 3.155488613747341e-17,
+       "inertia": {
+        "neg": 5000,
+        "pos": 15000,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "rail_20209": {
+   "equilibration_residual": 2.220446049250313e-16,
+   "max_abs_entry": 3.333300882898583e-05,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 20209,
+   "neg": 20209,
+   "pos": 0,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 20209,
+     "ok": true,
+     "pos": 0,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.2042944964885798e-16,
+       "inertia": {
+        "neg": 20209,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.0409746834623265e-16,
+       "inertia": {
+        "neg": 20209,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 20209,
+     "ok": true,
+     "pos": 0,
+     "runs": {
+      "minus": {
+       "eta_inf": 2.2179012526605264e-16,
+       "inertia": {
+        "neg": 20209,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 2.231465653916308e-16,
+       "inertia": {
+        "neg": 20209,
+        "pos": 0,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "s3dkq4m2": {
+   "method": "spd (manifest matrix_type)",
+   "n": 90449,
+   "neg": 0,
+   "pos": 90449,
+   "status": "ok",
+   "zero": 0
+  },
+  "shallow_water1": {
+   "method": "spd (manifest matrix_type)",
+   "n": 81920,
+   "neg": 0,
+   "pos": 81920,
+   "status": "ok",
+   "zero": 0
+  },
+  "shallow_water2": {
+   "method": "spd (manifest matrix_type)",
+   "n": 81920,
+   "neg": 0,
+   "pos": 81920,
+   "status": "ok",
+   "zero": 0
+  },
+  "smt": {
+   "method": "spd (manifest matrix_type)",
+   "n": 25710,
+   "neg": 0,
+   "pos": 25710,
+   "status": "ok",
+   "zero": 0
+  },
+  "thermomech_TC": {
+   "method": "spd (manifest matrix_type)",
+   "n": 102158,
+   "neg": 0,
+   "pos": 102158,
+   "status": "ok",
+   "zero": 0
+  },
+  "thermomech_TK": {
+   "method": "spd (manifest matrix_type)",
+   "n": 102158,
+   "neg": 0,
+   "pos": 102158,
+   "status": "ok",
+   "zero": 0
+  },
+  "thread": {
+   "method": "spd (manifest matrix_type)",
+   "n": 29736,
+   "neg": 0,
+   "pos": 29736,
+   "status": "ok",
+   "zero": 0
+  },
+  "tuma1": {
+   "equilibration_residual": 0.00026025103483640066,
+   "max_abs_entry": 3.51641,
+   "method": "spectrum slicing (smf + ma57, u=0.5)",
+   "mode": "cold",
+   "n": 22967,
+   "neg": 9607,
+   "pos": 13360,
+   "shift": 1e-10,
+   "slices": {
+    "ma57": {
+     "neg": 9607,
+     "ok": true,
+     "pos": 13360,
+     "runs": {
+      "minus": {
+       "eta_inf": 6.712119261739339e-15,
+       "inertia": {
+        "neg": 9607,
+        "pos": 13360,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.3347889645948874e-14,
+       "inertia": {
+        "neg": 9607,
+        "pos": 13360,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    },
+    "smf": {
+     "neg": 9607,
+     "ok": true,
+     "pos": 13360,
+     "runs": {
+      "minus": {
+       "eta_inf": 1.74811402649563e-14,
+       "inertia": {
+        "neg": 9607,
+        "pos": 13360,
+        "zero": 0
+       },
+       "outcome": "Success"
+      },
+      "plus": {
+       "eta_inf": 1.4785675589259654e-14,
+       "inertia": {
+        "neg": 9607,
+        "pos": 13360,
+        "zero": 0
+       },
+       "outcome": "Success"
+      }
+     },
+     "zero": 0
+    }
+   },
+   "status": "ok",
+   "zero": 0
+  },
+  "wathen100": {
+   "method": "spd (manifest matrix_type)",
+   "n": 30401,
+   "neg": 0,
+   "pos": 30401,
+   "status": "ok",
+   "zero": 0
+  }
+ },
+ "generated": "2026-11-23",
+ "manifest": "public_suitesparse.json",
+ "rel_shift": 1e-10,
+ "schema_version": 1,
+ "strict_pivot_u": 0.5
+}
