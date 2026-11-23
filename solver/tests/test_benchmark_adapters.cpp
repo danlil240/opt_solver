@@ -807,6 +807,50 @@ TEST(BenchmarkAdapters, CudssSolvesPoisson) {
     }
 }
 
+// cuDSS's own iterative refinement by track and matrix type: an indefinite
+// solve is refined on every track (3 steps on ipopt, 2 otherwise: cuDSS pivots
+// on the diagonal only, and unrefined it missed the accuracy gate on every
+// c-* KKT system of the sealed board's recommended track), an SPD solve only
+// on the ipopt track.
+TEST(BenchmarkAdapters, CudssRefinesIndefiniteSolvesOnEveryTrack) {
+    if (std::getenv("SMF_BENCH_CUDSS_IR") != nullptr) GTEST_SKIP() << "SMF_BENCH_CUDSS_IR overrides the count";
+    auto adapter = make_solver_adapter("cudss");
+    ASSERT_NE(adapter.get(), nullptr);
+    if (!adapter->identity().available) GTEST_SKIP() << "no usable CUDA device: " << adapter->stats().reason;
+
+    const CscLower A = make_poisson2d(30);
+    std::vector<double> b(static_cast<std::size_t>(A.n), 1.0);
+
+    struct Expect {
+        MatrixType type;
+        const char *track;
+        int steps;  // stats().refine_iterations; -1: no refinement ran
+    };
+    const Expect cases[] = {
+        {MatrixType::RealSymmetricIndefinite, "recommended", 2},
+        {MatrixType::RealSymmetricIndefinite, "ipopt", 3},
+        {MatrixType::RealSymmetricPositiveDefinite, "recommended", -1},
+        {MatrixType::RealSymmetricPositiveDefinite, "ipopt", 3},
+    };
+    for (const Expect &e : cases) {
+        SCOPED_TRACE(std::string(e.type == MatrixType::RealSymmetricIndefinite ? "ldlt " : "spd ") + e.track);
+        Control ctrl;
+        ctrl.matrix_type = e.type;
+        adapter->configure(ctrl, e.track);
+        ASSERT_EQ(adapter->analyse(A), Outcome::Success) << adapter->stats().reason;
+        ASSERT_EQ(adapter->factor(A.values), Outcome::Success) << adapter->stats().reason;
+        std::vector<double> x = b;
+        ASSERT_EQ(adapter->solve(x, 1), Outcome::Success) << adapter->stats().reason;
+        EXPECT_EQ(adapter->stats().refine_iterations, e.steps);
+        EXPECT_TRUE(is_qualified_validation(validate(A, b, x, 1)));
+
+        // Several right-hand sides are never refined.
+        std::vector<double> x2(2 * b.size(), 1.0);
+        ASSERT_EQ(adapter->solve(x2, 2), Outcome::Success) << adapter->stats().reason;
+        EXPECT_EQ(adapter->stats().refine_iterations, -1);
+    }
+}
+
 #endif // SMF_BENCH_CUDSS
 
 TEST(BenchmarkAdapters, PanuaUnavailableWhenLibOrLicenseMissing) {
