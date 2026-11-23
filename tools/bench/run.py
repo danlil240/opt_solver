@@ -9,6 +9,7 @@ import os
 import pathlib
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -26,7 +27,64 @@ def sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def _probe_command_stdout(cmd: List[str]) -> Optional[str]:
+    """Best-effort command probe returning stripped stdout on rc=0, else None."""
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            stdout, _ = proc.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return None
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    text = (stdout or "").strip()
+    return text or None
+
+
+_PANUA_HOLDER_LINE_RE = re.compile(r"(?i)^(\s*(?:\[PANUA\]\s*)?for\s+).+$")
+_EMAIL_TOKEN_RE = re.compile(r"\S*@\S*")
+
+
+def _redact_panua_license_output(text: Optional[str]) -> Optional[str]:
+    """Redact license holder names and email tokens from check_license output."""
+    if not text:
+        return None
+    redacted_lines: List[str] = []
+    for line in text.splitlines():
+        line = _PANUA_HOLDER_LINE_RE.sub(r"\1[REDACTED]", line)
+        line = _EMAIL_TOKEN_RE.sub("[REDACTED]", line)
+        redacted_lines.append(line)
+    out = "\n".join(redacted_lines).strip()
+    return out or None
+
+
+def _probe_panua_license(panua_lib: Optional[str]) -> Optional[str]:
+    """Best-effort redacted stdout summary from Panua check_license(.exe), or None."""
+    if not panua_lib:
+        return None
+    try:
+        bin_dir = pathlib.Path(panua_lib).resolve().parent.parent / "bin"
+        names = ("check_license.exe", "check_license") if os.name == "nt" else ("check_license", "check_license.exe")
+        for name in names:
+            candidate = bin_dir / name
+            if candidate.exists():
+                return _redact_panua_license_output(_probe_command_stdout([str(candidate)]))
+    except OSError:
+        return None
+    return None
+
+
 def inventory_environment(build_dir: pathlib.Path) -> Dict[str, Any]:
+    panua_lib = os.environ.get("SMF_PANUA_PARDISO_LIB") or None
+    panua_lic = os.environ.get("PANUA_LIC_PATH") or None
+    if panua_lic is None:
+        default_lic = pathlib.Path.home() / "panua.lic"
+        if default_lic.exists():
+            panua_lic = str(default_lic)
     env_info: Dict[str, Any] = {
         "platform": platform.platform(),
         "system": platform.system(),
@@ -46,6 +104,12 @@ def inventory_environment(build_dir: pathlib.Path) -> Dict[str, Any]:
             for k in ("SMF_PIVOTING", "SMF_BENCH_PIVOTING")
             if k in os.environ
         },
+        "panua_pardiso_lib": panua_lib,
+        "panua_lic_path": panua_lic,
+        "panua_license_check": _probe_panua_license(panua_lib),
+        "gpu": _probe_command_stdout(
+            ["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"]
+        ),
         "cmake_cache": {},
     }
     cache_file = build_dir / "CMakeCache.txt"
@@ -134,9 +198,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--ordering", default=None,
                         choices=("amd", "metis", "matching", "auto", "auto_parallel"),
                         help="pin smf's ordering for every case (experiments only; wins over a per-case pin)")
-    parser.add_argument("--runner", choices=("native", "wsl"), default="native",
-                        help="'wsl' runs the Linux-only solvers (ssids) through WSL2 via run_wsl.py; "
-                             "the others stay native")
+    parser.add_argument("--runner", choices=("native", "wsl", "wsl-smf"), default="native",
+                        help="'wsl' runs Linux-only solvers (ssids) through WSL2 via run_wsl.py; "
+                             "'wsl-smf' also runs Linux OpenBLAS smf in WSL2 for OS-parity")
     args = parser.parse_args(argv)
 
     if args.trials < 10 and not args.allow_short_trials:
@@ -223,7 +287,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     continue
                 if (solver_id, threads) in dead:
                     continue
-                use_wsl = args.runner == "wsl" and solver_id in run_wsl.WSL_SOLVERS
+                wsl_solvers = run_wsl.WSL_SOLVERS | {"smf"} if args.runner == "wsl-smf" else run_wsl.WSL_SOLVERS
+                use_wsl = args.runner in ("wsl", "wsl-smf") and solver_id in wsl_solvers
                 if use_wsl or (binary is not None and binary.name.startswith("bench_replay")):
                     cmd = [
                         str(binary) if binary is not None else "bench_replay",
@@ -273,9 +338,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                         env = dict(os.environ)
                         for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
                             env[var] = str(threads)
+                        if solver_id == "panua_pardiso":
+                            env.setdefault("PARDISOLICMESSAGE", "1")
                         lines_before = records_path.read_text(encoding="utf-8").count("\n") if records_path.exists() else 0
                         if use_wsl:
-                            cmd = run_wsl.wsl_command(cmd[1:], threads, timeout_s=max(1.0, args.timeout - 3.0))
+                            timeout_guard = max(1.0, args.timeout - 3.0)
+                            if solver_id == "smf":
+                                wsl_bin = args.binary if (args.binary and args.binary.startswith("/")) else None
+                                cmd = run_wsl.wsl_smf_command(cmd[1:], threads, binary=wsl_bin, timeout_s=timeout_guard)
+                            else:
+                                cmd = run_wsl.wsl_command(cmd[1:], threads, timeout_s=timeout_guard)
                         proc = subprocess.run(
                             cmd,
                             capture_output=True,
@@ -291,7 +363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         if use_wsl and not new_lines:
                             # No record: environment broken (dead) or a per-case driver failure.
                             outcome, why, env_dead = run_wsl.classify_no_record(
-                                proc.returncode, proc.stderr or proc.stdout)
+                                proc.returncode, proc.stderr or proc.stdout, solver_label=solver_id)
                             rec = run_wsl.unavailable_record(
                                 case, solver_id, mode, track, trial_id, is_warmup, threads, why, outcome)
                             with records_path.open("a", encoding="utf-8") as f:
@@ -312,7 +384,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         dead.add((solver_id, threads))
                     except subprocess.TimeoutExpired:
                         if use_wsl:
-                            run_wsl.kill_stray_drivers()
+                            run_wsl.kill_stray_drivers(pattern="bench_replay" if solver_id == "smf" else "ssids_replay")
                         rec = {
                             "schema_version": 1,
                             "matrix_id": matrix_id,

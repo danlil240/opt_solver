@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -90,11 +91,32 @@ Outcome map_cudss_status(cudssStatus_t s) {
 //     (diagonal / static) pivoting. cuDSS 0.8 lists CUDSS_PIVOT_BUNCH_KAUFMAN as
 //     "reserved for future (not supported yet)", so Bunch-Kaufman cannot be
 //     selected; the pivot strategy stays AUTO.
+//   * Matching stays off, the library default. cuDSS 0.8 offers matching with
+//     scaling for symmetric matrices (CUDSS_CONFIG_MATCHING_ALG), but on this
+//     suite it is not a safe default: on the 21 sealed-board matrices where
+//     cuDSS missed the accuracy gate (RTX 5080, 2026-11-23, 42 case-tracks),
+//     CUDSS_MATCHING_ALG_AUTO rescued OPF_6000, OPF_10000 and brainpc2 but
+//     lost HTC_336_4438 / HTC_336_9129, c-49, c-54 and c-55 on the ipopt
+//     track (omega 1e-16 -> 1 or 5e-7), multiplied the factor size (c-62:
+//     7.9M -> 34.2M entries) and reported inertias that disagree with the
+//     reference on every case. SMF_BENCH_CUDSS_MATCHING=auto turns it on for
+//     A/B checks (it needs the values at analysis, which analyse() has).
 //   * SPD: CUDSS_MTYPE_SPD (Cholesky), as the other adapters use their SPD path.
-//   * Iterative refinement follows the track like every other solver: on the
-//     "ipopt" track with one right-hand side the solve phase runs cuDSS's own
-//     CUDSS_CONFIG_IR_N_STEPS = 3 (the harness's refinement count); otherwise 0.
-//     The IR time is inside solve_ms (it is part of the solve call).
+//   * Iterative refinement, one right-hand side, cuDSS's own
+//     (CUDSS_CONFIG_IR_N_STEPS; its time is inside solve_ms). On the "ipopt"
+//     track: 3 steps, the harness's refinement count. On the other tracks the
+//     harness never refines, but a solver's own refinement stays on (MKL
+//     PARDISO: two steps after perturbed pivots; smf: after static pivots).
+//     cuDSS pivots on the diagonal only and has no automatic mode (default 0
+//     steps), so an indefinite solve gets kRecommendedIrSteps steps, MKL
+//     PARDISO's count; SPD solves get none. Keying it on perturbed pivots
+//     (CUDSS_DATA_NPIVOTS > 0) does not work: the c-49 ... c-67b KKT systems
+//     report none and still come out at omega 1e-7 to 2e-4 unrefined. Same
+//     42 case-tracks: 0 steps 13 pass, 2 steps 24 (every c-* recommended
+//     track, at omega <= 3e-15), 5 steps 26 (also HTC_336_4438 / _9129
+//     recommended); no case-track that passed is lost. The steps performed
+//     are reported as stats().refine_iterations.
+//     SMF_BENCH_CUDSS_IR=off|<n> overrides the count off the ipopt track.
 // Timing: every phase is host wall-clock around the cuDSS calls plus a
 // cudaDeviceSynchronize, and includes the host<->device copies of the matrix
 // structure (analyse), the values (factor) and the right-hand sides / solution
@@ -122,6 +144,19 @@ public:
     void configure(const Control &ctrl, const std::string &track) override {
         indefinite_ = (ctrl.matrix_type == MatrixType::RealSymmetricIndefinite);
         track_ = track;
+        matching_ = false;
+        if (const char *e = std::getenv("SMF_BENCH_CUDSS_MATCHING")) matching_ = std::string(e) == "auto";
+        ir_override_ = -1;  // the default count
+        if (const char *e = std::getenv("SMF_BENCH_CUDSS_IR")) {
+            if (std::string(e) == "off") {
+                ir_override_ = 0;
+            } else {
+                // Only a plain count 0..100 is taken; anything else keeps the default.
+                char *end = nullptr;
+                const long v = std::strtol(e, &end, 10);
+                if (end != e && *end == '\0' && v >= 0 && v <= 100) ir_override_ = static_cast<int>(v);
+            }
+        }
     }
 
     Outcome analyse(const CscLower &A) override {
@@ -152,6 +187,12 @@ public:
             !cudss_ok(cudssConfigCreate(&config_), "cudssConfigCreate") ||
             !cudss_ok(cudssDataCreate(handle_, &data_), "cudssDataCreate")) {
             return stats_.outcome;
+        }
+        if (indefinite_ && matching_) {
+            const cudssMatchingAlg_t alg = CUDSS_MATCHING_ALG_AUTO;
+            if (!cudss_ok(cudssConfigSet(config_, CUDSS_CONFIG_MATCHING_ALG, &alg, sizeof(alg)), "set matching")) {
+                return stats_.outcome;
+            }
         }
 
         const cudssMatrixType_t mtype = indefinite_ ? CUDSS_MTYPE_SYMMETRIC : CUDSS_MTYPE_SPD;
@@ -211,7 +252,13 @@ public:
         if (nrhs <= 0 || b_and_x.size() < total) return fail(Outcome::InvalidInput, "cudss: solve buffer too small");
 
         if (!ensure_rhs(nrhs)) return stats_.outcome;
-        const int ir_steps = (track_ == "ipopt" && nrhs == 1) ? 3 : 0;
+        int ir_steps = 0;
+        if (nrhs == 1) {
+            if (track_ == "ipopt") ir_steps = 3;
+            else if (ir_override_ >= 0) ir_steps = ir_override_;
+            else if (indefinite_) ir_steps = kRecommendedIrSteps;
+        }
+        stats_.refine_iterations = -1;
         if (!cudss_ok(cudssConfigSet(config_, CUDSS_CONFIG_IR_N_STEPS, &ir_steps, sizeof(ir_steps)), "set IR steps")) {
             return stats_.outcome;
         }
@@ -228,6 +275,15 @@ public:
         stats_.solve_ms = ms_since(t0);
         stats_.outcome = map_cudss_status(st);
         if (st != CUDSS_STATUS_SUCCESS) stats_.reason = "cudss solve status " + std::to_string(static_cast<int>(st));
+        if (st == CUDSS_STATUS_SUCCESS && ir_steps > 0) {
+            int done = 0;
+            size_t written = 0;
+            if (cudssDataGet(handle_, data_, CUDSS_DATA_IR_N_STEPS, &done, sizeof(done), &written) ==
+                    CUDSS_STATUS_SUCCESS &&
+                written == sizeof(done) && done >= 0) {
+                stats_.refine_iterations = done;
+            }
+        }
         return stats_.outcome;
     }
 
@@ -369,7 +425,13 @@ private:
         n_ = 0;
     }
 
+    // Refinement steps of an indefinite solve off the ipopt track: MKL
+    // PARDISO's automatic count (iparm(8) = 0: two steps).
+    static constexpr int kRecommendedIrSteps = 2;
+
     bool indefinite_ = true;
+    bool matching_ = false;
+    int ir_override_ = -1;  // SMF_BENCH_CUDSS_IR: -1 the default, else the step count
     std::string track_ = "recommended";
     int n_ = 0;
     int nrhs_ = 0;

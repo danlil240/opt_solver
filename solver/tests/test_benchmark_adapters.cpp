@@ -807,4 +807,199 @@ TEST(BenchmarkAdapters, CudssSolvesPoisson) {
     }
 }
 
+// cuDSS's own iterative refinement by track and matrix type: an indefinite
+// solve is refined on every track (3 steps on ipopt, 2 otherwise: cuDSS pivots
+// on the diagonal only, and unrefined it missed the accuracy gate on every
+// c-* KKT system of the sealed board's recommended track), an SPD solve only
+// on the ipopt track.
+TEST(BenchmarkAdapters, CudssRefinesIndefiniteSolvesOnEveryTrack) {
+    if (std::getenv("SMF_BENCH_CUDSS_IR") != nullptr) GTEST_SKIP() << "SMF_BENCH_CUDSS_IR overrides the count";
+    auto adapter = make_solver_adapter("cudss");
+    ASSERT_NE(adapter.get(), nullptr);
+    if (!adapter->identity().available) GTEST_SKIP() << "no usable CUDA device: " << adapter->stats().reason;
+
+    const CscLower A = make_poisson2d(30);
+    std::vector<double> b(static_cast<std::size_t>(A.n), 1.0);
+
+    struct Expect {
+        MatrixType type;
+        const char *track;
+        int steps;  // stats().refine_iterations; -1: no refinement ran
+    };
+    const Expect cases[] = {
+        {MatrixType::RealSymmetricIndefinite, "recommended", 2},
+        {MatrixType::RealSymmetricIndefinite, "ipopt", 3},
+        {MatrixType::RealSymmetricPositiveDefinite, "recommended", -1},
+        {MatrixType::RealSymmetricPositiveDefinite, "ipopt", 3},
+    };
+    for (const Expect &e : cases) {
+        SCOPED_TRACE(std::string(e.type == MatrixType::RealSymmetricIndefinite ? "ldlt " : "spd ") + e.track);
+        Control ctrl;
+        ctrl.matrix_type = e.type;
+        adapter->configure(ctrl, e.track);
+        ASSERT_EQ(adapter->analyse(A), Outcome::Success) << adapter->stats().reason;
+        ASSERT_EQ(adapter->factor(A.values), Outcome::Success) << adapter->stats().reason;
+        std::vector<double> x = b;
+        ASSERT_EQ(adapter->solve(x, 1), Outcome::Success) << adapter->stats().reason;
+        EXPECT_EQ(adapter->stats().refine_iterations, e.steps);
+        EXPECT_TRUE(is_qualified_validation(validate(A, b, x, 1)));
+
+        // Several right-hand sides are never refined.
+        std::vector<double> x2(2 * b.size(), 1.0);
+        ASSERT_EQ(adapter->solve(x2, 2), Outcome::Success) << adapter->stats().reason;
+        EXPECT_EQ(adapter->stats().refine_iterations, -1);
+    }
+}
+
 #endif // SMF_BENCH_CUDSS
+
+TEST(BenchmarkAdapters, PanuaUnavailableWhenLibOrLicenseMissing) {
+    EnvScope env;
+    env.set("SMF_PANUA_PARDISO_LIB", "__nonexistent_panua_lib__.dll");
+
+    auto adapter = make_solver_adapter("panua_pardiso");
+    ASSERT_NE(adapter.get(), nullptr);
+    const AdapterIdentity ident = adapter->identity();
+    EXPECT_EQ(ident.solver_id, "panua_pardiso");
+    EXPECT_FALSE(ident.available);
+
+    const CscLower I3 = make_identity_spd_3x3();
+    EXPECT_EQ(adapter->analyse(I3), Outcome::Unavailable);
+    EXPECT_FALSE(adapter->stats().reason.empty());
+}
+
+TEST(BenchmarkAdapters, PanuaAndMklCoexistInSameProcess) {
+    const char *panua_lib = std::getenv("SMF_PANUA_PARDISO_LIB");
+    if (panua_lib == nullptr || *panua_lib == '\0') {
+        GTEST_SKIP() << "SMF_PANUA_PARDISO_LIB not set";
+    }
+
+    auto mkl = make_solver_adapter("mkl_pardiso");
+    auto panua = make_solver_adapter("panua_pardiso");
+    ASSERT_NE(mkl.get(), nullptr);
+    ASSERT_NE(panua.get(), nullptr);
+
+    const AdapterIdentity mkl_id = mkl->identity();
+    const AdapterIdentity panua_id = panua->identity();
+    EXPECT_EQ(mkl_id.solver_id, "mkl_pardiso");
+    EXPECT_EQ(panua_id.solver_id, "panua_pardiso");
+    if (!panua_id.available) {
+        const std::string reason = panua->stats().reason;
+        if (reason.find("license") != std::string::npos) {
+            GTEST_SKIP() << reason;
+        }
+        FAIL() << "panua_pardiso unavailable: " << reason;
+    }
+
+    CscLower spd3;
+    spd3.n = 3;
+    spd3.col_ptr = {0, 1, 2, 3};
+    spd3.row_idx = {0, 1, 2};
+    spd3.values = {2.0, 4.0, 8.0};
+
+    const CscLower indef2 = make_exchange_2x2_indef();
+
+    std::vector<SolverAdapter *> adapters;
+    if (mkl_id.available) {
+        adapters.push_back(mkl.get());
+    }
+    adapters.push_back(panua.get());
+
+    for (SolverAdapter *ad : adapters) {
+        const std::string id = ad->identity().solver_id;
+        SCOPED_TRACE("adapter=" + id);
+
+        // SPD 3x3: diag(2, 4, 8)
+        {
+            Control ctrl;
+            ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+            ad->configure(ctrl, "recommended");
+            ASSERT_EQ(ad->analyse(spd3), Outcome::Success) << ad->stats().reason;
+            ASSERT_EQ(ad->factor(spd3.values), Outcome::Success) << ad->stats().reason;
+            const std::vector<double> b = {2.0, 8.0, 24.0};
+            std::vector<double> x = b;
+            ASSERT_EQ(ad->solve(x, 1), Outcome::Success) << ad->stats().reason;
+            EXPECT_TRUE(is_qualified_validation(validate(spd3, b, x, 1)));
+            if (id == "panua_pardiso") {
+                EXPECT_GT(ad->stats().factor_entries, 0);
+            }
+        }
+
+        // Indefinite 2x2 exchange matrix
+        {
+            Control ctrl;
+            ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+            ad->configure(ctrl, "recommended");
+            ASSERT_EQ(ad->analyse(indef2), Outcome::Success) << ad->stats().reason;
+            ASSERT_EQ(ad->factor(indef2.values), Outcome::Success) << ad->stats().reason;
+            const std::vector<double> b = {1.0, 2.0};
+            std::vector<double> x = b;
+            ASSERT_EQ(ad->solve(x, 1), Outcome::Success) << ad->stats().reason;
+            EXPECT_TRUE(is_qualified_validation(validate(indef2, b, x, 1)));
+            const AdapterStats st = ad->stats();
+            EXPECT_EQ(st.inertia_pos, 1);
+            EXPECT_EQ(st.inertia_neg, 1);
+            EXPECT_EQ(st.inertia_zero, 0);
+            if (id == "panua_pardiso") {
+                EXPECT_GT(st.factor_entries, 0);
+            }
+        }
+    }
+}
+
+TEST(BenchmarkAdapters, PanuaMissingStructuralDiagonalAndIndefRefactor) {
+    const char *panua_lib = std::getenv("SMF_PANUA_PARDISO_LIB");
+    if (panua_lib == nullptr || *panua_lib == '\0') {
+        GTEST_SKIP() << "SMF_PANUA_PARDISO_LIB not set";
+    }
+
+    auto panua = make_solver_adapter("panua_pardiso");
+    ASSERT_NE(panua.get(), nullptr);
+    const AdapterIdentity panua_id = panua->identity();
+    EXPECT_EQ(panua_id.solver_id, "panua_pardiso");
+    if (!panua_id.available) {
+        GTEST_SKIP() << "panua_pardiso unavailable: " << panua->stats().reason;
+    }
+
+    // 4x4 symmetric indefinite KKT matrix [H, B^T; B, 0] whose lower-diagonal
+    // 2x2 constraint block omits structural diagonal zeros (2,2) and (3,3).
+    // H = [[4, 1], [1, 3]] (SPD), B = [[1, 0], [1, 2]] (full rank 2) -> inertia (2, 2, 0).
+    CscLower kkt;
+    kkt.n = 4;
+    kkt.col_ptr = {0, 4, 6, 6, 6};
+    kkt.row_idx = {0, 1, 2, 3, 1, 3};
+    kkt.values = {4.0, 1.0, 1.0, 1.0, 3.0, 2.0};
+
+    Control ctrl;
+    ctrl.matrix_type = MatrixType::RealSymmetricIndefinite;
+    panua->configure(ctrl, "recommended");
+    ASSERT_EQ(panua->analyse(kkt), Outcome::Success) << panua->stats().reason;
+    ASSERT_EQ(panua->factor(kkt.values), Outcome::Success) << panua->stats().reason;
+
+    const AdapterStats st1 = panua->stats();
+    EXPECT_EQ(st1.inertia_pos, 2);
+    EXPECT_EQ(st1.inertia_neg, 2);
+    EXPECT_EQ(st1.inertia_zero, 0);
+
+    const std::vector<double> b1 = {1.0, -2.0, 0.5, 3.0};
+    std::vector<double> x1 = b1;
+    ASSERT_EQ(panua->solve(x1, 1), Outcome::Success) << panua->stats().reason;
+    EXPECT_TRUE(is_qualified_validation(validate(kkt, b1, x1, 1)));
+
+    // Refactor with changed primal and off-diagonal values on the same pattern
+    // while keeping the inserted zero constraint diagonals intact:
+    // H = [[6, -1.5], [-1.5, 5]] (SPD), B = [[2, 0], [-0.5, 3]] -> inertia (2, 2, 0).
+    CscLower kkt2 = kkt;
+    kkt2.values = {6.0, -1.5, 2.0, -0.5, 5.0, 3.0};
+    ASSERT_EQ(panua->factor(kkt2.values), Outcome::Success) << panua->stats().reason;
+
+    const AdapterStats st2 = panua->stats();
+    EXPECT_EQ(st2.inertia_pos, 2);
+    EXPECT_EQ(st2.inertia_neg, 2);
+    EXPECT_EQ(st2.inertia_zero, 0);
+
+    const std::vector<double> b2 = {2.5, 1.0, -1.0, 4.0};
+    std::vector<double> x2 = b2;
+    ASSERT_EQ(panua->solve(x2, 1), Outcome::Success) << panua->stats().reason;
+    EXPECT_TRUE(is_qualified_validation(validate(kkt2, b2, x2, 1)));
+}

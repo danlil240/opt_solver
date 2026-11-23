@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import json
+import tempfile
 import unittest
 import io
 import math
@@ -291,12 +294,12 @@ class TestScore(unittest.TestCase):
 
     def test_competitor_set_per_class(self):
         self.assertEqual(set(score.competitor_set("small_kkt")),
-                         {"ma57", "ma97", "ssids", "mkl_pardiso", "mumps"})
+                         {"ma57", "ma97", "ssids", "mkl_pardiso", "panua_pardiso", "mumps"})
         self.assertEqual(set(score.competitor_set("large_kkt")), set(score.competitor_set("hard_indef")))
         self.assertEqual(set(score.competitor_set("hard_indef")),
-                         {"ma57", "ma97", "ssids", "mkl_pardiso", "mumps"})
+                         {"ma57", "ma97", "ssids", "mkl_pardiso", "panua_pardiso", "mumps"})
         self.assertEqual(set(score.competitor_set("spd")),
-                         {"cholmod", "mkl_pardiso", "ma57", "ma97", "ssids", "mumps"})
+                         {"cholmod", "mkl_pardiso", "panua_pardiso", "ma57", "ma97", "ssids", "mumps"})
         # cholmod on an indefinite class is never best
         m = manifest([case("a", "hard_indef", "tuning")])
         res = score.score([rec("a", "smf", 100.0), rec("a", "cholmod", 1.0),
@@ -313,9 +316,9 @@ class TestScore(unittest.TestCase):
         t1 = res["hard_indef"]["recommended"][1]["ratio"]
         t8 = res["hard_indef"]["recommended"][8]["ratio"]
         self.assertEqual(t1["competitor_set"], t8["competitor_set"])
-        self.assertEqual(set(t1["missing_competitors"]), {"ssids", "mkl_pardiso", "mumps"})
+        self.assertEqual(set(t1["missing_competitors"]), {"ssids", "mkl_pardiso", "panua_pardiso", "mumps"})
         self.assertEqual(set(t8["missing_competitors"]),
-                         {"ma57", "ssids", "mkl_pardiso", "mumps"})
+                         {"ma57", "ssids", "mkl_pardiso", "panua_pardiso", "mumps"})
         self.assertEqual(t1["best_solver_counts"], {"ma57": 1})
         self.assertEqual(t8["best_solver_counts"], {"ma97": 1})
         text = score.render(res, "all")
@@ -329,6 +332,135 @@ class TestScore(unittest.TestCase):
         res = score.score(records, m, split="all")
         r = res["spd"]["recommended"][1]["ratio"]
         self.assertEqual((r["n"], r["no_accurate_competitor"]), (1, 1))
+
+    def test_panua_pardiso_in_competitor_sets(self):
+        for cls in ("hard_indef", "public_indef_kkt", "public_indef_pde", "public_spd"):
+            self.assertIn("panua_pardiso", score.competitor_set(cls))
+        m = manifest([case("a", "public_indef_kkt", "sealed_public")])
+        records = [
+            rec("a", "smf", 100.0),
+            rec("a", "panua_pardiso", 50.0),
+            rec("a", "ma57", 200.0),
+        ]
+        res = score.score(records, m, split="sealed_public", shift_ms=10.0)
+        r = res["public_indef_kkt"]["recommended"][1]["ratio"]
+        self.assertEqual(r["best_solver_counts"], {"panua_pardiso": 1})
+        self.assertTrue(math.isclose(r["geomean"], 110.0 / 60.0))
+
+    def test_gpu_exempt_from_cpu_gflops_cap(self):
+        cudss_rec = rec("a", "cudss", 1100.0, threads=1, flops=5e11, factor_ms=1000.0)
+        ssids_rec = rec("a", "ssids", 1100.0, threads=1, flops=5e11, factor_ms=1000.0)
+        self.assertFalse(score.is_implausible(cudss_rec))
+        self.assertTrue(score.is_implausible(ssids_rec))
+        self.assertEqual(score.record_status(cudss_rec), "ok")
+        self.assertEqual(score.record_status(ssids_rec), "implausible")
+
+    def test_public_classes_and_sealed_split(self):
+        # Manifest intentionally lists public classes in reverse order to verify CLASS_ORDER sorting.
+        m = manifest([
+            case("c", "public_spd", "sealed_public"),
+            case("b", "public_indef_pde", "sealed_public"),
+            case("a", "public_indef_kkt", "sealed_public"),
+        ])
+        records = [
+            rec("a", "smf", 40.0), rec("a", "panua_pardiso", 80.0),
+            rec("b", "smf", 50.0), rec("b", "ma97", 100.0),
+            rec("c", "smf", 30.0), rec("c", "cholmod", 60.0),
+        ]
+        res = score.score(records, m, split="sealed_public", shift_ms=10.0)
+        md = score.render(res, "sealed_public")
+        idx_kkt = md.index("## public_indef_kkt /")
+        idx_pde = md.index("## public_indef_pde /")
+        idx_spd = md.index("## public_spd /")
+        self.assertLess(idx_kkt, idx_pde)
+        self.assertLess(idx_pde, idx_spd)
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            rec_path = td / "records.jsonl"
+            man_path = td / "manifest.json"
+            rec_path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+            man_path.write_text(json.dumps(m), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = score.main(["--records", str(rec_path), "--manifest", str(man_path),
+                                 "--split", "sealed_public"])
+            self.assertEqual(rc, 0)
+            self.assertIn("split: sealed_public", buf.getvalue())
+
+    def test_include_gpu_dual_summary_and_rollup(self):
+        m = manifest([
+            case("k1", "public_indef_kkt", "sealed_public", track="recommended"),
+            case("k1", "public_indef_kkt", "sealed_public", track="ipopt"),
+            case("s1", "public_spd", "sealed_public", track="recommended"),
+        ])
+        records = [
+            rec("k1", "smf", 40.0, track="recommended"),
+            rec("k1", "panua_pardiso", 80.0, track="recommended"),
+            rec("k1", "ma97", 120.0, track="recommended"),
+            rec("k1", "cudss", 20.0, track="recommended", outcome="Inaccurate", eta=1e-4),
+            rec("k1", "smf", 50.0, track="ipopt"),
+            rec("k1", "panua_pardiso", 110.0, track="ipopt"),
+            rec("k1", "ma97", 90.0, track="ipopt"),
+            rec("k1", "cudss", 30.0, track="ipopt", outcome="Inaccurate", eta=1e-4),
+            rec("s1", "smf", 100.0, track="recommended"),
+            rec("s1", "panua_pardiso", 200.0, track="recommended"),
+            rec("s1", "ma97", 250.0, track="recommended"),
+            rec("s1", "cudss", 20.0, track="recommended"),
+        ]
+        res = score.score(records, m, split="sealed_public", shift_ms=10.0)
+        # Backward compatibility when include_gpu=False (default):
+        self.assertNotIn("cudss", res["public_spd"]["recommended"][1]["ratio"]["best_solver_counts"])
+        self.assertNotIn("cudss", res["public_indef_kkt"]["recommended"][1]["ratio"]["best_solver_counts"])
+        self.assertNotIn("Headline summary", score.render(res, "sealed_public"))
+
+        # Dual headline roll-up when include_gpu=True:
+        md = score.render(res, "sealed_public", include_gpu=True)
+        self.assertIn("## Headline summary (per thread count)", md)
+        self.assertIn("### 1 thread(s)", md)
+        headline = md.split("## public_indef_kkt /")[0]
+        self.assertIn("CPU-only", headline)
+        self.assertIn("0.559", headline)
+        self.assertIn("3/3", headline)
+        self.assertIn("GPU head-to-head", headline)
+        self.assertIn("cudss", headline)
+        self.assertIn("3.667", headline)
+        self.assertIn("1/3", headline)
+        self.assertIn("All rivals incl. GPU", headline)
+        self.assertIn("1.069", headline)
+        self.assertIn("public_indef_kkt", headline)
+        self.assertIn("public_spd", headline)
+
+        with tempfile.TemporaryDirectory() as td:
+            td = pathlib.Path(td)
+            rec_path = td / "records.jsonl"
+            man_path = td / "manifest.json"
+            rec_path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+            man_path.write_text(json.dumps(m), encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = score.main(["--records", str(rec_path), "--manifest", str(man_path),
+                                 "--split", "sealed_public", "--include-gpu"])
+            self.assertEqual(rc, 0)
+            self.assertIn("## Headline summary (per thread count)", buf.getvalue())
+
+    def test_include_gpu_headline_skips_override_tracks(self):
+        m = manifest([
+            case("s1", "public_spd", "sealed_public", track="recommended"),
+        ])
+        records = [
+            rec("s1", "smf", 100.0, track="recommended"),
+            rec("s1", "cholmod", 200.0, track="recommended"),
+            rec("s1", "cudss", 20.0, track="recommended"),
+            # Override track only runs smf; must not double-count total_cases or smf_solved in GPU headline.
+            rec("s1", "smf", 90.0, track="ipopt-plugin"),
+        ]
+        res = score.score(records, m, split="sealed_public", shift_ms=10.0)
+        md = score.render(res, "sealed_public", include_gpu=True)
+        headline = md.split("## public_spd /")[0]
+        self.assertIn("### 1 thread(s) (1 case-tracks)", headline)
+        self.assertIn("`smf` solved 1/1", headline)
+        self.assertIn("`cudss` solved 1/1", headline)
+        self.assertIn("## public_spd / ipopt-plugin / 1 thread(s)", md)
 
 
 if __name__ == "__main__":
