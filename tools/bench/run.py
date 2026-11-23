@@ -9,6 +9,7 @@ import os
 import pathlib
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -44,16 +45,34 @@ def _probe_command_stdout(cmd: List[str]) -> Optional[str]:
     return text or None
 
 
+_PANUA_HOLDER_LINE_RE = re.compile(r"(?i)^(\s*(?:\[PANUA\]\s*)?for\s+).+$")
+_EMAIL_TOKEN_RE = re.compile(r"\S*@\S*")
+
+
+def _redact_panua_license_output(text: Optional[str]) -> Optional[str]:
+    """Redact license holder names and email tokens from check_license output."""
+    if not text:
+        return None
+    redacted_lines: List[str] = []
+    for line in text.splitlines():
+        line = _PANUA_HOLDER_LINE_RE.sub(r"\1[REDACTED]", line)
+        line = _EMAIL_TOKEN_RE.sub("[REDACTED]", line)
+        redacted_lines.append(line)
+    out = "\n".join(redacted_lines).strip()
+    return out or None
+
+
 def _probe_panua_license(panua_lib: Optional[str]) -> Optional[str]:
-    """Best-effort stdout summary from Panua check_license(.exe), or None."""
+    """Best-effort redacted stdout summary from Panua check_license(.exe), or None."""
     if not panua_lib:
         return None
     try:
         bin_dir = pathlib.Path(panua_lib).resolve().parent.parent / "bin"
-        for name in ("check_license.exe", "check_license"):
+        names = ("check_license.exe", "check_license") if os.name == "nt" else ("check_license", "check_license.exe")
+        for name in names:
             candidate = bin_dir / name
             if candidate.exists():
-                return _probe_command_stdout([str(candidate)])
+                return _redact_panua_license_output(_probe_command_stdout([str(candidate)]))
     except OSError:
         return None
     return None
@@ -344,7 +363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         if use_wsl and not new_lines:
                             # No record: environment broken (dead) or a per-case driver failure.
                             outcome, why, env_dead = run_wsl.classify_no_record(
-                                proc.returncode, proc.stderr or proc.stdout)
+                                proc.returncode, proc.stderr or proc.stdout, solver_label=solver_id)
                             rec = run_wsl.unavailable_record(
                                 case, solver_id, mode, track, trial_id, is_warmup, threads, why, outcome)
                             with records_path.open("a", encoding="utf-8") as f:

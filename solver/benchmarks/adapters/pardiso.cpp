@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -291,12 +293,20 @@ std::string panua_license_error(int error) {
     }
 }
 
+Outcome map_panua_error(int error, bool is_factor_phase) {
+    if (error == -10 || error == -11 || error == -12) {
+        return Outcome::Unavailable;
+    }
+    return map_pardiso_error(error, is_factor_phase);
+}
+
 void *open_panua_library(const std::string &path, std::string &err_msg) {
 #if defined(_WIN32)
     HMODULE mod = LoadLibraryA(path.c_str());
     if (mod == nullptr) {
+        const DWORD err = GetLastError();
         err_msg = "panua_pardiso: LoadLibraryA(\"" + path +
-                  "\") failed (Win32 error " + std::to_string(GetLastError()) + ")";
+                  "\") failed (Win32 error " + std::to_string(err) + ")";
     }
     return static_cast<void *>(mod);
 #else
@@ -347,6 +357,8 @@ public:
         } else {
 #if defined(_WIN32)
             lib_path_ = "libpardiso.dll";
+#elif defined(__APPLE__)
+            lib_path_ = "libpardiso.dylib";
 #else
             lib_path_ = "libpardiso.so";
 #endif
@@ -403,6 +415,11 @@ public:
         unload_library();
     }
 
+    PanuaPardisoSolverAdapter(const PanuaPardisoSolverAdapter &) = delete;
+    PanuaPardisoSolverAdapter &operator=(const PanuaPardisoSolverAdapter &) = delete;
+    PanuaPardisoSolverAdapter(PanuaPardisoSolverAdapter &&) = delete;
+    PanuaPardisoSolverAdapter &operator=(PanuaPardisoSolverAdapter &&) = delete;
+
     AdapterIdentity identity() const override {
         AdapterIdentity id;
         id.solver_id = "panua_pardiso";
@@ -429,9 +446,31 @@ public:
         if (A.n <= 0 || A.n > std::numeric_limits<int>::max() ||
             A.col_ptr.size() != static_cast<std::size_t>(A.n) + 1 ||
             A.row_idx.size() != A.values.size() ||
+            A.col_ptr[0] != 0 ||
+            A.col_ptr.back() != static_cast<Int>(A.row_idx.size()) ||
             A.row_idx.size() >= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "panua_pardiso: invalid CSC shape";
+            return stats_.outcome;
+        }
+        for (std::size_t j = 0; j < static_cast<std::size_t>(A.n); ++j) {
+            if (A.col_ptr[j] > A.col_ptr[j + 1]) {
+                stats_.outcome = Outcome::InvalidInput;
+                stats_.reason = "panua_pardiso: non-monotone col_ptr";
+                return stats_.outcome;
+            }
+            for (Int p = A.col_ptr[j]; p < A.col_ptr[j + 1]; ++p) {
+                const Int i = A.row_idx[static_cast<std::size_t>(p)];
+                if (i < 0 || i >= A.n) {
+                    stats_.outcome = Outcome::InvalidInput;
+                    stats_.reason = "panua_pardiso: row_idx out of range";
+                    return stats_.outcome;
+                }
+            }
+        }
+        if (!build_upper_csr(A)) {
+            stats_.outcome = Outcome::InvalidInput;
+            stats_.reason = "panua_pardiso: matrix nnz exceeds int32 limit";
             return stats_.outcome;
         }
 
@@ -443,36 +482,31 @@ public:
         std::memset(dparm_, 0, sizeof(dparm_));
         init_fn_(pt_, &session_mtype_, &solver, iparm_, dparm_, &error);
         if (error != 0) {
-            if (error == -10 || error == -11 || error == -12) {
-                stats_.outcome = Outcome::Unavailable;
-                stats_.reason = panua_license_error(error);
-            } else {
-                stats_.outcome = Outcome::Failed;
-                stats_.reason = "panua_pardisoinit error " + std::to_string(error);
-            }
+            stats_.outcome = map_panua_error(error, false);
+            stats_.reason = (stats_.outcome == Outcome::Unavailable)
+                                ? panua_license_error(error)
+                                : ("panua_pardisoinit error " + std::to_string(error));
             return stats_.outcome;
         }
 
         // Inspected Panua PARDISO 8.2 (libpardiso.dll 20240630) pardisoinit_d defaults:
         //   mtype =  2 (SPD):   iparm[0]=1, iparm[1]=2 (METIS), iparm[17]=-1, iparm[18]=-1,
         //                       iparm[23]=1, iparm[24]=1; iparm[10]=0, iparm[12]=0, iparm[20]=0.
-        //   mtype = -2 (indef): same plus iparm[9]=8 (pivot perturbation 1e-8);
-        //                       iparm[10]=0 (scaling), iparm[12]=0 (matching), iparm[20]=0
-        //                       (unlike MKL where iparm[20]=0 disables 2x2 Bunch-Kaufman,
-        //                        Panua's default iparm[20]=0 solves 2x2/exchange systems cleanly).
+        //   mtype = -2 (indef): same plus iparm[9]=8 (pivot perturbation 1e-8), while
+        //                       iparm[10]=0, iparm[12]=0, iparm[20]=0.
+        // Upgrade symmetric indefinite / KKT runs from (0, 0, 0) to Panua's manual
+        // KKT recommendations for parity with MKL PARDISO: scaling (iparm[10]=1),
+        // weighted matching (iparm[12]=2), and 2x2 Bunch-Kaufman pivoting with
+        // weighted matching (iparm[20]=3).
         iparm_[2] = threads_;
         iparm_[5] = 0;  // write solution to x (do not overwrite b)
+        if (indefinite_) {
+            iparm_[10] = 1;
+            iparm_[12] = 2;
+            iparm_[20] = 3;
+        }
 
         n_ = static_cast<int>(A.n);
-        ia_.resize(A.col_ptr.size());
-        for (std::size_t i = 0; i < A.col_ptr.size(); ++i) {
-            ia_[i] = static_cast<int>(A.col_ptr[i]) + 1;
-        }
-        ja_.resize(A.row_idx.size());
-        for (std::size_t i = 0; i < A.row_idx.size(); ++i) {
-            ja_[i] = static_cast<int>(A.row_idx[i]) + 1;
-        }
-        a_.assign(A.values.begin(), A.values.end());
         perm_.assign(static_cast<std::size_t>(n_), 0);
         x_.assign(static_cast<std::size_t>(n_), 0.0);
 
@@ -486,28 +520,36 @@ public:
         stats_.analyse_ms = ms_since(t0, t1);
 
         if (error == 0) {
+            analysed_ = true;
             stats_.factor_entries = iparm_[17] > 0 ? static_cast<int64_t>(iparm_[17]) : 0;
             // Panua's iparm_[18] reports factorization work in GFLOPS (10^9 flops,
             // integer-truncated: verified dense 500x500 -> 0, dense 1500x1500 -> 1
             // against libpardiso.dll, matching Panua's pardiso_sym.c).
             stats_.flops = iparm_[18] > 0 ? static_cast<double>(iparm_[18]) * 1e9 : 0.0;
+        } else {
+            analysed_ = false;
         }
 
-        stats_.outcome = map_pardiso_error(error, false);
+        stats_.outcome = map_panua_error(error, false);
         if (error != 0) {
-            stats_.reason = "panua_pardiso phase 11 error " + std::to_string(error);
+            stats_.reason = (stats_.outcome == Outcome::Unavailable)
+                                ? panua_license_error(error)
+                                : ("panua_pardiso phase 11 error " + std::to_string(error));
         }
         return stats_.outcome;
     }
 
     Outcome factor(std::span<const double> values) override {
         if (!available_) return unavailable();
-        if (n_ <= 0 || values.size() != a_.size()) {
+        if (!analysed_ || n_ <= 0 || values.size() != input_nnz_) {
             stats_.outcome = Outcome::InvalidInput;
             stats_.reason = "panua_pardiso: factor before analyse or values size mismatch";
             return stats_.outcome;
         }
-        a_.assign(values.begin(), values.end());
+        std::fill(a_.begin(), a_.end(), 0.0);
+        for (std::size_t k = 0; k < input_nnz_; ++k) {
+            a_[static_cast<std::size_t>(scatter_[k])] += values[k];
+        }
 
         int phase = 22, error = 0, maxfct = 1, mnum = 1, nrhs = 1;
         double ddum = 0.0;
@@ -519,17 +561,22 @@ public:
         stats_.factor_ms = ms_since(t0, t1);
         stats_.reason.clear();
 
-        if (indefinite_ && error == 0) {
-            stats_.inertia_pos = iparm_[21];
-            stats_.inertia_neg = iparm_[22];
-            stats_.inertia_zero =
-                std::max(0, n_ - stats_.inertia_pos - stats_.inertia_neg);
-        } else if (!indefinite_) {
-            stats_.inertia_pos = (error == 0) ? n_ : 0;
+        if (error != 0) {
+            stats_.inertia_pos = 0;
             stats_.inertia_neg = 0;
             stats_.inertia_zero = 0;
-        }
-        if (error == 0) {
+            factored_ = false;
+        } else {
+            if (indefinite_) {
+                stats_.inertia_pos = iparm_[21];
+                stats_.inertia_neg = iparm_[22];
+                stats_.inertia_zero =
+                    std::max(0, n_ - stats_.inertia_pos - stats_.inertia_neg);
+            } else {
+                stats_.inertia_pos = n_;
+                stats_.inertia_neg = 0;
+                stats_.inertia_zero = 0;
+            }
             if (iparm_[17] > 0) {
                 stats_.factor_entries = static_cast<int64_t>(iparm_[17]);
             }
@@ -537,24 +584,24 @@ public:
                 stats_.flops = static_cast<double>(iparm_[18]) * 1e9;
             }
             factored_ = true;
-        } else {
-            factored_ = false;
         }
 
-        stats_.outcome = map_pardiso_error(error, true);
+        stats_.outcome = map_panua_error(error, true);
         if (error != 0) {
-            stats_.reason = "panua_pardiso phase 22 error " + std::to_string(error);
+            stats_.reason = (stats_.outcome == Outcome::Unavailable)
+                                ? panua_license_error(error)
+                                : ("panua_pardiso phase 22 error " + std::to_string(error));
         }
         return stats_.outcome;
     }
 
     Outcome solve(std::span<double> b_and_x, int nrhs) override {
         if (!available_) return unavailable();
-        if (n_ <= 0 || nrhs <= 0 ||
+        if (!analysed_ || n_ <= 0 || nrhs <= 0 ||
             b_and_x.size() < static_cast<std::size_t>(n_) *
                                  static_cast<std::size_t>(nrhs)) {
             stats_.outcome = Outcome::InvalidInput;
-            stats_.reason = "panua_pardiso: solve buffer too small";
+            stats_.reason = "panua_pardiso: solve buffer too small or not analysed";
             return stats_.outcome;
         }
         if (!factored_) {
@@ -581,9 +628,11 @@ public:
                         static_cast<std::size_t>(n_) *
                             static_cast<std::size_t>(nrhs) * sizeof(double));
         }
-        stats_.outcome = map_pardiso_error(error, false);
+        stats_.outcome = map_panua_error(error, false);
         if (error != 0) {
-            stats_.reason = "panua_pardiso phase 33 error " + std::to_string(error);
+            stats_.reason = (stats_.outcome == Outcome::Unavailable)
+                                ? panua_license_error(error)
+                                : ("panua_pardiso phase 33 error " + std::to_string(error));
         }
         return stats_.outcome;
     }
@@ -595,6 +644,92 @@ private:
         stats_.outcome = Outcome::Unavailable;
         stats_.reason = unavail_reason_;
         return stats_.outcome;
+    }
+
+    // Build 1-based upper-triangle CSR (ia_, ja_, a_) from lower-triangle CSC A,
+    // inserting explicit 0.0 diagonal entries wherever A omits (j, j) so Panua's
+    // diagonal-first upper-CSR contract holds on KKT systems, and recording a
+    // scatter_ map for repeat factor() calls.
+    bool build_upper_csr(const CscLower &A) {
+        const std::size_t n = static_cast<std::size_t>(A.n);
+        constexpr std::size_t kInsertedDiag = std::numeric_limits<std::size_t>::max();
+        struct RowEntry {
+            int col;
+            std::size_t src_idx;
+        };
+
+        std::vector<std::size_t> row_counts(n, 0);
+        std::vector<char> has_diag(n, 0);
+        for (std::size_t j = 0; j < n; ++j) {
+            const int jj = static_cast<int>(j);
+            for (Int p = A.col_ptr[j]; p < A.col_ptr[j + 1]; ++p) {
+                const int i = static_cast<int>(A.row_idx[static_cast<std::size_t>(p)]);
+                const int r = std::min(i, jj);
+                const int c = std::max(i, jj);
+                if (r == c) has_diag[static_cast<std::size_t>(r)] = 1;
+                ++row_counts[static_cast<std::size_t>(r)];
+            }
+        }
+        for (std::size_t r = 0; r < n; ++r) {
+            if (!has_diag[r]) ++row_counts[r];
+        }
+
+        std::vector<std::size_t> row_offsets(n + 1, 0);
+        for (std::size_t r = 0; r < n; ++r) {
+            row_offsets[r + 1] = row_offsets[r] + row_counts[r];
+        }
+        const std::size_t total_entries = row_offsets[n];
+        std::vector<RowEntry> entries(total_entries);
+        std::vector<std::size_t> cursor = row_offsets;
+
+        for (std::size_t j = 0; j < n; ++j) {
+            const int jj = static_cast<int>(j);
+            for (Int p = A.col_ptr[j]; p < A.col_ptr[j + 1]; ++p) {
+                const std::size_t up = static_cast<std::size_t>(p);
+                const int i = static_cast<int>(A.row_idx[up]);
+                const int r = std::min(i, jj);
+                const int c = std::max(i, jj);
+                entries[cursor[static_cast<std::size_t>(r)]++] = {c, up};
+            }
+        }
+        for (std::size_t r = 0; r < n; ++r) {
+            if (!has_diag[r]) {
+                entries[cursor[r]++] = {static_cast<int>(r), kInsertedDiag};
+            }
+        }
+
+        ia_.assign(n + 1, 0);
+        ia_[0] = 1;
+        ja_.clear();
+        ja_.reserve(total_entries);
+        input_nnz_ = A.values.size();
+        scatter_.assign(input_nnz_, 0);
+        for (std::size_t r = 0; r < n; ++r) {
+            auto beg = entries.begin() + static_cast<std::ptrdiff_t>(row_offsets[r]);
+            auto end = entries.begin() + static_cast<std::ptrdiff_t>(row_offsets[r + 1]);
+            std::sort(beg, end, [](const RowEntry &lhs, const RowEntry &rhs) {
+                return lhs.col < rhs.col || (lhs.col == rhs.col && lhs.src_idx < rhs.src_idx);
+            });
+            int prev = -1;
+            for (auto it = beg; it != end; ++it) {
+                if (it->col != prev) {
+                    ja_.push_back(it->col + 1);
+                    prev = it->col;
+                }
+                if (it->src_idx != kInsertedDiag) {
+                    scatter_[it->src_idx] = static_cast<int>(ja_.size()) - 1;
+                }
+            }
+            if (ja_.size() >= static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+                return false;
+            }
+            ia_[r + 1] = static_cast<int>(ja_.size()) + 1;
+        }
+        a_.assign(ja_.size(), 0.0);
+        for (std::size_t k = 0; k < input_nnz_; ++k) {
+            a_[static_cast<std::size_t>(scatter_[k])] += A.values[k];
+        }
+        return true;
     }
 
     void release_handle() noexcept {
@@ -610,6 +745,8 @@ private:
         }
         std::memset(pt_, 0, sizeof(pt_));
         n_ = 0;
+        input_nnz_ = 0;
+        analysed_ = false;
         factored_ = false;
     }
 
@@ -626,6 +763,7 @@ private:
     std::string lib_path_;
     std::string unavail_reason_;
     bool available_ = false;
+    bool analysed_ = false;
     bool factored_ = false;
 
     void *pt_[64];
@@ -634,10 +772,11 @@ private:
     int session_mtype_ = -2;
     int msglvl_ = 0;
     int n_ = 0;
+    std::size_t input_nnz_ = 0;
     bool indefinite_ = true;
     std::string track_ = "recommended";
     int threads_ = 1;
-    std::vector<int> ia_, ja_, perm_;
+    std::vector<int> ia_, ja_, perm_, scatter_;
     std::vector<double> a_, x_;
     AdapterStats stats_{};
 };

@@ -443,6 +443,25 @@ class TestScore(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("## Headline summary (per thread count)", buf.getvalue())
 
+    def test_include_gpu_headline_skips_override_tracks(self):
+        m = manifest([
+            case("s1", "public_spd", "sealed_public", track="recommended"),
+        ])
+        records = [
+            rec("s1", "smf", 100.0, track="recommended"),
+            rec("s1", "cholmod", 200.0, track="recommended"),
+            rec("s1", "cudss", 20.0, track="recommended"),
+            # Override track only runs smf; must not double-count total_cases or smf_solved in GPU headline.
+            rec("s1", "smf", 90.0, track="ipopt-plugin"),
+        ]
+        res = score.score(records, m, split="sealed_public", shift_ms=10.0)
+        md = score.render(res, "sealed_public", include_gpu=True)
+        headline = md.split("## public_spd /")[0]
+        self.assertIn("### 1 thread(s) (1 case-tracks)", headline)
+        self.assertIn("`smf` solved 1/1", headline)
+        self.assertIn("`cudss` solved 1/1", headline)
+        self.assertIn("## public_spd / ipopt-plugin / 1 thread(s)", md)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,6 +60,14 @@ class ClassifyTests(unittest.TestCase):
     def test_oom_kill_and_timeout_are_not_dead(self):
         self.assertEqual(run_wsl.classify_no_record(137, ""), ("Timeout", "ssids driver killed by timeout (rc=137)", False))
         self.assertFalse(run_wsl.classify_no_record(124, "")[2])
+        self.assertEqual(
+            run_wsl.classify_no_record(137, "", solver_label="smf"),
+            ("Timeout", "smf driver killed by timeout (rc=137)", False),
+        )
+        outcome, why, dead = run_wsl.classify_no_record(139, "crash", solver_label="smf")
+        self.assertEqual(outcome, "Failed")
+        self.assertFalse(dead)
+        self.assertTrue(why.startswith("smf driver exited without a record"))
 
     def test_missing_wsl_or_driver_is_dead(self):
         for rc, text in ((0xFFFFFFFF, ""), (-1, ""), (127, ""),
@@ -245,6 +253,43 @@ class InventoryAndPanuaEnvTests(unittest.TestCase):
                 ])
             self.assertEqual(len(captured_envs), 1)
             self.assertEqual(captured_envs[0].get("PARDISOLICMESSAGE"), "1")
+
+    def test_probe_panua_license_redacts_holder_and_email(self):
+        import tempfile
+        from unittest import mock
+
+        import run
+
+        with tempfile.TemporaryDirectory() as td:
+            panua_root = pathlib.Path(td) / "panua"
+            (panua_root / "lib").mkdir(parents=True)
+            (panua_root / "bin").mkdir(parents=True)
+            lib_file = panua_root / "lib" / "libpardiso.dll"
+            lib_file.write_text("", encoding="utf-8")
+            (panua_root / "bin" / "check_license.exe").write_text("", encoding="utf-8")
+
+            sample_out = "\n".join([
+                "[PANUA] License check:",
+                "[PANUA] Valid Panua Pardiso academic trial license",
+                "[PANUA] for ALICE_alice@example.edu.",
+                "for bob_local_user",
+                "Holder contact: admin@corp.example",
+                "[PANUA] Expiring Tue 2026-12-22 02:00:00.",
+                "===> Valid Pardiso license (type   1) found... <===",
+            ])
+            with mock.patch.object(run, "_probe_command_stdout", return_value=sample_out):
+                redacted = run._probe_panua_license(str(lib_file))
+
+            self.assertIsNotNone(redacted)
+            assert redacted is not None
+            self.assertNotIn("ALICE_alice", redacted)
+            self.assertNotIn("alice@example.edu", redacted)
+            self.assertNotIn("bob_local_user", redacted)
+            self.assertNotIn("admin@corp.example", redacted)
+            self.assertNotIn("@", redacted)
+            self.assertIn("Valid Panua Pardiso academic trial license", redacted)
+            self.assertIn("Expiring Tue 2026-12-22 02:00:00.", redacted)
+            self.assertIn("Valid Pardiso license (type   1) found", redacted)
 
 
 class RunWslSolverFlagTests(unittest.TestCase):

@@ -603,7 +603,11 @@ def _track_sort_key(track: str) -> tuple[int, str]:
 def _render_gpu_headline_summary(result: dict[str, Any]) -> list[str]:
     """Cross-class per-thread roll-up showing CPU-only, GPU h2h, and CPU+GPU."""
     threads_list = sorted({
-        t for by_track in result.values() for by_threads in by_track.values() for t in by_threads
+        t
+        for by_track in result.values()
+        for track, by_threads in by_track.items()
+        if track not in OVERRIDE_TRACKS
+        for t in by_threads
     })
     if not threads_list:
         return []
@@ -613,6 +617,8 @@ def _render_gpu_headline_summary(result: dict[str, Any]) -> list[str]:
         cells: list[tuple[str, str, dict[str, Any]]] = []
         for cls in sorted(result, key=_class_sort_key):
             for track in sorted(result[cls], key=_track_sort_key):
+                if track in OVERRIDE_TRACKS:
+                    continue
                 if threads in result[cls][track]:
                     cells.append((cls, track, result[cls][track][threads]))
         if not cells:

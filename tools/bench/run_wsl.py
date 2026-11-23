@@ -128,7 +128,8 @@ _ENV_MARKERS = ("wsl_e_", "there is no distribution", "execvpe", "not a valid di
                 "wsl is not installed", "no such file or directory", "cannot open shared object")
 
 
-def classify_no_record(returncode: int, text: str, guarded: bool = True) -> Tuple[str, str, bool]:
+def classify_no_record(returncode: int, text: str, guarded: bool = True,
+                       solver_label: str = "ssids") -> Tuple[str, str, bool]:
     """A WSL attempt that produced no record: (outcome, reason, dead).
 
     dead = the environment is broken (no wsl.exe/distro/driver), so later
@@ -138,11 +139,11 @@ def classify_no_record(returncode: int, text: str, guarded: bool = True) -> Tupl
     text = (text or "").replace(chr(0), "").strip()
     snippet = text[:300]
     if guarded and returncode in (124, 137):
-        return "Timeout", f"ssids driver killed by timeout (rc={returncode})", False
+        return "Timeout", f"{solver_label} driver killed by timeout (rc={returncode})", False
     low = text.lower()
     if returncode in (-1, 0xFFFFFFFF, 127) or any(m in low for m in _ENV_MARKERS):
         return "Unavailable", f"wsl driver did not run (rc={returncode}): {snippet}", True
-    return "Failed", f"ssids driver exited without a record (rc={returncode}): {snippet}", False
+    return "Failed", f"{solver_label} driver exited without a record (rc={returncode}): {snippet}", False
 
 
 def export_builtin_case(binary: pathlib.Path, case_id: str, cache_dir: pathlib.Path) -> Tuple[pathlib.Path, str]:
