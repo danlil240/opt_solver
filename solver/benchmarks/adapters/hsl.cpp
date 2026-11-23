@@ -310,9 +310,19 @@ public:
         // static pivots (refinement experiments).
         const char *ra = std::getenv("SMF_BENCH_REFINE_ALWAYS");
         refine_always_ = ra != nullptr && ra[0] == '1';
-        if (track_ == "recommended" &&
-            ctrl_.matrix_type == MatrixType::RealSymmetricPositiveDefinite &&
-            ctrl_.ordering == OrderingMethod::AutoSerial) {
+        // smf's automatic ordering is AutoParallel (AMD, plus METIS nested
+        // dissection above n = 8192 when AMD's predicted factor is dear per
+        // row; the cheaper is kept): it is what the C API's SMF_ORDER_AUTO
+        // and the IPOPT plugin run, and what the manifests' track
+        // definitions state ("smf default ordering (AutoParallel + Predicted
+        // matching, as the plugin)"). The C++ Control still defaults to
+        // AutoSerial (AMD only), so the adapter selects it on every track and
+        // matrix type. Until 2026-11-23 it did so for SPD on the recommended
+        // track only, and every indefinite case ran AMD-only: on the sealed
+        // SuiteSparse board's 3D PDE matrices that made the factor 1.3-2.6x
+        // larger (SiO 263M -> 115M entries, Lin 215M -> 109M, CurlCurl_1
+        // 185M -> 83M). bench_replay --ordering amd pins AMD.
+        if (ctrl_.ordering == OrderingMethod::AutoSerial) {
             ctrl_.ordering = OrderingMethod::AutoParallel;
         }
     }
