@@ -1,10 +1,11 @@
 # Blind Sealed Public SuiteSparse Benchmark Board (9 Rivals: CPU, Panua, cuDSS GPU, WSL2 SSIDS)
 
-**Date:** 2026-11-22 (initial blind run completed 2026-11-23; Panua PARDISO adapter fix & `panua_pardiso`-only `1T`/`2T` re-run completed 2026-11-23)  
+**Date:** 2026-11-22 (initial blind run completed 2026-11-23; Panua PARDISO adapter fix & `panua_pardiso`-only `1T`/`2T` re-run completed 2026-11-23; cuDSS adapter refinement fix & `cudss`-only `1T`/`8T` re-run completed 2026-11-23)  
 **Branch:** `bench/sealed-public-suitesparse`  
 **Pre-registration sealed manifest commit:** `590eb19` (`benchmarks/manifests/public_suitesparse.json`, 60 matrices / 95 case-tracks)  
-**Initial blind run commit:** `86e743a` (zero changes to `solver/src/`, `solver/include/`, `benchmarks/manifests/public_suitesparse.json`, or `benchmarks/manifests/fronttier.json`; all `smf`, `ma57`, `ma97`, `mkl_pardiso`, `mumps`, `cholmod`, `ssids`, and `cudss` records remain untouched from `86e743a`)  
+**Initial blind run commit:** `86e743a` (zero changes to `solver/src/`, `solver/include/`, `benchmarks/manifests/public_suitesparse.json`, or `benchmarks/manifests/fronttier.json`; all `smf`, `ma57`, `ma97`, `mkl_pardiso`, `mumps`, `cholmod`, and `ssids` records remain untouched from `86e743a`)  
 **Panua adapter fairness fix:** Only `PanuaPardisoSolverAdapter` (`solver/benchmarks/adapters/pardiso.cpp`) was updated to insert explicit zero diagonal entries in 1-based upper-CSR and set Panua's symmetric-indefinite KKT defaults (`iparm[10]=1, iparm[12]=2, iparm[20]=3`), and only `panua_pardiso` (`T = 1` and `T = 2`) was re-run on the identical sealed manifest  
+**cuDSS adapter fairness fix:** In the initial run `cudss` was the only static-pivoting rival left without iterative refinement on the `recommended` track (the harness refines only on `ipopt`; MKL PARDISO keeps its automatic two steps and `smf` its own refinement, while cuDSS's `CUDSS_CONFIG_IR_N_STEPS` defaults to `0`). Only `CudssAdapter` (`solver/benchmarks/adapters/cudss_adapter.cpp`, commit `3eef5b1`) was updated to run two cuDSS refinement steps on indefinite solves off the `ipopt` track, and only `cudss` (`T = 1` and `T = 8`) was re-run on the identical sealed manifest. `cudss` went from `66 / 89` to `77 / 89` accurate (all 11 `c-*` `recommended` case-tracks). cuDSS matching (`CUDSS_CONFIG_MATCHING_ALG`) was tested and left off: on the 21 matrices `cudss` had missed it rescued `OPF_6000`, `OPF_10000` and `brainpc2` but lost `HTC_336_4438`, `HTC_336_9129`, `c-49`, `c-54` and `c-55` on `ipopt`  
 **Post-seal inertia reference:** `benchmarks/manifests/public_suitesparse_inertia.json` (generated strictly after all initial benchmark sweeps finished)
 
 ---
@@ -19,7 +20,7 @@ Every Windows CPU, GPU, and WSL2 Linux run executed sequentially (one process at
 - **GPU:** NVIDIA GeForce RTX 5080 (16,303 MiB VRAM, driver `621.14`)
 - **Windows Host OS & Compiler:** Windows 11 (`10.0.26300-SP0`), MSVC `19.44.35228.0` (VS 2022 BuildTools `14.44.35207`)
   - CPU binary (`build-mtt/benchmarks/Release/bench_replay.exe`): `SMF_USE_MKL=ON`, `SMF_MKL_THREADING=intel`, Intel oneAPI MKL `2026.2-Product Build 20260915`
-  - GPU binary (`build/benchmarks/Release/bench_replay.exe`): `SMF_BENCH_CUDSS=ON`, `SMF_MKL_THREADING=sequential`, NVIDIA cuDSS `0.8.0` (`libcudss-windows-x86_64-0.8.0.10_cuda13-archive`)
+  - GPU binary (`build/benchmarks/Release/bench_replay.exe`): `SMF_BENCH_CUDSS=ON`, `SMF_MKL_THREADING=sequential`, NVIDIA cuDSS `0.8.0` (`libcudss-windows-x86_64-0.8.0.10_cuda13-archive`); the `cudss` re-run used a binary of the same configuration built from the adapter-fix commit `3eef5b1`
 - **WSL2 Guest OS & Compiler:** Ubuntu Linux (`6.18.58.1-microsoft-standard-WSL2`), GCC / GFortran `15.2.0-16ubuntu1`, OpenBLAS `0.3.32+ds-5`, METIS `5.1.0.dfsg-8`
   - `ssids` driver (`~/ssids_bench/ssids_replay`): SPRAL SSIDS `2025.09.18` (CPU, OpenMP, `libspral.so`) with `OMP_CANCELLATION=TRUE`, `OMP_PROC_BIND=TRUE`, `OMP_THREAD_LIMIT=<T>`, `OPENBLAS_NUM_THREADS=1`
   - `smf` Linux parity binary (`~/opt_solver_wsl/build/benchmarks/bench_replay`): `SMF_USE_MKL=OFF` (OpenBLAS)
@@ -36,7 +37,7 @@ Every Windows CPU, GPU, and WSL2 Linux run executed sequentially (one process at
 | `mumps` | MUMPS `5.8.2` (`dmumps.lib`) | `T = 1, 8` | Built with MKL BLAS (`build-mtt`) |
 | `cholmod` | SuiteSparse CHOLMOD `5.4.0` (`cholmod.lib`) | `T = 1, 8` | SPD-only (`Unavailable` on all 70 indefinite tracks); multi-threaded MKL BLAS at `T = 8` |
 | `ssids` | SPRAL SSIDS `2025.09.18` (`libspral.so`, WSL2) | `T = 1, 8` | Cross-OS in main board + same-OS/same-BLAS parity view vs Linux OpenBLAS `smf` |
-| `cudss` | NVIDIA cuDSS `0.8.0` (`cudss64`, RTX 5080) | `T = 1, 8` | `threads` controls host CPU analysis/ordering; exempt from CPU GFLOP/s plausibility cap (`--include-gpu`) |
+| `cudss` | NVIDIA cuDSS `0.8.0` (`cudss64`, RTX 5080) | `T = 1, 8` | `threads` controls host CPU analysis/ordering; exempt from CPU GFLOP/s plausibility cap (`--include-gpu`). Library defaults (diagonal pivoting, matching off) plus cuDSS's own iterative refinement on indefinite solves: 3 steps on `ipopt`, 2 on `recommended` (fixed adapter); none on SPD `recommended` |
 
 ### Corpus, Timing & Gates
 
@@ -59,10 +60,10 @@ All ratios are `smf / rival` shifted 10 ms geometric means (`< 1.000` means `smf
 | **CPU-only (`smf` vs best accurate CPU)** | `T = 1` | **82 / 89** | 82 | **1.046** | 36 / 82 | All 7 CPU rivals (`ma57, ma97, mkl_pardiso, panua_pardiso, mumps, cholmod, ssids`) |
 | **CPU-only (`smf` vs best accurate CPU)** | `T = 8` | **81 / 89** | 81 | **0.650** | **68 / 81** | 5 multi-core CPU rivals (`ma97, mkl_pardiso, mumps, cholmod, ssids`) |
 | **Matched `T = 2` vs Panua PARDISO** | `T = 2` | **82 / 89** | 80 | **0.424** | **71 / 80** | Panua solved **`84 / 89`** (`5` inaccurate, `0` crashes, `0` timeouts) |
-| **GPU head-to-head (`smf` vs `cudss` RTX 5080)** | `T = 1` | **82 / 89** | 64 | **0.851** | 35 / 64 | `cudss` solved `66 / 89` (`23` inaccurate) |
-| **GPU head-to-head (`smf` vs `cudss` RTX 5080)** | `T = 8` | **81 / 89** | 64 | **0.416** | **57 / 64** | `cudss` solved `66 / 89` (`23` inaccurate) |
-| **All rivals incl. GPU (`smf` vs best CPU+GPU)** | `T = 1` | **82 / 89** | 82 | **1.381** | 26 / 82 | 7 CPU rivals + RTX 5080 `cudss` |
-| **All rivals incl. GPU (`smf` vs best CPU+GPU)** | `T = 8` | **81 / 89** | 81 | **0.672** | **66 / 81** | 5 multi-core CPU rivals + RTX 5080 `cudss` |
+| **GPU head-to-head (`smf` vs `cudss` RTX 5080)** | `T = 1` | **82 / 89** | 75 | **0.788** | 45 / 75 | `cudss` solved `77 / 89` (`12` inaccurate) |
+| **GPU head-to-head (`smf` vs `cudss` RTX 5080)** | `T = 8` | **81 / 89** | 74 | **0.406** | **67 / 74** | `cudss` solved `77 / 89` (`12` inaccurate) |
+| **All rivals incl. GPU (`smf` vs best CPU+GPU)** | `T = 1` | **82 / 89** | 82 | **1.399** | 25 / 82 | 7 CPU rivals + RTX 5080 `cudss` |
+| **All rivals incl. GPU (`smf` vs best CPU+GPU)** | `T = 8` | **81 / 89** | 81 | **0.677** | **66 / 81** | 5 multi-core CPU rivals + RTX 5080 `cudss` |
 | **WSL2 OS-parity (`smf` OpenBLAS vs `ssids`)** | `T = 1` | **82 / 89** | 82 | **0.417** | 74 / 82 | Same WSL2 Ubuntu guest + GCC 15 + OpenBLAS |
 | **WSL2 OS-parity (`smf` OpenBLAS vs `ssids`)** | `T = 8` | **82 / 89** | 82 | **0.352** | **79 / 82** | Same WSL2 Ubuntu guest + GCC 15 + OpenBLAS |
 | **OS/BLAS parity (`wsl_smf` OpenBLAS / `win_smf` MKL)** | `T = 1` / `T = 8` | 82 / 82 (`wsl`) | 82 / 81 | **0.848** (`1T`) / **1.023** (`8T`) | — | Linux OpenBLAS `smf` is 15% faster at 1T, parity (+2.3%) at 8T |
@@ -70,9 +71,9 @@ All ratios are `smf / rival` shifted 10 ms geometric means (`< 1.000` means `smf
 ### Best-Rival Counts in CPU-Only & All-Rivals Comparisons
 
 - **`T = 1` CPU-only (82 pairs):** Fastest accurate CPU rival per case-track: `ma97` (26), `ma57` (20), `ssids` (15), `cholmod` (10), `mkl_pardiso` (7), `panua_pardiso` (4).  
-- **`T = 1` Incl. GPU (82 pairs):** Fastest accurate overall rival: `cudss` (29), `ma97` (20), `ma57` (19), `cholmod` (8), `mkl_pardiso` (4), `panua_pardiso` (2).  
+- **`T = 1` Incl. GPU (82 pairs):** Fastest accurate overall rival: `cudss` (31), `ma97` (19), `ma57` (19), `cholmod` (8), `mkl_pardiso` (4), `panua_pardiso` (1).  
 - **`T = 8` CPU-only (81 pairs):** Fastest accurate CPU rival: `mkl_pardiso` (52), `ma97` (20), `ssids` (6), `cholmod` (2), `mumps` (1).  
-- **`T = 8` Incl. GPU (81 pairs):** Fastest accurate overall rival: `mkl_pardiso` (44), `ma97` (17), `cudss` (13), `ssids` (4), `cholmod` (2), `mumps` (1).
+- **`T = 8` Incl. GPU (81 pairs):** Fastest accurate overall rival: `mkl_pardiso` (44), `ma97` (17), `cudss` (16), `cholmod` (2), `mumps` (1), `ssids` (1).
 
 ---
 
@@ -82,16 +83,16 @@ All ratios are `smf / rival` shifted 10 ms geometric means (`< 1.000` means `smf
 
 | Class (Scored Cases) | View / Threads | `smf` Solved | Rival / Best Cohort `n` | CPU-Only Geomean | GPU H2H Geomean | Incl. GPU Geomean |
 |---|---|---:|---:|---:|---:|---:|
-| **`public_indef_kkt`** (40) | Main `T = 1` | 35 / 40 | 35 (GPU: 19) | **1.034** | **0.337** | **1.067** |
-| **`public_indef_kkt`** (40) | Main `T = 8` | 34 / 40 | 34 (GPU: 19) | **0.496** | **0.257** | **0.499** |
+| **`public_indef_kkt`** (40) | Main `T = 1` | 35 / 40 | 35 (GPU: 30) | **1.034** | **0.393** | **1.103** |
+| **`public_indef_kkt`** (40) | Main `T = 8` | 34 / 40 | 34 (GPU: 29) | **0.496** | **0.287** | **0.510** |
 | **`public_indef_kkt`** (40) | Matched `T = 2` vs Panua | 35 / 40 | 34 | **0.271** | — | — |
 | **`public_indef_kkt`** (40) | WSL2 Parity `T = 1` / `T = 8` | 35 / 40 | 35 / 35 | **0.321** / **0.309** | — | — |
-| **`public_indef_pde`** (24) | Main `T = 1` | 22 / 24 | 22 (GPU: 20) | **1.250** | **2.196** | **2.282** |
-| **`public_indef_pde`** (24) | Main `T = 8` | 22 / 24 | 22 (GPU: 20) | **0.968** | **0.819** | **1.062** |
+| **`public_indef_pde`** (24) | Main `T = 1` | 22 / 24 | 22 (GPU: 20) | **1.250** | **2.184** | **2.273** |
+| **`public_indef_pde`** (24) | Main `T = 8` | 22 / 24 | 22 (GPU: 20) | **0.968** | **0.813** | **1.059** |
 | **`public_indef_pde`** (24) | Matched `T = 2` vs Panua | 22 / 24 | 21 | **0.764** | — | — |
 | **`public_indef_pde`** (24) | WSL2 Parity `T = 1` / `T = 8` | 22 / 24 | 22 / 22 | **0.719** / **0.562** | — | — |
-| **`public_spd`** (25) | Main `T = 1` | 25 / 25 | 25 (GPU: 25) | **0.908** | **0.805** | **1.274** |
-| **`public_spd`** (25) | Main `T = 8` | 25 / 25 | 25 (GPU: 25) | **0.663** | **0.349** | **0.673** |
+| **`public_spd`** (25) | Main `T = 1` | 25 / 25 | 25 (GPU: 25) | **0.908** | **0.802** | **1.273** |
+| **`public_spd`** (25) | Main `T = 8` | 25 / 25 | 25 (GPU: 25) | **0.663** | **0.347** | **0.673** |
 | **`public_spd`** (25) | Matched `T = 2` vs Panua | 25 / 25 | 25 | **0.476** | — | — |
 | **`public_spd`** (25) | WSL2 Parity `T = 1` / `T = 8` | 25 / 25 | 25 / 25 | **0.373** / **0.280** | — | — |
 
@@ -99,20 +100,20 @@ All ratios are `smf / rival` shifted 10 ms geometric means (`< 1.000` means `smf
 
 | Class | Track | `T` | `smf` Solved | CPU-Only (`n`) | GPU H2H (`n`) | Incl. GPU (`n`) | WSL2 Parity (`n`) | Matched `T=2` vs Panua (`n`) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `public_indef_kkt` | `recommended` | `1` | 17 / 20* | 1.083 (17) | 0.424 (3) | 1.083 (17) | 0.390 (17) | — |
-| `public_indef_kkt` | `recommended` | `8` | 16 / 20* | 0.566 (16) | 0.333 (3) | 0.566 (16) | 0.367 (17) | — |
+| `public_indef_kkt` | `recommended` | `1` | 17 / 20* | 1.083 (17) | 0.493 (14) | 1.159 (17) | 0.390 (17) | — |
+| `public_indef_kkt` | `recommended` | `8` | 16 / 20* | 0.566 (16) | 0.348 (13) | 0.594 (16) | 0.367 (17) | — |
 | `public_indef_kkt` | `recommended` | `2` | 17 / 20 | — | — | — | — | 0.331 (16) |
 | `public_indef_kkt` | `ipopt` | `1` | 18 / 20 | 0.990 (18) | 0.323 (16) | 1.053 (18) | 0.267 (18) | — |
-| `public_indef_kkt` | `ipopt` | `8` | 18 / 20 | 0.440 (18) | 0.245 (16) | 0.445 (18) | 0.263 (18) | — |
+| `public_indef_kkt` | `ipopt` | `8` | 18 / 20 | 0.440 (18) | 0.246 (16) | 0.445 (18) | 0.263 (18) | — |
 | `public_indef_kkt` | `ipopt` | `2` | 18 / 20 | — | — | — | — | 0.228 (18) |
-| `public_indef_pde` | `recommended` | `1` | 11 / 12 | 1.236 (11) | 2.204 (10) | 2.275 (11) | 0.726 (11) | — |
-| `public_indef_pde` | `recommended` | `8` | 11 / 12 | 0.902 (11) | 0.780 (10) | 0.992 (11) | 0.506 (11) | — |
+| `public_indef_pde` | `recommended` | `1` | 11 / 12 | 1.236 (11) | 2.185 (10) | 2.258 (11) | 0.726 (11) | — |
+| `public_indef_pde` | `recommended` | `8` | 11 / 12 | 0.902 (11) | 0.772 (10) | 0.989 (11) | 0.506 (11) | — |
 | `public_indef_pde` | `recommended` | `2` | 11 / 12 | — | — | — | — | 0.776 (10) |
-| `public_indef_pde` | `ipopt` | `1` | 11 / 12 | 1.263 (11) | 2.187 (10) | 2.288 (11) | 0.711 (11) | — |
-| `public_indef_pde` | `ipopt` | `8` | 11 / 12 | 1.038 (11) | 0.860 (10) | 1.137 (11) | 0.625 (11) | — |
+| `public_indef_pde` | `ipopt` | `1` | 11 / 12 | 1.263 (11) | 2.184 (10) | 2.288 (11) | 0.711 (11) | — |
+| `public_indef_pde` | `ipopt` | `8` | 11 / 12 | 1.038 (11) | 0.856 (10) | 1.133 (11) | 0.625 (11) | — |
 | `public_indef_pde` | `ipopt` | `2` | 11 / 12 | — | — | — | — | 0.753 (11) |
-| `public_spd` | `recommended` | `1` | 25 / 25 | 0.908 (25) | 0.805 (25) | 1.274 (25) | 0.373 (25) | — |
-| `public_spd` | `recommended` | `8` | 25 / 25 | 0.663 (25) | 0.349 (25) | 0.673 (25) | 0.280 (25) | — |
+| `public_spd` | `recommended` | `1` | 25 / 25 | 0.908 (25) | 0.802 (25) | 1.273 (25) | 0.373 (25) | — |
+| `public_spd` | `recommended` | `8` | 25 / 25 | 0.663 (25) | 0.347 (25) | 0.673 (25) | 0.280 (25) | — |
 | `public_spd` | `recommended` | `2` | 25 / 25 | — | — | — | — | 0.476 (25) |
 
 *\*Scorer denominator note:* When a warmup attempt hits the 300 s subprocess timeout (`dtoc` `recommended` for `smf` at `T = 1, 8`; `Si34H36` for `ma97`/`mumps` at `T = 1`), `run.py` skips measured trials and writes no non-warmup record, so `score.py`'s table denominator appears as `19`, `17`, `16`, or `11`. All denominators in this report are normalized to the true **89 scored case-tracks** (40 KKT + 24 PDE + 25 SPD). Under the fixed adapter, `panua_pardiso` completed all 95 case-tracks with zero timeouts and zero crashes.
@@ -135,7 +136,7 @@ Shifted 10 ms geometric mean of `smf / rival` on the **common accurate cohort** 
 | **`cholmod`** *(SPD)* | 25 | **0.759** | 20 / 4 / 1 | 24 / 1 | — | — | 0.759 (25) |
 | **`ssids`** *(WSL2)* | 82 | **0.492** | 67 / 4 / 11 | 68 / 14 | 0.353 (35) | 0.904 (22) | 0.459 (25) |
 | **`ssids`** *(WSL2 parity)* | 82 | **0.417** | 73 / 1 / 8 | 74 / 8 | 0.321 (35) | 0.719 (22) | 0.373 (25) |
-| **`cudss`** *(RTX 5080)* | 64 | **0.851** | 35 / 2 / 27 | 35 / 29 | 0.337 (19) | 2.196 (20) | 0.805 (25) |
+| **`cudss`** *(RTX 5080)* | 75 | **0.788** | 45 / 2 / 28 | 45 / 30 | 0.393 (30) | 2.184 (20) | 0.802 (25) |
 
 ### Matched `T = 2` Head-to-Head (`panua_t2`)
 
@@ -153,7 +154,7 @@ Shifted 10 ms geometric mean of `smf / rival` on the **common accurate cohort** 
 | **`cholmod`** *(SPD)* | 25 | **0.445** | 24 / 0 / 1 | 24 / 1 | — | — | 0.445 (25) |
 | **`ssids`** *(WSL2)* | 81 | **0.343** | 75 / 3 / 3 | 78 / 3 | 0.298 (34) | 0.564 (22) | 0.270 (25) |
 | **`ssids`** *(WSL2 parity)* | 82 | **0.352** | 77 / 2 / 3 | 79 / 3 | 0.309 (35) | 0.562 (22) | 0.280 (25) |
-| **`cudss`** *(RTX 5080)* | 64 | **0.416** | 54 / 4 / 6 | 57 / 7 | 0.257 (19) | 0.819 (20) | 0.349 (25) |
+| **`cudss`** *(RTX 5080)* | 74 | **0.406** | 64 / 5 / 5 | 67 / 7 | 0.287 (29) | 0.813 (20) | 0.347 (25) |
 
 ---
 
@@ -177,7 +178,7 @@ Every solver's true outcome across all **89 scored case-tracks** (no hidden warm
 | **`mumps`** | `8` | **83 / 89** | 2 | 4 (`4` Singular) | 0 | 0 | 0 | `dtoc` (`2` Singular), `CurlCurl_1` (`2` Singular), `c-62` (`rec`), `c-64` (`rec`); `Si34H36` solved in 117.2 s |
 | **`cholmod`** | `1, 8` | **25 / 25 SPD** | 0 | 0 | 0 | 0 | 64 | `Unavailable` on all 64 scored indefinite tracks (expected) |
 | **`ssids`** *(WSL2)* | `1, 8` | **87 / 89** | 2 | 0 | 0 | 0 | 0 | `dtoc` (`2` Inaccurate, `eta=0.25, omega=1.0`) |
-| **`cudss`** *(RTX 5080)* | `1, 8` | **66 / 89** | 23 | 0 | 0 | 0 | 0 | Inaccurate on 16 `rec` KKT + `dtoc` (`2`) + `brainpc2` (`ipopt`) + `OPF_6000` (`ipopt`) + `OPF_10000` (`ipopt`) + `tuma1` (`2`) |
+| **`cudss`** *(RTX 5080)* | `1, 8` | **77 / 89** | 12 | 0 | 0 | 0 | 0 | `dtoc` (`2`), `brainpc2` (`2`), `OPF_6000` (`2`), `OPF_10000` (`2`), `tuma1` (`2`), `HTC_336_4438` (`rec`), `HTC_336_9129` (`rec`). Initial run without refinement on `recommended`: `66 / 89` (also inaccurate on all 11 `c-*` `rec` case-tracks, `omega` `1e-7..2e-4`) |
 
 ### Detailed Audit of Every `smf` Non-`ok` Scored Case
 
@@ -187,8 +188,8 @@ Every solver's true outcome across all **89 scored case-tracks** (no hidden warm
 | **`dtoc`** (`kkt` / `recommended`) | 24,993 | `Win 1T, 8T`; `WSL 1T, 8T` | `Timeout` (>300 s warmup) | — | — | — | Same rank-4999 singular matrix; `T = 2` completed in `141.9 s` (`Singular`). |
 | **`Si34H36`** (`pde` / `recommended`, `ipopt`) | 97,569 | All (`1, 2, 8`, Win & WSL) | `OutOfMemory` (`wall ~0.33–0.36 s`, `271 MB` RSS) | — | — | `(0, 0, 0)` (ref disputed) | `check_analysis_storage_bounds(keep)` (`factor_indef.cpp:402`) aborted because predicted panel storage exceeded `kMaxFactorStorageEntries = 2^29` (`536,870,912` entries, ~4 GiB cap). `hsl.cpp:314` left `ctrl.ordering = AutoSerial` (AMD only, never METIS) on indefinite matrices, whereas METIS-enabled rivals stayed just below the cap (`ssids 480M`, `panua 482M`, `ma57 530M`, `ma97 531M`; `mumps` used `1.35B` / `20.3 GB` RSS). |
 | **`OPF_10000`** (`kkt` / `ipopt`) | 43,887 | All (`1, 2, 8`, Win & WSL) | `Inaccurate` (`wall ~20–25 ms`) | `1.1e-17..1.9e-17` | `3.2e-8..4.2e-7` | `(21392, 22495, 0)` vs `(21392, 22494, 1)` consistent | Matrix has 1 near-zero eigenvalue. On `ipopt` (`u = 1e-8 <= skip_trial_max_pivot_u`), `skip_trial_gate` skipped the MC64 matching trial (`matching=0.49 ms` vs `12.1 ms` on `recommended`), inflating delays from `45 -> 1004` and raising `omega` past `1e-8` despite machine-precision `eta_inf`. On `recommended`, `smf` ran MC64 and passed (`omega = 5.2e-11`). |
-| **`HTC_336_4438`** (`kkt` / `recommended`) | 226,340 | All (`1, 2, 8`, Win & WSL) | `Inaccurate` (`wall ~496–614 ms`) | `3.2e-18..4.3e-18` | `1.8e-7..3.1e-7` | `(105781, 120559, 0)` exact | `eta_inf` is machine precision (`~3e-18`), failing only `OMEGA_GATE = 1e-8` with `ir_steps = 0`. Shared by `ma97` (`5.0e-7`), `mkl_pardiso` (`0.076`), and `cudss` (`0.012`). On `ipopt` (`ir_steps = 3`), `smf` passes at `omega <= 5.2e-15` across Win & WSL (`<= 5.0e-15` Win, `5.16e-15` WSL `8T`) in `63–68 ms`. |
-| **`HTC_336_9129`** (`kkt` / `recommended`) | 226,340 | All (`1, 2, 8`, Win & WSL) | `Inaccurate` (`wall ~91–139 ms`) | `9.1e-18..1.4e-17` | `7.1e-7..1.2e-6` | `(105781, 120559, 0)` exact | Same pattern as `HTC_336_4438`: `eta_inf ~ 1e-17`, no refinement on `recommended` (`ma97 1.4e-6`, `mkl_pardiso 6.5e-6`, `cudss 7.6e-3`). On `ipopt` (`ir_steps = 3`), `smf` passes at `omega <= 5.5e-15` in `63–73 ms`. |
+| **`HTC_336_4438`** (`kkt` / `recommended`) | 226,340 | All (`1, 2, 8`, Win & WSL) | `Inaccurate` (`wall ~496–614 ms`) | `3.2e-18..4.3e-18` | `1.8e-7..3.1e-7` | `(105781, 120559, 0)` exact | `eta_inf` is machine precision (`~3e-18`), failing only `OMEGA_GATE = 1e-8` with `ir_steps = 0`. Shared by `ma97` (`5.0e-7`), `mkl_pardiso` (`0.076`), and `cudss` (`8.5e-7..2.5e-6` with its two refinement steps; `0.012` unrefined in the initial run). On `ipopt` (`ir_steps = 3`), `smf` passes at `omega <= 5.2e-15` across Win & WSL (`<= 5.0e-15` Win, `5.16e-15` WSL `8T`) in `63–68 ms`. |
+| **`HTC_336_9129`** (`kkt` / `recommended`) | 226,340 | All (`1, 2, 8`, Win & WSL) | `Inaccurate` (`wall ~91–139 ms`) | `9.1e-18..1.4e-17` | `7.1e-7..1.2e-6` | `(105781, 120559, 0)` exact | Same pattern as `HTC_336_4438`: `eta_inf ~ 1e-17`, no refinement on `recommended` (`ma97 1.4e-6`, `mkl_pardiso 6.5e-6`, `cudss 7.5e-7..2.0e-6` with two refinement steps, `7.6e-3` unrefined). On `ipopt` (`ir_steps = 3`), `smf` passes at `omega <= 5.5e-15` in `63–73 ms`. |
 | **`c-54`** (`kkt` / `recommended`) | 31,793 | `Win 8T` only | `Inaccurate` (1/3 trials; `100.6 ms`) | `5.8e-19..1.2e-18` | `9.14e-9..1.055e-8` | `(17664, 14129, 0)` exact | Non-deterministic parallel tree reduction straddles `OMEGA_GATE = 1e-8`: trial 0 hit `1.055e-8`, trials 1–2 passed (`9.96e-9`, `9.14e-9`). Passed at `Win 1T` (`7.29e-9`), `Win 2T`, and `WSL2 1T/8T`, and passed `ipopt` at `omega = 7.1e-16`. |
 
 ---
@@ -210,7 +211,7 @@ Post-seal spectrum slicing (`smf` + `ma57` at `pivot_u = 0.5` with Ruiz equilibr
   - **`ma57`** (`T = 1`): **75 exact / 10 consistent / 2 wrong** of 87 (`FAIL`): reported `(89399, 1, 0)` on SPD `denormal` (ref `(89400, 0, 0)`) and `(102157, 1, 0)` on SPD `thermomech_TK` (ref `(102158, 0, 0)`), even though both passed backward error (`eta_inf ~ 3e-16`).
   - **`mkl_pardiso`** (`T = 1, 8`): **73 exact / 12 consistent / 2 wrong** of 87 (`FAIL`): `HTC_336_4438` (`ipopt` & `rec`) reported `(105782, 120558, 0)` vs `(105781, 120559, 0)` (inaccurate).
   - **`panua_pardiso`** (`T = 1, 2`): **75 exact / 10 consistent / 2 wrong** of 87 (`FAIL`): `dtoc` (`ipopt` & `rec`) reported `(24993, 0, 0)` vs `(9997, 9997, 4999)` (inaccurate; perturbed 4,999 zero + 9,997 negative pivots positive). On `OPF_10000`, the fixed adapter reported `(21392, 22495, 0)` (consistent with `(21392, 22494, 1)`).
-  - **`cudss`** (`T = 1, 8`): **71 exact / 10 consistent / 6 wrong** of 87 (`FAIL`): `brainpc2` (`2` tracks: `(13805, 13802, 0)` vs `(13807, 13800, 0)`), `OPF_6000` (`2` tracks: `(14305..14311, 15591..15597, 0)` vs `(14274, 15628, 0)`), `OPF_10000` (`2` tracks: `(21455..21463, 22424..22432, 0)` vs `(21392, 22494, 1)`) — all inaccurate static-pivoting sign flips.
+  - **`cudss`** (`T = 1, 8`): **71 exact / 10 consistent / 6 wrong** of 87 (`FAIL`): `brainpc2` (`2` tracks: `(13805..13806, 13801..13802, 0)` vs `(13807, 13800, 0)`), `OPF_6000` (`2` tracks: `(14305..14313, 15589..15597, 0)` vs `(14274, 15628, 0)`), `OPF_10000` (`2` tracks: `(21453..21466, 22421..22434, 0)` vs `(21392, 22494, 1)`) — all inaccurate static-pivoting sign flips.
 
 ---
 
@@ -314,5 +315,5 @@ Notice `smf`, `ma57`, `ma97`, `mumps`, and `ssids` all identified exact algebrai
 
 ### F. GPU Head-to-Head Losses vs `cudss` on RTX 5080
 
-- **`T = 8` (All 6 of 64):** `SiO` `ipopt` **7.64x** (`9047.1` vs `1184.4` ms), `SiO` `rec` **3.74x** (`4368.4` vs `1169.4`), `Lin` `ipopt` **2.03x** (`3722.0` vs `1829.4`), `Lin` `rec` **1.43x** (`2600.5` vs `1813.8`), `F1` `rec` **1.18x** (`2567.7` vs `2173.0`), `F1` `ipopt` **1.10x** (`2459.5` vs `2232.2`).
-- **`T = 1` (All 27 of 64):** `SiO` `rec` **18.80x**, `SiO` `ipopt` **18.57x**, `Lin` `rec` **5.95x**, `Lin` `ipopt` **5.95x**, `CurlCurl_1` `rec` **4.18x**, `CurlCurl_1` `ipopt` **4.14x**, `gas_sensor` `ipopt` **3.79x**, `gas_sensor` `rec` **3.78x**, `F1` `rec` **3.65x**, `F1` `ipopt` **3.50x**, `thread` **3.00x**, `af_2_k101` **2.81x**, `af_0_k101` **2.81x**, `boneS01` **2.27x**, `qa8fk` `rec` **2.15x**, `qa8fk` `ipopt` **2.14x**, `BenElechi1` **1.97x**, `s3dkq4m2` **1.89x**, `m_t1` **1.88x**, `2cubes_sphere` **1.80x**, `smt` **1.68x**, `c-62` `ipopt` **1.65x**, `offshore` **1.48x**, `qa8fm` **1.47x**, `gsm_106857` `rec` **1.46x**, `gsm_106857` `ipopt` **1.42x**, `msdoor` **1.32x**.
+- **`T = 8` (All 5 of 74):** `SiO` `ipopt` **7.61x** (`9047.1` vs `1189.4` ms), `SiO` `rec` **3.70x** (`4368.4` vs `1181.4`), `Lin` `ipopt` **2.02x** (`3722.0` vs `1838.1`), `Lin` `rec` **1.42x** (`2600.5` vs `1829.4`), `F1` `rec` **1.17x** (`2567.7` vs `2192.2`).
+- **`T = 1` (All 28 of 75):** `SiO` `rec` **18.60x**, `SiO` `ipopt` **18.54x**, `Lin` `ipopt` **5.93x**, `Lin` `rec` **5.88x**, `CurlCurl_1` `rec` **4.14x**, `CurlCurl_1` `ipopt` **4.12x**, `gas_sensor` `rec` **3.79x**, `gas_sensor` `ipopt` **3.78x**, `F1` `rec` **3.60x**, `F1` `ipopt` **3.56x**, `thread` **2.95x**, `af_2_k101` **2.83x**, `af_0_k101` **2.82x**, `boneS01` **2.22x**, `qa8fk` `ipopt` **2.14x**, `qa8fk` `rec` **2.14x**, `BenElechi1` **1.95x**, `s3dkq4m2` **1.92x**, `m_t1` **1.88x**, `2cubes_sphere` **1.77x**, `smt` **1.68x**, `c-62` `ipopt` **1.66x**, `c-62` `rec` **1.65x**, `qa8fm` **1.49x**, `offshore` **1.49x**, `gsm_106857` `rec` **1.43x**, `gsm_106857` `ipopt` **1.42x**, `msdoor` **1.32x**.
