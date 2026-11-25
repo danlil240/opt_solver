@@ -270,7 +270,7 @@ IpmFactorStatus IpmSession::run_factor(int max_negative_pivots) {
   // fk_.slack) owns.
   const bool ran = (fk_.analysis == ak_.get() ||
                     slack_owns(*ak_, fk_.analysis)) &&
-                   !fk_.factor_values.empty();
+                   (!fk_.factor_values.empty() || fk_.use_banded_spd);
   solvable_ = result == IpmFactorStatus::Ok || (result == IpmFactorStatus::Singular && ran);
   aborted_ = result == IpmFactorStatus::WrongInertia;
   pending_accept_ = solvable_;

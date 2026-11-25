@@ -823,7 +823,7 @@ OneThreadRun one_thread_run(const DetCase &c, int num_threads) {
                   0);
         r.x.insert(r.x.end(), b.begin(), b.end());
     }
-    if (!fk.use_banded_spd) {
+    {
         std::vector<double> b(static_cast<std::size_t>(n), 0.0);
         for (int i = 0; i < n; i += 97) b[static_cast<std::size_t>(i)] = 1.0 + 0.01 * i;
         std::vector<int> reach;

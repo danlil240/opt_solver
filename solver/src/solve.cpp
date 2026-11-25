@@ -920,49 +920,66 @@ int solve_core(const FactorKeep &fkeep, const Control &ctrl, Info &info,
   const CallBlasGuard call_blas(ctrl);
 
   if (fkeep.use_banded_spd) {
-    if (job != SolveJob::Full) {
-      info.status = ErrorCode::FeatureNotAvailable;
-      return static_cast<int>(ErrorCode::FeatureNotAvailable);
-    }
     if (n != fkeep.band_n) {
       info.status = ErrorCode::IllegalValue;
       return static_cast<int>(ErrorCode::IllegalValue);
     }
 
-    if (has_scale) {
-      apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
-    }
-
-    for (int rhs = 0; rhs < nrhs; ++rhs) {
-      const double *src = b + static_cast<std::ptrdiff_t>(rhs) * n;
-      double *dst = ws.rhs_perm.data() + static_cast<std::ptrdiff_t>(rhs) * n;
-      for (int j = 0; j < n; ++j) {
-        dst[static_cast<std::size_t>(
-            fkeep.iperm[static_cast<std::size_t>(j)])] = src[j];
+    switch (job) {
+    case SolveJob::Full: {
+      if (has_scale) {
+        apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
       }
-    }
 
-    const int rc = smf_dpbtrs_lower(ws.rhs_perm.data(), n, fkeep.band_kd, nrhs,
-                                    fkeep.band_factor.data(),
-                                    fkeep.band_kd + 1, n);
-    if (rc != 0) {
-      info.status = ErrorCode::SingularMatrix;
-      return rc;
-    }
-
-    for (int rhs = 0; rhs < nrhs; ++rhs) {
-      const double *src =
-          ws.rhs_perm.data() + static_cast<std::ptrdiff_t>(rhs) * n;
-      double *dst = b + static_cast<std::ptrdiff_t>(rhs) * n;
-      for (int new_i = 0; new_i < n; ++new_i) {
-        dst[static_cast<std::size_t>(
-            fkeep.perm[static_cast<std::size_t>(new_i)])] =
-            src[new_i];
+      for (int rhs = 0; rhs < nrhs; ++rhs) {
+        const double *src = b + static_cast<std::ptrdiff_t>(rhs) * n;
+        double *dst = ws.rhs_perm.data() + static_cast<std::ptrdiff_t>(rhs) * n;
+        for (int j = 0; j < n; ++j) {
+          dst[static_cast<std::size_t>(
+              fkeep.iperm[static_cast<std::size_t>(j)])] = src[j];
+        }
       }
-    }
 
-    if (has_scale) {
-      apply_scale_to_solution(b, n, nrhs, fkeep.scale);
+      const int rc = smf_dpbtrs_lower(ws.rhs_perm.data(), n, fkeep.band_kd, nrhs,
+                                      fkeep.band_factor.data(),
+                                      fkeep.band_kd + 1, n);
+      if (rc != 0) {
+        info.status = ErrorCode::SingularMatrix;
+        return rc;
+      }
+
+      for (int rhs = 0; rhs < nrhs; ++rhs) {
+        const double *src =
+            ws.rhs_perm.data() + static_cast<std::ptrdiff_t>(rhs) * n;
+        double *dst = b + static_cast<std::ptrdiff_t>(rhs) * n;
+        for (int new_i = 0; new_i < n; ++new_i) {
+          dst[static_cast<std::size_t>(
+              fkeep.perm[static_cast<std::size_t>(new_i)])] =
+              src[new_i];
+        }
+      }
+
+      if (has_scale) {
+        apply_scale_to_solution(b, n, nrhs, fkeep.scale);
+      }
+      break;
+    }
+    case SolveJob::Forward:
+      if (has_scale) {
+        apply_scale_to_rhs(b, n, nrhs, fkeep.scale);
+      }
+      solve_forward(fkeep, b, n, nrhs, ws, 1, /*permute=*/true);
+      break;
+    case SolveJob::DiagOnly:
+      // SPD Cholesky: D = I.
+      break;
+    case SolveJob::Backward:
+    case SolveJob::DiagBack:
+      solve_backward(fkeep, b, n, nrhs, ws, 1, /*apply_diag=*/false, /*permute=*/true);
+      if (has_scale) {
+        apply_scale_to_solution(b, n, nrhs, fkeep.scale);
+      }
+      break;
     }
 
     auto t1 = std::chrono::steady_clock::now();

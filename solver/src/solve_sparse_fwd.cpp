@@ -127,12 +127,40 @@ void solve_sparse_forward(const AnalysisKeep     &akeep,
 
     // ------------------------------------------------------------------
     // Step 5: Sparse forward substitution — process only reach supernodes.
+    // ------------------------------------------------------------------
+    if (fkeep.use_banded_spd) {
+        const int kd = fkeep.band_kd;
+        const int ldab = kd + 1;
+        if (n != fkeep.band_n ||
+            fkeep.band_factor.size() <
+                static_cast<std::size_t>(ldab) * static_cast<std::size_t>(n)) {
+            return;
+        }
+        const double *ab = fkeep.band_factor.data();
+        for (int s : reach) {
+            const Supernode &sn = supernodes[static_cast<std::size_t>(s)];
+            for (int j = sn.col_start; j < sn.col_end; ++j) {
+                const double *col_j = ab + static_cast<std::size_t>(j) * ldab;
+                const double xj = (x_out[static_cast<std::size_t>(j)] /= col_j[0]);
+                if (xj != 0.0) {
+                    const int klen = std::min(kd, n - 1 - j);
+                    for (int r = 1; r <= klen; ++r) {
+                        const double lij = col_j[r];
+                        if (lij != 0.0) {
+                            x_out[static_cast<std::size_t>(j + r)] -= lij * xj;
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     //   Logic is identical to solve_forward() for each supernode:
     //     (a) gather p pivot entries from x_out
     //     (b) solve L11 * y = b_loc  (non-unit or unit lower triangular)
     //     (c) scatter pivot entries back
     //     (d) update q extended rows: x_out[ext] -= L21 * y
-    // ------------------------------------------------------------------
     std::vector<double> b_loc;
     std::vector<double> b_ext;
 
