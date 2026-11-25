@@ -31,9 +31,9 @@ python3 tools/ipopt/smf-linear-solver/apply_to_ipopt.py /path/to/Ipopt-3.14.19
 ```bash
 ./configure \
   --prefix=/usr/local \
-  CPPFLAGS="-DIPOPT_HAS_SMF $(pkg-config --cflags smf)" \
-  LDFLAGS="$(pkg-config --libs-only-L smf) -Wl,-rpath,$(pkg-config --variable=libdir smf)" \
-  LIBS="$(pkg-config --libs-only-l smf)"
+  CPPFLAGS="-DIPOPT_HAS_SMF $(pkg-config --cflags smf-solver)" \
+  LDFLAGS="$(pkg-config --libs-only-L smf-solver) -Wl,-rpath,$(pkg-config --variable=libdir smf-solver)" \
+  LIBS="$(pkg-config --libs-only-l smf-solver)"
 make -j && make install
 ```
 

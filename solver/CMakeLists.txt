@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(smf VERSION 0.2.0 LANGUAGES C CXX)
+project(smf VERSION 0.2.1 LANGUAGES C CXX)
 
 # ---- C++ standard -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -655,10 +655,10 @@ if(SMF_BUILD_IPOPT_ADAPTER)
     target_compile_definitions(smf PUBLIC SMF_BUILD_IPOPT_ADAPTER=1)
 endif()
 
-# ---- C ABI shared library (libsmf_c + smf.pc) ---------------------------
+# ---- C ABI shared library (libsmf_c + smf-solver.pc) --------------------
 if(SMF_BUILD_C_API)
     add_library(smf_c SHARED src/smf_c.cpp)
-    target_link_libraries(smf_c PRIVATE smf)
+    target_link_libraries(smf_c PRIVATE $<BUILD_INTERFACE:smf>)
     target_include_directories(smf_c PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -704,14 +704,20 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(_smf_dev_install_targets smf)
-if(TARGET smf_metis)
-    list(APPEND _smf_dev_install_targets smf_metis)
+option(SMF_INSTALL_STATIC_LIBS
+    "Install static C++ archives (smf, smf_metis) and C++ headers alongside the C ABI shared library"
+    ON)
+
+if(SMF_INSTALL_STATIC_LIBS)
+    set(_smf_dev_install_targets smf)
+    if(TARGET smf_metis)
+        list(APPEND _smf_dev_install_targets smf_metis)
+    endif()
+    install(TARGETS ${_smf_dev_install_targets} EXPORT smfTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT development)
 endif()
-install(TARGETS ${_smf_dev_install_targets} EXPORT smfTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT development)
 if(TARGET smf_c)
     install(TARGETS smf_c EXPORT smfTargets
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT runtime
@@ -719,16 +725,22 @@ if(TARGET smf_c)
                 NAMELINK_COMPONENT development
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT development)
     configure_file(
-        cmake/smf.pc.in
-        ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
+        cmake/smf-solver.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/smf-solver.pc
         @ONLY)
-    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/smf.pc
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/smf-solver.pc
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
         COMPONENT development)
 endif()
-install(DIRECTORY include/
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    COMPONENT development)
+if(SMF_INSTALL_STATIC_LIBS)
+    install(DIRECTORY include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        COMPONENT development)
+elseif(TARGET smf_c)
+    install(FILES include/smf/smf_c.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/smf
+        COMPONENT development)
+endif()
 if(TARGET smf_metis)
     # The vendored METIS/GKlib are in the installed libraries: ship their
     # licences and notices (third_party/README.md) with runtime artefacts too.

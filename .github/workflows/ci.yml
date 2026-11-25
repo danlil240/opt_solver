@@ -44,8 +44,8 @@ jobs:
         run: |
           cmake --install build
           export PKG_CONFIG_PATH="$PWD/install/lib/pkgconfig"
-          pkg-config --exists smf
-          pkg-config --modversion smf
+          pkg-config --exists smf-solver
+          pkg-config --modversion smf-solver
 
           # Verify smfTargets.cmake exports only relocatable include dir
           ! grep "INTERFACE_INCLUDE_DIRECTORIES" "$PWD/install/lib/cmake/smf/smfTargets.cmake" | grep -q "/usr"
@@ -71,7 +71,7 @@ jobs:
           }
           EOF
           cc -std=c99 -Wall -Wextra -Werror /tmp/smf_c99_check.c \
-            $(pkg-config --cflags --libs smf) \
+            $(pkg-config --cflags --libs smf-solver) \
             -Wl,-rpath,"$PWD/install/lib" -o /tmp/smf_c99_check
           /tmp/smf_c99_check
 
@@ -88,6 +88,18 @@ jobs:
             -DCMAKE_PREFIX_PATH="$PWD/install"
           cmake --build /tmp/smf_cmake_consumer/build
           LD_LIBRARY_PATH="$PWD/install/lib" /tmp/smf_cmake_consumer/build/app
+
+          # Verify SMF_INSTALL_STATIC_LIBS=OFF omits static archives while keeping CMake config working
+          cmake -S solver -B build -DSMF_INSTALL_STATIC_LIBS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/install-shared"
+          cmake --install build
+          test ! -e "$PWD/install-shared/lib/libsmf.a"
+          test ! -e "$PWD/install-shared/lib/libsmf_metis.a"
+          test -f "$PWD/install-shared/lib/pkgconfig/smf-solver.pc"
+          test -f "$PWD/install-shared/include/smf/smf_c.h"
+          cmake -S /tmp/smf_cmake_consumer -B /tmp/smf_cmake_consumer/build-shared -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/install-shared"
+          cmake --build /tmp/smf_cmake_consumer/build-shared
+          LD_LIBRARY_PATH="$PWD/install-shared/lib" /tmp/smf_cmake_consumer/build-shared/app
 
       - name: Run Python packaging unit tests
         run: pytest -q packaging/python/tests
@@ -141,7 +153,7 @@ jobs:
         run: |
           cmake --install build
           export PKG_CONFIG_PATH="$PWD/install/lib/pkgconfig"
-          pkg-config --exists smf
+          pkg-config --exists smf-solver
           cat > /tmp/smf_c99_check.c <<'EOF'
           #include <stdio.h>
           #include <string.h>
@@ -155,7 +167,7 @@ jobs:
           }
           EOF
           cc -std=c99 -Wall -Wextra -Werror /tmp/smf_c99_check.c \
-            $(pkg-config --cflags --libs smf) \
+            $(pkg-config --cflags --libs smf-solver) \
             -Wl,-rpath,"$PWD/install/lib" -Wl,-rpath,"$CONDA_PREFIX/lib" -o /tmp/smf_c99_check
           /tmp/smf_c99_check
 
@@ -264,9 +276,9 @@ jobs:
             --prefix="/tmp/ipopt-ci/inst-builtin" \
             --disable-java --without-hsl --without-mumps \
             --with-lapack-lflags="-lopenblas" \
-            CPPFLAGS="-DIPOPT_HAS_SMF $(pkg-config --cflags smf)" \
-            LDFLAGS="$(pkg-config --libs-only-L smf) -Wl,-rpath,$(pkg-config --variable=libdir smf)" \
-            LIBS="$(pkg-config --libs-only-l smf)"
+            CPPFLAGS="-DIPOPT_HAS_SMF $(pkg-config --cflags smf-solver)" \
+            LDFLAGS="$(pkg-config --libs-only-L smf-solver) -Wl,-rpath,$(pkg-config --variable=libdir smf-solver)" \
+            LIBS="$(pkg-config --libs-only-l smf-solver)"
           make -j"$(nproc)" && make install
           g++ -O2 -std=c++17 "$GITHUB_WORKSPACE/tools/ipopt/smf-linear-solver/test_ipopt_smf.cpp" \
             $(PKG_CONFIG_PATH="/tmp/ipopt-ci/inst-builtin/lib/pkgconfig" pkg-config --cflags --libs ipopt) \

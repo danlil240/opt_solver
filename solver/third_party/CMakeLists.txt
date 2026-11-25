@@ -52,7 +52,7 @@ else()
     check_include_file(execinfo.h SMF_METIS_HAVE_EXECINFO_H)
     check_symbol_exists(getline "stdio.h" SMF_METIS_HAVE_GETLINE)
     target_compile_definitions(smf_metis PRIVATE
-        LINUX _FILE_OFFSET_BITS=64
+        LINUX _FILE_OFFSET_BITS=64 _GNU_SOURCE
         $<$<BOOL:${SMF_METIS_HAVE_EXECINFO_H}>:HAVE_EXECINFO_H>
         $<$<BOOL:${SMF_METIS_HAVE_GETLINE}>:HAVE_GETLINE>)
     target_compile_options(smf_metis PRIVATE -fno-strict-aliasing -w)

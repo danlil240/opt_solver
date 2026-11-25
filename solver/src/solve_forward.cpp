@@ -10,7 +10,9 @@
 #include "smf/workspace.hpp"
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <span>
 #include <vector>
@@ -92,7 +94,19 @@ struct SplitUpdate {
 struct AtomicUpdate {
   double *x;
   void operator()(Int r, double v) const {
+#if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201806L
     std::atomic_ref<double>(x[r]).fetch_sub(v, std::memory_order_relaxed);
+#else
+    auto *p = reinterpret_cast<std::uint64_t *>(&x[r]);
+    std::uint64_t expected = __atomic_load_n(p, __ATOMIC_RELAXED);
+    for (;;) {
+      const std::uint64_t desired =
+          std::bit_cast<std::uint64_t>(std::bit_cast<double>(expected) - v);
+      if (__atomic_compare_exchange_n(p, &expected, desired, true,
+                                      __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        break;
+    }
+#endif
   }
 };
 

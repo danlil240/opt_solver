@@ -293,7 +293,7 @@ public:
     AdapterIdentity identity() const override {
         AdapterIdentity id;
         id.solver_id = "smf";
-        id.version = "0.2.0";
+        id.version = "0.2.1";
         id.library_path = "in-tree:libsmf";
         id.integer_abi = "int32_offsets64";
         id.available = true;
@@ -528,7 +528,7 @@ public:
     AdapterIdentity identity() const override {
         AdapterIdentity id;
         id.solver_id = "smf";
-        id.version = "0.2.0";
+        id.version = "0.2.1";
         id.library_path = "in-tree:libsmf (" + label_ + ")";
         id.integer_abi = "int32_offsets64";
         id.available = true;

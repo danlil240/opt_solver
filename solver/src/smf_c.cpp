@@ -31,7 +31,7 @@
 #include <vector>
 
 #ifndef SMF_VERSION_STR
-#  define SMF_VERSION_STR "0.2.0"
+#  define SMF_VERSION_STR "0.2.1"
 #endif
 #ifndef SMF_BLAS_BACKEND_STR
 #  define SMF_BLAS_BACKEND_STR "unknown"
