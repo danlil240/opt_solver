@@ -754,6 +754,40 @@ TEST(MatchingTrial, DecisionDoesNotDependOnThreadsAutoParallel) {
     }
 }
 
+// The matching trial is judged against AMD's predicted flops in every auto
+// ordering mode, and AutoParallel's METIS trial runs only when the matching
+// ordering was not adopted. TSOPF_FS_b300's AMD factor is dear enough for the
+// METIS rule, and METIS's predicted flops are far below AMD's: judged against
+// METIS, as it was while METIS ran first, the matching ordering was rejected
+// (ratio 1.85 to METIS, 0.014 to AMD), which left 16k delays instead of 3.6k
+// and an inaccurate solve at IPOPT's pivot threshold. AutoParallel must give
+// AutoSerial's analysis here.
+TEST(MatchingTrial, AutoParallelAdoptsTheMatchingOrderingWhereAutoSerialDoes) {
+    namespace fs = std::filesystem;
+    const fs::path mtx = fs::path(__FILE__).parent_path() / ".." / ".." / "benchmarks" / "fixtures" /
+                         "large" / "TSOPF_FS_b300" / "TSOPF_FS_b300.mtx";
+    std::error_code ec;
+    if (!fs::exists(mtx, ec)) GTEST_SKIP() << "fixture not present: " << mtx.string();
+    auto mm = read_matrix_market(mtx.string());
+    ASSERT_TRUE(mm.ok) << mm.error_message;
+    Control serial;
+    serial.matrix_type = MatrixType::RealSymmetricIndefinite;
+    serial.ordering = OrderingMethod::AutoSerial;
+    Control parallel = serial;
+    parallel.ordering = OrderingMethod::AutoParallel;
+    Solver s1, s2;
+    Info i1, i2;
+    auto a1 = s1.analyse(mm.matrix, serial, i1);
+    auto a2 = s2.analyse(mm.matrix, parallel, i2);
+    ASSERT_NE(a1, nullptr);
+    ASSERT_NE(a2, nullptr);
+    ASSERT_EQ(i1.ordering_used, static_cast<int>(OrderingMethod::Matching));
+    EXPECT_LT(i1.matching_exact_ratio, 0.1);  // against AMD
+    EXPECT_EQ(i2.matching_trial, i1.matching_trial);
+    expect_same_analysis(*a1, *a2, i1, i2);
+    ASSERT_FALSE(a2->matching_scale.empty());
+}
+
 // TSOPF_FS_b162_c1 adopts the matching ordering, and its searches exceed the
 // default budget: the initial matching passes, the searches resume, and the
 // analysis is bitwise the exact trial's.

@@ -897,60 +897,6 @@ namespace smf
         const bool base_dear = concurrent && factor_flops(sym0) * std::max(1, control.expected_refactors) >=
                                                  kMetisFlopsPerRow * static_cast<double>(n);
 
-        // AutoParallel on large matrices: METIS costs several us per vertex
-        // (up to ~85% of analysis) and only pays off when AMD's factor is
-        // expensive per row; then it is tried and the cheaper one kept.
-        if (kHaveMetis && amd_ordered &&
-            control.ordering == OrderingMethod::AutoParallel && n > 8192)
-        {
-            const double fl = factor_flops(sym0);
-            const double refactors = std::max(1, control.expected_refactors);
-            if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
-            {
-                std::vector<Int> mperm;
-                if (spec_nd)
-                {
-                    if (spec_nd->th.joinable()) spec_nd->th.join();
-                    if (spec_nd->ok) mperm = std::move(spec_nd->perm);
-                    spec_nd.reset();
-                }
-                else
-                {
-                    // Parallel nested dissection straight off the arena's
-                    // adjacency (compressed, depth-graded separators, AMD/fast
-                    // METIS leaves) at both 1T and multi-thread: identical
-                    // permutation across thread counts and no redundant copies.
-                    mperm.resize(sn_sz);
-                    if (!parallel_nd_order(n, xadj, adj, nullptr, std::max(1, control.num_threads),
-                                           mperm.data()))
-                        mperm.clear();
-                }
-                if (mperm.size() == sn_sz)
-                {
-                    const Int depth_m = symbolic_counts(mperm.data(), sym1);
-                    if (factor_flops(sym1) < fl)
-                    {
-                        perm = std::move(mperm);
-                        std::swap(sym0, sym1);
-                        depth0 = depth_m;
-                        info.ordering_used = static_cast<int>(OrderingMethod::METIS);
-                    }
-                }
-            }
-            else if (spec_nd)
-            {
-                spec_nd->cancel = 1;
-                if (spec_nd->th.joinable()) spec_nd->th.join();
-                spec_nd.reset();
-            }
-        }
-        else if (spec_nd)
-        {
-            spec_nd->cancel = 1;
-            if (spec_nd->th.joinable()) spec_nd->th.join();
-            spec_nd.reset();
-        }
-
         lap(phases.ordering);
         if (concurrent)
             concurrent->base_ordered(base_dear);
@@ -1064,6 +1010,76 @@ namespace smf
                 info.ordering_used = static_cast<int>(OrderingMethod::Matching);
             }
         }
+        lap(phases.matching);
+
+        // AutoParallel on large matrices: METIS costs several us per vertex
+        // (up to ~85% of analysis) and only pays off when AMD's factor is
+        // expensive per row; then it is tried and the cheaper one kept.
+        // It runs after the matching trial, and only when the trial did not
+        // adopt the matching ordering: the trial is judged against AMD's
+        // predicted flops in every ordering mode. Predicted flops count no
+        // delays, and an ordering without the matching's 2x2 pairs delays the
+        // columns the matching pairs up. Judged against METIS's (lower)
+        // prediction, as it was while METIS ran first, the matching ordering
+        // was rejected where AutoSerial adopts it: TSOPF_FS_b300 / _c1 / _c2 /
+        // _c3 (ratio 1.85-2.2 to METIS, 0.014-0.028 to AMD) then factored
+        // with 16k-39k delays instead of 3.6k-7.1k, and TSOPF_FS_b300 / _c1
+        // at u = 1e-8 came out at omega 0.3-0.9. An adopted matching ordering
+        // also spares the METIS call (it doubled those analyses).
+        if (kHaveMetis && amd_ordered &&
+            info.ordering_used != static_cast<int>(OrderingMethod::Matching) &&
+            control.ordering == OrderingMethod::AutoParallel && n > 8192)
+        {
+            const double fl = factor_flops(sym0);
+            const double refactors = std::max(1, control.expected_refactors);
+            if (fl * refactors >= kMetisFlopsPerRow * static_cast<double>(n))
+            {
+                std::vector<Int> mperm;
+                if (spec_nd)
+                {
+                    if (spec_nd->th.joinable()) spec_nd->th.join();
+                    if (spec_nd->ok) mperm = std::move(spec_nd->perm);
+                    spec_nd.reset();
+                }
+                else
+                {
+                    // Parallel nested dissection straight off the arena's
+                    // adjacency (compressed, depth-graded separators, AMD/fast
+                    // METIS leaves) at both 1T and multi-thread: identical
+                    // permutation across thread counts and no redundant copies.
+                    mperm.resize(sn_sz);
+                    if (!parallel_nd_order(n, xadj, adj, nullptr, std::max(1, control.num_threads),
+                                           mperm.data()))
+                        mperm.clear();
+                }
+                if (mperm.size() == sn_sz)
+                {
+                    const Int depth_m = symbolic_counts(mperm.data(), sym1);
+                    if (factor_flops(sym1) < fl)
+                    {
+                        perm = std::move(mperm);
+                        std::swap(sym0, sym1);
+                        depth0 = depth_m;
+                        info.ordering_used = static_cast<int>(OrderingMethod::METIS);
+                    }
+                }
+            }
+            else if (spec_nd)
+            {
+                spec_nd->cancel = 1;
+                if (spec_nd->th.joinable()) spec_nd->th.join();
+                spec_nd.reset();
+            }
+        }
+        else if (spec_nd)
+        {
+            spec_nd->cancel = 1;
+            if (spec_nd->th.joinable()) spec_nd->th.join();
+            spec_nd.reset();
+        }
+
+        lap(phases.ordering);
+
         const Int *parent0 = sym0;
         const Int *post0 = sym0 + sn_sz;
         const Int *colcount0 = sym0 + 2 * sn_sz;

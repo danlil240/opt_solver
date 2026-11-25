@@ -853,6 +853,84 @@ TEST(BenchmarkAdapters, CudssRefinesIndefiniteSolvesOnEveryTrack) {
 
 #endif // SMF_BENCH_CUDSS
 
+namespace {
+
+// 7-point Laplacian of a g x g x g grid minus shift * I (indefinite for a
+// shift inside its spectrum), lower triangle in CSC.
+CscLower make_shifted_laplace3d(int g, double shift) {
+    CscLower A;
+    A.n = g * g * g;
+    A.col_ptr.assign(static_cast<std::size_t>(A.n) + 1, 0);
+    for (int k = 0; k < g; ++k) {
+        for (int j = 0; j < g; ++j) {
+            for (int i = 0; i < g; ++i) {
+                const int col = (k * g + j) * g + i;
+                A.row_idx.push_back(col);
+                A.values.push_back(6.0 - shift);
+                if (i + 1 < g) {
+                    A.row_idx.push_back(col + 1);
+                    A.values.push_back(-1.0);
+                }
+                if (j + 1 < g) {
+                    A.row_idx.push_back(col + g);
+                    A.values.push_back(-1.0);
+                }
+                if (k + 1 < g) {
+                    A.row_idx.push_back(col + g * g);
+                    A.values.push_back(-1.0);
+                }
+                A.col_ptr[static_cast<std::size_t>(col) + 1] = static_cast<Int>(A.row_idx.size());
+            }
+        }
+    }
+    return A;
+}
+
+// AdapterStats::order_hash of one cold factorization by the smf adapter.
+std::uint64_t smf_order_hash(const CscLower &A, const Control &ctrl, const std::string &track) {
+    auto adapter = make_solver_adapter("smf");
+    adapter->configure(ctrl, track);
+    EXPECT_EQ(adapter->analyse(A), Outcome::Success) << adapter->stats().reason;
+    EXPECT_EQ(adapter->factor(A.values), Outcome::Success) << adapter->stats().reason;
+    return adapter->stats().order_hash;
+}
+
+} // namespace
+
+// The smf adapter runs smf's automatic ordering (AutoParallel: the C API's
+// SMF_ORDER_AUTO, the IPOPT plugin's default) on every track and matrix type,
+// not Control's C++ default (AutoSerial, AMD only). On a 3D grid large enough
+// for the METIS rule, an indefinite matrix must get the ordering an explicit
+// AutoParallel gets, which differs from AMD's (30^3 grid, about 1 s).
+TEST(BenchmarkAdapters, SmfAdapterUsesAutoParallelOrderingOnIndefinite) {
+    const CscLower A = make_shifted_laplace3d(30, 2.9731);
+    for (const char *track : {"recommended", "ipopt"}) {
+        SCOPED_TRACE(track);
+        Control base;
+        base.matrix_type = MatrixType::RealSymmetricIndefinite;
+        smf::bench::apply_replay_track(base, track, /*sequence=*/false);
+        ASSERT_EQ(base.ordering, OrderingMethod::AutoSerial);  // Control's C++ default
+        // The METIS rule weighs AMD's predicted flops by expected_refactors:
+        // a large count makes it fire at this test size.
+        base.expected_refactors = 1000;
+
+        Control explicit_auto = base;
+        explicit_auto.ordering = OrderingMethod::AutoParallel;
+        Control amd = base;
+        amd.ordering = OrderingMethod::AMD;
+
+        const std::uint64_t h_default = smf_order_hash(A, base, track);
+        const std::uint64_t h_auto = smf_order_hash(A, explicit_auto, track);
+        const std::uint64_t h_amd = smf_order_hash(A, amd, track);
+        ASSERT_NE(h_default, 0u);
+        EXPECT_EQ(h_default, h_auto);
+        if (h_auto == h_amd) {
+            GTEST_SKIP() << "AutoParallel kept AMD on this build (no METIS, or its rule did not fire)";
+        }
+        EXPECT_NE(h_default, h_amd);  // an explicit AMD pin still gives AMD
+    }
+}
+
 TEST(BenchmarkAdapters, PanuaUnavailableWhenLibOrLicenseMissing) {
     EnvScope env;
     env.set("SMF_PANUA_PARDISO_LIB", "__nonexistent_panua_lib__.dll");
