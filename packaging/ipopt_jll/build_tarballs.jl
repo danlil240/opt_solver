@@ -37,6 +37,8 @@ cmake --install build
 
 install_license LICENSE
 install_license solver/third_party/LICENSE-Apache-2.0.txt
+install_license solver/third_party/metis/LICENSE
+install_license solver/third_party/gklib/LICENSE.txt
 """
 
 platforms = expand_cxxstring_abis(supported_platforms(; exclude=p -> arch(p) == "i686"))
@@ -50,7 +52,7 @@ dependencies = [
     Dependency("OpenBLAS32_jll"),
     Dependency("SuiteSparse32_jll"),
     Dependency("CompilerSupportLibraries_jll"),
-    Dependency("LLVMOpenMP_jll"; platforms=filter(Sys.isapple, platforms)),
+    Dependency("LLVMOpenMP_jll"; platforms=filter(p -> Sys.isapple(p) || Sys.isfreebsd(p), platforms)),
 ]
 
 build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies;
