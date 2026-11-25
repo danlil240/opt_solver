@@ -20,3 +20,8 @@ cmake -S solver -B build -G Ninja \
 
 cmake --build build -j "${CPU_COUNT}"
 cmake --install build
+
+# Follow CFEP-18: do not ship static archives in libsmf (keep shared libsmf_c,
+# libsmf_ma97, smf.pc, headers, and third-party license notices).
+rm -f "${PREFIX}/lib/libsmf.a" "${PREFIX}/lib/libsmf_metis.a"
+rm -rf "${PREFIX}/lib/cmake/smf"
