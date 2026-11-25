@@ -1,7 +1,7 @@
-# Path to #1: deep research + measurements (2026-10-29)
+# Path to #1: literature survey + measurements (2026-10-29)
 
 **Inputs:**
-- A deep-research run: 104 agents, 22 primary sources, 110 claims extracted, 25 verified by 3-vote adversarial checks, 13 confirmed.
+- A literature survey: 22 primary sources, 25 claims cross-checked, 13 confirmed.
 - Spot measurements on this machine at main `4d8421e` (binaries from 2026-10-28), compared against the front-tier records in `benchmarks/results/fronttier_20261029-day/score_fm`.
 
 **Caveat:** every number below is a single trial on a desktop with background load. Re-measure before adopting anything.
@@ -12,7 +12,7 @@
    - The "1-thread" SSIDS records actually ran on **16 cores**.
    - The "8/16-thread" SSIDS records were **oversubscribed**.
    - So the 1-thread hard_indef and spd scores overstated smf's losses, and the 8/16-thread scores overstated smf's wins.
-   - The memory and roadmap claim that "SSIDS is the 1-thread rival" came from this bug.
+   - The earlier claim that "SSIDS is the 1-thread rival" came from this bug.
    - **Corrected:** hard_indef loses at 1 thread (1.13-1.22) and on held-out at 8/16 threads (1.07-1.18), where properly threaded SSIDS is the main rival. spd and large_kkt win at 8/16 threads and are at parity or better at 1 thread (worst: large_kkt ipopt held-out, 1.03).
 2. **The biggest real lever the literature did not name is amalgamation.**
    - On the hard KKT matrices, smf's factorization is memory-bound: narrow supernodes carry huge contribution blocks.
@@ -168,7 +168,7 @@ smf's 16-thread speedup over its own 1-thread time:
 | ncvxqp3 | 5.77 s | 4.46 s | 1.29x | 2.34 s |
 | TSOPF_FS_b300_c3 | 3.80 s | 3.46 s | 1.10x | 1.66 s |
 
-Part of this is lever 1 (narrow fronts cannot use threads) and part is the serial analysis (lever 3). The rest is architecture. Today's engine is "serial tree + threaded BLAS". It has APTP 2D top tiles, but only at u ≥ 1e-6 and f ≥ 512, and no cross-front pipelining (the deferred "Task 13b").
+Part of this is lever 1 (narrow fronts cannot use threads) and part is the serial analysis (lever 3). The rest is architecture. Today's engine is "serial tree + threaded BLAS". It has APTP 2D top tiles, but only at u ≥ 1e-6 and f ≥ 512, and no cross-front pipelining.
 
 The SSIDS/MA87/PaStiX design is one DAG of tile tasks that spans fronts:
 - a parent's tiles start as soon as the child tiles they depend on are final;

@@ -958,7 +958,7 @@ TEST(Ma97PluginRuntime, Mc64RequestAfterDelayCascadeIsHonoured) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 17: PGLib AC-OPF IPOPT captures replayed through the plugin.
+// PGLib AC-OPF IPOPT captures replayed through the plugin.
 // ---------------------------------------------------------------------------
 
 namespace {

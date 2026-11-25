@@ -1,16 +1,16 @@
-/// test_dod_regression.cpp — M5.S3 Definition-of-Done regression battery
+/// test_dod_regression.cpp — Definition-of-Done regression battery
 ///
-/// Automated tests for all §15 DoD criteria from
-/// ma97_solver_implementation_plan.md plus additional M5.S3 acceptance items:
+/// Automated tests for the solver's definition-of-done criteria plus
+/// additional acceptance items:
 ///
-///   §15 criterion 1: SPD matrices solved with residual < 1e-10
-///   §15 criterion 2: Indefinite KKT matrices solved with residual < 1e-9
-///   §15 criterion 3: Correct inertia reported (sum == n, counts non-negative)
-///   §15 criterion 4: Analyse-once, factor-many (10 iterations)
-///   §15 criterion 5: Singular/rank-deficient handling + continue_on_singular
-///   §15 criterion 6: Diagnostics (rank, inertia, factor entries, timing)
-///   §15 criterion 7: Deterministic single-thread behavior
-///   M5.S3 additions: SolveJob::Forward differs from Full, factor_solve parity
+///   Criterion 1: SPD matrices solved with residual < 1e-10
+///   Criterion 2: Indefinite KKT matrices solved with residual < 1e-9
+///   Criterion 3: Correct inertia reported (sum == n, counts non-negative)
+///   Criterion 4: Analyse-once, factor-many (10 iterations)
+///   Criterion 5: Singular/rank-deficient handling + continue_on_singular
+///   Criterion 6: Diagnostics (rank, inertia, factor entries, timing)
+///   Criterion 7: Deterministic single-thread behavior
+///   Additions: SolveJob::Forward differs from Full, factor_solve parity
 ///
 /// Label: dod_regression
 /// Runtime target: < 30 s total

@@ -328,7 +328,7 @@ TEST(ParallelNd, ReserveCallerCoreDeterministicAndCancel)
 #if defined(SMF_HAS_METIS) && SMF_HAS_METIS
 // Gate for running METIS from several std::threads. The raw conda-forge
 // METIS 5.2.1 aborts the process when called concurrently (GKlib's memory
-// core is process-global; see task-6-report.md), so smf only calls METIS
+// core is process-global), so smf only calls METIS
 // through its wrappers, which serialise the calls unless the vendored,
 // thread-safe METIS is linked; this checks those: 8 threads x 50
 // METIS_NodeND (+ vertex separator) calls equal the serial results.

@@ -1,6 +1,6 @@
 # Triage: smf vs MA27 per-iteration factorization on PGLib AC-OPF (IPOPT)
 
-Date: 2026-10-27 (Task 17). Branch `feat/solver-performance`, base cb71627, fix 642873a.
+Date: 2026-10-27. Branch `feat/solver-performance`, base cb71627, fix 642873a.
 All runs: 1 thread (`OMP/MKL/OPENBLAS_NUM_THREADS=1`), below-normal priority. Tuning split only
 (PGLib case118, case500_goc, case2869_pegase, case4661_sdet; COPS tuning models for the IPOPT
 check). Held-out cases (case1354/2000/9241) were only replayed for the R7 accuracy gate.
@@ -31,7 +31,7 @@ check). Held-out cases (case1354/2000/9241) were only replayed for the R7 accura
 - **Result.** IPOPT `LinearSystemFactorization` (s), smf before -> after, against MA27 in the
   same session: case2869 1.264 -> 0.753 (0.593), case4661 3.215 -> 1.822 (1.742), case500
   0.159 -> 0.119 (0.094). Iterations are unchanged, except cops_chain_800: 424 -> 167 (MA27
-  1475). The full table is in the Task 17 report. What remains is the one-time analysis (the
+  1475). What remains is the one-time analysis (the
   matching), not the per-iteration refactorization, which is 0.65-0.85x MA27's.
 
 ## 1. Starting gap (replay harness, ipopt track, all stored steps, median of 3)

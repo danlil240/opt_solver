@@ -11,7 +11,7 @@ What it adds on top of that design:
 - An interior-point mode (`smf::IpmSession`) that can reuse pivot sequences and the symbolic analysis across IPOPT iterations. Its features are built and gated but stay off by default.
 - A drop-in `libsmf_ma97` plugin that IPOPT loads in place of HSL MA97, an IPOPT `TSymLinearSolver` adapter and a C API.
 
-The code lives in `solver/`. Benchmark tooling is in `tools/bench/` and `benchmarks/`, the IPOPT integration in `tools/ipopt/`, packaging recipes in `packaging/`, performance write-ups in `docs/performance/`, and design specs and implementation plans in `docs/design/`.
+The code lives in `solver/`. Benchmark tooling is in `tools/bench/` and `benchmarks/`, the IPOPT integration in `tools/ipopt/`, packaging recipes in `packaging/`, and performance write-ups in `docs/performance/`.
 
 ## Building
 
@@ -220,18 +220,18 @@ What still loses by more than 1.1x (November 20 MKL board):
   - ncvxqp9 rec (1.17x factor against MA97).
   - `acopf_grid_80`, `acopf_grid_160`, `helm3d01`, `G3_circuit`, `bratu3d`, and `ncvxqp5` all flipped from losses to wins.
 
-The OpenBLAS parity write-up is `docs/performance/2026-11-20-openblas-parity.md`. Earlier write-ups include `docs/performance/2026-11-02-auction-matching.md`, `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival in `docs/performance/2026-10-30-branches-and-scoreboard.md`.
+The OpenBLAS parity write-up is `docs/performance/2026-11-20-openblas-parity.md`. Earlier write-ups include `docs/performance/2026-11-02-auction-matching.md`, `docs/performance/2026-11-02-factor-side-delays.md`, and the full Ryzen scoreboard with every rival in `docs/performance/2026-10-30-scoreboard.md`.
 
 ## Roadmap
 
-The long-term plan is in `docs/roadmap.md`: win the CPU KKT niche, then a GPU mixed-precision path, then prove it on public end-to-end benchmarks. The next six steps each have an implementation plan in `docs/design/plans/`:
+The long-term plan is in `docs/roadmap.md`: win the CPU KKT niche, then a GPU mixed-precision path, then prove it on public end-to-end benchmarks. The next steps:
 
-- **Rescue cost** (`2026-11-02-rescue-cost.md`, in progress). The rescue reuses the matcher the analysis already built instead of rebuilding it, and cheapens or skips the unscaled first try after an initial rejection.
-- **Auction matching** (`2026-11-02-auction-matching.md`). An epsilon-scaling auction for the analysis' max-product matching, with the same verdicts and accuracy, aimed at the matching-dominated losses above.
-- **IPOPT end to end** (`2026-11-02-ipopt-end-to-end.md`). A reproducible public board of IPOPT with smf against MA27, MA57, MA97 and MUMPS on CUTEst, COPS 3.0 and PGLib-OPF, with the instance list and scoring frozen before the first run.
-- **Intra-front parallelism** (`2026-11-02-intra-front-parallel.md`). Tile Cholesky and outer-blocked TPP kernels so that large SPD and TPP fronts run as tile tasks and scale past 8 threads.
-- **SPD ordering cost** (`2026-11-02-spd-ordering-cost.md`). Cheaper nested dissection on large SPD matrices through METIS options, compression and a thread-safe METIS build, without losing fill.
-- **GPU mixed precision** (`2026-11-02-gpu-mixed-precision.md`). Factor the large root fronts in FP32, recover FP64 accuracy with GMRES refinement, and offload them to an RTX 5080, measured against cuDSS. It starts with a CPU go/no-go gate.
+- **Rescue cost.** The rescue reuses the matcher the analysis already built instead of rebuilding it, and cheapens or skips the unscaled first try after an initial rejection.
+- **Auction matching.** An epsilon-scaling auction for the analysis' max-product matching, with the same verdicts and accuracy, aimed at the matching-dominated losses above.
+- **IPOPT end to end.** A reproducible public board of IPOPT with smf against MA27, MA57, MA97 and MUMPS on CUTEst, COPS 3.0 and PGLib-OPF, with the instance list and scoring frozen before the first run.
+- **Intra-front parallelism.** Tile Cholesky and outer-blocked TPP kernels so that large SPD and TPP fronts run as tile tasks and scale past 8 threads.
+- **SPD ordering cost.** Cheaper nested dissection on large SPD matrices through METIS options, compression and a thread-safe METIS build, without losing fill.
+- **GPU mixed precision.** Factor the large root fronts in FP32, recover FP64 accuracy with GMRES refinement, and offload them to an RTX 5080, measured against cuDSS. It starts with a CPU go/no-go gate.
 
 ## License
 

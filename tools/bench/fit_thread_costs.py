@@ -89,7 +89,7 @@ import score  # noqa: E402
 import thread_scaling  # noqa: E402
 
 FIT_CLASSES = ("large_kkt", "hard_indef", "spd")
-DEFAULT_REPO_ROOT = "C:/Users/daniel/projects/opt_solver"
+DEFAULT_REPO_ROOT = str(pathlib.Path(__file__).resolve().parents[2])
 BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
 TIE = 1.02
 RATIO_TOL = thread_scaling.RATIO_TOL

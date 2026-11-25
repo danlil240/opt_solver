@@ -1,7 +1,7 @@
 // test_parallel_determinism.cpp — M6.G1 acceptance tests
 //
 // Decision Log (BLAS non-determinism):
-//   D-DET-001 (superseded by Task 14): bitwise identity across thread counts
+//   D-DET-001 (superseded): bitwise identity across thread counts
 //   was judged impossible and the multi-thread test used a residual
 //   tolerance. Deterministic mode (determinism.hpp) now gives it: one BLAS
 //   thread per call, tiled fronts whatever the thread count, a thread-count
@@ -370,7 +370,7 @@ struct DetCase {
 
 struct DetRun {
     std::vector<double> x;
-    std::vector<double> xm;  // nrhs = 5 blocked solve (Task 16)
+    std::vector<double> xm;  // nrhs = 5 blocked solve
     std::vector<double> d;  // D entries (indefinite), elimination order
     int pos = 0, neg = 0, zero = 0;
     int subtrees = 0, tiles = 0;
@@ -473,7 +473,7 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
                      MatrixType::RealSymmetricPositiveDefinite, true, false,
                      OrderingMethod::AutoParallel});
     {
-        // The Task 13 Helmholtz: helm3d01 when the fixture is present.
+        // The Helmholtz case: helm3d01 when the fixture is present.
         const fs::path mtx = fixture_root() / "large" / "helm3d01" / "helm3d01.mtx";
         std::error_code ec;
         auto mm = fs::exists(mtx, ec) ? read_matrix_market(mtx.string()) : MatrixMarketResult{};
@@ -500,7 +500,7 @@ TEST(ParallelDeterminism, BitwiseAcrossThreadCounts) {
                 if (threads == 8 && run == 0) {
                     if (c.expect_parallel) {
                         EXPECT_GE(r.subtrees, 2) << "8 threads: parallel path not taken";
-                        // The root-arena path (Task 6b3) is part of what
+                        // The root-arena path is part of what
                         // must reproduce bitwise.
                         EXPECT_GT(r.arena_blocks, 0) << "8 threads: no root block in the arena";
                     }

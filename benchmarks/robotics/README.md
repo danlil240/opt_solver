@@ -48,7 +48,7 @@ The KKT sequences IPOPT requested can be captured with the plugin (`SMF_KKT_DUMP
 
 | file | what |
 |---|---|
-| `report_step4.md` | first measurements and where smf lost (smf main d6fd34a against MUMPS, MA27, MA57, MA97) |
+| `report.md` | first measurements and where smf lost (smf main d6fd34a against MUMPS, MA27, MA57, MA97) |
 | `summary_t1.md` | that run's per-cell table (N = 50, 100, 200, 400) |
 | `suite_t1.jsonl`, `suite_seeds.jsonl` | its raw records: `run_suite.py` output, and the seed sweep |
 | `diag_n100.jsonl` | `diag_suite.py` records at N = 100 (regularisation counts, plugin trace); rerun on 2026-11-06 with the thread variables set to 1 in the child (the first run did not set them; its iteration, regularisation and trial-factorization counts were identical). The smf rows are the merged plugin with `SMF_SLACK_ELIM=auto` (the elimination runs on truck_trailer only) |

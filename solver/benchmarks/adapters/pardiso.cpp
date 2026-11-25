@@ -58,7 +58,7 @@ Outcome map_pardiso_error(int error, bool is_factor_phase) {
 // perturbation as a non-optional internal step and does not expose a reliable
 // zero-pivot count through iparm, so exact singularity cannot be reported at
 // factor time. A regularized factor+solve is caught downstream by the shared
-// backward-error qualification (Inaccurate), which is the spec's mechanism for
+// backward-error qualification (Inaccurate), which is the benchmark's mechanism for
 // "no falsely successful singular solve".
 class MklPardisoSolverAdapter final : public SolverAdapter {
 public:

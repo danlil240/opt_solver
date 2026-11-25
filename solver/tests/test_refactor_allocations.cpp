@@ -1,7 +1,7 @@
 // A warm refactorization (same analysis, NumericWorkspace and FactorKeep,
 // new values) allocates no buffer of the matrix's size: per-call copies of
 // that size are page-faulted in and freed on every factorization, a fixed
-// cost that grew with the thread count in the benchmarks (Task 6b4).
+// cost that grew with the thread count in the benchmarks.
 //
 // The global operator new is replaced in this executable (smf links
 // statically) to count, while armed, the allocations of at least a given

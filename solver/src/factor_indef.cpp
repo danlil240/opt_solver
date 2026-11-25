@@ -27,8 +27,7 @@ namespace smf {
 namespace {
 
 // Control::delay_budget: static pivot tolerance (relative to max|A| after
-// scaling) of the fronts after the budget, sqrt(eps) scale as in MA57
-// (refinement_mixed_precision.md).
+// scaling) of the fronts after the budget, sqrt(eps) scale as in MA57.
 constexpr double kDelayBudgetStaticTol = 1e-8;
 
 bool check_analysis_storage_bounds(const AnalysisKeep &keep) noexcept {

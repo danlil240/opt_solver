@@ -133,7 +133,7 @@ std::vector<std::tuple<Int, Int, double>> triplets(const CscLower &A) {
 }
 
 // KKT [[H, J^T], [J, 0]] with kN = 40 primal and kM = 15 constraint rows
-// (the Task 6 fixture of test_ipm_hooks.cpp), stored without the
+// (the small KKT fixture of test_ipm_hooks.cpp), stored without the
 // constraint-block diagonal. J has no entry in columns 0..2 and full row rank
 // (row i alone touches column 3 + i).
 constexpr int kN = 40;
@@ -159,7 +159,7 @@ CscLower kkt(std::initializer_list<int> neg_cols) {
 // so x^T H x > 0 for J x = 0. Inertia (40, 15, 0).
 CscLower good_kkt() { return kkt({3, 4, 5}); }
 
-// The Task 6 KKT: H = -1 on columns 0..2, which lie in null(J). The reduced
+// The small KKT fixture: H = -1 on columns 0..2, which lie in null(J). The reduced
 // Hessian is indefinite; inertia (37, 18, 0).
 CscLower bad_kkt() { return kkt({0, 1, 2}); }
 

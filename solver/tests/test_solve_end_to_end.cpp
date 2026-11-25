@@ -195,7 +195,7 @@ TEST(SolveEndToEnd, SPD4x4ResidualCheck) {
 }
 
 // ---------------------------------------------------------------------------
-// Task 16: cached inverse diagonal blocks and the blocked multi-RHS solve.
+// Cached inverse diagonal blocks and the blocked multi-RHS solve.
 // Fixtures: optim20 and the 7 large_kkt IPOPT replays (first factorization's
 // values in the .mtx), each when present on disk.
 // ---------------------------------------------------------------------------

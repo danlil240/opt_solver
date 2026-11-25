@@ -38,8 +38,7 @@ SEED = 20261027
 HELDOUT_FRACTION = 0.30
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# Duff-Hogg-Lopez (RAL-TR-2018-012) hard indefinite set, all 24 matrices
-# (.superpowers/sdd/2026-10-27-front-tier-solver/dhl-hard-set.md).
+# Duff-Hogg-Lopez (RAL-TR-2018-012) hard indefinite set, all 24 matrices.
 # (group, name, family).
 DHL_HARD = [
     ("TSOPF", "TSOPF_FS_b39_c7", "power_flow"), ("TSOPF", "TSOPF_FS_b162_c1", "power_flow"),

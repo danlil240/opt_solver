@@ -38,11 +38,12 @@ from plugin_trace import parse_trace
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 BUILD_REL = REPO / "build" / "Release"
+# Licensed CoinHSL binaries are not redistributable: set SMF_COINHSL_BIN, or
+# unpack the archive under build-deps/ (ignored by git).
 COINHSL_BIN = pathlib.Path(
     os.environ.get(
         "SMF_COINHSL_BIN",
-        r"C:\Users\daniel\Downloads\CoinHSL-archive.v2024.5.15.x86_64-w64-mingw32-libgfortran5"
-        r"\CoinHSL-archive.v2024.5.15.x86_64-w64-mingw32-libgfortran5\bin",
+        str(REPO / "build-deps" / "coinhsl-2024.5.15" / "CoinHSL.v2024.5.15.x86_64-w64-mingw32-libgfortran5" / "bin"),
     )
 )
 IPOPT_EXE = pathlib.Path(sys.executable).parent / "Library" / "bin" / "ipopt.exe"

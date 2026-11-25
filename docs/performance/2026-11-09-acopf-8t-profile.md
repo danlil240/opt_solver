@@ -186,7 +186,7 @@ The existing auto rule with the sequence length as `expected_refactors` (probe `
   - This is the only path found to acopf80, at roughly -10 to -15% if it works; uncertain.
 - **C. Accept acopf80 (about 1.1) as the remaining loss** after A, and move to "best optimizer".
 
-## Follow-up: steps A and B (Daniel chose "A, then B", 2026-11-09)
+## Follow-up: steps A and B (2026-11-09)
 
 ### A: tell the analysis how long IPOPT runs are (PR #72)
 

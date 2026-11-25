@@ -177,7 +177,7 @@ partition_tasks(const TreeView &t, const SubtreeSums &u, int threads, double min
 // Two adjacent merged tasks weigh more than a grain together, so there are
 // at most about 2 kTaskGrainsPerThread merged tasks per thread, and a
 // heaviest-first schedule of tasks within a grain ends within a grain of
-// sub_total / threads. Swept at 4 to 64 per thread in Task 6a2: within noise.
+// sub_total / threads. Swept at 4 to 64 per thread: within noise.
 inline constexpr double kTaskGrainsPerThread = 16.0;
 inline double task_grain(double sub_total, int threads) {
   return sub_total / (kTaskGrainsPerThread * static_cast<double>(threads));

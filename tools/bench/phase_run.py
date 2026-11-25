@@ -6,8 +6,8 @@
 Per case and thread count: 1 warmup run, then N trials with --print-steps. Each run's stderr (the library's
 SMF_BENCH_PHASE_TRACE marks when that variable is set, and bench_replay's per-step lines) goes to
 <out>/phase_<case>_T<threads>_<trial>.txt; tools/bench/phase_split.py tabulates them. Records go to
-<out>/records.jsonl. One process at a time; on the 12900K run it under start /affinity FFFF /belownormal
-(~/.claude/smf-remote/rpy.sh does).
+<out>/records.jsonl. One process at a time; on a hybrid CPU pin it to the P-cores (on Windows: start /affinity FFFF
+/belownormal).
 """
 
 from __future__ import annotations
