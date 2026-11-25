@@ -2,20 +2,29 @@
 using BinaryBuilder, Pkg
 
 name = "smf"
-version = v"0.2.0"
+version = v"0.2.1"
 
 sources = [
     GitSource("https://github.com/danlil240/opt_solver.git",
-              "31348d9da6dfcc854703fcfd1434f32a798712fb"),
+              "8ffa88d29b6ef82cd613ca3c2486e113f98da895"),
+    FileSource("https://github.com/joseluisq/MacOSX-SDKs/releases/download/15.0/MacOSX15.0.sdk.tar.xz",
+               "9df0293776fdc8a2060281faef929bf2fe1874c1f9368993e7a4ef87b1207f98"),
 ]
 
 script = raw"""
+if [[ "${target}" == *-apple-darwin* ]]; then
+    # Use MacOSX15.0.sdk for C++20 libc++ support (std::bit_cast, std::span).
+    tar -xf "${WORKSPACE}/srcdir/MacOSX15.0.sdk.tar.xz" -C "${WORKSPACE}/srcdir"
+    apple_sdk_root="${WORKSPACE}/srcdir/MacOSX15.0.sdk"
+    sed -i "s!/opt/${target}/${target}/sys-root!${apple_sdk_root}!" "${CMAKE_TARGET_TOOLCHAIN}"
+    sed -i "s!/opt/${target}/${target}/sys-root!${apple_sdk_root}!" /opt/bin/${bb_full_target}/${target}-clang*
+    export MACOSX_DEPLOYMENT_TARGET=15.0
+fi
+
 cd $WORKSPACE/srcdir/opt_solver
 
 # Let BinaryBuilder's compiler wrappers select the target microarchitecture
 # (do not force x86-64-v3 on generic x86_64 platforms).
-MARCH_OPT="-DSMF_MARCH=none"
-
 cmake -S solver -B build -G Ninja \
     -DCMAKE_INSTALL_PREFIX=${prefix} \
     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TARGET_TOOLCHAIN} \
@@ -26,11 +35,12 @@ cmake -S solver -B build -G Ninja \
     -DSMF_VENDORED_METIS=ON \
     -DSMF_BUILD_C_API=ON \
     -DSMF_BUILD_MA97_PLUGIN=ON \
+    -DSMF_INSTALL_STATIC_LIBS=OFF \
     -DSMF_BUILD_TESTS=OFF \
     -DSMF_BUILD_BENCHMARKS=OFF \
     -DBLAS_LIBRARIES="-L${libdir} -lopenblas" \
     -DLAPACK_LIBRARIES="-L${libdir} -lopenblas" \
-    ${MARCH_OPT}
+    -DSMF_MARCH=none
 
 cmake --build build -j ${nproc}
 cmake --install build
@@ -41,7 +51,7 @@ install_license solver/third_party/metis/LICENSE
 install_license solver/third_party/gklib/LICENSE.txt
 """
 
-platforms = expand_cxxstring_abis(supported_platforms(; exclude=p -> arch(p) == "i686"))
+platforms = expand_cxxstring_abis(supported_platforms(; exclude=p -> arch(p) == "i686" || Sys.isfreebsd(p)))
 
 products = [
     LibraryProduct("libsmf_c", :libsmf_c),
@@ -52,7 +62,7 @@ dependencies = [
     Dependency("OpenBLAS32_jll"),
     Dependency("SuiteSparse32_jll"),
     Dependency("CompilerSupportLibraries_jll"),
-    Dependency("LLVMOpenMP_jll"; platforms=filter(p -> Sys.isapple(p) || Sys.isfreebsd(p), platforms)),
+    Dependency("LLVMOpenMP_jll"; platforms=filter(Sys.isapple, platforms)),
 ]
 
 build_tarballs(ARGS, name, version, sources, script, platforms, products, dependencies;

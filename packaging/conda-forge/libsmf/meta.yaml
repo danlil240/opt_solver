@@ -1,5 +1,5 @@
-{% set name = "libsmf" %}
-{% set version = "0.2.0" %}
+{% set name = "smf-solver" %}
+{% set version = "0.2.1" %}
 
 package:
   name: {{ name }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/danlil240/opt_solver/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: a63735ddc80b758af636a24c093c5f9993945c9c367304375cccac40fd183eda
+  sha256: ca6fce663cd96e2a7e6458696085a66949e51735c61fa0fb9ef378bddccec72c
 
 build:
   number: 0
