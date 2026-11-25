@@ -30,6 +30,13 @@ void smf_dtrsm_right_lower_transpose(double *B, int n_rows, int k,
 int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
                      int ldab, int ldb);
 
+/// Banded triangular solve with factor from smf_dpbtrf_lower.
+/// Solves op(L) * X = B in place for nrhs right-hand sides (column-major, ldb),
+/// where op(L) = L when trans == false and L^T when trans == true.
+/// Returns 0 on success, < 0 on invalid arguments.
+int smf_dtbsv_lower(double *B, int n, int kd, int nrhs, const double *AB,
+                    int ldab, int ldb, bool trans);
+
 // --- BLAS wrappers ---
 
 /// Symmetric rank-k update: C := C - A Aᵀ  (lower, no-transpose)

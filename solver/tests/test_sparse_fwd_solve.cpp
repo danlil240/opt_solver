@@ -249,6 +249,107 @@ TEST(SparseFwdSolve, ReachSizeSmall) {
 }
 
 // ===========================================================================
+// Test 3b — BandedSpdAutoParallelMatchesDenseAndKeepsSmallReach
+//
+// Under AutoParallel, narrow-band SPD matrices (n >= 100, bw <= 128) take the
+// LAPACK dpbtrf banded path where factor_values / factor_col_ptr are empty.
+// Both solve_forward() and solve_sparse_forward() must handle this path
+// cleanly (no crash), agree to machine precision, and preserve sparse reach.
+// Covers both narrow (kd <= 16) and wider (kd > 16) bands.
+// ===========================================================================
+TEST(SparseFwdSolve, BandedSpdAutoParallelMatchesDenseAndKeepsSmallReach) {
+    auto build_banded_auto = [](const CscLower &A, std::unique_ptr<AnalysisKeep> &ak,
+                                FactorKeep &fk) {
+        Control ctrl;
+        ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+        ctrl.ordering = OrderingMethod::AutoParallel;
+        Info info;
+        Solver s;
+        ak = s.analyse(A, ctrl, info);
+        ASSERT_NE(ak.get(), nullptr);
+        ASSERT_EQ(s.factor(*ak, ctrl, info, fk), FactorStatus::Success);
+        ASSERT_TRUE(fk.use_banded_spd) << "premise: narrow-band SPD under AutoParallel takes banded path";
+    };
+
+    // Case 1: block-diagonal tridiagonal (n=120, kd=1 <= 16), sparse RHS e_0 & dense RHS.
+    {
+        const int n = 120;
+        const int block_size = 10;
+        std::unique_ptr<AnalysisKeep> ak;
+        FactorKeep fk;
+        build_banded_auto(make_block_diag(n, block_size), ak, fk);
+
+        std::vector<double> b_sparse(static_cast<std::size_t>(n), 0.0);
+        b_sparse[0] = 1.0;
+        const std::vector<double> x_dense = dense_fwd(fk, b_sparse);
+
+        std::vector<int> reach;
+        std::vector<double> x_sparse;
+        solve_sparse_forward(*ak, fk, b_sparse, reach, x_sparse);
+
+        ASSERT_EQ(static_cast<int>(x_sparse.size()), n);
+        const double tol = 1e-14 * std::max(inf_norm(x_dense), 1.0);
+        for (int i = 0; i < n; ++i) {
+            EXPECT_NEAR(x_sparse[static_cast<std::size_t>(i)],
+                        x_dense[static_cast<std::size_t>(i)], tol)
+                << "sparse RHS mismatch at " << i;
+        }
+        EXPECT_GT(reach.size(), 0u);
+        EXPECT_LE(static_cast<int>(reach.size()), block_size);
+
+        // Dense all-ones RHS as well.
+        std::vector<double> b_all(static_cast<std::size_t>(n), 1.0);
+        const std::vector<double> x_dense_all = dense_fwd(fk, b_all);
+        solve_sparse_forward(*ak, fk, b_all, reach, x_sparse);
+        const double tol_all = 1e-14 * std::max(inf_norm(x_dense_all), 1.0);
+        for (int i = 0; i < n; ++i) {
+            EXPECT_NEAR(x_sparse[static_cast<std::size_t>(i)],
+                        x_dense_all[static_cast<std::size_t>(i)], tol_all)
+                << "dense RHS mismatch at " << i;
+        }
+    }
+
+    // Case 2: wider band (n=150, kd=20 > 16) exercises BLAS dtbsv path too.
+    {
+        const int n = 150;
+        const int bw = 20;
+        CscLower A;
+        A.n = n;
+        A.col_ptr.resize(static_cast<std::size_t>(n + 1), 0);
+        for (int j = 0; j < n; ++j) {
+            A.row_idx.push_back(j);
+            A.values.push_back(40.0);
+            for (int d : {1, 7, bw}) {
+                if (j + d < n) {
+                    A.row_idx.push_back(j + d);
+                    A.values.push_back(-0.5);
+                }
+            }
+            A.col_ptr[static_cast<std::size_t>(j + 1)] = static_cast<Int>(A.row_idx.size());
+        }
+        std::unique_ptr<AnalysisKeep> ak;
+        FactorKeep fk;
+        build_banded_auto(A, ak, fk);
+
+        std::vector<double> b(static_cast<std::size_t>(n), 0.0);
+        b[12] = 2.5;
+        b[85] = -1.25;
+        const std::vector<double> x_dense = dense_fwd(fk, b);
+        std::vector<int> reach;
+        std::vector<double> x_sparse;
+        solve_sparse_forward(*ak, fk, b, reach, x_sparse);
+
+        ASSERT_EQ(static_cast<int>(x_sparse.size()), n);
+        const double tol = 1e-13 * std::max(inf_norm(x_dense), 1.0);
+        for (int i = 0; i < n; ++i) {
+            EXPECT_NEAR(x_sparse[static_cast<std::size_t>(i)],
+                        x_dense[static_cast<std::size_t>(i)], tol)
+                << "kd=20 mismatch at " << i;
+        }
+    }
+}
+
+// ===========================================================================
 // Test 4 — ZeroRHS
 //
 // Any matrix, RHS = all-zeros → x_out = all-zeros, reach empty.

@@ -355,6 +355,28 @@ void solve_backward(const FactorKeep &fkeep, double *x, int n, int nrhs,
   if (n <= 0 || nrhs <= 0 || x == nullptr)
     return;
 
+  if (fkeep.use_banded_spd) {
+    if (n != fkeep.band_n ||
+        static_cast<int>(fkeep.perm.size()) != n ||
+        fkeep.band_factor.size() <
+            static_cast<std::size_t>(fkeep.band_kd + 1) * static_cast<std::size_t>(n)) {
+      return;
+    }
+    smf_dtbsv_lower(x, n, fkeep.band_kd, nrhs, fkeep.band_factor.data(),
+                    fkeep.band_kd + 1, n, /*trans=*/true);
+    if (permute) {
+      std::vector<double> &tmp = ws.tmp;
+      tmp.resize(static_cast<std::size_t>(n));
+      for (int rhs = 0; rhs < nrhs; ++rhs) {
+        double *xc = x + static_cast<std::ptrdiff_t>(rhs) * n;
+        for (int j = 0; j < n; ++j)
+          tmp[static_cast<std::size_t>(fkeep.perm[static_cast<std::size_t>(j)])] = xc[j];
+        std::copy(tmp.begin(), tmp.end(), xc);
+      }
+    }
+    return;
+  }
+
   const bool use_steps = !fkeep.solve_steps.empty();
   const AnalysisKeep *ak = fkeep.analysis;
   if (!use_steps && ak == nullptr)

@@ -219,6 +219,61 @@ TEST(SolveInterleaved, PositiveDefinite) {
     check_solves(F, nrhs, n, 400u + static_cast<unsigned>(nrhs));
 }
 
+TEST(SolveInterleaved, BandedSpdAutoParallelPartialSolves) {
+  auto make_wide_band_spd = [](Int n, Int bw, unsigned seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> u(-0.5, 0.5);
+    std::vector<std::tuple<Int, Int, double>> t;
+    for (Int i = 0; i < n; ++i) {
+      t.emplace_back(i, i, 20.0);
+      for (Int d : {Int{1}, Int{5}, bw})
+        if (i + d < n)
+          t.emplace_back(i + d, i, u(rng));
+    }
+    return from_triplets(n, std::move(t));
+  };
+
+  for (const auto &[label, A, scaling] : std::vector<std::tuple<const char *, CscLower, ScalingMethod>>{
+           {"kd11_unscaled", make_spd(400, 5u), ScalingMethod::None},
+           {"kd11_scaled", make_spd(400, 9u), ScalingMethod::Equilibration},
+           {"kd24_unscaled", make_wide_band_spd(200, 24, 11u), ScalingMethod::None},
+           {"kd24_scaled", make_wide_band_spd(200, 24, 13u), ScalingMethod::Equilibration},
+       }) {
+    SCOPED_TRACE(label);
+    Factored F;
+    F.A = A;
+    F.ctrl.matrix_type = MatrixType::RealSymmetricPositiveDefinite;
+    F.ctrl.ordering = OrderingMethod::AutoParallel;
+    F.ctrl.scaling = scaling;
+    factor(F);
+    ASSERT_TRUE(F.fk.use_banded_spd) << "premise: narrow-band SPD takes banded path";
+    const int n = static_cast<int>(F.A.n);
+    for (int nrhs : {1, 3, 6})
+      check_solves(F, nrhs, n + 2, 500u + static_cast<unsigned>(nrhs));
+
+    // Explicit Forward -> DiagOnly -> Backward sequence matches Full.
+    std::vector<double> b(static_cast<std::size_t>(n) * 2);
+    for (std::size_t i = 0; i < b.size(); ++i)
+      b[i] = std::sin(0.07 * static_cast<double>(i)) + 0.25;
+    std::vector<double> x_full = b;
+    std::vector<double> x_split = b;
+    Solver s;
+    Info info;
+    SolveWorkspace ws;
+    ASSERT_EQ(s.solve(F.fk, F.ctrl, info, x_full.data(), n, 2, ws, SolveJob::Full), 0);
+    ASSERT_EQ(s.solve(F.fk, F.ctrl, info, x_split.data(), n, 2, ws, SolveJob::Forward), 0);
+    ASSERT_EQ(s.solve(F.fk, F.ctrl, info, x_split.data(), n, 2, ws, SolveJob::DiagOnly), 0);
+    ASSERT_EQ(s.solve(F.fk, F.ctrl, info, x_split.data(), n, 2, ws, SolveJob::Backward), 0);
+    for (int r = 0; r < 2; ++r) {
+      EXPECT_LT(rel_residual(F.A, x_split.data() + r * n, b.data() + r * n), 1e-12);
+      for (int i = 0; i < n; ++i) {
+        EXPECT_NEAR(x_split[static_cast<std::size_t>(r) * n + i],
+                    x_full[static_cast<std::size_t>(r) * n + i], 1e-12);
+      }
+    }
+  }
+}
+
 TEST(SolveInterleaved, RefactorRebuildsDinv) {
   Factored F;
   F.A = make_kkt(200, 100, 4, 17u);

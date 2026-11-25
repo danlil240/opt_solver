@@ -814,3 +814,68 @@ TEST(CApiTest, IpmSolveCtrlOverrideDoesNotResetSessionControl) {
 
     smf_ipm_free(&sess);
 }
+
+/* Default C API ordering is SMF_ORDER_AUTO (AutoParallel), which takes the
+ * banded dpbtrf path for narrow-band SPD matrices (n >= 100, bw <= 128).
+ * Partial solves (FORWARD / DIAGONAL / BACKWARD) must work on that path in
+ * both smf_ipm_solve and smf_solve. */
+TEST(CApiTest, BandedSpdPartialSolvesWorkUnderDefaultAutoOrdering) {
+    const int n = 120;
+    std::vector<int> col_ptr(static_cast<std::size_t>(n + 1), 0);
+    std::vector<int> row_idx;
+    std::vector<double> vals;
+    for (int j = 0; j < n; ++j) {
+        row_idx.push_back(j);
+        vals.push_back(4.0);
+        if (j + 1 < n) {
+            row_idx.push_back(j + 1);
+            vals.push_back(-1.0);
+        }
+        col_ptr[static_cast<std::size_t>(j + 1)] = static_cast<int>(row_idx.size());
+    }
+
+    // Build b = A * x_true for 2 right-hand sides.
+    const int nrhs = 2;
+    std::vector<double> x_true(static_cast<std::size_t>(n) * nrhs);
+    std::vector<double> b(static_cast<std::size_t>(n) * nrhs, 0.0);
+    for (int r = 0; r < nrhs; ++r) {
+        for (int i = 0; i < n; ++i)
+            x_true[static_cast<std::size_t>(r) * n + i] =
+                (r == 0 ? 1.0 : -0.5) * static_cast<double>((i % 7) + 1);
+        for (int j = 0; j < n; ++j) {
+            for (int p = col_ptr[static_cast<std::size_t>(j)];
+                 p < col_ptr[static_cast<std::size_t>(j + 1)]; ++p) {
+                const int i = row_idx[static_cast<std::size_t>(p)];
+                const double v = vals[static_cast<std::size_t>(p)];
+                b[static_cast<std::size_t>(r) * n + i] += v * x_true[static_cast<std::size_t>(r) * n + j];
+                if (i != j)
+                    b[static_cast<std::size_t>(r) * n + j] += v * x_true[static_cast<std::size_t>(r) * n + i];
+            }
+        }
+    }
+
+    smf_ipm_control_t ctrl;
+    smf_ipm_default_control(&ctrl);
+    ASSERT_EQ(ctrl.ordering, SMF_ORDER_AUTO);
+    ctrl.num_threads = 1;
+
+    smf_ipm_session_t sess = nullptr;
+    ASSERT_EQ(smf_ipm_create(&sess), SMF_OK);
+    ASSERT_EQ(smf_ipm_analyse(sess, n, col_ptr.data(), row_idx.data(), vals.data(), &ctrl, nullptr),
+              SMF_OK);
+    ASSERT_EQ(smf_ipm_factor(sess, SMF_POSDEF, vals.data(), &ctrl, nullptr, nullptr), SMF_OK);
+
+    std::vector<double> x_full = b;
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FULL, nrhs, x_full.data(), n, &ctrl, nullptr), SMF_OK);
+
+    std::vector<double> x_split = b;
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_FORWARD, nrhs, x_split.data(), n, &ctrl, nullptr), SMF_OK);
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_DIAGONAL, nrhs, x_split.data(), n, &ctrl, nullptr), SMF_OK);
+    ASSERT_EQ(smf_ipm_solve(sess, SMF_SOLVE_BACKWARD, nrhs, x_split.data(), n, &ctrl, nullptr), SMF_OK);
+
+    for (std::size_t i = 0; i < x_true.size(); ++i) {
+        EXPECT_NEAR(x_full[i], x_true[i], 1e-12);
+        EXPECT_NEAR(x_split[i], x_true[i], 1e-12);
+    }
+    smf_ipm_free(&sess);
+}

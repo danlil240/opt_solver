@@ -364,6 +364,10 @@ FactorStatus factor_indef(const AnalysisKeep &keep, const FactorValues &values,
   // this factorization completes its own setup (every error return leaves 0).
   const bool setup_reuse = fkeep.setup_analysis == keep.serial && fkeep.analysis == &keep;
   fkeep.setup_analysis = 0;
+  fkeep.use_banded_spd = false;
+  fkeep.band_n = 0;
+  fkeep.band_kd = 0;
+  fkeep.band_factor.clear();
   const Int ns = static_cast<Int>(keep.supernodes.size());
 
   info.delayed_pivots = 0;

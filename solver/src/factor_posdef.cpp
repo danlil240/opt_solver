@@ -64,6 +64,9 @@ static bool try_factor_banded_spd(Int n, const Int *col_ptr, const Int *row_idx,
   fkeep.use_banded_spd = true;
   // The band solve: no step layout to run in parallel.
   fkeep.solve_threads = 1;
+  fkeep.solve_steps.clear();
+  fkeep.factor_values.clear();
+  fkeep.factor_col_ptr.clear();
   fkeep.band_n = n_i;
   fkeep.band_kd = kd_i;
   fkeep.band_factor = std::move(ab);

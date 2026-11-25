@@ -110,6 +110,38 @@ int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
   return 0;
 }
 
+int smf_dtbsv_lower(double *B, int n, int kd, int nrhs, const double *AB,
+                    int ldab, int ldb, bool trans) {
+  if (n < 0 || kd < 0 || nrhs < 0 || ldab < kd + 1 || ldb < std::max(1, n)) {
+    return -1;
+  }
+  for (int rhs = 0; rhs < nrhs; ++rhs) {
+    double *x = B + static_cast<std::size_t>(rhs) * ldb;
+    if (!trans) {
+      for (int j = 0; j < n; ++j) {
+        const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+        x[j] /= col_j[0];
+        const int klen = std::min(kd, n - 1 - j);
+        const double xj = x[j];
+        for (int r = 1; r <= klen; ++r) {
+          x[j + r] -= col_j[r] * xj;
+        }
+      }
+    } else {
+      for (int j = n - 1; j >= 0; --j) {
+        const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+        const int klen = std::min(kd, n - 1 - j);
+        double sum = x[j];
+        for (int r = 1; r <= klen; ++r) {
+          sum -= col_j[r] * x[j + r];
+        }
+        x[j] = sum / col_j[0];
+      }
+    }
+  }
+  return 0;
+}
+
 void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
                      int ldc) {
   for (int j = 0; j < k; ++j) {
@@ -526,6 +558,49 @@ int smf_dpbtrs_lower(double *B, int n, int kd, int nrhs, const double *AB,
   dpbtrs_(&uplo, &n, &kd, &nrhs, const_cast<double *>(AB), &ldab, B, &ldb,
           &info);
   return info;
+}
+
+int smf_dtbsv_lower(double *B, int n, int kd, int nrhs, const double *AB,
+                    int ldab, int ldb, bool trans) {
+  if (n < 0 || kd < 0 || nrhs < 0 || ldab < kd + 1 || ldb < std::max(1, n)) {
+    return -1;
+  }
+  if (n == 0 || nrhs == 0) {
+    return 0;
+  }
+  if (kd <= 16) {
+    for (int rhs = 0; rhs < nrhs; ++rhs) {
+      double *x = B + static_cast<std::size_t>(rhs) * ldb;
+      if (!trans) {
+        for (int j = 0; j < n; ++j) {
+          const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+          x[j] /= col_j[0];
+          const int klen = std::min(kd, n - 1 - j);
+          const double xj = x[j];
+          for (int r = 1; r <= klen; ++r) {
+            x[j + r] -= col_j[r] * xj;
+          }
+        }
+      } else {
+        for (int j = n - 1; j >= 0; --j) {
+          const double *col_j = AB + static_cast<std::size_t>(j) * ldab;
+          const int klen = std::min(kd, n - 1 - j);
+          double sum = x[j];
+          for (int r = 1; r <= klen; ++r) {
+            sum -= col_j[r] * x[j + r];
+          }
+          x[j] = sum / col_j[0];
+        }
+      }
+    }
+    return 0;
+  }
+  for (int rhs = 0; rhs < nrhs; ++rhs) {
+    double *x = B + static_cast<std::size_t>(rhs) * ldb;
+    cblas_dtbsv(CblasColMajor, CblasLower, trans ? CblasTrans : CblasNoTrans,
+                CblasNonUnit, n, kd, AB, ldab, x, 1);
+  }
+  return 0;
 }
 
 void smf_dsyrk_lower(double *C, int k, const double *A, int n_cols, int lda,
