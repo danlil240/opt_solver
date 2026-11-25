@@ -3,7 +3,7 @@ exec_prefix=${prefix}
 libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
 includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
 
-Name: smf
+Name: smf-solver
 Description: Sparse symmetric multifrontal direct linear solver (C ABI)
 Version: @PROJECT_VERSION@
 URL: https://github.com/danlil240/opt_solver

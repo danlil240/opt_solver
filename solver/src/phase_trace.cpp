@@ -19,7 +19,7 @@ thread_local int t_top_front = 0;
 
 int phase_trace_level() noexcept {
   static const int level = [] {
-#ifdef _WIN32
+#ifdef _MSC_VER
     char *e = nullptr;
     std::size_t len = 0;
     if (_dupenv_s(&e, &len, "SMF_BENCH_PHASE_TRACE") != 0 || e == nullptr) return 0;

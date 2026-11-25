@@ -111,7 +111,11 @@ CpuTopology read_topology() {
           t.core_cpus.push_back(std::move(cpus));
           // EfficiencyClass: the same (0) on every core of a non-hybrid
           // CPU; on a hybrid one (Alder Lake and later) higher on P-cores.
+#if defined(__MINGW32__)
+          t.core_class.push_back(0);
+#else
           t.core_class.push_back(static_cast<int>(rec->Processor.EfficiencyClass));
+#endif
         }
         if (rec->Size == 0) break;
         off += rec->Size;

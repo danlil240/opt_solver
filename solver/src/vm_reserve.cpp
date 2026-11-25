@@ -20,7 +20,7 @@ namespace smf {
 namespace {
 std::atomic<long long> g_decommit_bytes{0};
 bool fail_reserve_hook() noexcept {
-#ifdef _WIN32
+#ifdef _MSC_VER
   char *e = nullptr;
   std::size_t len = 0;
   if (_dupenv_s(&e, &len, "SMF_TEST_STORE_FAIL_RESERVE") != 0 || e == nullptr) return false;

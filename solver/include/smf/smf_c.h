@@ -36,7 +36,18 @@ extern "C" {
 #  define SMF_C_API
 #endif
 
-/** Current C ABI version (bumped only on breaking struct/signature changes). */
+/**
+ * Current C ABI version (bumped only on breaking struct/signature changes).
+ *
+ * ABI stability policy:
+ *  - Patch releases (0.x.y) are strictly binary- and source-compatible with
+ *    earlier 0.x.* releases (additive-only, guarded by SOVERSION 1, the
+ *    smf_c.map symbol export list, and struct_size fields on control/info
+ *    structs).
+ *  - Pre-1.0 minor releases (0.x.0) may make ABI changes when necessary and
+ *    will bump SMF_C_ABI_VERSION / SOVERSION if any exported symbol or layout
+ *    changes incompatibly.
+ */
 #define SMF_C_ABI_VERSION 1
 
 /* -------------------------------------------------------------------------
@@ -46,7 +57,7 @@ extern "C" {
 /** Returns SMF_C_ABI_VERSION that this library was compiled with. */
 SMF_C_API int smf_c_abi_version(void);
 
-/** Returns a static null-terminated library version string (e.g. "0.1.0"). */
+/** Returns a static null-terminated library version string (e.g. "0.2.1"). */
 SMF_C_API const char* smf_version(void);
 
 /** Returns a static null-terminated BLAS backend string (e.g. "openblas", "mkl"). */

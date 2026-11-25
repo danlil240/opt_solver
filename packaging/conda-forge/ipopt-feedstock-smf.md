@@ -21,8 +21,8 @@ in `conda-forge/ipopt-feedstock` requires only three small additions:
 
 3. **Pass `IPOPT_HAS_SMF` flags to `./configure`** in `build.sh`:
    ```bash
-   SMF_CFLAGS="$(pkg-config --cflags smf)"
-   SMF_LIBS="$(pkg-config --libs smf)"
+   SMF_CFLAGS="$(pkg-config --cflags smf-solver)"
+   SMF_LIBS="$(pkg-config --libs smf-solver)"
    ./configure \
      --prefix="${PREFIX}" \
      CPPFLAGS="${CPPFLAGS} -DIPOPT_HAS_SMF ${SMF_CFLAGS}" \

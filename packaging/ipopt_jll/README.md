@@ -2,7 +2,7 @@
 
 ## 1. Building `smf_jll` via Yggdrasil
 
-`build_tarballs.jl` builds `libsmf_c` (versioned C ABI + `smf.pc`) and
+`build_tarballs.jl` builds `libsmf_c` (versioned C ABI + `smf-solver.pc`) and
 `libsmf_ma97` against `OpenBLAS32_jll` and `SuiteSparse32_jll` for Linux
 (`x86_64`, `aarch64`), macOS (`x86_64`, `aarch64`), and Windows (`x86_64`).
 
