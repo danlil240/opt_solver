@@ -6,7 +6,7 @@ import run_wsl
 
 class WslPathTests(unittest.TestCase):
     def test_drive_paths_translate(self):
-        self.assertEqual(run_wsl.to_wsl_path("C:\\Users\\daniel\\a b\\x.mtx"), "/mnt/c/Users/daniel/a b/x.mtx")
+        self.assertEqual(run_wsl.to_wsl_path("C:\\Users\\me\\a b\\x.mtx"), "/mnt/c/Users/me/a b/x.mtx")
         self.assertEqual(run_wsl.to_wsl_path("D:/data/x.mtx"), "/mnt/d/data/x.mtx")
 
     def test_relative_resolves_against_cwd(self):

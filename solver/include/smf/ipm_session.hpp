@@ -23,10 +23,9 @@ enum class StaticMode { Off, Fallback, Regularized };
 
 /// Interior-point options of an IpmSession.
 ///
-/// abort_on_wrong_inertia and reanalyse default to false. The spec's struct
-/// (docs/design/specs/2026-10-26-ipm-mode-design.md) had
-/// abort_on_wrong_inertia = true, and reanalyse (added beside it) was true
-/// until the gates ran. Both features failed their gates on the IPOPT tuning
+/// abort_on_wrong_inertia and reanalyse default to false. The original
+/// design had abort_on_wrong_inertia = true, and reanalyse (added beside it)
+/// was true until the gates ran. Both features failed their gates on the IPOPT tuning
 /// and held-out models (docs/performance/2026-10-26-ipm-mode.md), so the
 /// measured decision is off and a caller opts in explicitly.
 struct IpmControl {

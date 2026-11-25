@@ -212,7 +212,7 @@ Inertia at the last step is identical on every model.
 
 IPOPT takes the same path. The replay step that fails the componentwise gate does not change the solve.
 
-That leaves the gate itself as a decision for the user: accept the merged tree on this evidence, or tighten the delay guard further (which would trade away merges).
+That leaves the gate itself as a decision: accept the merged tree on this evidence, or tighten the delay guard further (which would trade away merges).
 
 ## 5. Interplay with scale-on-delay (recommended track, u = 0.01)
 
@@ -293,7 +293,7 @@ One outlier: pde_control_120 (recommended track) at +45% peak RSS. That is the s
 
 1. **Re-tune scale-on-delay on the new tree.** That means the ratio, and possibly a trigger in flops instead of eligible × rows². The two recommended-track losses in section 5 come from there.
    - *2026-10-30:* the ratio alone does not do it. Ratios 8, 6 and 4 fix pde_control (2.77 s → 1.97, 1.53 and 0.99 s), but they start rescaling cops_elec_200 (1.6x → 2.7x behind MA97) and case300 (+33%).
-   - The ratio stays at 16, and the cops_polygon_200 replay step is accepted. See section 4 of `2026-10-30-branches-and-scoreboard.md`.
+   - The ratio stays at 16, and the cops_polygon_200 replay step is accepted. See section 2 of `2026-10-30-scoreboard.md`.
    - *Done (feat/sod-next-step):* `Control::scale_on_delay_next_ratio` (4). A factorization let through past 4x the delay-free work leaves the next one to run under 4x as its limit, not 16x.
      - pde_control_250: step 2 takes 97,870 delays at 5.0x and is accepted. Step 3's stopped try then trips at 4x, not 16x: 1472 → 460 ms.
      - A one-off spike passes the tighter limit unscaled. cops_elec_200 runs 2.2, 8.5, 2.2, so it pays no matching.

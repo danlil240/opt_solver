@@ -691,7 +691,7 @@ ReanalysisResult reanalyse_and_check(const CscLower &A, int threads, bool legacy
 } // namespace
 
 TEST(IpmHooks, ReanalysisRemovesDelays) {
-    // grid_kkt(40, 7) with u = 0.5, nemin = 1 delays heavily (the Task 6 KKT
+    // grid_kkt(40, 7) with u = 0.5, nemin = 1 delays heavily (the small KKT
     // does not: its AMD order already puts each constraint after its primal).
     const ReanalysisResult serial = reanalyse_and_check(grid_kkt(40, 7), 1);
     EXPECT_GT(serial.first_delays, 0);

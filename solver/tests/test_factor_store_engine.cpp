@@ -270,7 +270,7 @@ TEST(FactorStoreEngine, OtherPathAfterInPlaceFactorization) {
 // decommits nor faults in the room its large top fronts assemble in: trim()
 // keeps what the last factorization reached (its fronts' room past the fill),
 // not only the fill. Decommitting that room cost acopf_grid_160 ~2 ms of
-// assembly per 8-thread refactorization (8T engine Stage 2, Task 0).
+// assembly per 8-thread refactorization (8T engine Stage 2).
 TEST(FactorStoreEngine, RefactorKeepsAssemblyRoom) {
     const CscLower A = opf_like_kkt(60000, 24000, 3);
     Solver s;

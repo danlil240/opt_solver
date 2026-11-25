@@ -257,7 +257,7 @@ CscLower prepend_block(const CscLower &A) {
     return B;
 }
 
-// Codex's repro: 100 states (diagonal 4, neighbours -0.5), each coupled by 1
+// Repro: 100 states (diagonal 4, neighbours -0.5), each coupled by 1
 // to a multiplier whose slack block is [1e14 -1; -1 0] (an active
 // constraint at a huge barrier term).
 CscLower huge_slack_kkt() {
@@ -503,7 +503,7 @@ TEST(SlackElimination, PluginEnvironmentKnob) {
     EXPECT_EQ(bad.mode, SlackElimination::Off);
 }
 
-// Codex P2 (PR #57): pairs with a huge slack diagonal pass the update guard
+// PR #57 review: pairs with a huge slack diagonal pass the update guard
 // but the substituted solution loses componentwise accuracy; the solve must
 // still meet the full path's.
 TEST(SlackElimination, HugeSlackDiagonalIsAccurate) {
@@ -517,7 +517,7 @@ TEST(SlackElimination, HugeSlackDiagonalIsAccurate) {
     EXPECT_EQ(on.info.num_negative, off.info.num_negative);
 }
 
-// Codex P2 (PR #57): a KKT scaled by 1e-161 makes the pair determinants
+// PR #57 review: a KKT scaled by 1e-161 makes the pair determinants
 // subnormal; the pairs must be inverted from a normalized block.
 TEST(SlackElimination, TinyScaledKktIsAccurate) {
     Kkt k = make_kkt(5, 100, 10, 250, 0.0, 1e-4);
@@ -538,7 +538,7 @@ TEST(SlackElimination, TinyScaledKktIsAccurate) {
     EXPECT_EQ(on.info.num_negative, off.info.num_negative);
 }
 
-// Codex P2 (PR #57, re-review): the solve check's backward error must not
+// PR #57 review: the solve check's backward error must not
 // overflow or underflow with the right-hand side's scale (1e200, 1e-200).
 TEST(SlackElimination, SolveCheckIsScaleInvariant) {
     const CscLower A = prepend_block(huge_slack_kkt());
@@ -554,7 +554,7 @@ TEST(SlackElimination, SolveCheckIsScaleInvariant) {
     }
 }
 
-// Codex P2 (PR #57, re-review): a slack factor's solve rejects a null
+// PR #57 review: a slack factor's solve rejects a null
 // right-hand side and a non-positive nrhs before touching them.
 TEST(SlackElimination, SolveRejectsBadArguments) {
     const CscLower A = huge_slack_kkt();
@@ -578,7 +578,7 @@ TEST(SlackElimination, SolveRejectsBadArguments) {
     EXPECT_EQ(s.solve(fk, c, sj, x.data(), n, 0), static_cast<int>(ErrorCode::IllegalValue));
 }
 
-// Codex P2 (PR #57, re-review): the solve-time fallback factors the full
+// PR #57 review: the solve-time fallback factors the full
 // matrix in the cleaned layout, so input with duplicates and unsorted rows
 // (factored through either overload) falls back to an accurate solve.
 TEST(SlackElimination, SolveFallbackOnUncleanInput) {
@@ -637,7 +637,7 @@ TEST(SlackElimination, SolveFallbackOnUncleanInput) {
     }
 }
 
-// Codex P2 (PR #57, re-review): a right-hand side of mixed magnitude (1e20 on
+// PR #57 review: a right-hand side of mixed magnitude (1e20 on
 // an independent block, 1 elsewhere) must not let the large rows hide an
 // inaccurate solution in the others: the check is per row (Oettli-Prager).
 TEST(SlackElimination, SolveCheckMixedMagnitudeRhs) {
@@ -665,7 +665,7 @@ TEST(SlackElimination, SolveCheckMixedMagnitudeRhs) {
     }
 }
 
-// Codex P2 (PR #57, re-review): accumulated pair updates can make the reduced
+// PR #57 review: accumulated pair updates can make the reduced
 // matrix numerically singular although the full matrix factors cleanly (two
 // states, 128 pairs [1e15 -1; -1 0] each coupled by 1 to both states). The
 // factorization must then take the full matrix: inertia (130, 128, 0).
@@ -695,7 +695,7 @@ CscLower buried_kkt(int m, double delta, double ass = 1e15) {
     return A;
 }
 
-// Codex P2 (PR #57, re-review): the pairs' accumulated updates (~1.3e17 on
+// PR #57 review: the pairs' accumulated updates (~1.3e17 on
 // a 2x2 state block) bury the block's true eigenvalue 4 under rounding: the
 // reduced factorization succeeds with the wrong inertia (129, 129, 0). The
 // inertia guard (kSlackPivotNoise) sends it to the full matrix: (130, 128, 0).
@@ -824,7 +824,7 @@ TEST(SlackElimination, SolveReturnsFullRefactorFailure) {
     }
 }
 
-// Codex P2 (PR #57, re-review): the inertia guard maps each D entry's pivot
+// PR #57 review: the inertia guard maps each D entry's pivot
 // index through the factor's own order (fkeep.perm), right on every engine.
 // The buried-eigenvalue states sit among `extra` independent rows that the
 // pairs do not touch (no accumulated rounding), so a wrong mapping would read

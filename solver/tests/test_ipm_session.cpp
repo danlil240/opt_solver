@@ -114,7 +114,7 @@ double max_rel_diff(const std::vector<double> &a, const std::vector<double> &b) 
 }
 
 // KKT [[H, J^T], [J, 0]] with kN = 40 primal and kM = 15 constraint rows
-// (the Task 6 fixture of test_ipm_hooks.cpp). H = diag(-1, -1, -1, 2, ...):
+// (the small KKT fixture of test_ipm_hooks.cpp). H = diag(-1, -1, -1, 2, ...):
 // the three negative coordinates lie in null(J), J has full row rank, so the
 // inertia is (37, 18, 0).
 constexpr int kN = 40;
@@ -566,7 +566,7 @@ CscLower laplacian_2d(int m) {
     return A;
 }
 
-// Saddle point [L B^T; B 0] (the Task 8 matrix of test_ipm_hooks.cpp): L a
+// Saddle point [L B^T; B 0] (the saddle-point matrix of test_ipm_hooks.cpp): L a
 // 2D Laplacian on m x m; constraint r couples primal v = r * stride (b1) and
 // v + 1 (-b2), b1, b2 in [0.5, 2). With u = 0.5 and nemin = 1 its AMD order
 // delays heavily, as robot_arm's KKT does under IPOPT.
@@ -616,7 +616,7 @@ CscLower shifted_kkt(const CscLower &A1, int nv, int stride) {
     return A2;
 }
 
-// The delay-prone setting of Task 8 (AMD, u = 0.5, nemin = 1, no scaling).
+// The delay-prone setting for that saddle point (AMD, u = 0.5, nemin = 1, no scaling).
 Control delay_ctrl() {
     Control c;
     c.matrix_type = MatrixType::RealSymmetricIndefinite;

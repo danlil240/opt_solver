@@ -2,7 +2,6 @@
 
 **Date:** 2026-10-30 to 2026-10-31
 **Branch:** `feat/small-tree-serial` (on main `7ee12e4` + `feat/sod-next-step`)
-**Plan:** `docs/design/plans/2026-10-30-thread-scheduling.md`
 **Machine:** Ryzen 9 9950X3D (2 CCDs of 8 cores), MKL, Windows 11.
 
 ## Result

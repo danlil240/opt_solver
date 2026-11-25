@@ -2,8 +2,7 @@
 
 **Date:** 2026-11-09 · **Build:** `perf/8t-p3-layout` (Parts 1-4: #66 -> #67 -> #68 -> #69), threaded MKL, cuDSS off ·
 **Machine:** i9-12900K, P-cores · **Data:** `benchmarks/results/remote/e8t_gate1` (8 cases, smf + MKL PARDISO, same
-day), `e8t_board_gate1` vs `e8t_board_base` (board, smf, 1/8/16T, 3 trials + 1 warmup) ·
-**Spec:** `docs/design/specs/2026-11-09-refactor-8t-engine-design.md`
+day), `e8t_board_gate1` vs `e8t_board_base` (board, smf, 1/8/16T, 3 trials + 1 warmup)
 
 ## Verdict
 

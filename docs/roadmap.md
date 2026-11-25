@@ -1,7 +1,7 @@
 # smf long-term roadmap
 
 **Date:** 2026-10-26
-**Input:** `solver_research_report.md` (state of the art in optimization solvers, Oct 2026; a local file in the working copy, not committed to the repository) and the performance write-ups in `docs/performance/`.
+**Input:** a survey of the state of the art in optimization solvers (October 2026, referred to below as the research report) and the performance write-ups in `docs/performance/`.
 
 ## Positioning
 

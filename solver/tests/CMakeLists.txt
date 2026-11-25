@@ -159,7 +159,7 @@ add_executable(test_singular test_singular.cpp)
 target_link_libraries(test_singular PRIVATE smf GTest::gtest_main)
 add_test(NAME Singular COMMAND test_singular)
 
-# --- M5.S3 test target ---
+# --- Definition-of-done regression tests ---
 
 add_executable(test_dod_regression test_dod_regression.cpp)
 target_link_libraries(test_dod_regression PRIVATE smf GTest::gtest_main)
@@ -251,7 +251,7 @@ add_executable(test_indef_larger test_indef_larger.cpp)
 target_link_libraries(test_indef_larger PRIVATE smf GTest::gtest_main)
 add_test(NAME IndefLarger COMMAND test_indef_larger)
 
-# --- Task 1: Benchmark validation tests ---
+# --- Benchmark validation tests ---
 
 add_executable(test_benchmark_validation
     test_benchmark_validation.cpp
@@ -260,7 +260,7 @@ add_executable(test_benchmark_validation
 target_link_libraries(test_benchmark_validation PRIVATE smf GTest::gtest_main)
 add_test(NAME BenchmarkValidation COMMAND test_benchmark_validation)
 
-# --- Task 2: Indefinite adversarial & factor identity tests ---
+# --- Indefinite adversarial & factor identity tests ---
 
 add_executable(test_indef_adversarial
     test_indef_adversarial.cpp
@@ -276,7 +276,7 @@ add_executable(test_factor_identity test_factor_identity.cpp)
 target_link_libraries(test_factor_identity PRIVATE smf GTest::gtest_main)
 add_test(NAME FactorIdentity COMMAND test_factor_identity)
 
-# --- Task 3: Delayed pivots and full-front stability tests ---
+# --- Delayed pivots and full-front stability tests ---
 
 add_executable(test_delayed_pivots
     test_delayed_pivots.cpp
@@ -288,7 +288,7 @@ if(WIN32)
 endif()
 add_test(NAME DelayedPivots COMMAND test_delayed_pivots)
 
-# --- Task 4: NumericWorkspace and SolveWorkspace tests ---
+# --- NumericWorkspace and SolveWorkspace tests ---
 
 add_executable(test_numeric_workspace
     test_numeric_workspace.cpp
@@ -300,7 +300,7 @@ if(WIN32)
 endif()
 add_test(NAME NumericWorkspace COMMAND test_numeric_workspace)
 
-# --- Task 5: Refinement and symmetric matching tests ---
+# --- Refinement and symmetric matching tests ---
 
 add_executable(test_refinement
     test_refinement.cpp
@@ -397,7 +397,7 @@ endif()
 add_test(NAME IpmRegularized COMMAND test_ipm_regularized)
 set_tests_properties(IpmRegularized PROPERTIES TIMEOUT 60)
 
-# --- Task 6: Benchmark adapters tests ---
+# --- Benchmark adapters tests ---
 
 add_executable(test_benchmark_adapters
     test_benchmark_adapters.cpp
@@ -418,7 +418,7 @@ endif()
 smf_stage_runtime_dlls(test_benchmark_adapters)
 add_test(NAME BenchmarkAdapters COMMAND test_benchmark_adapters)
 
-# --- Task 7: Blocked indefinite frontal kernel tests ---
+# --- Blocked indefinite frontal kernel tests ---
 
 add_executable(test_blocked_indef
     test_blocked_indef.cpp
@@ -430,7 +430,7 @@ if(WIN32)
 endif()
 add_test(NAME BlockedIndef COMMAND test_blocked_indef)
 
-# --- Task 8: Task budget and memory-aware parallel scheduling tests ---
+# --- Task budget and memory-aware parallel scheduling tests ---
 
 add_executable(test_task_budget
     test_task_budget.cpp
@@ -442,7 +442,7 @@ if(WIN32)
 endif()
 add_test(NAME TaskBudget COMMAND test_task_budget)
 
-# --- Task 9: MA97 plugin ABI and runtime tests ---
+# --- MA97 plugin ABI and runtime tests ---
 
 add_executable(test_ma97_plugin_abi test_ma97_plugin_abi.cpp)
 target_link_libraries(test_ma97_plugin_abi PRIVATE smf GTest::gtest_main)
@@ -467,13 +467,13 @@ if(SMF_BUILD_MA97_PLUGIN)
     target_compile_definitions(test_ipopt_plugin_runtime PRIVATE
         SMF_MA97_PLUGIN_PATH="$<TARGET_FILE:smf_ma97>")
     add_test(NAME Ma97PluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginRuntime.*)
-    # Task 17: PGLib IPOPT captures replayed through the plugin (skips without fixtures).
+    # PGLib IPOPT captures replayed through the plugin (skips without fixtures).
     add_test(NAME IpoptPluginRuntime COMMAND test_ipopt_plugin_runtime --gtest_filter=IpoptPluginRuntime.*)
     # Several MA97 sessions in one process: per-session trace state, process totals.
     add_test(NAME Ma97PluginSessions COMMAND test_ipopt_plugin_runtime --gtest_filter=Ma97PluginSessions.*)
 endif()
 
-# --- Task 10: Native portfolio dispatch policy tests ---
+# --- Native portfolio dispatch policy tests ---
 
 add_executable(test_dispatch_policy
     test_dispatch_policy.cpp

@@ -1,8 +1,8 @@
-# Solver state and branches (2026-10-30)
+# Scoreboard against every other solver (2026-10-30)
 
-One page: where smf stands against every other solver, and what each branch is.
+One page: where smf stands against every other solver.
 
-**Update, same day:** `integ/amalg-cheaper-trial` is merged to main through the PR that adds this file (branch `feat/cost-amalgamation-cheaper-trial`). In this file, "main" means main *before* that merge, and "integ branch" means main *after* it. The merge decisions are in section 4.
+**Builds:** `integ/amalg-cheaper-trial` (cost-model amalgamation plus the cheaper matching trial) was merged to main the same day (PR #14). In this file, "main" means main *before* that merge, and "integ branch" means main *after* it. The decisions taken with the merge are in section 2.
 
 **Scores** are smf time / other solver time, as a shifted geometric mean (10 ms shift, `score.py`'s method). **Below 1 means smf is faster.** "W/L" counts the case-tracks where smf is faster or slower. Only case-tracks that both solvers solve accurately are timed. The accuracy gate is eta ≤ 1e-10 and omega ≤ 1e-8.
 
@@ -80,59 +80,10 @@ Per class, integration branch, 1 thread (time ratio, W/L):
 
 **Caveats:**
 - The 1-thread absolute level drifts by about ±0.1 from run to run. Main's hard_indef read 1.04 in an earlier quiet run today, and 1.13 here.
-- The main → branch delta is clean, because the two ran interleaved in the same session.
+- The main → branch delta is clean, because the two ran interleaved in the same run.
 - The competitors were not re-run today.
 
-## 2. Branches
-
-### Open: candidates for the next PR
-
-| branch | what it does, in one line | measured against main | status |
-|---|---|---|---|
-| `integ/amalg-cheaper-trial` | main plus the two branches below, merged together. | Wall time 0.91x overall and **0.82x on hard_indef** (factor 0.80x, analysis 0.90x). No accuracy changes on any of 144 case-tracks. Slower: pde_control_250 1.69x and pde_control_120 1.23x (recommended track). | ctest 69/69. **Merged** (section 4). |
-| `claude/gracious-aryabhata-360a24` (cost-model amalgamation) | Merges a small supernode into its parent when the merge saves more memory traffic than it adds in padding flops. Before, the merge looked only at pivot count. | Factor time on hard_indef: 0.78 (tuning) and 0.83 (held-out) at 1 thread, 0.55 at 8/16 threads. c-big: 15.7 s → 2.8 s. | Two open items. cops_polygon_200: one IPOPT replay step misses the omega gate by a hair (1.37e-8 against 1e-8); **this needs your accept or reject.** pde_control_250/120 are 1.69x/1.29x slower on the recommended track (scale-on-delay interplay). Local only. |
-| `feat/cheaper-matching-trial` | The analysis phase's matching trial does the same work, only cheaper: a deferred initial ordering, an early resume, and the searches on a worker thread. **Bit-identical output.** | Analysis 0.90x on hard_indef (TSOPF about 0.5x). 1-thread hard_indef score 1.04 → 0.98. | Done. Local only. |
-
-### Open: parked (no net gain)
-
-| branch | what it does | why parked |
-|---|---|---|
-| `feat/hybrid-aptp` | Per front: if TPP delays pivots in a small front, redo that front with APTP. | Its big wins (catmix, chain) are already covered by scale-on-delay, which is on main. It is 2x slower on steering, case118, glider and case1354, and makes case300 inaccurate. It is 18 commits behind main. Its worktree's apparent edit to `test_ldlt_aptp.cpp` is a line-ending artifact: the diff is empty. |
-| `feat/own-md` | Smf's own vendored AMD (about 2.4k lines), used for etree/column counts in analyse. | Analysis is no faster (1.02-1.03x). There are small wins on small KKTs and a 20% loss on bmwcra, boyd2 and TSOPF. Not worth the code. |
-| `integ/side-branches` | An old (2026-10-28) integration test of own-md on top of main. | Superseded. Nothing in it is not also in `feat/own-md`. |
-
-### Already merged into main (safe to delete)
-
-| branch | went in via |
-|---|---|
-| `feat/solver-performance` | PR #11: beat MA27, solve phase, budgeted matching trial |
-| `feat/matching-trial-fixes` | inside PR #11 |
-| `feat/scale-on-delay` (also on origin) | PR #12: matching scaling on demand when delays blow up the fronts |
-| `feat/fast-matching` | PR #13: guard band and cheaper matcher searches |
-| `claude/frosty-colden-6ee95f` | no commits of its own (points at the PR #13 merge) |
-
-Remote leftovers from May: 11 `copilot/*`, `danlil240/*` and `ver2` branches, all merged. `origin/copilot/improve-solver-performance` (3 commits, May) is not merged, but main has rewritten those files since. Treat it as dead.
-
-## 3. Cleanup
-
-**Done:** the benchmark results that lived only inside worktrees were copied into the main checkout's `benchmarks/results/` (gitignored):
-- `archive_scale-on-delay/`: the sod_* and il* runs;
-- `archive_hybrid-aptp/`: the hy_* runs.
-
-**Still to do: deleting worktrees and branches.** Auto mode blocks these deletions, so they wait for the owner's go.
-
-| what | frees |
-|---|---|
-| The 5 merged local branches, and the worktrees of `fast-matching`, `scale-on-delay` and `matching-trial` | about 6.9 GB |
-| The detached worktree `opt_solver-wt/baseline-6b7927d` (the pre-scale-on-delay baseline build) | about 5.2 GB |
-| `integ/side-branches` and its worktree `opt_solver-wt/integration` | about 1.9 GB |
-| The worktrees of the parked `own-md` and `hybrid-aptp` (the branches stay) | about 3.6 GB |
-| After this merge: `integ/amalg-cheaper-trial` and its worktree `opt_solver-wt/integ-amalg-trial` | about 1.9 GB |
-| The 13 dead branches on origin: the 12 May leftovers and `feat/scale-on-delay` | — |
-
-The worktrees of `claude/gracious-aryabhata-360a24` and `feat/cheaper-matching-trial` belong to two idle desktop sessions. Archiving those sessions removes them.
-
-## 4. Merge decisions (2026-10-30)
+## 2. Merge decisions (2026-10-30)
 
 **Merge `integ/amalg-cheaper-trial` as is**, with `scale_on_delay_ratio` left at 16.
 
@@ -159,7 +110,7 @@ Sweep: `integ` binary, `SMF_BENCH_SCALE_ON_DELAY`, every indefinite recommended-
 - A ratio of 4 also breaks `test_scale_on_delay`'s premise (`ratio > 4`).
 - The proper fix is a trigger that tracks cost better, such as flops instead of eligible × rows². That is follow-up 1 of `2026-10-29-cost-model-amalgamation.md`.
 
-**3. `feat/hybrid-aptp` and `feat/own-md` are not merged.** Neither has a net gain on top of main (section 2).
+**3. Two other experiments are not merged.** A per-front APTP retry after TPP delays (`feat/hybrid-aptp`) and a vendored AMD for the analysis (`feat/own-md`) were measured as well; neither has a net gain on top of main.
 
 **Next:**
 - Run the merged main on the 8/16-thread board. Expected: c-big flips against SSIDS, and the held-out hard_indef gap at 8/16 threads narrows.

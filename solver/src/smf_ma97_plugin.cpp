@@ -602,7 +602,7 @@ extern "C"
         // when the analysis computed the matching ordering and rejected it
         // (kept AMD or METIS), the matching scaling is not applied, as under
         // ScalingMethod::Auto. Without its ordering it makes the factor less
-        // accurate (triage-case9241-notes.md; on PGLib case2869 / case4661 a
+        // accurate (on PGLib case2869 / case4661 a
         // reused matching scale gives wrong inertia and omega up to 1 on most
         // steps), and recomputing it costs ~10x a refactorization. The
         // request is then answered with the unit scale, which IPOPT stores
