@@ -48,6 +48,7 @@ jobs:
           environment-name: smfwhl
           create-args: >-
             libblas=*=*openblas
+            libopenblas<0.3.34
             liblapack
             libcblas
             blas-devel
@@ -105,14 +106,16 @@ jobs:
           EOF
           python -m pip install --force-reinstall --no-deps dist/*.whl
           python - <<'EOF'
-          import os, smf_solver
+          import os, tomllib, smf_solver
+          with open("packaging/python/pyproject.toml", "rb") as fh:
+              expected_ver = tomllib.load(fh)["project"]["version"]
           print("c_library_path:", smf_solver.c_library_path())
           print("ma97_plugin_path:", smf_solver.ma97_plugin_path())
           assert "_libs" in smf_solver.c_library_path() and os.path.isfile(smf_solver.c_library_path())
           assert "_libs" in smf_solver.ma97_plugin_path() and os.path.isfile(smf_solver.ma97_plugin_path())
           print("abi:", smf_solver.abi_version(), "ver:", smf_solver.version(), "blas:", smf_solver.blas_backend())
           assert smf_solver.abi_version() == 1
-          assert smf_solver.version() == "0.1.0"
+          assert smf_solver.version() == expected_ver, f"{smf_solver.version()!r} != {expected_ver!r}"
           assert smf_solver.blas_backend() != "reference", "Expected OpenBLAS/system BLAS, got reference"
           EOF
           pytest -q packaging/python/tests

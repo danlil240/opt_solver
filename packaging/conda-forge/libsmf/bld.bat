@@ -12,7 +12,7 @@ cmake -S solver -B build -G Ninja ^
   -DSMF_BUILD_MA97_PLUGIN=ON ^
   -DSMF_BUILD_TESTS=OFF ^
   -DSMF_BUILD_BENCHMARKS=OFF ^
-  -DSMF_MSVC_ARCH=AVX2
+  -DSMF_MSVC_ARCH=
 if errorlevel 1 exit 1
 
 cmake --build build -j %CPU_COUNT%
