@@ -1,5 +1,5 @@
 {% set name = "libsmf" %}
-{% set version = "0.1.0" %}
+{% set version = "0.2.0" %}
 
 package:
   name: {{ name }}
@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/danlil240/opt_solver/archive/refs/tags/v{{ version }}.tar.gz
-  sha256: ad36380e3dc73a99e83f8afa3723bc1b809e03a8020c688d2ae0ba492c488480
+  sha256: a63735ddc80b758af636a24c093c5f9993945c9c367304375cccac40fd183eda
 
 build:
   number: 0

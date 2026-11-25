@@ -2,11 +2,11 @@
 using BinaryBuilder, Pkg
 
 name = "smf"
-version = v"0.1.0"
+version = v"0.2.0"
 
 sources = [
     GitSource("https://github.com/danlil240/opt_solver.git",
-              "a1275b5202e8abf124d7fb2d6b308a069d1007c5"),
+              "31348d9da6dfcc854703fcfd1434f32a798712fb"),
 ]
 
 script = raw"""
