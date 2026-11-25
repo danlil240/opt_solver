@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MARCH_OPT=""
-if [[ "${target_platform}" == "linux-64" || "${target_platform}" == "osx-64" ]]; then
-  MARCH_OPT="-DSMF_MARCH=x86-64-v3"
-else
-  # ARM64 / Apple Silicon / ppc64le: use compiler default target flags.
-  MARCH_OPT="-DSMF_MARCH=none"
-fi
-
+# Portable baseline target: let conda-forge compiler flags and runtime-dispatched
+# libblas/liblapack select SIMD levels without requiring AVX2 on legacy CPUs.
 cmake -S solver -B build -G Ninja \
   ${CMAKE_ARGS} \
   -DCMAKE_BUILD_TYPE=Release \
@@ -22,7 +16,7 @@ cmake -S solver -B build -G Ninja \
   -DSMF_BUILD_MA97_PLUGIN=ON \
   -DSMF_BUILD_TESTS=OFF \
   -DSMF_BUILD_BENCHMARKS=OFF \
-  ${MARCH_OPT}
+  -DSMF_MARCH=none
 
 cmake --build build -j "${CPU_COUNT}"
 cmake --install build

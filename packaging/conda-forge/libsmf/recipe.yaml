@@ -1,0 +1,71 @@
+schema_version: 1
+
+context:
+  name: libsmf
+  version: "0.2.0"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  url: https://github.com/danlil240/opt_solver/archive/refs/tags/v${{ version }}.tar.gz
+  sha256: PLACEHOLDER_UPDATE_AFTER_V0_2_0_TAG
+
+build:
+  number: 0
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ stdlib('c') }}
+    - cmake >=3.20
+    - ninja
+    - pkg-config
+    - if: linux
+      then: libgomp
+    - if: osx
+      then: llvm-openmp
+  host:
+    - blas-devel
+    - libblas
+    - liblapack
+    - libcblas
+    - suitesparse
+  run_exports:
+    - ${{ pin_subpackage('libsmf', upper_bound='x.x') }}
+
+tests:
+  - package_contents:
+      include:
+        - smf/smf_c.h
+      lib:
+        - smf_c
+        - smf_ma97
+  - if: unix
+    then:
+      script:
+        - pkg-config --exists --exact-version=${{ version }} smf
+      requirements:
+        run:
+          - pkg-config
+
+about:
+  homepage: https://github.com/danlil240/opt_solver
+  repository: https://github.com/danlil240/opt_solver
+  license: MIT AND Apache-2.0
+  license_file:
+    - LICENSE
+    - solver/third_party/LICENSE-Apache-2.0.txt
+    - solver/third_party/README.md
+  summary: Sparse symmetric multifrontal direct linear solver (Cholesky / LDL^T) for IPOPT and KKT systems
+  description: |
+    smf is a C++20 sparse symmetric multifrontal direct solver designed for
+    interior-point optimizers (IPOPT, CasADi, cyipopt, JuMP/MadNLP). It ships
+    a versioned C ABI (libsmf_c, pkg-config smf) for native linear_solver=smf
+    integration as well as a drop-in HSL MA97 plugin (libsmf_ma97).
+
+extra:
+  recipe-maintainers:
+    - danlil240

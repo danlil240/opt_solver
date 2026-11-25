@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "smf-solver"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sparse symmetric multifrontal direct linear solver (libsmf_c + libsmf_ma97) for IPOPT, cyipopt, and CasADi"
 readme = "README.md"
 license = { text = "MIT AND Apache-2.0" }

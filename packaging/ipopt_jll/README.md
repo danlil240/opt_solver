@@ -8,7 +8,7 @@
 
 ## 2. Wiring `linear_solver="smf"` into `Ipopt_jll`
 
-In Yggdrasil `I/Ipopt/build_tarballs.jl`:
+In Yggdrasil `C/Coin-OR/Ipopt/build_tarballs.jl`:
 
 1. Add `Dependency("smf_jll")` to `dependencies`.
 2. Apply `tools/ipopt/smf-linear-solver/ipopt-3.14.19-smf.patch` to the Ipopt
