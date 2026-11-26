@@ -4,8 +4,23 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <limits>
 #include <mutex>
+
+#if (defined(SMF_USE_MKL) && SMF_USE_MKL) || \
+    (!(defined(SMF_HAS_ACCELERATE) && SMF_HAS_ACCELERATE) && \
+     !(defined(SMF_HAS_OPENBLAS) && SMF_HAS_OPENBLAS) && \
+     !(defined(SMF_BLAS_REFERENCE) && SMF_BLAS_REFERENCE))
+#  if defined(_WIN32)
+#    ifndef NOMINMAX
+#      define NOMINMAX
+#    endif
+#    include <windows.h>
+#  else
+#    include <dlfcn.h>
+#  endif
+#endif
 
 #if defined(SMF_USE_MKL) && SMF_USE_MKL
 #  include <mkl.h>
@@ -94,23 +109,102 @@ static void blas_restore(int prev)        { const int want = prev > 0 ? prev : 1
 #  define SMF_BLAS_THREAD_API 1
 #  define SMF_BLAS_THREAD_LOCAL 0
 
+#elif !(defined(SMF_BLAS_REFERENCE) && SMF_BLAS_REFERENCE)
+// Generic / runtime-dispatched BLAS (e.g. conda-forge libblas, FlexiBLAS):
+// lazily probe already-loaded libraries for OpenBLAS or MKL thread controls
+// so multi-threaded smf regions don't oversubscribe the runtime BLAS backend.
+namespace {
+struct RuntimeBlasThreadApi {
+    int (*get_fn)() = nullptr;
+    void (*set_fn)(int) = nullptr;
+};
+
+#if !defined(_WIN32)
+template <class Fn>
+Fn load_fn_ptr(void *sym) noexcept {
+    Fn fn = nullptr;
+    if (sym) {
+        static_assert(sizeof(fn) == sizeof(sym));
+        std::memcpy(&fn, &sym, sizeof(fn));
+    }
+    return fn;
+}
+#endif
+
+const RuntimeBlasThreadApi &runtime_blas_thread_api() noexcept {
+    static const RuntimeBlasThreadApi api = []() {
+        RuntimeBlasThreadApi r;
+#if defined(_WIN32)
+        constexpr const char *kOpenBlasMods[] = {
+            "libopenblas.dll", "openblas.dll", "blas.dll", "libblas.dll"
+        };
+        for (const char *mod : kOpenBlasMods) {
+            if (HMODULE h = GetModuleHandleA(mod)) {
+                auto g = reinterpret_cast<int (*)()>(
+                    reinterpret_cast<void *>(GetProcAddress(h, "openblas_get_num_threads")));
+                auto s = reinterpret_cast<void (*)(int)>(
+                    reinterpret_cast<void *>(GetProcAddress(h, "openblas_set_num_threads")));
+                if (g && s) { r.get_fn = g; r.set_fn = s; return r; }
+            }
+        }
+        constexpr const char *kMklMods[] = { "mkl_rt.2.dll", "mkl_rt.dll", "blas.dll" };
+        for (const char *mod : kMklMods) {
+            if (HMODULE h = GetModuleHandleA(mod)) {
+                auto g = reinterpret_cast<int (*)()>(
+                    reinterpret_cast<void *>(GetProcAddress(h, "MKL_Get_Max_Threads")));
+                auto s = reinterpret_cast<void (*)(int)>(
+                    reinterpret_cast<void *>(GetProcAddress(h, "MKL_Set_Num_Threads")));
+                if (g && s) { r.get_fn = g; r.set_fn = s; return r; }
+            }
+        }
+#else
+        if (void *g = dlsym(RTLD_DEFAULT, "openblas_get_num_threads")) {
+            if (void *s = dlsym(RTLD_DEFAULT, "openblas_set_num_threads")) {
+                r.get_fn = load_fn_ptr<int (*)()>(g);
+                r.set_fn = load_fn_ptr<void (*)(int)>(s);
+                return r;
+            }
+        }
+        if (void *g = dlsym(RTLD_DEFAULT, "MKL_Get_Max_Threads")) {
+            if (void *s = dlsym(RTLD_DEFAULT, "MKL_Set_Num_Threads")) {
+                r.get_fn = load_fn_ptr<int (*)()>(g);
+                r.set_fn = load_fn_ptr<void (*)(int)>(s);
+                return r;
+            }
+        }
+#endif
+        return r;
+    }();
+    return api;
+}
+} // namespace
+
+static int blas_get_num_threads() {
+    const auto &api = runtime_blas_thread_api();
+    return api.get_fn ? api.get_fn() : 1;
+}
+static int blas_set_num_threads(int n) {
+    const auto &api = runtime_blas_thread_api();
+    if (!api.get_fn || !api.set_fn) return 0;
+    const int prev = api.get_fn();
+    if (prev != n) api.set_fn(n);
+    return prev;
+}
+static void blas_restore(int prev) {
+    const auto &api = runtime_blas_thread_api();
+    if (!api.get_fn || !api.set_fn) return;
+    const int want = prev > 0 ? prev : 1;
+    if (api.get_fn() != want) api.set_fn(want);
+}
+#  define SMF_BLAS_THREAD_API 1
+#  define SMF_BLAS_THREAD_LOCAL 0
+
 #else
 static int  blas_get_num_threads()        { return 1; }
 static int  blas_set_num_threads(int /*n*/) { return 0; }
 static void blas_restore(int /*prev*/)    {}
 #  define SMF_BLAS_THREAD_API 0
 #  define SMF_BLAS_THREAD_LOCAL 0
-#endif
-
-#if defined(SMF_USE_MKL) && SMF_USE_MKL
-#  if defined(_WIN32)
-#    ifndef NOMINMAX
-#      define NOMINMAX
-#    endif
-#    include <windows.h>
-#  else
-#    include <dlfcn.h>
-#  endif
 #endif
 
 namespace smf {
