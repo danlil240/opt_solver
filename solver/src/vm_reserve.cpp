@@ -63,7 +63,11 @@ std::size_t vm_page() noexcept {
 #else
 void *vm_reserve(std::size_t bytes) noexcept {
   if (bytes == 0 || fail_reserve_hook()) return nullptr;
-  void *p = mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+#ifdef MAP_NORESERVE
+  flags |= MAP_NORESERVE;
+#endif
+  void *p = mmap(nullptr, bytes, PROT_NONE, flags, -1, 0);
   return p == MAP_FAILED ? nullptr : p;
 }
 bool vm_commit(void *p, std::size_t bytes) noexcept {

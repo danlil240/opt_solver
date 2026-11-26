@@ -300,3 +300,30 @@ jobs:
             -Wl,-rpath,"/tmp/ipopt-ci/inst-runtime/lib" \
             -o /tmp/ipopt-ci/test_runtime
           /tmp/ipopt-ci/test_runtime "$GITHUB_WORKSPACE/smf-prefix/lib/libsmf_c.so"
+
+  julia-ipopt-smf:
+    name: Julia 1.11 (Ipopt.jl + smf_jll, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.11"
+
+      - name: Install JuMP, Ipopt, smf_jll and run end-to-end test
+        shell: bash
+        run: |
+          julia --project=julia-test-env -e '
+            using Pkg
+            Pkg.add(["JuMP", "Ipopt", "smf_jll"])
+            Pkg.status()
+          '
+          SMF_PLUGIN_STATS=1 julia --project=julia-test-env \
+            packaging/ipopt_jll/test_ipopt_smf.jl 2> smf_stats.log
+          cat smf_stats.log
+          grep -q '\[smf_ma97\]' smf_stats.log
