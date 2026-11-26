@@ -111,6 +111,14 @@ struct PluginSymbols {
 #endif
 #ifdef _WIN32
         handle = LoadLibraryA(path);
+        // A forced plugin unload (SMF_PLUGIN_UNLOAD=1) must not take a threaded
+        // BLAS down with it: where OpenBLAS is only a dependency of the plugin
+        // (forwarding libcblas / liblapack DLLs), its worker threads would
+        // still be running when the DLL is unmapped. Keep it for the process.
+        for (const char *blas : {"openblas.dll", "libopenblas.dll"}) {
+            HMODULE pinned = nullptr;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_PIN, blas, &pinned);
+        }
         if (!handle) return false;
         default_control = reinterpret_cast<decltype(default_control)>(
             GetProcAddress(handle, "ma97_default_control_d"));

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(smf VERSION 0.2.2 LANGUAGES C CXX)
+project(smf VERSION 0.2.3 LANGUAGES C CXX)
 
 # ---- C++ standard -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -636,12 +636,17 @@ target_link_libraries(smf PUBLIC
 # Clang (-ffp-contract=on) would under -march=native.
 if(NOT MSVC)
     set_source_files_properties(src/ldlt_kernel.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # clang-cl: /fp:precise still allows contraction within an expression.
+    set_source_files_properties(src/ldlt_kernel.cpp PROPERTIES COMPILE_OPTIONS "/clang:-ffp-contract=off")
 endif()
 
 if(SMF_ENABLE_OPENMP AND TARGET OpenMP::OpenMP_CXX)
     target_link_libraries(smf PUBLIC OpenMP::OpenMP_CXX)
     target_compile_definitions(smf PUBLIC SMF_PARALLEL=1)
-    if(MSVC)
+    # cl needs /openmp:llvm for OpenMP 3 tasks (its default runtime is
+    # OpenMP 2.0). clang-cl gets -fopenmp and libomp from FindOpenMP.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
         target_compile_options(smf PUBLIC /openmp:llvm)
     endif()
 endif()

@@ -45,6 +45,11 @@ if(MSVC)
     # /W0: upstream code, not ours to lint; C4005 (GKlib redefines INFINITY
     # before <math.h>) is reported even then, so it is named too.
     target_compile_options(smf_metis PRIVATE /W0 /wd4005)
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        # clang-cl: GKlib calls read()/write() without <io.h>. MSVC accepts
+        # the implicit declarations, Clang (C99) does not.
+        target_compile_options(smf_metis PRIVATE /FIio.h)
+    endif()
 else()
     # Upstream's GCC/Clang defines; __thread is native there.
     include(CheckIncludeFile)
