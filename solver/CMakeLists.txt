@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(smf VERSION 0.2.1 LANGUAGES C CXX)
+project(smf VERSION 0.2.2 LANGUAGES C CXX)
 
 # ---- C++ standard -------------------------------------------------------
 set(CMAKE_CXX_STANDARD 20)
@@ -192,9 +192,48 @@ else()
                 find_path(OPENBLAS_CBLAS_INCLUDE_DIR cblas.h)
             endif()
             if(OPENBLAS_CBLAS_INCLUDE_DIR)
-                if(NOT SMF_HAS_OPENBLAS AND (_smf_blas_str MATCHES "[Oo]pen[Bb][Ll][Aa][Ss]" OR NOT APPLE))
+                include(CheckCXXSourceCompiles)
+                # Generic Netlib BLAS separates libblas (Fortran) from libcblas (CBLAS).
+                set(CMAKE_REQUIRED_INCLUDES "${OPENBLAS_CBLAS_INCLUDE_DIR}")
+                set(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
+                check_cxx_source_compiles([=[
+#include <cblas.h>
+int main() {
+  double a = 1.0, b = 1.0, c = 0.0;
+  cblas_dgemm(CblasColMajor, CblasNoTrans, CblasNoTrans, 1, 1, 1,
+              1.0, &a, 1, &b, 1, 0.0, &c, 1);
+  return 0;
+}
+]=] SMF_BLAS_HAS_CBLAS)
+                if(NOT SMF_BLAS_HAS_CBLAS)
+                    find_library(SMF_CBLAS_LIBRARY NAMES cblas libcblas
+                        HINTS "${_smf_default_conda_lib}/lib")
+                    if(SMF_CBLAS_LIBRARY)
+                        list(APPEND BLAS_LIBRARIES "${SMF_CBLAS_LIBRARY}")
+                        message(STATUS "smf: Separate CBLAS library found: ${SMF_CBLAS_LIBRARY}")
+                    endif()
+                endif()
+                # Only enable direct OpenBLAS thread calls when cblas.h and the
+                # linked BLAS actually provide them (generic Netlib/conda-forge
+                # cblas.h does not; runtime probing handles those instead).
+                set(CMAKE_REQUIRED_INCLUDES "${OPENBLAS_CBLAS_INCLUDE_DIR}")
+                set(CMAKE_REQUIRED_LIBRARIES ${BLAS_LIBRARIES})
+                check_cxx_source_compiles([=[
+#include <cblas.h>
+int main() {
+  int n = openblas_get_num_threads();
+  openblas_set_num_threads(n > 0 ? n : 1);
+  return 0;
+}
+]=] SMF_CBLAS_HAS_OPENBLAS_THREADS)
+                unset(CMAKE_REQUIRED_INCLUDES)
+                unset(CMAKE_REQUIRED_LIBRARIES)
+                if(SMF_CBLAS_HAS_OPENBLAS_THREADS)
                     set(SMF_HAS_OPENBLAS ON)
                     set(SMF_BLAS_BACKEND_NAME "openblas")
+                else()
+                    set(SMF_HAS_OPENBLAS OFF)
+                    set(SMF_BLAS_BACKEND_NAME "system")
                 endif()
                 message(STATUS "smf: cblas.h found at ${OPENBLAS_CBLAS_INCLUDE_DIR} (SMF_HAS_OPENBLAS=${SMF_HAS_OPENBLAS})")
             endif()
