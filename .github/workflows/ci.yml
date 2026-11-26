@@ -231,7 +231,9 @@ jobs:
   # The conda-forge package layout on Windows: clang-cl, so that OpenMP comes
   # from llvm-openmp (cl's /openmp:llvm runtime, libomp140.x86_64.dll, ships
   # with Visual Studio only), built against the netlib reference BLAS/LAPACK
-  # import libraries and run with OpenBLAS behind the same DLL names.
+  # import libraries and run with OpenBLAS behind the same DLL names. No DLLs
+  # are staged beside the tests (SMF_DEPS_DLL_DIR empty), or they would keep
+  # running on the reference BLAS of the build environment.
   windows-clang-cl:
     name: Windows (clang-cl, conda-forge BLAS + llvm-openmp)
     runs-on: windows-latest
@@ -276,6 +278,7 @@ jobs:
             -DSMF_INSTALL_STATIC_LIBS=OFF ^
             -DSMF_BUILD_TESTS=ON ^
             -DSMF_BUILD_BENCHMARKS=OFF ^
+            -DSMF_DEPS_DLL_DIR= ^
             -DSMF_MSVC_ARCH=
           if errorlevel 1 exit /b 1
           cmake --build build
