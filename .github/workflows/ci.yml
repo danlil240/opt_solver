@@ -228,6 +228,100 @@ jobs:
           test -f install/include/smf/smf_c.h
           python -m unittest discover -s packaging/python/tests -v
 
+  # The conda-forge package layout on Windows: clang-cl, so that OpenMP comes
+  # from llvm-openmp (cl's /openmp:llvm runtime, libomp140.x86_64.dll, ships
+  # with Visual Studio only), built against the netlib reference BLAS/LAPACK
+  # import libraries and run with OpenBLAS behind the same DLL names.
+  windows-clang-cl:
+    name: Windows (clang-cl, conda-forge BLAS + llvm-openmp)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: cmd /C call {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: smfclang
+          init-shell: cmd.exe
+          create-args: >-
+            clang
+            llvm-openmp
+            blas-devel=*=*netlib
+            libblas=*=*netlib
+            libcblas=*=*netlib
+            liblapack=*=*netlib
+            libamd
+            cmake
+            ninja
+
+      - name: Configure & build
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          call micromamba activate smfclang
+          if errorlevel 1 exit /b 1
+          set "INCLUDE=%CONDA_PREFIX%\Library\include;%INCLUDE%"
+          set "LIB=%CONDA_PREFIX%\Library\lib;%LIB%"
+          set "CC=clang-cl.exe"
+          set "CXX=clang-cl.exe"
+          cmake -S solver -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_INSTALL_PREFIX="%CD%\install" ^
+            -DBLA_VENDOR=Generic ^
+            -DSMF_USE_MKL=OFF ^
+            -DSMF_BUILD_C_API=ON ^
+            -DSMF_BUILD_MA97_PLUGIN=ON ^
+            -DSMF_INSTALL_STATIC_LIBS=OFF ^
+            -DSMF_BUILD_TESTS=ON ^
+            -DSMF_BUILD_BENCHMARKS=OFF ^
+            -DSMF_MSVC_ARCH=
+          if errorlevel 1 exit /b 1
+          cmake --build build
+          if errorlevel 1 exit /b 1
+          cmake --install build
+          if errorlevel 1 exit /b 1
+
+      - name: Check the OpenMP runtime the DLLs link
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          dumpbin /nologo /dependents install\bin\smf_c.dll install\bin\smf_ma97.dll > deps.txt
+          if errorlevel 1 exit /b 1
+          type deps.txt
+          findstr /i /c:"libomp140" /c:"vcomp" deps.txt && exit /b 1
+          findstr /i /c:"libomp.dll" deps.txt || exit /b 1
+          exit /b 0
+
+      # OpenBLAS < 0.3.34: see the pin in the windows-msvc job.
+      - name: Switch the runtime BLAS to OpenBLAS
+        run: |
+          call micromamba install -y -n smfclang "blas-devel=*=*openblas" "libblas=*=*openblas" "libcblas=*=*openblas" "liblapack=*=*openblas" "libopenblas<0.3.34"
+          if errorlevel 1 exit /b 1
+
+      - name: Run C++ test suite
+        run: |
+          call micromamba activate smfclang
+          if errorlevel 1 exit /b 1
+          set "PATH=%CD%\build;%PATH%"
+          ctest --test-dir build --output-on-failure --timeout 300 -j 4
+          if errorlevel 1 exit /b 1
+
+      - name: Build and run a C consumer against the installed package
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath`) do call "%%i\VC\Auxiliary\Build\vcvars64.bat"
+          call micromamba activate smfclang
+          if errorlevel 1 exit /b 1
+          cmake -S packaging/conda-forge/libsmf/test -B build-consumer -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DCMAKE_PREFIX_PATH="%CD%\install;%CONDA_PREFIX%\Library"
+          if errorlevel 1 exit /b 1
+          cmake --build build-consumer
+          if errorlevel 1 exit /b 1
+          set "PATH=%CD%\install\bin;%PATH%"
+          ctest --test-dir build-consumer --output-on-failure
+          if errorlevel 1 exit /b 1
+
   ipopt-native-smf:
     name: Native IPOPT 3.14.19 (linear_solver=smf)
     runs-on: ubuntu-latest

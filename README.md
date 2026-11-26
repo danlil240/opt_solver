@@ -15,7 +15,7 @@ The code lives in `solver/`. Benchmark tooling is in `tools/bench/` and `benchma
 
 ## Building
 
-You need CMake 3.20 or later, a C++20 compiler (MSVC 2022, GCC 11+ or Clang 14+), BLAS and LAPACK (MKL or OpenBLAS), and GoogleTest for the tests. SuiteSparse AMD and METIS 5 are optional but recommended, since the ordering policy relies on both.
+You need CMake 3.20 or later, a C++20 compiler (MSVC 2022 or clang-cl, GCC 11+ or Clang 14+), BLAS and LAPACK (MKL or OpenBLAS), and GoogleTest for the tests. SuiteSparse AMD and METIS 5 are optional but recommended, since the ordering policy relies on both.
 
 ```bash
 cmake -S solver -B build -DCMAKE_BUILD_TYPE=Release

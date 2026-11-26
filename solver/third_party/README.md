@@ -125,6 +125,8 @@ caught.
 
 - MSVC: `WIN32 MSC _CRT_SECURE_NO_DEPRECATE __thread=__declspec(thread)`,
   upstream's set with real TLS and without `USE_GKREGEX` (patch 5).
+  clang-cl also gets `/FIio.h`: GKlib calls `read()` / `write()` without a
+  declaration, which Clang rejects in C99.
 - GCC / Clang: `LINUX _FILE_OFFSET_BITS=64`, `HAVE_EXECINFO_H` /
   `HAVE_GETLINE` when present, `-std=c99 -fno-strict-aliasing`; native
   `__thread`. Symbols get hidden visibility, and `libsmf_ma97` links with
